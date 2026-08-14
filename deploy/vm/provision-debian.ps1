@@ -175,12 +175,41 @@ if (-not $expected) {
     Die "'$rawName' is not listed in SHA512SUMS. Adjust -ImageVariant/-DebianBuild to match one of the names above."
 }
 
-if (Test-Path $rawPath) {
-    Info 'Image already downloaded; verifying checksum.'
+# Resume rather than restart. This is a ~3 GiB transfer over a link that has already dropped
+# once; without -C - an interruption at 95% throws away everything. curl -C - starts at 0 when
+# the file is absent, resumes from the current length when it is partial, and reports 416 when
+# the server says there is nothing left to fetch — which is success, not failure.
+$expectedSize = 3221225472
+$haveSize = if (Test-Path $rawPath) { (Get-Item $rawPath).Length } else { 0 }
+
+if ($haveSize -eq $expectedSize) {
+    Info 'Image already present at full size; verifying checksum.'
 } else {
-    Info "GET $base/$rawName  (~3 GiB, this takes a while)"
-    & curl.exe -fSL --retry 3 --progress-bar -o $rawPath "$base/$rawName"
-    if ($LASTEXITCODE -ne 0) { Die "Download failed." }
+    if ($haveSize -gt 0) {
+        Info ("Resuming from {0:N0} MiB of {1:N0} MiB" -f ($haveSize / 1MB), ($expectedSize / 1MB))
+    } else {
+        Info "GET $base/$rawName  (~3 GiB, this takes a while)"
+    }
+    & curl.exe -fL -C - --retry 5 --retry-delay 5 --retry-all-errors `
+               --progress-bar -o $rawPath "$base/$rawName"
+    $curlRc = $LASTEXITCODE
+    $nowSize = if (Test-Path $rawPath) { (Get-Item $rawPath).Length } else { 0 }
+
+    # curl exits 33 when the server refuses ranged requests, and 36 on a bad resume attempt.
+    # Both mean "resume is not possible", so fall back to a clean restart once.
+    if (($curlRc -eq 33 -or $curlRc -eq 36) -and $nowSize -lt $expectedSize) {
+        Warn2 'Server refused the ranged request; restarting the download from zero.'
+        Remove-Item $rawPath -Force -ErrorAction SilentlyContinue
+        & curl.exe -fL --retry 5 --retry-delay 5 --retry-all-errors `
+                   --progress-bar -o $rawPath "$base/$rawName"
+        $curlRc = $LASTEXITCODE
+        $nowSize = if (Test-Path $rawPath) { (Get-Item $rawPath).Length } else { 0 }
+    }
+
+    if ($nowSize -ne $expectedSize) {
+        Die ("Download incomplete: {0:N0} of {1:N0} bytes (curl rc={2}). Re-run to resume." -f `
+             $nowSize, $expectedSize, $curlRc)
+    }
 }
 
 Info 'Computing SHA512...'
