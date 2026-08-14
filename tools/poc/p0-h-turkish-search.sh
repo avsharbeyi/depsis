@@ -76,11 +76,15 @@ section '1. depsis_norm — translate() MUST run before lower()'
 # reordering the pipeline would silently break every search. Keep both sides lowercase so the
 # function is correct independently of the surrounding calls.
 
+# Both the function and the dictionary are SCHEMA-QUALIFIED. This is not cosmetic: PostgreSQL
+# restricts search_path while building an index, so an unqualified reference to public.unaccent
+# resolves in ordinary queries and in a GENERATED column, but fails when a migration builds an
+# expression index from its own session. Section 2 below is what catches it.
 sudo -u postgres "${PSQL[@]}" -d "$DB" <<'SQL' >/dev/null
 CREATE OR REPLACE FUNCTION depsis_norm(txt text) RETURNS text
   LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT AS $$
   SELECT lower(
-           unaccent('unaccent',
+           public.unaccent('public.unaccent'::regdictionary,
              translate(normalize(txt, NFKC),
                        'İIıŞşĞğÜüÖöÇç',
                        'iiissgguuoocc')
@@ -209,20 +213,39 @@ plan_of() { # sql -> plan text
   sudo -u postgres "${PSQL[@]}" -d "$DB" -c "EXPLAIN (ANALYZE, BUFFERS) $1" 2>&1
 }
 
-# 4a. 1-2 characters: prefix path, must use the B-tree, must NOT be a seq scan.
+# 4a. 1-2 characters: the prefix path.
+#
+# The architectural claim under test is that a text_pattern_ops B-tree CAN serve LIKE 'ab%'.
+# Whether the planner CHOOSES it is a costing question, not a design question, and on a small
+# corpus the honest answer is often "no": 'i%' matches a quarter of 20k rows, and with LIMIT 50
+# a sequential scan finds fifty of them in a few pages. The planner is right to prefer it there.
+#
+# So usability is asserted with enable_seqscan off — if the index cannot serve the query even
+# then, the design is wrong. The plan the planner picks unaided is recorded as a measurement.
 for short in 'i' 'is'; do
-  p=$(plan_of "SELECT id FROM file_entries
-               WHERE organization_id = 1 AND parent_id IS NULL
-                 AND name_norm LIKE '${short}%' LIMIT 50;")
-  if grep -q 'fe_name_norm_prefix' <<<"$p"; then
-    pass "prefix query '${short}%' uses the B-tree index"
-  elif grep -qi 'Seq Scan' <<<"$p"; then
-    fail "prefix query '${short}%' fell back to a Seq Scan" "$(head -3 <<<"$p")"
+  q_prefix="SELECT id FROM file_entries
+            WHERE organization_id = 1 AND parent_id IS NULL
+              AND name_norm LIKE '${short}%' LIMIT 50;"
+
+  forced=$(sudo -u postgres "${PSQL[@]}" -d "$DB" \
+             -c "SET enable_seqscan = off; EXPLAIN (ANALYZE, BUFFERS) $q_prefix" 2>&1)
+  if grep -q 'fe_name_norm_prefix' <<<"$forced"; then
+    pass "prefix '${short}%' CAN be served by the text_pattern_ops B-tree"
   else
-    fail "prefix query '${short}%' used an unexpected plan" "$(head -3 <<<"$p")"
+    fail "prefix '${short}%' cannot use the B-tree even with seqscan disabled" \
+         "$(head -3 <<<"$forced")"
   fi
-  ms=$(grep -oP 'Execution Time: \K[0-9.]+' <<<"$p" | tail -1)
-  note "  '${short}%' execution time: ${ms:-?} ms"
+
+  natural=$(plan_of "$q_prefix")
+  if grep -q 'fe_name_norm_prefix' <<<"$natural"; then
+    chosen='B-tree'
+  elif grep -qi 'Seq Scan' <<<"$natural"; then
+    chosen='Seq Scan (cheaper at this corpus size)'
+  else
+    chosen='other'
+  fi
+  ms=$(grep -oP 'Execution Time: \K[0-9.]+' <<<"$natural" | tail -1)
+  note "  '${short}%' planner chose: ${chosen}; ${ms:-?} ms"
 done
 
 # 4b. >= 3 characters: substring path, must use the GIN trigram index.

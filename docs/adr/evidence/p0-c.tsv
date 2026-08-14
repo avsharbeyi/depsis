@@ -1,0 +1,64 @@
+p0-c	NOTE	psql client: psql (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)	
+p0-c	NOTE	server_version: 18.6 (Debian 18.6-1.pgdg13+2) (num=180006, major=18, port=5432)	
+p0-c	NOTE	postgresql package: not installed	
+p0-c	NOTE	postgresql-18 package: 18.6-1.pgdg13+2	
+p0-c	NOTE	pg_catalog.uuidv7() overloads: 2	
+p0-c	PASS	PG 18 ships built-in uuidv7() (ADR-0013 §1)	= 1
+p0-c	NOTE	nondeterministic-collation LIKE claim (ADR-0013 §1) is NOT tested here — deferred to P0-H	
+p0-c	NOTE	primary key default for this run: uuidv7()	
+p0-c	PASS	created test database and the two ADR-0013 roles	
+p0-c	PASS	depsis_app can log in over TCP — RLS is exercised on a real connection	
+p0-c	NOTE	connection mode: tcp	
+p0-c	PASS	schema created with ENABLE ROW LEVEL SECURITY (FORCE deliberately withheld for section 2)	
+p0-c	PASS	seeded 2 tenants / 4 files as the owner with NO tenant context set	the seed only succeeded because the owner bypasses RLS — that is section 2
+p0-c	PASS	file_entries is owned by the migration role	= depsis_owner
+p0-c	PASS	depsis_app is not a superuser	= false
+p0-c	PASS	depsis_app does not hold BYPASSRLS	= false
+p0-c	NOTE	owner, tenant-A context, ENABLE only → rows=4 sum=1500	
+p0-c	PASS	owner sees ALL 4 rows despite a tenant-A context — RLS is bypassed as documented	ENABLE ROW LEVEL SECURITY does not constrain the table owner
+p0-c	PASS	after FORCE, the owner sees only tenant A (2 rows)	= 2
+p0-c	PASS	after FORCE, the owner aggregate is tenant-scoped too	= 300
+p0-c	PASS	no table has RLS enabled without FORCE	= 0
+p0-c	NOTE	this guard only catches ENABLE-without-FORCE; a tenant table with NO RLS at all is invisible to it	the Phase 1 migration test must also assert every table carrying organization_id has RLS
+p0-c	PASS	a SUPERUSER still sees all 4 rows even under FORCE (documented, unavoidable)	= 4
+p0-c	NOTE	app, tenant-A context → names=a-budget.txt,a-photo.jpg count=2 sum=300 orgs=1 bprobe=0 	
+p0-c	PASS	plain SELECT returns exactly tenant A	= a-budget.txt,a-photo.jpg
+p0-c	PASS	COUNT(*) agrees with the list	= 2
+p0-c	PASS	SUM() is tenant-scoped (300, not 1500)	= 300
+p0-c	PASS	organizations is tenant-scoped as well	= 1
+p0-c	PASS	targeted probe for B's file returns 0 rows	= 0
+p0-c	PASS	tenant B sees only its own 2 rows	= 2
+p0-c	PASS	tenant B aggregate is 1200	= 1200
+p0-c	PASS	tenant A cannot INSERT a row owned by tenant B (WITH CHECK) (failed as expected, rc=3)	psql:<stdin>:3: ERROR:  new row violates row-level security policy for table "file_entries"
+p0-c	PASS	tenant A cannot UPDATE B's rows (0 rows visible to the UPDATE)	rc=0
+p0-c	PASS	B's row survived A's blind UPDATE untouched	= 800
+p0-c	NOTE	installed the FORBIDDEN constraint UNIQUE (name) — ADR-0013 §2.2 says this must never ship	
+p0-c	PASS	the constraint audit DETECTS the cross-tenant UNIQUE	= 1
+p0-c	PASS	tenant A cannot SELECT 'quarterly-layoffs.xlsx' (0 rows)	= 0
+p0-c	PASS	COVERT CHANNEL CONFIRMED: 23505 tells tenant A that another tenant holds that name	psql:<stdin>:4: ERROR:  23505: duplicate key value violates unique constraint "file_entries_name_global_key" ; SCHEMA NAME:  depsis ; TABLE NAME:  file_entries ; CONSTRAINT NAME:  file_entries_name_global_key ; LOCATION:  _bt_check_unique, nbtinsert.c:666
+p0-c	NOTE	error DETAIL was suppressed under RLS — only EXISTENCE leaked, not the stored value	that suppression is not a mitigation: A already learns the answer it asked for
+p0-c	PASS	the constraint audit is clean once organization_id is in the key	= 0
+p0-c	PASS	the SAME insert now succeeds under UNIQUE (organization_id, parent_id, name)	rc=0
+p0-c	PASS	intra-tenant uniqueness still enforced (same name twice inside tenant A) (failed as expected, rc=3)	psql:<stdin>:3: ERROR:  duplicate key value violates unique constraint "file_entries_tenant_name_key"
+p0-c	PASS	tenant A now has 3 rows	= 3
+p0-c	PASS	tenant A sees exactly one 'quarterly-layoffs.xlsx'	= 1
+p0-c	PASS	tenant B still has 2 rows	= 2
+p0-c	PASS	tenant B sees exactly one 'quarterly-layoffs.xlsx'	= 1
+p0-c	NOTE	file_entries PRIMARY KEY (id) is global by construction; safe only because ids are unguessable	a natural or sequential primary key would reintroduce the same covert channel
+p0-c	NOTE	fail-closed probes → autocommit=0 intxn=0 empty=0 unknown=0 	
+p0-c	PASS	no context, outside any transaction → 0 rows	= 0
+p0-c	PASS	no context, inside a transaction → 0 rows	= 0
+p0-c	PASS	empty-string context → 0 rows, not an error	= 0
+p0-c	PASS	unknown tenant id → 0 rows	= 0
+p0-c	PASS	a malformed org id ERRORS rather than returning rows (failed as expected, rc=3)	psql:<stdin>:3: ERROR:  invalid input syntax for type uuid: "not-a-uuid"
+p0-c	NOTE	malformed context raises 22P02 instead of returning 0 rows — the API must validate org ids upstream	
+p0-c	NOTE	SET LOCAL scope → inside=3 after=0 setting=[] 	
+p0-c	PASS	context applies inside its transaction	= 3
+p0-c	PASS	context is GONE on the next request over the same backend	= 0
+p0-c	NOTE	residual GUC value after COMMIT: []	this is why the policy uses nullif(current_setting(...), \x27\x27)
+p0-c	PASS	plain SET (no LOCAL) LEAKS tenant context past COMMIT — session pooling is unusable	a later request on the same backend still saw 3 tenant-A rows
+p0-c	PASS	worker-1 is holding its row lock; the second claim is genuinely concurrent	
+p0-c	NOTE	worker-1 claimed job '1'; worker-2 claimed job '2' in 33ms	
+p0-c	PASS	two concurrent claimers received DIFFERENT jobs	= 2
+p0-c	PASS	worker-2 did not block on worker-1's lock (33ms << 6000ms hold)	
+p0-c	PASS	exactly one job is left queued after two claims	= 1

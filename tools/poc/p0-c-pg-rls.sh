@@ -134,9 +134,15 @@ note "postgresql-$PG_MAJOR package: $(dpkg-query -W -f='${Version}' "postgresql-
 
 # uuidv7() is the one thing ADR-0013 §1 names as concretely missing below PG 18. It is a
 # built-in, so a catalog lookup settles it without depending on any extension being present.
-HAS_UUIDV7=$(runuser -u postgres -- psql -X -At -c \
+#
+# This is an OVERLOAD COUNT, not a boolean. PG 18 ships two: uuidv7() and uuidv7(interval).
+# An earlier version of this check compared it to exactly 1, which failed on a correct server
+# and — worse — silently pushed the schema below onto gen_random_uuid() even though uuidv7()
+# was available. Count-as-boolean is the bug; compare with -ge.
+UUIDV7_OVERLOADS=$(runuser -u postgres -- psql -X -At -c \
   "SELECT count(*) FROM pg_proc WHERE proname = 'uuidv7' AND pronamespace = 'pg_catalog'::regnamespace")
-note "pg_catalog.uuidv7() present: $HAS_UUIDV7"
+note "pg_catalog.uuidv7() overloads: $UUIDV7_OVERLOADS"
+if [ "${UUIDV7_OVERLOADS:-0}" -ge 1 ]; then HAS_UUIDV7=1; else HAS_UUIDV7=0; fi
 
 if [ "$PG_MAJOR" -ge 18 ]; then
   # If an 18+ server does NOT have uuidv7(), ADR-0013's version table is wrong.

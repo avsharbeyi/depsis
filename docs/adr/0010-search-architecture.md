@@ -1,6 +1,6 @@
 # ADR-0010: Arama mimarisi ve Türkçe normalizasyon
 
-- **Durum:** Accepted (provisional, PoC: P0-H)
+- **Durum:** **Accepted** — P0-H koştu ve geçti (2026-08-14), kanıt: [`evidence/p0-h.tsv`](evidence/p0-h.tsv)
 - **Tarih:** 2026-08-14
 - **Faz:** 0
 - **Etkilenen bileşenler:** `apps/api/src/search`, `deploy/migrations`, `apps/web` arama kutusu
@@ -62,7 +62,7 @@ Collation'a değil, **veriye** normalizasyon uygulanır:
 CREATE FUNCTION depsis_norm(txt text) RETURNS text
   LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT AS $$
   SELECT lower(
-           unaccent('unaccent',
+           public.unaccent('public.unaccent'::regdictionary,
              translate(normalize(txt, NFKC),
                        'İIıŞşĞğÜüÖöÇç',
                        'iiissgguuoocc')
@@ -82,8 +82,24 @@ Kritik ayrıntılar:
   biri her aramayı sessizce bozardı. Fonksiyon çevresindeki çağrılardan **bağımsız olarak**
   doğru olmalı; bu yüzden iki taraf da küçük harf. (P0-H yazılırken fark edildi.)
 - `normalize(txt, NFKC)` Unicode denkliğini toplar — aynı görünen iki farklı kodlama aynı satıra düşer.
-- Fonksiyon **`IMMUTABLE`** olmalı, yoksa ifade indeksi kurulamaz. `unaccent`'in varsayılan hâli
-  `STABLE`'dır; bu yüzden sözlük **açıkça** (`'unaccent'`) verilir.
+- Fonksiyon **`IMMUTABLE`** olmalı, yoksa ifade indeksi kurulamaz. Tek argümanlı `unaccent()`
+  `STABLE`'dır; bu yüzden sözlük **açıkça** verilir.
+- **Hem fonksiyon hem sözlük şema ile nitelenmelidir** (`public.unaccent`,
+  `'public.unaccent'::regdictionary`). Bu, P0-H'de ampirik olarak bulundu ve sinsi bir tuzaktır:
+  niteliksiz biçim düz sorguda çalışır, `GENERATED STORED` kolonda da çalışır, ve fonksiyonun
+  oluşturulduğu oturumda ifade indeksi kurmaya bile izin verir. **Yalnız ayrı bir oturumda
+  indeks kurarken** patlar — çünkü PostgreSQL indeks kurulumu sırasında `search_path`'i
+  kısıtlar ve `public` aranmaz. Migration'lar tam olarak böyle çalıştığı için bu, üretimde
+  ortaya çıkacak bir hataydı.
+
+  Ölçülen davranış (PG 18.6, ayrı oturumda `CREATE INDEX`):
+
+  | Biçim                                                  | Sonuç                                                 |
+  | ------------------------------------------------------ | ----------------------------------------------------- |
+  | `unaccent('unaccent', x)`                              | ❌ `function unaccent(unknown, text) does not exist`  |
+  | `unaccent('unaccent'::regdictionary, x)`               | ❌ `text search dictionary "unaccent" does not exist` |
+  | `public.unaccent('public.unaccent'::regdictionary, x)` | ✅                                                    |
+  | `public.unaccent(x)` (tek argüman)                     | ✅ ama `STABLE` riski taşır                           |
 
 Şema:
 

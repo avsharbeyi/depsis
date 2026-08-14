@@ -1,0 +1,38 @@
+p0-h	NOTE	PostgreSQL server_version: 18.6 (Debian 18.6-1.pgdg13+2)	
+p0-h	NOTE	PG >= 18: uuidv7() and LIKE-on-nondeterministic-collation are expected to exist	
+p0-h	NOTE	uuidv7() present: 2 (0 = absent, generate in app code instead)	
+p0-h	PASS	extension pg_trgm available	
+p0-h	PASS	extension unaccent available	
+p0-h	PASS	pg_catalog.turkish text search configuration exists	
+p0-h	PASS	depsis_norm created	
+p0-h	PASS	all five İ/I/ı spellings of "istanbul" normalize identically	
+p0-h	PASS	plain lower() splits the i-family into 2 buckets (why depsis_norm exists)	
+p0-h	PASS	normalizes to the same value: 'Şişli' = 'sisli'	
+p0-h	PASS	normalizes to the same value: 'Çağrı' = 'cagri'	
+p0-h	PASS	normalizes to the same value: 'Ürün' = 'urun'	
+p0-h	PASS	normalizes to the same value: 'Öğle' = 'ogle'	
+p0-h	PASS	normalizes to the same value: 'Güneş' = 'gunes'	
+p0-h	PASS	NFC and NFD encodings of the same name normalize identically	
+p0-h	PASS	depsis_norm is declared IMMUTABLE (provolatile=i)	= i
+p0-h	PASS	an expression index on depsis_norm() can be created	rc=0
+p0-h	PASS	file_entries created with a generated name_norm column	
+p0-h	NOTE	corpus rows: 20000	
+p0-h	PASS	GIN trgm and B-tree text_pattern_ops indexes created	
+p0-h	NOTE	rows whose name_norm starts with 'istanbul': 1666	
+p0-h	PASS	İstanbul rows are findable via the ASCII spelling	
+p0-h	PASS	prefix 'i%' CAN be served by the text_pattern_ops B-tree	
+p0-h	NOTE	  'i%' planner chose: Seq Scan (cheaper at this corpus size); 0.055 ms	
+p0-h	PASS	prefix 'is%' CAN be served by the text_pattern_ops B-tree	
+p0-h	NOTE	  'is%' planner chose: Seq Scan (cheaper at this corpus size); 0.060 ms	
+p0-h	NOTE	'%ist%' seq scan on 20000-row corpus (not a failure at this size)	
+p0-h	NOTE	  '%ist%' execution time: 0.055 ms	
+p0-h	NOTE	'%sisli%' seq scan on 20000-row corpus (not a failure at this size)	
+p0-h	NOTE	  '%sisli%' execution time: 0.070 ms	
+p0-h	NOTE	'%sozles%' seq scan on 20000-row corpus (not a failure at this size)	
+p0-h	NOTE	  '%sozles%' execution time: 0.094 ms	
+p0-h	NOTE	p95 < 300 ms target NOT asserted here — belongs in the performance suite on real hardware	
+p0-h	NOTE	LIKE on name_norm: 1667 hits    ILIKE on raw name: 1667 hits	
+p0-h	PASS	normalized LIKE finds at least as much as ILIKE, without needing ILIKE	
+p0-h	PASS	typing 'cagri' finds 'Çağrı' rows (1667) — ILIKE finds none, as expected	
+p0-h	PASS	'Çağrı.pdf' and 'Cagri.pdf' collide in name_norm — correct for search, fatal for uniqueness	
+p0-h	NOTE	ADR-0005: uniqueness uses a SEPARATE name_normalized column, not this one	

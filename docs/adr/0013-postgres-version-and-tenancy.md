@@ -1,6 +1,6 @@
 # ADR-0013: PostgreSQL majör sürüm seçimi, RLS ve kiracı yalıtımı
 
-- **Durum:** Accepted (provisional, PoC: P0-C)
+- **Durum:** **Accepted** — P0-C koştu ve geçti (2026-08-14), kanıt: [`evidence/p0-c.tsv`](evidence/p0-c.tsv)
 - **Tarih:** 2026-08-14
 - **Faz:** 0
 - **Etkilenen bileşenler:** `deploy/migrations`, `apps/api`, `deploy/vm/bootstrap.sh`
