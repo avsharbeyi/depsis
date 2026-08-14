@@ -1,0 +1,10 @@
+{
+  // Build view: emits dist/, excludes tests. `tsc -b` uses this one.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}

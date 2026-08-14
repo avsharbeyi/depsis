@@ -1,0 +1,114 @@
+name: CI
+
+# Pipeline order per master prompt §19:
+#   format -> lint -> typecheck -> unit -> integration -> e2e -> security -> build -> signed artifacts
+# Stages not yet implemented are declared here as explicit, visibly-skipped jobs rather than
+# omitted, so that "we have no e2e coverage yet" stays legible instead of silently absent.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned in ADR-0002. Node 22 is Maintenance LTS; 24 is Active LTS.
+  NODE_VERSION: '24.19.0'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: format · typecheck · unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Reject CRLF in files that Debian executes
+        # A CRLF reaching a shell script, systemd unit or cloud-init seed produces
+        # "bad interpreter" style failures that are painful to diagnose. .gitattributes
+        # prevents this; this check proves the prevention is actually working.
+        run: |
+          bad=$(git ls-files --eol -- '*.sh' '*.service' '*.socket' '*.timer' \
+                  'deploy/**/user-data' 'deploy/**/meta-data' \
+                | grep -v 'w/lf' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::CRLF found in Linux-consumed files:"; echo "$bad"; exit 1
+          fi
+          echo "All Linux-consumed files are LF."
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test:unit
+      - run: pnpm build
+
+  rust:
+    name: system-agent (linux + windows cross-check)
+    runs-on: ubuntu-latest
+    # ADR-0006: the agent must keep compiling for Windows so cfg-gating regressions surface
+    # immediately. Cross-checking from Linux CI is cheaper than a Windows runner.
+    if: hashFiles('services/system-agent/Cargo.toml') != ''
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all
+      - run: cargo check --target x86_64-pc-windows-msvc
+
+  security:
+    name: dependency · secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Dependency advisories
+        run: pnpm audit --audit-level=high
+      - name: Secret scan
+        # §16 and ADR-0004/0006: a controller secret or DB password must never reach a
+        # frontend bundle, an API response, or a log.
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # ── Declared but not yet implemented ────────────────────────────────────────
+  # These exist so their absence is visible in every CI run. Each is enabled by the
+  # PoC named in its ADR.
+
+  integration:
+    name: integration (needs Debian VM — ADR-0012)
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::notice::Not yet implemented. Requires the Hyper-V/Debian target."
+          echo "Gated on P0-B (ADR-0004), P0-C (ADR-0013), P0-D (ADR-0011), P0-E (ADR-0006)."
+
+  e2e:
+    name: e2e (Playwright — desktop + mobile-360)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "::notice::Not yet implemented. Enabled when apps/web exists (Phase 1)."

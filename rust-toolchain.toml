@@ -1,0 +1,7 @@
+# Pinned per ADR-0002 / ADR-0006. Verified 2026-08-14.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+# Windows devs additionally need the MSVC toolchain and Visual Studio Build Tools;
+# CI cross-checks the Windows target to catch cfg-gating regressions (ADR-0006).
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]

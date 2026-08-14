@@ -1,0 +1,71 @@
+# ── Node / pnpm ───────────────────────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+*.tsbuildinfo
+dist/
+build/
+out/
+.turbo/
+.vite/
+
+# ── Rust ──────────────────────────────────────────────────────────────────────
+target/
+**/*.rs.bk
+
+# ── Test & coverage output ────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+blob-report/
+.playwright/
+
+# ── Secrets — never commit. See docs/threat-model for the secret handling rules.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/testdata/**/*.key
+*.p12
+*.pfx
+authtoken.secret
+secrets/
+*.age
+*.sops.yaml
+
+# ── VM / disk artifacts — huge binaries, must be rebuilt not committed ─────────
+# deploy/vm/ scripts are tracked; the images they download and build are not.
+deploy/vm/artifacts/
+deploy/vm/seed/*.iso
+*.vhd
+*.vhdx
+*.avhdx
+*.iso
+*.qcow2
+*.raw
+*.img
+!deploy/vm/**/*.template.img
+
+# ── PoC / run reports are generated evidence, kept out of git ─────────────────
+# Curated results are promoted into docs/ by hand.
+tools/poc/out/
+reports/
+
+# ── OS / editor noise ─────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+pnpm-debug.log*

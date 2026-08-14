@@ -1,0 +1,6 @@
+# Layout per DEPSIS_Master_Engineering_Prompt.md §19.
+# Packages are added here as they are created; an empty glob is not an error.
+packages:
+  - 'apps/*'
+  - 'packages/*'
+  - 'services/*'

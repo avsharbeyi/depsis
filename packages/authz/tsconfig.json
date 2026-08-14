@@ -1,0 +1,13 @@
+{
+  // Editor + ESLint view: includes tests, so type-aware lint rules can see them.
+  // The build uses tsconfig.build.json, which excludes tests from dist/.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "noEmit": true,
+    "composite": false,
+    "types": ["vitest/globals"]
+  },
+  "include": ["src/**/*.ts"]
+}
