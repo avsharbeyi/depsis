@@ -35,7 +35,10 @@
 [CmdletBinding()]
 param(
     [string] $VMName       = 'depsis-poc',
-    [string] $ArtifactRoot = (Join-Path $PSScriptRoot 'artifacts'),
+    # Left empty on purpose: $PSScriptRoot is not reliably populated while parameter defaults
+    # are being bound (it comes back empty under `powershell -File ...`), so the default is
+    # resolved in the body instead. See "resolve paths" below.
+    [string] $ArtifactRoot = '',
 
     # Pin the DATED build directory, never 'latest/', so the environment is reproducible.
     # Verified present 2026-08-14: https://cdimage.debian.org/images/cloud/trixie/
@@ -62,6 +65,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# ─── resolve paths ────────────────────────────────────────────────────────────
+# $PSScriptRoot is empty during parameter binding under `powershell -File`, so the script
+# directory is resolved here, with $MyInvocation as a fallback for the odd invocation modes
+# (dot-sourcing, ISE) where $PSScriptRoot is also unset.
+$scriptDir = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptDir)) {
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($scriptDir)) {
+    throw 'Could not determine the script directory. Pass -ArtifactRoot explicitly.'
+}
+if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
+    $ArtifactRoot = Join-Path $scriptDir 'artifacts'
+}
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 $script:step = 0
