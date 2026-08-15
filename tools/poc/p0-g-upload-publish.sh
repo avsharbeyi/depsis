@@ -517,14 +517,21 @@ if [ "$HAVE_PY" -eq 1 ]; then
     note "ZFS renameat2(RENAME_NOREPLACE), destination absent: $zres"
     case "$zres" in
       ERRNO:EINVAL*)
-        pass 'ZFS rejects RENAME_NOREPLACE with EINVAL, as ADR-0008 predicts' "$zres"
-        note 'the linkat+unlink fallback is therefore load-bearing, not a nicety'
+        # Measured 2026-08-15: ZFS 2.3.2 does NOT do this — it supports the flag. Kept as a
+        # live branch because support is a version property, not a guarantee: an older ZFS or
+        # a different filesystem may still answer EINVAL, and then the fallback matters again.
+        pass 'ZFS rejects RENAME_NOREPLACE with EINVAL — the linkat+unlink fallback is load-bearing here' "$zres"
         ;;
       OK*)
-        # Not a disaster, but it contradicts the ADR and must not pass quietly: ADR-0008
-        # section 4 and the "RENAME_NOREPLACE probe edilmeden kullanılamaz" prohibition both
-        # need rewriting, and the runtime probe's cached "false" would now be wrong.
-        unexpected 'RENAME_NOREPLACE SUCCEEDED on ZFS — ADR-0008 section 4 is out of date' "$zres"
+        # This is the measured behaviour on ZFS 2.3.2 / kernel 6.12.101. ADR-0008 originally
+        # predicted EINVAL, having conflated RENAME_NOREPLACE with RENAME_EXCHANGE and
+        # RENAME_WHITEOUT — those two need pool feature flags, this one does not. The ADR has
+        # been corrected, so success is now the expected result rather than a surprise.
+        #
+        # Success alone is NOT sufficient evidence though: a filesystem that silently ignored
+        # the flag would also land here. The destination-present probe below is what separates
+        # real support from silent ignoring, and it is the assertion that actually matters.
+        pass 'ZFS accepts RENAME_NOREPLACE when the destination is absent' "$zres"
         ;;
       *)
         fail 'ZFS returned an unexpected errno for RENAME_NOREPLACE' "$zres"
@@ -669,10 +676,14 @@ if [ "$HAVE_PY" -eq 1 ]; then
   if [ "$st1" != "NOQUOTA" ]; then
     # The limit must be both a real ceiling and actually usable. A refquota that stops at 10%
     # of its nominal value would be just as broken as one that does not stop at all.
-    if [ "$b1" -lt "$REFQUOTA_B" ]; then
-      pass 'the enforced ceiling is at or below the configured refquota' "$b1 < $REFQUOTA_B"
+    # The bug to catch is EXCEEDING the ceiling, not reaching it. Filling exactly refquota and
+    # failing on the next write is refquota working precisely — measured at exactly 67108864 of
+    # 67108864 on ZFS 2.3.2. An earlier version demanded strictly less and flagged correct
+    # behaviour as a surprise.
+    if [ "$b1" -le "$REFQUOTA_B" ]; then
+      pass 'the enforced ceiling never exceeds the configured refquota' "$b1 <= $REFQUOTA_B"
     else
-      unexpected 'wrote at least refquota bytes before failing' "$b1 >= $REFQUOTA_B"
+      fail 'writes went PAST refquota — the ceiling is not enforced' "$b1 > $REFQUOTA_B"
     fi
     if [ "$b1" -gt $(( REFQUOTA_B * 3 / 4 )) ]; then
       pass 'refquota is usable, not wildly conservative' "$b1 of $REFQUOTA_B bytes usable"

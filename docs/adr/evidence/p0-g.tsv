@@ -1,0 +1,76 @@
+p0-g	NOTE	zfs version: zfs-2.3.2-2	
+p0-g	NOTE	kernel: 6.12.101+deb13-amd64	
+p0-g	NOTE	coreutils cp: cp (GNU coreutils) 9.7	
+p0-g	NOTE	glibc: ldd (Debian GLIBC 2.41-12+deb13u3) 2.41
+
+[31mPoC aborted (rc=141) at line 240[0m	
+p0-g	NOTE	python3: Python 3.13.5	
+p0-g	NOTE	vdevs: /dev/disk/by-id/scsi-36002248004b15f354038ec30c4cdcc6d /dev/disk/by-id/scsi-3600224801b119da9db3fc88bc4bd0afd	
+p0-g	PASS	created mirror test pool	
+p0-g	PASS	both datasets live in the same pool	= depsistest
+p0-g	NOTE	block_cloning pool feature: enabled	
+p0-g	NOTE	fallocate(2) preallocation works on this ZFS build	apparent=1048576 allocated=1*512
+p0-g	NOTE	st_dev of /srv/depsis-poc/users/1001 = 58 ; st_dev of /srv/depsis-poc/users/1002 = 59	
+p0-g	PASS	the two datasets report different st_dev (each dataset is its own superblock)	= 59
+p0-g	PASS	raw rename(2) from one dataset into another in the SAME pool → EXDEV	ERRNO:EXDEV
+p0-g	PASS	bind mount of the SAME dataset reports the SAME st_dev	= 58
+p0-g	PASS	rename(2) across a bind mount of the same dataset (same st_dev!) → EXDEV	ERRNO:EXDEV
+p0-g	NOTE	confirmed: the kernel test is mount identity, not device identity	
+p0-g	PASS	mv across datasets SUCCEEDS (userspace fallback) where rename(2) failed	rc=0
+p0-g	PASS	mv produced a NEW inode — it copied, it did not rename	= 5
+p0-g	NOTE	inode before mv=128, after mv=5	this is why the PoC uses raw rename(2) and never mv
+p0-g	NOTE	created 1024 MiB staging file in 3745 ms (includes /dev/urandom cost)	
+p0-g	NOTE	dataset used grew by 1074470912 bytes for a 1073741824 byte file	
+p0-g	PASS	the staging file really consumed pool space (space accounting is trustworthy)	
+p0-g	PASS	intra-dataset rename(2) from .depsis/staging into the visible tree	OK
+p0-g	NOTE	intra-dataset rename of 1024 MiB took 18 ms	
+p0-g	PASS	rename preserved the inode (nothing was copied)	= 6
+p0-g	PASS	rename preserved the size	= 1073741824
+p0-g	PASS	rename consumed no measurable space	delta=0 bytes
+p0-g	NOTE	full intra-dataset copy of 1024 MiB took 622 ms	this is the cost ADR-0008 is claiming to eliminate
+p0-g	PASS	rename is O(1): 18 ms vs a 622 ms copy (bound 50 ms)	
+p0-g	PASS	cp --reflink=always ACROSS datasets must fail → EXDEV	cp: failed to clone '/srv/depsis-poc/users/1002/Documents/clone.bin' from '/srv/depsis-poc/users/1001/Documents/big.published': Invalid cross-device link
+p0-g	NOTE	intra-dataset cp --reflink=always SUCCEEDS (block cloning is usable within a dataset)	
+p0-g	NOTE	cross-dataset cp --reflink=auto: rc=0, 79 ms, destination used grew 1074470912 bytes	
+p0-g	PASS	--reflink=auto silently performed a FULL copy across datasets	it wrote ~1074470912 bytes and reported success
+p0-g	PASS	control: RENAME_NOREPLACE works on tmpfs — the probe itself is sound	OK glibc renameat2()
+p0-g	PASS	control: RENAME_NOREPLACE onto an existing name on tmpfs → EEXIST	ERRNO:EEXIST glibc renameat2()
+p0-g	NOTE	ZFS renameat2(RENAME_NOREPLACE), destination absent: OK glibc renameat2()	
+p0-g	PASS	ZFS accepts RENAME_NOREPLACE when the destination is absent	OK glibc renameat2()
+p0-g	NOTE	ZFS renameat2(RENAME_NOREPLACE), destination present: ERRNO:EEXIST glibc renameat2()	
+p0-g	PASS	ZFS answers EEXIST — real RENAME_NOREPLACE support	ADR-0008 section 4 needs updating
+p0-g	PASS	link(2) succeeds when the destination does not exist	OK
+p0-g	PASS	the link points at the same inode	= 387
+p0-g	PASS	link count is 2 before the unlink	= 2
+p0-g	PASS	link(2) onto an EXISTING destination must fail atomically → EEXIST	ERRNO:EEXIST
+p0-g	PASS	the original destination content is untouched	
+p0-g	PASS	link count drops to 1 after unlinking the staging name	= 1
+p0-g	PASS	published content survives the unlink	
+p0-g	PASS	link(2) across datasets fails too (the fallback is intra-dataset only) → EXDEV	ERRNO:EXDEV
+p0-g	PASS	fsync() on a directory fd is accepted by ZFS (step 5 is implementable)	OK
+p0-g	PASS	the full ADR-0008 ordering executes end to end	OK
+p0-g	PASS	published file has the staged content	
+p0-g	PASS	the .part name is gone from staging after publish (failed as expected, rc=1)	
+p0-g	NOTE	DURABILITY NOT TESTED HERE — power-loss behaviour is out of scope for P0-G	belongs to the chaos/recovery suite; ADR-0008 item 5 remains unverified after this run
+p0-g	NOTE	fill #1 (fresh dataset, refquota=64M): ERRNO:EDQUOT 67108864	
+p0-g	PASS	writing past refquota returns EDQUOT	stopped at 67108864 bytes
+p0-g	NOTE	the tus layer must map this to 507 Insufficient Storage, not 500	
+p0-g	PASS	the enforced ceiling never exceeds the configured refquota	67108864 <= 67108864
+p0-g	PASS	refquota is usable, not wildly conservative	67108864 of 67108864 bytes usable
+p0-g	NOTE	ADR-0008 UI source → used	67297280 usedbysnapshots	67198976 available	33366016 referenced	98304 refquota	67108864 quota	100663296 	
+p0-g	PASS	all six ADR-mandated quota properties parse as byte integers	
+p0-g	PASS	the snapshot still holds the deleted data	usedbysnapshots=67198976
+p0-g	PASS	refquota freed on delete (referenced dropped)	referenced=98304
+p0-g	NOTE	statvfs on /srv/depsis-poc/users/1003 → total=33423360 used=131072 avail=33292288 (frsize=131072)	
+p0-g	NOTE	zfs        on depsistest/users/1003 → used=67297280 usedbysnapshots=67198976 referenced=98304 available=33366016	
+p0-g	PASS	statvfs used disagrees materially with zfs used — statvfs cannot feed the quota UI	gap=67166208 bytes, usedbysnapshots=67198976
+p0-g	NOTE	fill #2 (snapshot holding ~64M, quota=96M): ERRNO:EDQUOT 33423360	
+p0-g	NOTE	statvfs promised 33292288 bytes; the dataset actually accepted 33423360 bytes	delta=-131072 bytes — measured, not asserted
+p0-g	PASS	snapshot space counts against quota but not refquota	fill#1=67108864 bytes, fill#2=33423360 bytes with the same refquota
+p0-g	NOTE	after snapshot destroy → used=106496 usedbysnapshots=0	
+p0-g	NOTE	fill #3 (snapshot destroyed): ERRNO:EDQUOT 66977792	
+p0-g	PASS	destroying the snapshot returned the quota headroom	fill#2=33423360 → fill#3=66977792 bytes
+p0-g	NOTE	Samba veto of .depsis is proven by P0-B and is not repeated here	
+p0-g	NOTE	power-loss durability of the directory fsync is NOT proven by this script (see section 6)	
+p0-g	NOTE	BLAKE3 vs SHA-256 throughput (ADR-0008, unverified) is not measured here	
+p0-g	NOTE	EDQUOT → HTTP 507 mapping is an API-layer test; this script only establishes the errno	

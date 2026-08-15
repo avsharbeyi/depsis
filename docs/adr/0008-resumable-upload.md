@@ -1,6 +1,7 @@
 # ADR-0008: Devam ettirilebilir yükleme, atomik yayınlama ve kota modeli
 
-- **Durum:** Accepted (provisional, PoC: P0-G)
+- **Durum:** **Accepted** — P0-G koştu (2026-08-15), kanıt: [`evidence/p0-g.tsv`](evidence/p0-g.tsv).
+  Bir iddia düzeltildi; bkz. "Ölçüldü — P0-G".
 - **Tarih:** 2026-08-14
 - **Faz:** 0 (karar), 1–2 (uygulama)
 - **Etkilenen bileşenler:** `apps/api/src/uploads`, `apps/api/src/download`, `services/system-agent`, dataset düzeni, Samba share şablonu
@@ -192,6 +193,65 @@ UI'ya `zfs get -Hp -o value used,usedbysnapshots,available,refquota,quota` ile r
 > paylaşılan bir dataset üzerinde `userquota@`/`userused@` — ama bu kullanıcı başına snapshot ve
 > send/recv'i kaybettirir. Faz 1 kullanıcı başına dataset ile gider; ölçek sorunu ölçülürse
 > yeniden değerlendirilir.
+
+## Ölçüldü — P0-G (2026-08-15, ZFS 2.3.2 / kernel 6.12.101 / coreutils 9.7)
+
+### Çekirdek iddia doğrulandı, üstelik daha güçlü biçimde
+
+| Ölçüm                                                  | Sonuç                                                       |
+| ------------------------------------------------------ | ----------------------------------------------------------- |
+| Aynı havuzdaki iki dataset farklı `st_dev` bildiriyor  | ✅ 58 vs 59                                                 |
+| Dataset'ler arası çıplak `rename(2)`                   | ✅ **EXDEV**                                                |
+| **Aynı dataset'in bind mount'u üzerinden `rename(2)`** | ✅ **EXDEV** — `st_dev` aynı olmasına rağmen                |
+| `mv` başarılı ama **inode değişiyor** (256 → 5)        | ✅ kopyaladı, taşımadı                                      |
+| `cp --reflink=always` dataset'ler arası                | ✅ EXDEV                                                    |
+| `cp --reflink=auto` dataset'ler arası                  | ✅ **sessizce tam kopya** (hedef 1.074.470.912 bayt büyüdü) |
+| Dataset **içi** `cp --reflink=always`                  | ✅ çalışıyor (`block_cloning` etkin)                        |
+
+Bind mount testi, ADR'nin dayandığı `rename(2)` cümlesini ampirik olarak kanıtlıyor: çekirdeğin
+kontrolü **mount kimliği**, cihaz kimliği değil. Aynı dataset, aynı `st_dev`, farklı mount →
+yine EXDEV.
+
+### Dataset içi rename gerçekten O(1)
+
+1024 MiB dosya: **rename 14 ms**, aynı boyutta tam kopya **570 ms**. Inode korunuyor, ölçülebilir
+alan tüketilmiyor. Staging'i hedefin içine almanın kazancı tam olarak bu.
+
+### ⚠ Düzeltme — `RENAME_NOREPLACE` ZFS'te **çalışıyor**
+
+Bu ADR "güvenilir değil, `rename_exchange`/`rename_whiteout` feature flag'leri master'da yok"
+diyip `linkat`+`unlink` yedeğini zorunlu kılıyordu. **Yanlış** — araştırma iki farklı şeyi
+karıştırmış: `RENAME_EXCHANGE` ve `RENAME_WHITEOUT` pool feature flag'i ister,
+`RENAME_NOREPLACE` istemez.
+
+Ölçüm bayrağın **sessizce yok sayılmadığını** da gösteriyor, asıl önemli olan bu:
+
+| Durum                            | Sonuç                              |
+| -------------------------------- | ---------------------------------- |
+| tmpfs kontrolü (probe sağlam mı) | ✅ çalışıyor, mevcut adda `EEXIST` |
+| ZFS, hedef **yok**               | ✅ **OK**                          |
+| ZFS, hedef **var**               | ✅ **`EEXIST`**                    |
+
+Bayrak yok sayılsaydı ikinci satır başarılı olup üzerine yazardı. Yayınlama doğrudan
+`renameat2(RENAME_NOREPLACE)` kullanabilir.
+
+ADR'nin "runtime-probe et" kuralı **yine de geçerli** — bu bir sürüm ölçümüdür, evrensel garanti
+değil. `linkat`+`unlink` yedek olarak kalır; P0-G onun da atomik `EEXIST` verdiğini doğruladı.
+
+### Kota semantiği doğrulandı
+
+`refquota` aşımı **`EDQUOT`** veriyor (tus katmanı 507'ye çevirmeli, 500'e değil). Altı
+ADR-zorunlu özellik bayt tamsayısı olarak ayrıştırılıyor. Snapshot alanı `quota`'ya sayılıyor,
+`refquota`'ya sayılmıyor; snapshot silinince kota boşluğu geri geliyor.
+
+**`statvfs` ölçülerek elendi:** 33.292.288 bayt vaat etti, dataset gerçekte 33.423.360 bayt
+kabul etti. "Kota UI'ı `statvfs`'ten beslenemez" kuralı artık ölçüme dayanıyor.
+
+### Bu koşunun kanıtlamadığı
+
+Dizin `fsync`'inin **güç kesintisi** dayanıklılığı. `fsync(dirfd)` ZFS tarafından kabul ediliyor
+ve sıralama uçtan uca çalışıyor, ama gerçek kesinti testi kaos/kurtarma süitine ait. Script bunu
+açıkça kapsam dışı ilan ediyor — "sıralama çalıştı" ile "dayanıklı" aynı şey değildir.
 
 ## Kanıt
 

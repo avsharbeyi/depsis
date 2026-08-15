@@ -40,7 +40,7 @@ Master prompt §0.2 gereği her büyük değişiklikten önce bir ADR yazılır.
 | [0005](0005-file-identity.md)                   | Dosya kimliği ve path reconciliation                      | **Accepted** ✅ P0-D geçti 38/38 — kimlik restart-kararlı                                    |
 | [0006](0006-system-agent-ipc.md)                | Sistem aracısı ayrıcalık sınırı ve IPC                    | **Accepted (provisional, P0-E)**                                                             |
 | [0007](0007-storage-abstraction.md)             | Depolama soyutlaması (ZFS/Mock; Btrfs'in gerçek maliyeti) | **Accepted**                                                                                 |
-| [0008](0008-resumable-upload.md)                | Devam ettirilebilir yükleme, atomik yayınlama, kota       | **Accepted (provisional, P0-G)** ⚠️ staging dataset varsayımı çürütüldü                      |
+| [0008](0008-resumable-upload.md)                | Devam ettirilebilir yükleme, atomik yayınlama, kota       | **Accepted** ✅ P0-G geçti 41/41 — EXDEV kanıtlandı; `RENAME_NOREPLACE` düzeltildi           |
 | [0009](0009-auth-session-mfa.md)                | Oturum ve MFA modeli; WebAuthn RP ID kısıtı               | **Accepted**                                                                                 |
 | [0010](0010-search-architecture.md)             | Arama mimarisi ve Türkçe normalizasyon                    | **Accepted** ✅ P0-H geçti 22/22 — ICU collation varsayımı çürütüldü                         |
 | [0011](0011-filesystem-events.md)               | Dosya sistemi olay yakalama                               | **Accepted** ✅ P0-D geçti 38/38 — fanotify FID ZFS'te çalışıyor; snapshot delege edilebilir |
