@@ -51,6 +51,14 @@ param(
     [int]    $VdevCount    = 4,
     [int]    $VdevSizeGB   = 20,
 
+    # Default On, deliberately. Secure Boot makes the DKMS-built OpenZFS module unloadable
+    # ("Key was rejected by service") unless the DKMS MOK is enrolled, and enrolling it needs
+    # console interaction at boot. That is a real production constraint (ADR-0012), so the
+    # default keeps it visible rather than quietly papering over it. Pass -SecureBoot Off for a
+    # PoC VM, where ZFS/Samba semantics are the subject and boot security is not.
+    [ValidateSet('On', 'Off')]
+    [string] $SecureBoot   = 'On',
+
     [string] $LabSwitch    = 'DEPSIS-Lab',
     [string] $LabHostIP    = '192.168.244.1',
     [string] $LabGuestIP   = '192.168.244.10',
@@ -322,13 +330,12 @@ users:
 ssh_pwauth: false
 disable_root: true
 
-# Contrib is required for OpenZFS on Debian; it is DKMS-built against the running kernel,
-# so linux-headers must be present BEFORE zfs-dkms is configured.
-apt:
-  sources_list: |
-    deb http://deb.debian.org/debian trixie main contrib non-free-firmware
-    deb http://deb.debian.org/debian trixie-updates main contrib non-free-firmware
-    deb http://security.debian.org/debian-security trixie-security main contrib non-free-firmware
+# NOTE: cloud-init's `apt: sources_list:` is deliberately NOT used here. It writes the legacy
+# /etc/apt/sources.list, but the Debian 13 cloud image ships the deb822 format in
+# /etc/apt/sources.list.d/debian.sources and has no legacy file at all. The directive applied
+# silently to nothing, contrib stayed disabled, and zfsutils-linux had no installation
+# candidate — so the first real boot came up with no ZFS and no error anywhere obvious.
+# Contrib is enabled explicitly in runcmd below, against the file the image actually uses.
 
 package_update: true
 package_upgrade: false
@@ -358,9 +365,18 @@ write_files:
       }
 
 runcmd:
+  # OpenZFS lives in contrib, and the Debian 13 cloud image ships Components: main only.
+  # Edit the deb822 file the image actually uses, then refresh — without this, every ZFS
+  # package below silently has no installation candidate.
+  - [ sh, -c, "sed -i 's/^Components: main$/Components: main contrib non-free-firmware/' /etc/apt/sources.list.d/debian.sources" ]
+  - [ sh, -c, "grep -q contrib /etc/apt/sources.list.d/debian.sources || { echo 'FATAL: contrib not enabled' >&2; exit 1; }" ]
+  - [ sh, -c, "apt-get update" ]
   # zfs-dkms pulls in a licence acceptance prompt; preseed it for unattended install.
   - [ sh, -c, "echo 'zfs-dkms zfs-dkms/note-incompatible-licenses note true' | debconf-set-selections" ]
   - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y zfsutils-linux zfs-dkms zfs-zed" ]
+  # Fail loudly if the DKMS module did not actually build. A VM that boots without ZFS looks
+  # healthy and then fails every storage PoC for a reason that is not obvious.
+  - [ sh, -c, "modprobe zfs && zfs version || { echo 'FATAL: zfs module unavailable after install' >&2; exit 1; }" ]
   - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y samba smbclient samba-vfs-modules" ]
   - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib" ]
   - [ sh, -c, "modprobe zfs && zfs version > /var/log/depsis-zfs-version.txt 2>&1 || true" ]
@@ -475,17 +491,31 @@ Good "Expected identifiers recorded in $vmDir\expected-disk-ids.json"
 Step 'Firmware / Secure Boot'
 
 $sysDrive = Get-VMHardDiskDrive -VMName $VMName -ControllerNumber 0 -ControllerLocation 0
+
+if ($SecureBoot -eq 'Off') {
+    Set-VMFirmware -VMName $VMName -EnableSecureBoot Off -FirstBootDevice $sysDrive
+    Warn2 'Secure Boot DISABLED by request (-SecureBoot Off).'
+    Info  'Chosen so the DKMS-built OpenZFS module can load without MOK enrolment.'
+    Info  'Production must not copy this blindly — see ADR-0012 for the three real options.'
+}
+else {
 try {
     Set-VMFirmware -VMName $VMName -EnableSecureBoot On `
                    -SecureBootTemplate 'MicrosoftUEFICertificateAuthority' `
                    -FirstBootDevice $sysDrive
     Good "Secure Boot on, template MicrosoftUEFICertificateAuthority (required for Debian's shim)."
+    Warn2 'Secure Boot is ON: the DKMS OpenZFS module will FAIL to load until its MOK is enrolled.'
+    Warn2 'Expect "modprobe: could not insert zfs: Key was rejected by service" on first boot.'
+    Info  'Enrol with:  sudo mokutil --import /var/lib/dkms/mok.pub  then reboot and confirm at'
+    Info  'the MOK Manager screen (needs console interaction — vmconnect). Or re-run with'
+    Info  '-SecureBoot Off for a throwaway PoC VM.'
 } catch {
     Warn2 "Named template rejected: $($_.Exception.Message)"
     Warn2 'Falling back to Secure Boot OFF so the PoC is not blocked. Available templates:'
     Get-CimInstance -Namespace root\virtualization\v2 -ClassName Msvm_SecureBootTemplate -ErrorAction SilentlyContinue |
         ForEach-Object { Warn2 ("  {0}  {1}" -f $_.ElementName, $_.InstanceID) }
     Set-VMFirmware -VMName $VMName -EnableSecureBoot Off -FirstBootDevice $sysDrive
+}
 }
 
 # Integration-service NAMES are localised: on a Turkish Windows there is no component called

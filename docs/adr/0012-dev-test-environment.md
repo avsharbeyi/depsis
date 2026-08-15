@@ -107,7 +107,9 @@ hikâyesinin iki yüzü var:
 
 Bu yüzden **üç kademeli kimlik**:
 
-1. `/dev/disk/by-id/*` (page 0x83) — beklenen yol, ama **inferred**, PoC'nin ilk beş dakikada
+1. `/dev/disk/by-id/*` (page 0x83) — **DOĞRULANDI** (2026-08-15, ilk gerçek guest). Ayrıntı
+   aşağıdaki "Ölçüldü" bölümünde. Aşağıdaki paragrafın "inferred" ifadesi artık geçerli değil;
+   PoC'nin ilk beş dakikada
    kanıtlaması gereken şey.
 2. `/dev/disk/by-partuuid/*` — GPT partition GUID'i diskin kendi içeriğindedir; slot değişimine,
    yeniden başlatmaya ve yeniden takmaya dayanır.
@@ -128,6 +130,93 @@ tanımlayıcısı da kopyalanır ve diskler `/dev/disk/by-id`'de çakışır. Ko
 Sağlama script'i her vdev'in `DiskIdentifier`'ını **oluşturma anında**
 `expected-disk-ids.json`'a yazar. Guest tarafı PoC bunları `/dev/disk/by-id`'de doğrular — böylece
 R1 bir umut değil, **makine ile kontrol edilebilir bir değişmez** hâline gelir.
+
+### Ölçüldü — disk kimliği (2026-08-15, ilk gerçek guest)
+
+ADR bu maddeyi `inferred` bırakmıştı; artık ölçüm var. Guest'te `/dev/disk/by-id/` altında
+**hem** NAA (`wwn-0x…`) **hem** T10 (`scsi-3…`) biçimi mevcut, ve host'un
+`expected-disk-ids.json`'a yazdığı `DiskIdentifier` GUID'inin son 12 hane'si guest adının
+içinde birebir görünüyor:
+
+| Host `DiskIdentifier`     | Guest `by-id`         |
+| ------------------------- | --------------------- |
+| `83D77D99-…-7850EF317343` | `wwn-0x…7850ef317343` |
+| `355FB104-…-EC30C4CDCC6D` | `wwn-0x…ec30c4cdcc6d` |
+| `98C36D73-…-1E95E8A74A3D` | `wwn-0x…1e95e8a74a3d` |
+| `A99D111B-…-C88BC4BD0AFD` | `wwn-0x…c88bc4bd0afd` |
+
+Dördü de **farklı** — yani "her vdev kendi `New-VHD` çağrısıyla üretilir" kuralı işini yaptı.
+Guest toplam altı disk görüyor: sistem (3 bölüm), seed (CIDATA), dört vdev.
+
+Sonuç: risk R1'in disk kimliği tarafı artık **makine ile kontrol edilebilir bir değişmez**.
+P0-A bu eşleşmeyi otomatik doğrular. Seri numarasının (page 0x80) yokluğu hâlâ P0-A'nın işi.
+
+### Ölçüldü — Secure Boot, OpenZFS'i yüklenmez hâle getiriyor (2026-08-15)
+
+Bu, test ortamına özgü bir sıkıntı değil; **üretim kısıtı** olduğu için buraya yazılıyor.
+
+Secure Boot açık bir Debian'da DKMS ile derlenen OpenZFS modülü **yüklenmiyor**:
+
+```
+modprobe: ERROR: could not insert 'zfs': Key was rejected by service
+```
+
+Ölçülen durum:
+
+|                                 |                                                                     |
+| ------------------------------- | ------------------------------------------------------------------- |
+| `mokutil --sb-state`            | `SecureBoot enabled`                                                |
+| `/sys/kernel/security/lockdown` | `none [integrity] confidentiality` — integrity modu **etkin**       |
+| `dmesg`                         | `Kernel is locked down from EFI Secure Boot`                        |
+| `dkms status`                   | `zfs/2.3.2, 6.12.101+deb13-amd64: installed` — **derleme başarılı** |
+
+Yani sorun derleme değil. Modül var, çalışır durumda; çekirdek **imzasını** kabul etmiyor.
+
+**Debian bunun için zaten hazırlık yapmış:** `zfs-dkms` kurulumu sırasında
+`/var/lib/dkms/mok.key` ve `mok.pub` üretiliyor ve modül bu anahtarla imzalanıyor. Eksik olan
+tek adım, bu anahtarın firmware'e kaydedilmesi.
+
+#### Üretim için sonuç
+
+DEPSIS bir appliance olarak Secure Boot açık donanıma kurulacaksa, kurulum **MOK kaydını
+ele almak zorunda**:
+
+```bash
+mokutil --import /var/lib/dkms/mok.pub    # tek kullanımlık parola sorar
+reboot                                     # açılışta MOK Manager ekranı gelir
+```
+
+**Kritik operasyonel gerçek: bu adım tam otomatikleştirilemez.** MOK Manager açılışta
+fiziksel/konsol etkileşimi ister — parolayı oraya elle girmek gerekir. "Başsız bir NAS'a
+gözetimsiz kurulum" hedefiyle doğrudan çelişir.
+
+Üç seçenek var ve üçü de bedelli:
+
+1. **MOK kaydı** — Secure Boot korunur, ama ilk kurulumda konsol başında bir insan gerekir.
+   Sonraki çekirdek güncellemelerinde DKMS aynı anahtarla otomatik imzalar; tekrar etkileşim
+   gerekmez.
+2. **Secure Boot kapalı** — kurulum tamamen otomatik olur, ama boot zinciri doğrulaması gider.
+3. **Önceden imzalanmış çekirdek modülü dağıtmak** — DEPSIS'in kendi imza altyapısını ve
+   kullanıcının kendi anahtarını kaydetmesini gerektirir; 1'den daha karmaşık.
+
+Bu karar Faz 4'e (üretim sertleştirme) aittir ve kurulum sihirbazının bunu **açıkça sorması**
+gerekir. Sessizce Secure Boot'u kapatmak veya ZFS'siz bir sistemi "kurulum tamamlandı" diye
+göstermek kabul edilemez — ikincisi tam olarak bu turda yaşandı: VM sağlıklı göründü, SSH
+çalıştı, ama depolama katmanı yoktu.
+
+#### Test VM'i için
+
+PoC'ler ZFS/Samba semantiğini test ediyor, boot güvenliğini değil. Test VM'inde Secure Boot
+**kapatılır** (ADR bunu zaten pragmatik geri çekilme olarak öngörmüştü):
+
+```powershell
+Stop-VM -Name depsis-poc -Force
+Set-VMFirmware -VMName depsis-poc -EnableSecureBoot Off
+Start-VM -Name depsis-poc
+```
+
+Sağlama script'i artık bunu bir parametreyle sunuyor; varsayılan hâlâ Secure Boot açıktır,
+çünkü **üretim gerçeğini gizlememek** bu ADR'nin amacı.
 
 ### Tekrarlanabilirlik
 
