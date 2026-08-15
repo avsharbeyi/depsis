@@ -488,7 +488,25 @@ try {
     Set-VMFirmware -VMName $VMName -EnableSecureBoot Off -FirstBootDevice $sysDrive
 }
 
-Enable-VMIntegrationService -VMName $VMName -Name 'Guest Service Interface'
+# Integration-service NAMES are localised: on a Turkish Windows there is no component called
+# 'Guest Service Interface', so looking it up by name throws and — because ErrorActionPreference
+# is Stop — aborted provisioning before the VM was ever started. Match on the well-known
+# component GUID instead, and treat the whole thing as optional: this service only enables
+# Copy-VMFile, which ADR-0012 already records as "do not depend on it".
+try {
+    $gsiGuid = '6C09BB55-D683-4DA0-8931-C9BF705F6480'
+    $gsi = Get-VMIntegrationService -VMName $VMName |
+           Where-Object { $_.Id -like "*$gsiGuid*" }
+    if ($gsi) {
+        Enable-VMIntegrationService -VMIntegrationService $gsi
+        Good 'Guest Service Interface enabled (host->guest file copy available).'
+    } else {
+        Warn2 'Guest Service Interface component not found; skipping. Copy-VMFile will be unavailable.'
+    }
+} catch {
+    Warn2 "Could not enable Guest Service Interface: $($_.Exception.Message)"
+    Warn2 'Continuing — this is optional and must never block provisioning.'
+}
 # Cheapest unattended-boot debugger; Debian cloud images already enable ttyS0.
 Set-VMComPort -VMName $VMName -Number 1 -Path "\\.\pipe\$VMName-console"
 Good "Serial console on \\.\pipe\$VMName-console"
