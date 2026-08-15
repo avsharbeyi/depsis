@@ -1,0 +1,27 @@
+p0-b	NOTE	zfs version: zfs-2.3.2-2	
+p0-b	NOTE	samba version: Version 4.22.10-Debian-4.22.10+dfsg-0+deb13u2	
+p0-b	NOTE	kernel: 6.12.101+deb13-amd64	
+p0-b	NOTE	samba package: 2:4.22.10+dfsg-0+deb13u2	
+p0-b	NOTE	zfsutils package: 2.3.2-2	
+p0-b	NOTE	vdevs: /dev/disk/by-id/scsi-36002248004b15f354038ec30c4cdcc6d /dev/disk/by-id/scsi-3600224801b119da9db3fc88bc4bd0afd	
+p0-b	PASS	created mirror test pool	
+p0-b	NOTE	requested acltype=nfsv4, zfs reports: 'nfsv4' (set rc=0)	
+p0-b	PASS	setfacl on an acltype=nfsv4 dataset should FAIL (ACLs are off on Linux) (failed as expected, rc=1)	setfacl: /srv/depsis-poc/nfsv4/probe: Operation not supported
+p0-b	NOTE	operator-visible signal of the misconfiguration: acltype='nfsv4', no error emitted	
+p0-b	PASS	acltype is POSIX ACL (reported 'posix')	
+p0-b	PASS	xattr is SA-based (reported 'on')	
+p0-b	PASS	setfacl now succeeds	rc=0
+p0-b	PASS	setfacl on the file succeeds	rc=0
+p0-b	PASS	getfacl reports the granted user entry	
+p0-b	PASS	granted user (depsis_poc_alice) can read the file	rc=0
+p0-b	PASS	ungranted user (depsis_poc_bob) is REFUSED by the kernel (failed as expected, rc=1)	cat: /srv/depsis-poc/share1/doc.txt: Permission denied
+p0-b	PASS	new file inherited the default ACL	
+p0-b	PASS	new directory inherited the default ACL as a default	
+p0-b	PASS	testparm accepts the generated config	rc=0
+p0-b	PASS	the share is reachable over SMB (precondition for everything below)	
+p0-b	NOTE	smbcacls output: REVISION:1 ; CONTROL:SR|DP ; OWNER:Unix User\root ; GROUP:Unix Group\root ; ACL:Unix User\root:ALLOWED/0x0/RWDPO ; ACL:Unix Group\root:ALLOWED/0x0/R ; ACL:DEPSIS-POC\depsis_poc_alice:ALLOWED/0x0/R ; ACL:Everyone:ALLOWED/0x0/	
+p0-b	PASS	smbcacls can read the security descriptor over SMB	
+p0-b	PASS	the DEPSIS-granted subject appears in the SMB security descriptor	
+p0-b	NOTE	SMB->POSIX mirroring UNPROVEN	
+p0-b	PASS	.depsis is not listed over SMB	
+p0-b	PASS	veto files also BLOCKS direct access to .depsis (not just hiding)	

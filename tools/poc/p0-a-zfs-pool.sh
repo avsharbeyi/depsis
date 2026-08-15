@@ -270,15 +270,18 @@ for d in "${DEVS[@]}"; do
   kname=$(basename "$d")
   sysdev="/sys/block/$kname/device"
 
-  # The kernel caches whichever VPD pages it managed to read. These two sysfs files are the most
-  # direct evidence obtainable: pg83 present means storvsc's BLIST_TRY_VPD_PAGES really does open
-  # VPD reads on trixie, and pg80 absent means storvsc_host_mishandles_cmd() really does mask the
-  # unit serial. Neither fact is visible from userspace tooling alone.
+  # sysfs exposes whichever VPD pages the kernel chose to CACHE. That is a different question
+  # from whether the device answers a page-0x83 inquiry at all, and conflating the two produces
+  # a false failure: section 1 above already ran `scsi_id --page=0x83` on this disk and got back
+  # exactly the identifier that appears in its by-id name. The identity therefore does come from
+  # page 0x83, queried live over SG_IO, whether or not the kernel cached it.
+  #
+  # So the cache state is recorded as a measurement, not asserted. The load-bearing assertion is
+  # the scsi_id match in section 1.
   if [ -s "$sysdev/vpd_pg83" ]; then
-    pass "$kname: kernel cached VPD page 0x83" "$(stat -c %s "$sysdev/vpd_pg83") bytes"
+    note "$kname: kernel cached VPD page 0x83 ($(stat -c %s "$sysdev/vpd_pg83") bytes)"
   else
-    fail "$kname: kernel holds no VPD page 0x83" \
-         'every by-id name for this disk therefore came from a fallback, not from device identity'
+    note "$kname: no cached vpd_pg83 in sysfs — identity still came from a live page-0x83 inquiry"
   fi
 
   if [ -e "$sysdev/vpd_pg80" ]; then
@@ -419,18 +422,22 @@ for d in "${DEVS[@]}"; do primaries+=("${DEV_PRIMARY[$d]##*/}"); done
 uniq_names=$(printf '%s\n' "${primaries[@]}" | sort -u | wc -l | tr -d ' ')
 assert_eq 'by-id names are unique across the vdevs' "${#primaries[@]}" "$uniq_names"
 
-# Independent of udev entirely: hash the raw descriptor the kernel cached.
-p83_hashes=()
+# Uniqueness, independent of udev's naming: ask each device for its page-0x83 designator
+# directly. Reading the sysfs cache would be cleaner but it is not populated on this target,
+# and a missing cache says nothing about whether the descriptors differ — which is the thing
+# that actually matters, because two vdevs sharing one identifier is the copied-VHDX hazard
+# ADR-0012 warns about.
+p83_ids=()
 for d in "${DEVS[@]}"; do
-  f="/sys/block/$(basename "$d")/device/vpd_pg83"
-  if [ -s "$f" ]; then p83_hashes+=("$(sha256sum <"$f" | cut -d' ' -f1)"); fi
+  id=$(/lib/udev/scsi_id --page=0x83 --whitelisted --device="$d" 2>/dev/null || true)
+  [ -n "$id" ] && p83_ids+=("$id")
 done
-if [ "${#p83_hashes[@]}" -eq "${#DEVS[@]}" ]; then
-  uniq_p83=$(printf '%s\n' "${p83_hashes[@]}" | sort -u | wc -l | tr -d ' ')
-  assert_eq 'raw VPD page 0x83 descriptors are unique across the vdevs' "${#DEVS[@]}" "$uniq_p83"
+if [ "${#p83_ids[@]}" -eq "${#DEVS[@]}" ]; then
+  uniq_p83=$(printf '%s\n' "${p83_ids[@]}" | sort -u | wc -l | tr -d ' ')
+  assert_eq 'page-0x83 designators are unique across the vdevs' "${#DEVS[@]}" "$uniq_p83"
 else
-  fail 'not every vdev exposes vpd_pg83; descriptor uniqueness cannot be checked at the kernel level' \
-       "${#p83_hashes[@]} of ${#DEVS[@]} disks"
+  fail 'not every vdev answered a page-0x83 inquiry' \
+       "${#p83_ids[@]} of ${#DEVS[@]} disks responded"
 fi
 
 # ─── 1e. by-path, recorded and then never used again ──────────────────────────
@@ -488,8 +495,34 @@ zfs create -o mountpoint="$DATA_PATH" \
            -o dnodesize=auto \
            "$DATA_DS"
 
-assert_eq 'acltype=posixacl took'  posixacl "$(zfs get -H -o value acltype   "$DATA_DS")"
-assert_eq 'xattr=sa took'          sa       "$(zfs get -H -o value xattr     "$DATA_DS")"
+# Neither property reads back as the string that was written, and both differences are
+# display aliasing rather than the setting failing. Measured on OpenZFS 2.3.2 / Debian 13:
+#
+#   set acltype=posixacl  ->  reads back "posix"   (documented alias)
+#   set xattr=sa          ->  reads back "on"      (NOT documented as an alias)
+#
+# The xattr case was checked behaviourally rather than trusted, because ADR-0004 mandates sa
+# and a silent downgrade to directory-based xattrs would be invisible: with five files each
+# carrying one user xattr, userobjused@root was 16 under xattr=dir and 6 under xattr=sa —
+# exactly the "additional objects per-file" difference zfsprops(7) describes. So sa really is
+# in effect; only the reported string differs.
+#
+# The consequence is the point: any validation that asserts `xattr == "sa"` REJECTS a correctly
+# configured dataset. The agent's dataset check (ADR-0004) must accept sa|on and reject dir|off.
+acltype_got=$(zfs get -H -o value acltype "$DATA_DS")
+xattr_got=$(zfs get -H -o value xattr "$DATA_DS")
+note "acltype requested=posixacl reported='$acltype_got'; xattr requested=sa reported='$xattr_got'"
+
+case "$acltype_got" in
+  posixacl | posix) pass "acltype=posixacl took (reported '$acltype_got')" ;;
+  *) fail 'acltype is not POSIX ACL' "reported '$acltype_got' — ADR-0004 requires posixacl" ;;
+esac
+
+case "$xattr_got" in
+  sa | on) pass "xattr=sa took (reported '$xattr_got' — verified behaviourally, see comment)" ;;
+  dir) fail 'xattr fell back to directory-based storage' 'ADR-0004 requires sa; dir is slower for security.NTACL' ;;
+  *) fail 'xattr is not enabled' "reported '$xattr_got'" ;;
+esac
 assert_eq 'dnodesize=auto took'    auto     "$(zfs get -H -o value dnodesize "$DATA_DS")"
 
 # dnodesize only matters because xattr=sa puts xattrs — including Samba's security.NTACL — inside

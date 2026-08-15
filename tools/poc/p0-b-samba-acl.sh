@@ -98,8 +98,22 @@ zfs create -o mountpoint="$SHARE_PATH" \
            -o dnodesize=auto \
            "$SHARE_DS"
 
-assert_eq 'acltype is posixacl' posixacl "$(zfs get -H -o value acltype "$SHARE_DS")"
-assert_eq 'xattr is sa'         sa       "$(zfs get -H -o value xattr   "$SHARE_DS")"
+# Neither property reads back as written. Both are display aliasing, and P0-A settled it
+# behaviourally (xattr=sa yields 6 objects vs 16 for dir, so sa really is in effect):
+#   acltype=posixacl -> "posix"   xattr=sa -> "on"
+# The rule this implies is what matters: the agent's dataset validation must accept the alias
+# forms, or it rejects correctly configured datasets. See ADR-0004.
+acltype_got=$(zfs get -H -o value acltype "$SHARE_DS")
+xattr_got=$(zfs get -H -o value xattr "$SHARE_DS")
+case "$acltype_got" in
+  posixacl | posix) pass "acltype is POSIX ACL (reported '$acltype_got')" ;;
+  *) fail 'acltype is not POSIX ACL' "reported '$acltype_got'" ;;
+esac
+case "$xattr_got" in
+  sa | on) pass "xattr is SA-based (reported '$xattr_got')" ;;
+  dir) fail 'xattr fell back to directory-based storage' 'ADR-0004 requires sa' ;;
+  *) fail 'xattr is not enabled' "reported '$xattr_got'" ;;
+esac
 
 chgrp "$SHARE_GROUP" "$SHARE_PATH"
 chmod 0770 "$SHARE_PATH"
@@ -165,7 +179,7 @@ else
     map acl inherit = yes
     store dos attributes = yes
     full_audit:prefix = %u|%I|%S
-    full_audit:success = create_file renameat unlinkat mkdirat rmdir close ftruncate
+    full_audit:success = create_file renameat unlinkat mkdirat close ftruncate
     full_audit:failure = none
     full_audit:facility = local5
     full_audit:priority = notice
@@ -185,6 +199,24 @@ EOF
 
   printf '%s\n%s\n' "$SMB_PASS" "$SMB_PASS" | smbpasswd -s -a "$TEST_USER" >/dev/null
   smbpasswd -e "$TEST_USER" >/dev/null
+
+  # Prove the share is reachable BEFORE testing anything about it.
+  #
+  # An earlier run of this PoC reported the .depsis veto checks below as PASS while the share
+  # was in fact completely unreachable: an invalid vfs_full_audit opname made smbd refuse every
+  # connection, so the listing was empty (no .depsis in it — "pass") and the download failed
+  # ("pass"). Two green checks, both meaningless. Any test that concludes something from an
+  # absence has to first establish that presence was possible.
+  if smbclient "//127.0.0.1/p0bshare" -U "$TEST_USER%$SMB_PASS" -c 'ls' >/dev/null 2>&1; then
+    pass 'the share is reachable over SMB (precondition for everything below)'
+  else
+    fail 'the share is NOT reachable over SMB — every check below would be a false pass' \
+         "$(smbclient "//127.0.0.1/p0bshare" -U "$TEST_USER%$SMB_PASS" -c 'ls' 2>&1 | head -3)
+check the smbd log: an invalid full_audit opname makes the module refuse the connect, and
+testparm does not catch it."
+    poc_summary
+    exit 1
+  fi
 
   sacl=$(smbcacls "//127.0.0.1/p0bshare" /doc.txt -U "$TEST_USER%$SMB_PASS" 2>&1) || true
   note "smbcacls output: ${sacl//$'\n'/ ; }"

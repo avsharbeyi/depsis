@@ -30,22 +30,22 @@ Master prompt §0.2 gereği her büyük değişiklikten önce bir ADR yazılır.
 
 ## Dizin
 
-| ADR                                             | Başlık                                                    | Durum                                                                   |
-| ----------------------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------- |
-| [0000](0000-version-baseline.md)                | Sürüm temel çizgisi ve doğrulama yöntemi                  | **Accepted** (kısmi — 6 konu 2. turda)                                  |
-| [0001](0001-api-runtime.md)                     | API/BFF çalışma zamanı: NestJS/TypeScript                 | **Accepted**                                                            |
-| [0002](0002-monorepo-toolchain.md)              | Monorepo araç zinciri ve sürüm sabitlemesi                | **Accepted**                                                            |
-| [0003](0003-job-queue.md)                       | İş kuyruğu (PostgreSQL `SKIP LOCKED`)                     | **Accepted**                                                            |
-| [0004](0004-authz-authority-and-smb-mapping.md) | Yetki otoritesi ve SMB eşlemesi                           | **Accepted (provisional, P0-B)** ⚠️ ilk varsayım çürütüldü              |
-| [0005](0005-file-identity.md)                   | Dosya kimliği ve path reconciliation                      | **Accepted (provisional, P0-D)**                                        |
-| [0006](0006-system-agent-ipc.md)                | Sistem aracısı ayrıcalık sınırı ve IPC                    | **Accepted (provisional, P0-E)**                                        |
-| [0007](0007-storage-abstraction.md)             | Depolama soyutlaması (ZFS/Mock; Btrfs'in gerçek maliyeti) | **Accepted**                                                            |
-| [0008](0008-resumable-upload.md)                | Devam ettirilebilir yükleme, atomik yayınlama, kota       | **Accepted (provisional, P0-G)** ⚠️ staging dataset varsayımı çürütüldü |
-| [0009](0009-auth-session-mfa.md)                | Oturum ve MFA modeli; WebAuthn RP ID kısıtı               | **Accepted**                                                            |
-| [0010](0010-search-architecture.md)             | Arama mimarisi ve Türkçe normalizasyon                    | **Accepted** ✅ P0-H geçti 22/22 — ICU collation varsayımı çürütüldü    |
-| [0011](0011-filesystem-events.md)               | Dosya sistemi olay yakalama                               | **Accepted (provisional, P0-D)** ⚠️ ilk varsayım tersine çevrildi       |
-| [0012](0012-dev-test-environment.md)            | Geliştirme/test ortamı topolojisi                         | **Accepted**                                                            |
-| [0013](0013-postgres-version-and-tenancy.md)    | PostgreSQL majör sürümü, RLS ve kiracı yalıtımı           | **Accepted** ✅ P0-C geçti 45/45 — iki RLS baypası üretilip kapatıldı   |
+| ADR                                             | Başlık                                                    | Durum                                                                                 |
+| ----------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| [0000](0000-version-baseline.md)                | Sürüm temel çizgisi ve doğrulama yöntemi                  | **Accepted** (kısmi — 6 konu 2. turda)                                                |
+| [0001](0001-api-runtime.md)                     | API/BFF çalışma zamanı: NestJS/TypeScript                 | **Accepted**                                                                          |
+| [0002](0002-monorepo-toolchain.md)              | Monorepo araç zinciri ve sürüm sabitlemesi                | **Accepted**                                                                          |
+| [0003](0003-job-queue.md)                       | İş kuyruğu (PostgreSQL `SKIP LOCKED`)                     | **Accepted**                                                                          |
+| [0004](0004-authz-authority-and-smb-mapping.md) | Yetki otoritesi ve SMB eşlemesi                           | **Accepted** ✅ P0-B geçti 17/17 — `nfsv4` tuzağı ölçüldü; aşağı eşleme hâlâ kanıtsız |
+| [0005](0005-file-identity.md)                   | Dosya kimliği ve path reconciliation                      | **Accepted (provisional, P0-D)**                                                      |
+| [0006](0006-system-agent-ipc.md)                | Sistem aracısı ayrıcalık sınırı ve IPC                    | **Accepted (provisional, P0-E)**                                                      |
+| [0007](0007-storage-abstraction.md)             | Depolama soyutlaması (ZFS/Mock; Btrfs'in gerçek maliyeti) | **Accepted**                                                                          |
+| [0008](0008-resumable-upload.md)                | Devam ettirilebilir yükleme, atomik yayınlama, kota       | **Accepted (provisional, P0-G)** ⚠️ staging dataset varsayımı çürütüldü               |
+| [0009](0009-auth-session-mfa.md)                | Oturum ve MFA modeli; WebAuthn RP ID kısıtı               | **Accepted**                                                                          |
+| [0010](0010-search-architecture.md)             | Arama mimarisi ve Türkçe normalizasyon                    | **Accepted** ✅ P0-H geçti 22/22 — ICU collation varsayımı çürütüldü                  |
+| [0011](0011-filesystem-events.md)               | Dosya sistemi olay yakalama                               | **Accepted (provisional, P0-D)** ⚠️ ilk varsayım tersine çevrildi                     |
+| [0012](0012-dev-test-environment.md)            | Geliştirme/test ortamı topolojisi                         | **Accepted**                                                                          |
+| [0013](0013-postgres-version-and-tenancy.md)    | PostgreSQL majör sürümü, RLS ve kiracı yalıtımı           | **Accepted** ✅ P0-C geçti 45/45 — iki RLS baypası üretilip kapatıldı                 |
 
 ⚠️ = Faz 0 kickoff belgesindeki varsayım araştırmayla çürütüldü. Ayrıntı ADR'nin "Bulunan gerçek"
 bölümünde; özet [ADR-0000 §5](0000-version-baseline.md)'te.

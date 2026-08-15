@@ -1,0 +1,113 @@
+p0-a	NOTE	kernel: 6.12.101+deb13-amd64	
+p0-a	NOTE	zfs version: zfs-2.3.2-2	
+p0-a	NOTE	zfsutils-linux: 2.3.2-2	
+p0-a	NOTE	sg3-utils: 1.48-2	
+p0-a	NOTE	util-linux: 2.41-5	
+p0-a	NOTE	build marker: {  "vm": "depsis-poc",  "debian_build": "20260810-2566",  "image_variant": "generic",  "provisioned_by": "deploy/vm/provision-debian.ps1"}	
+p0-a	PASS	/dev/disk/by-id exists	36 symlinks total
+p0-a	NOTE	distinct vdev block devices under test: /dev/sdd /dev/sdf /dev/sde /dev/sdc	
+p0-a	NOTE	3 of the names poc_vdevs returned were aliases of a disk already counted	lib/common.sh does not dedupe on realpath; a caller trusting it could build a "mirror" from one disk
+p0-a	NOTE	  /dev/sdd <- scsi-36002248004b15f354038ec30c4cdcc6d	scsi-3… — page 0x83 designator type 3 (NAA)
+p0-a	NOTE	  /dev/sdd <- wwn-0x6002248004b15f354038ec30c4cdcc6d	wwn-0x6… — NAA-6 (IEEE Registered Extended) from VPD page 0x83
+p0-a	NOTE	  scsi_id --page=0x83 /dev/sdd: 36002248004b15f354038ec30c4cdcc6d	
+p0-a	PASS	/dev/sdd has a page-0x83-derived by-id name	scsi-36002248004b15f354038ec30c4cdcc6d
+p0-a	NOTE	  /dev/sdf <- scsi-3600224801b119da9db3fc88bc4bd0afd	scsi-3… — page 0x83 designator type 3 (NAA)
+p0-a	NOTE	  /dev/sdf <- wwn-0x600224801b119da9db3fc88bc4bd0afd	wwn-0x6… — NAA-6 (IEEE Registered Extended) from VPD page 0x83
+p0-a	NOTE	  scsi_id --page=0x83 /dev/sdf: 3600224801b119da9db3fc88bc4bd0afd	
+p0-a	PASS	/dev/sdf has a page-0x83-derived by-id name	scsi-3600224801b119da9db3fc88bc4bd0afd
+p0-a	NOTE	  /dev/sde <- scsi-360022480736dc39878571e95e8a74a3d	scsi-3… — page 0x83 designator type 3 (NAA)
+p0-a	NOTE	  /dev/sde <- wwn-0x60022480736dc39878571e95e8a74a3d	wwn-0x6… — NAA-6 (IEEE Registered Extended) from VPD page 0x83
+p0-a	NOTE	  scsi_id --page=0x83 /dev/sde: 360022480736dc39878571e95e8a74a3d	
+p0-a	PASS	/dev/sde has a page-0x83-derived by-id name	scsi-360022480736dc39878571e95e8a74a3d
+p0-a	NOTE	  /dev/sdc <- scsi-360022480997dd783eebf7850ef317343	scsi-3… — page 0x83 designator type 3 (NAA)
+p0-a	NOTE	  /dev/sdc <- wwn-0x60022480997dd783eebf7850ef317343	wwn-0x6… — NAA-6 (IEEE Registered Extended) from VPD page 0x83
+p0-a	NOTE	  scsi_id --page=0x83 /dev/sdc: 360022480997dd783eebf7850ef317343	
+p0-a	PASS	/dev/sdc has a page-0x83-derived by-id name	scsi-360022480997dd783eebf7850ef317343
+p0-a	NOTE	ADR-0012 'inferred' item SETTLED — by-id form(s) observed on this target: scsi-3… — page 0x83 designator type 3 (NAA) wwn-0x6… — NAA-6 (IEEE Registered Extended) from VPD page 0x83	
+p0-a	NOTE	sdd: no cached vpd_pg83 in sysfs — identity still came from a live page-0x83 inquiry	
+p0-a	PASS	sdd: no vpd_pg80 in sysfs at all	page 0x80 masked, as ADR-0012 predicts
+p0-a	NOTE	  lsblk -o NAME,SERIAL sdd: '6002248004b15f354038ec30c4cdcc6d'	page-0x83 derived if present; not evidence of a unit serial number
+p0-a	PASS	sdd: udev exported no ID_SCSI_SERIAL	
+p0-a	NOTE	  sg_vpd --page=0x80 sdd (rc=83): fetching VPD page failed: Numerical argument out of domain | sg_vpd failed: Numerical argument out of domain	
+p0-a	PASS	sdd: sg_vpd returns no unit serial	
+p0-a	NOTE	sdf: no cached vpd_pg83 in sysfs — identity still came from a live page-0x83 inquiry	
+p0-a	PASS	sdf: no vpd_pg80 in sysfs at all	page 0x80 masked, as ADR-0012 predicts
+p0-a	NOTE	  lsblk -o NAME,SERIAL sdf: '600224801b119da9db3fc88bc4bd0afd'	page-0x83 derived if present; not evidence of a unit serial number
+p0-a	PASS	sdf: udev exported no ID_SCSI_SERIAL	
+p0-a	NOTE	  sg_vpd --page=0x80 sdf (rc=83): fetching VPD page failed: Numerical argument out of domain | sg_vpd failed: Numerical argument out of domain	
+p0-a	PASS	sdf: sg_vpd returns no unit serial	
+p0-a	NOTE	sde: no cached vpd_pg83 in sysfs — identity still came from a live page-0x83 inquiry	
+p0-a	PASS	sde: no vpd_pg80 in sysfs at all	page 0x80 masked, as ADR-0012 predicts
+p0-a	NOTE	  lsblk -o NAME,SERIAL sde: '60022480736dc39878571e95e8a74a3d'	page-0x83 derived if present; not evidence of a unit serial number
+p0-a	PASS	sde: udev exported no ID_SCSI_SERIAL	
+p0-a	NOTE	  sg_vpd --page=0x80 sde (rc=83): fetching VPD page failed: Numerical argument out of domain | sg_vpd failed: Numerical argument out of domain	
+p0-a	PASS	sde: sg_vpd returns no unit serial	
+p0-a	NOTE	sdc: no cached vpd_pg83 in sysfs — identity still came from a live page-0x83 inquiry	
+p0-a	PASS	sdc: no vpd_pg80 in sysfs at all	page 0x80 masked, as ADR-0012 predicts
+p0-a	NOTE	  lsblk -o NAME,SERIAL sdc: '60022480997dd783eebf7850ef317343'	page-0x83 derived if present; not evidence of a unit serial number
+p0-a	PASS	sdc: udev exported no ID_SCSI_SERIAL	
+p0-a	NOTE	  sg_vpd --page=0x80 sdc (rc=83): fetching VPD page failed: Numerical argument out of domain | sg_vpd failed: Numerical argument out of domain	
+p0-a	PASS	sdc: sg_vpd returns no unit serial	
+p0-a	NOTE	schema consequence CONFIRMED: storage_devices.serial must stay nullable and can never be a key	no disk on this target reports a SCSI unit serial through any of four independent paths
+p0-a	NOTE	  page 0x83 /dev/sdd: Device Identification VPD page: |   Addressed logical unit: |     designator type: T10 vendor identification,  code set: Binary |       vendor id: MSFT     |       vendor specific: 0x04b15f354038de4d99a3ec30c4cdcc6d |     designator type: NAA,  code set: Binary |       0x6002248004b15f354038ec30c4cdcc6d	
+p0-a	NOTE	  page 0x83 /dev/sdf: Device Identification VPD page: |   Addressed logical unit: |     designator type: T10 vendor identification,  code set: Binary |       vendor id: MSFT     |       vendor specific: 0x1b119da9db3f3d4f9a4cc88bc4bd0afd |     designator type: NAA,  code set: Binary |       0x600224801b119da9db3fc88bc4bd0afd	
+p0-a	NOTE	  page 0x83 /dev/sde: Device Identification VPD page: |   Addressed logical unit: |     designator type: T10 vendor identification,  code set: Binary |       vendor id: MSFT     |       vendor specific: 0x736dc3987857114eb4731e95e8a74a3d |     designator type: NAA,  code set: Binary |       0x60022480736dc39878571e95e8a74a3d	
+p0-a	NOTE	  page 0x83 /dev/sdc: Device Identification VPD page: |   Addressed logical unit: |     designator type: T10 vendor identification,  code set: Binary |       vendor id: MSFT     |       vendor specific: 0x997dd783eebfbd4cabf67850ef317343 |     designator type: NAA,  code set: Binary |       0x60022480997dd783eebf7850ef317343	
+p0-a	NOTE	HOST<->GUEST IDENTITY BINDING UNPROVEN	copy deploy/vm/artifacts/depsis-poc/expected-disk-ids.json into the guest or set DEPSIS_EXPECTED_IDS, then re-run; until then R1 rests on the guest-side evidence only
+p0-a	PASS	by-id names are unique across the vdevs	= 4
+p0-a	PASS	page-0x83 designators are unique across the vdevs	= 4
+p0-a	NOTE	  /dev/sdd by-path: acpi-MSFT1000:00-scsi-0:0:0:3	recorded for slot cross-check; never for role assignment
+p0-a	NOTE	  /dev/sdf by-path: acpi-MSFT1000:00-scsi-0:0:0:5	recorded for slot cross-check; never for role assignment
+p0-a	NOTE	  /dev/sde by-path: acpi-MSFT1000:00-scsi-0:0:0:4	recorded for slot cross-check; never for role assignment
+p0-a	NOTE	  /dev/sdc by-path: acpi-MSFT1000:00-scsi-0:0:0:2	recorded for slot cross-check; never for role assignment
+p0-a	NOTE	mirror members: scsi-36002248004b15f354038ec30c4cdcc6d + scsi-3600224801b119da9db3fc88bc4bd0afd	
+p0-a	PASS	zpool create succeeded with /dev/disk/by-id arguments	/dev/disk/by-id/scsi-36002248004b15f354038ec30c4cdcc6d + /dev/disk/by-id/scsi-3600224801b119da9db3fc88bc4bd0afd
+p0-a	NOTE	zpool status:   pool: depsistest |  state: ONLINE | config: |  | 	NAME                                        STATE     READ WRITE CKSUM | 	depsistest                                  ONLINE       0     0     0 | 	  mirror-0                                  ONLINE       0     0     0 | 	    scsi-36002248004b15f354038ec30c4cdcc6d  ONLINE       0     0     0 | 	    scsi-3600224801b119da9db3fc88bc4bd0afd  ONLINE       0     0     0 |  | errors: No known data errors	
+p0-a	PASS	pool health is ONLINE	= ONLINE
+p0-a	PASS	topology is a mirror	
+p0-a	PASS	zpool status names the first member by its by-id name	
+p0-a	PASS	zpool status names the second member by its by-id name	
+p0-a	NOTE	ashift chosen by ZFS: 0	immutable after creation; measured on this VHDX, not a hardware number
+p0-a	NOTE	logical/physical sector size of scsi-36002248004b15f354038ec30c4cdcc6d: 512/4096	
+p0-a	NOTE	acltype requested=posixacl reported='posix'; xattr requested=sa reported='on'	
+p0-a	PASS	acltype=posixacl took (reported 'posix')	
+p0-a	PASS	xattr=sa took (reported 'on' — verified behaviourally, see comment)	
+p0-a	PASS	dnodesize=auto took	= auto
+p0-a	NOTE	feature@large_dnode: enabled	
+p0-a	PASS	dataset mounted at the requested path	= /srv/depsis-poc/data
+p0-a	PASS	snapshot created	depsistest/data@p0a
+p0-a	PASS	zfs send | zfs receive into a second dataset	rc=0
+p0-a	PASS	replica content is byte-identical to the source	2 files verified by sha256
+p0-a	PASS	the user xattr survived send/receive (xattr=sa payload)	= p0a
+p0-a	NOTE	plain send/recv did NOT reproduce the ADR-0004 properties (replica acltype=off xattr=on)	Phase 2 replication must use zfs send -p, or re-apply the properties after receive
+p0-a	NOTE	scrub settled in 2s: scrub repaired 0B in 00:00:00 with 0 errors on Sat Aug 15 05:26:39 2026	wall clock on a near-empty dynamic VHDX; §18.2 numbers may not be quoted from this
+p0-a	PASS	scrub completed	scrub repaired 0B in 00:00:00 with 0 errors on Sat Aug 15 05:26:39 2026
+p0-a	PASS	scrub reports zero errors	
+p0-a	PASS	pool reports no known data errors	= No known data errors
+p0-a	PASS	zpool status -x calls the pool healthy	
+p0-a	PASS	every vdev READ/WRITE/CKSUM counter is zero	
+p0-a	PASS	udev created -part1 by-id links for both members	zpool import -d by-id depends on these
+p0-a	PASS	tier 2: the two vdev PARTUUIDs differ	= c53bdace-3abc-1540-a837-e601fa88dd84
+p0-a	PASS	tier 2: both PARTUUIDs are present in /dev/disk/by-partuuid	603b8f36-0d29-bf46-81d5-a705e3b2ecc5 / c53bdace-3abc-1540-a837-e601fa88dd84
+p0-a	NOTE	tier 3 vdev/label GUIDs before export: 10860126842594226525 2582622903138663309 6677991281975036208	
+p0-a	PASS	pool exported	
+p0-a	PASS	the exported pool is discoverable scanning only /dev/disk/by-id	
+p0-a	PASS	zpool import -d /dev/disk/by-id re-imports the pool	rc=0
+p0-a	PASS	the /dev/disk/by-id namespace is unchanged by the round trip	= scsi-36002248004b15f354038ec30c4cdcc6d scsi-36002248004b15f354038ec30c4cdcc6d-part1 scsi-36002248004b15f354038ec30c4cdcc6d-part9 scsi-3600224801b119da9db3fc88bc4bd0afd scsi-3600224801b119da9db3fc88bc4bd0afd-part1 scsi-3600224801b119da9db3fc88bc4bd0afd-part9 scsi-3600224806317427c5fca6cb7083708a3 scsi-3600224806317427c5fca6cb7083708a3-part1 scsi-3600224806317427c5fca6cb7083708a3-part14 scsi-3600224806317427c5fca6cb7083708a3-part15 scsi-360022480736dc39878571e95e8a74a3d scsi-360022480736dc39878571e95e8a74a3d-part1 scsi-360022480736dc39878571e95e8a74a3d-part9 scsi-36002248074af547019ead4c3b91a1481 scsi-36002248074af547019ead4c3b91a1481-part1 scsi-360022480997dd783eebf7850ef317343 scsi-360022480997dd783eebf7850ef317343-part1 scsi-360022480997dd783eebf7850ef317343-part9 wwn-0x6002248004b15f354038ec30c4cdcc6d wwn-0x6002248004b15f354038ec30c4cdcc6d-part1 wwn-0x6002248004b15f354038ec30c4cdcc6d-part9 wwn-0x600224801b119da9db3fc88bc4bd0afd wwn-0x600224801b119da9db3fc88bc4bd0afd-part1 wwn-0x600224801b119da9db3fc88bc4bd0afd-part9 wwn-0x600224806317427c5fca6cb7083708a3 wwn-0x600224806317427c5fca6cb7083708a3-part1 wwn-0x600224806317427c5fca6cb7083708a3-part14 wwn-0x600224806317427c5fca6cb7083708a3-part15 wwn-0x60022480736dc39878571e95e8a74a3d wwn-0x60022480736dc39878571e95e8a74a3d-part1 wwn-0x60022480736dc39878571e95e8a74a3d-part9 wwn-0x6002248074af547019ead4c3b91a1481 wwn-0x6002248074af547019ead4c3b91a1481-part1 wwn-0x60022480997dd783eebf7850ef317343 wwn-0x60022480997dd783eebf7850ef317343-part1 wwn-0x60022480997dd783eebf7850ef317343-part9
+p0-a	PASS	tier 3: vdev label GUIDs are unchanged by the round trip	= 10860126842594226525 2582622903138663309 6677991281975036208
+p0-a	NOTE	zpool status -P after import:   pool: depsistest |  state: ONLINE |   scan: scrub repaired 0B in 00:00:00 with 0 errors on Sat Aug 15 05:26:39 2026 | config: |  | 	NAME                                                              STATE     READ WRITE CKSUM | 	depsistest                                                        ONLINE       0     0     0 | 	  mirror-0                                                        ONLINE       0     0     0 | 	    /dev/disk/by-id/scsi-36002248004b15f354038ec30c4cdcc6d-part1  ONLINE       0     0     0 | 	    /dev/disk/by-id/scsi-3600224801b119da9db3fc88bc4bd0afd-part1  ONLINE       0     0     0 |  | errors: No known data errors	
+p0-a	PASS	the imported pool config still records /dev/disk/by-id paths	
+p0-a	PASS	data survived the export/import round trip	2 files verified by sha256
+p0-a	NOTE	offlining pool member as ZFS names it: /dev/disk/by-id/scsi-36002248004b15f354038ec30c4cdcc6d-part1	
+p0-a	PASS	pool reports DEGRADED with one side offline	= DEGRADED
+p0-a	NOTE	degraded status:   pool: depsistest |  state: DEGRADED | status: One or more devices has been taken offline by the administrator. | 	Sufficient replicas exist for the pool to continue functioning in a | 	degraded state. | action: Online the device using 'zpool online' or replace the device with | 	'zpool replace'. |   scan: scrub repaired 0B in 00:00:00 with 0 errors on Sat Aug 15 05:26:39 2026 | config: |  | 	NAME                                        STATE     READ WRITE CKSUM | 	depsistest                                  DEGRADED     0     0     0 | 	  mirror-0                                  DEGRADED     0     0     0 | 	    scsi-36002248004b15f354038ec30c4cdcc6d  OFFLINE      0     0     0 | 	    scsi-3600224801b119da9db3fc88bc4bd0afd  ONLINE       0     0     0 |  | errors: No known data errors	
+p0-a	PASS	the offlined member is marked OFFLINE	
+p0-a	PASS	the offlined member is still named by its by-id name while degraded	
+p0-a	PASS	existing data is still readable while DEGRADED	2 files verified by sha256
+p0-a	PASS	a write issued while DEGRADED reads back correctly	= written while degraded
+p0-a	PASS	pool returns to ONLINE after the member is brought back	= ONLINE
+p0-a	NOTE	resilver settled in 0s: resilvered 216K in 00:00:00 with 0 errors on Sat Aug 15 05:26:41 2026	wall clock on a near-empty pool; not a capacity-planning number
+p0-a	PASS	bringing the member back triggered a resilver	resilvered 216K in 00:00:00 with 0 errors on Sat Aug 15 05:26:41 2026
+p0-a	PASS	the post-online scan reports zero errors	
+p0-a	PASS	zpool status -x calls the pool healthy again	
+p0-a	PASS	data is intact after the offline/online cycle	3 files verified by sha256

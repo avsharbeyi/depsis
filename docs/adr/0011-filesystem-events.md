@@ -89,7 +89,7 @@ fatrace ile, yani legacy path/mount mark ile — FID ile değil.
 ```ini
 vfs objects = acl_xattr full_audit
 full_audit:prefix  = %u|%I|%S
-full_audit:success = create_file renameat unlinkat mkdirat rmdir close ftruncate linkat symlinkat
+full_audit:success = create_file renameat unlinkat mkdirat close ftruncate linkat symlinkat
 full_audit:failure = none
 full_audit:facility = local5
 full_audit:priority = notice
@@ -98,6 +98,35 @@ full_audit:priority = notice
 > `write`/`pwrite`/`read`/`pread`/`open`/`getattr`/`lstat` **listelenmez** — syscall başına tetiklenir
 > ve makineyi boğar. İçerik-değişti tetikleyicisi olarak doğru olan `close`'dur: dosya başına tek
 > olay, veri yazıldıktan sonra.
+
+### ⚠ Geçersiz bir opname paylaşımı tamamen erişilemez yapar (P0-B'de ölçüldü)
+
+Bu ADR'nin ilk hâlinde listede **`rmdir`** vardı. Samba 4.22'de böyle bir opname **yok** —
+`*at()` VFS işlemlerine geçildiği için dizin silme `unlinkat` üzerinden gider. Sonucu şu:
+
+```
+init_bitmap: Could not find opname rmdir
+smb_full_audit_connect: Invalid success operations list. Failing connect
+```
+
+**Modül yalnız "denetim çalışmaz" demiyor — bağlantıyı tamamen reddediyor.** Yani o listedeki
+tek bir yazım hatası paylaşımı çevrimdışı bırakır.
+
+Daha kötüsü: **`testparm` bunu yakalamaz.** Liste yalnız bağlantı anında doğrulanır. Config
+sözdizimsel olarak geçerli görünür, `testparm -s` temiz geçer, servis sorunsuz başlar, ve
+sorun ancak ilk istemci bağlanmaya çalıştığında ortaya çıkar.
+
+Bu doğrudan ADR-0004/§9'un "tiplenmiş model → doğrulama → geçici config → `testparm` → atomik
+publish" akışını bağlar: **`testparm` bu sınıf hata için yeterli bir kapı değildir.** Sistem
+aracısının Samba config publish operasyonu, `testparm`'dan sonra ayrıca **canlı bir bağlantı
+denemesi (smoke test)** yapmalı ve başarısızsa önceki config'e geri dönmelidir (§17'nin
+"Samba reload başarısızsa önceki geçerli config geri gelir" gereksinimi).
+
+Bu ortamda ampirik olarak doğrulanan opname'ler (Samba 4.22.10, Debian 13):
+
+| Kabul edilen                                                                           | Reddedilen  |
+| -------------------------------------------------------------------------------------- | ----------- |
+| `create_file` `renameat` `unlinkat` `mkdirat` `close` `ftruncate` `linkat` `symlinkat` | **`rmdir`** |
 
 Satır biçimi `smbd_audit: %u|%I|%S|OPERATION|RESULT|FILE`; parser `|` ile böler, `RESULT == "ok"`
 alır. Taşıma: `local5` üzerinde bir rsyslog kuralı → `depsis` kullanıcısı olarak çalışan küçük bir

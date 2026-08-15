@@ -1,6 +1,7 @@
 # ADR-0004: Yetki otoritesi ve SMB eşlemesi
 
-- **Durum:** Accepted (provisional, PoC: P0-B)
+- **Durum:** **Accepted** — P0-B koştu ve geçti 17/17 (2026-08-15), kanıt:
+  [`evidence/p0-b.tsv`](evidence/p0-b.tsv). **Bir yarısı hâlâ kanıtlanmadı**, aşağıya bakınız.
 - **Tarih:** 2026-08-14
 - **Faz:** 0
 - **Etkilenen bileşenler:** `packages/authz`, `apps/api/src/files`, `services/system-agent/src/ops/samba.rs`, `deploy/migrations`
@@ -130,6 +131,89 @@ sürpriz yok.
 Duruş B (belirli paylaşımlarda Windows otoritedir, DEPSIS UI onları `smbcacls --sddl` ile
 **salt-okunur** gösterir) Faz 2'de değerlendirilebilir. **İki tarafın da yazdığı bir mod asla
 gönderilmeyecek** — kaçınmaya çalıştığımız yeniden yazım tam olarak odur.
+
+## Ölçüldü — P0-B (2026-08-15, Samba 4.22.10 / OpenZFS 2.3.2 / Debian 13)
+
+### Çekirdek iddia doğrulandı — ve yazdığımdan daha kötü
+
+Bu ADR "`acltype=nfsv4` sessizce `off`'a düşer" diyordu. Gerçek daha sinsi:
+
+```
+requested acltype=nfsv4 → zfs set rc=0, zfs get acltype → 'nfsv4'
+setfacl → BAŞARISIZ
+```
+
+`zfs set` **başarılı oluyor** ve `zfs get` **`nfsv4` raporluyor**. Özellik `off`'a düşmüyor
+bile; yapılandırılmış görünüyor. Yani bir operatör — ya da bir doğrulama kontrolü —
+`zfs get acltype` okuyup "posixacl değil ama bir ACL türü var" diye geçebilir. **Hiçbir sinyal
+yok.** Doğrulama bu yüzden `nfsv4`'ü **açıkça reddetmek** zorundadır; "boş değilse tamam"
+mantığı bu tuzağa düşer.
+
+### Uygulama ve eşleme kanıtlandı
+
+| İddia                                                                              | Sonuç                                              |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `acltype=posixacl` ile `setfacl` çalışıyor                                         | ✅                                                 |
+| ACL'i **çekirdek uyguluyor** — yetkili kullanıcı okuyor, yetkisiz **reddediliyor** | ✅                                                 |
+| `setfacl -d` mirası yeni dosya ve dizinlere geçiyor                                | ✅                                                 |
+| **DEPSIS'in verdiği POSIX ACL, SMB security descriptor'ında görünüyor**            | ✅ `ACL:DEPSIS-POC\depsis_poc_alice:ALLOWED/0x0/R` |
+| `veto files = /.depsis/` gerçekten **engelliyor**, yalnız gizlemiyor               | ✅                                                 |
+
+### Kanıtlanmayan yarı — dürüstlük notu
+
+**SMB → POSIX aşağı yönlü eşleme hâlâ kanıtlanmadı.** `smbcacls` ile SMB üzerinden ACL
+_yazma_ denemesi başarısız oldu, dolayısıyla `ignore system acls = no`'nun gerçekten iki
+gerçekliği köprülediği gösterilemedi.
+
+Bu, seçilen **Duruş A** ile çelişmiyor — orada Windows tarafından ACL düzenlemesi zaten
+kapalı. Hatta yazma denemesinin reddedilmesi Duruş A'nın istediği davranıştır. Ama ADR
+"aşağı eşleme tek köprüdür" diye yazdığı için, o cümle şu an **ölçülmemiş bir iddiadır**.
+
+Faz 2'de Duruş B (Windows otorite) değerlendirilirse bu boşluk **önce kapatılmalıdır**.
+Duruş A'da kaldığımız sürece bloke edici değil.
+
+## Ölçüldü — P0-A (2026-08-15, OpenZFS 2.3.2 / Debian 13)
+
+### 1. `xattr=sa` geri okunduğunda `on` görünüyor
+
+| Yazılan            | `zfs get` çıktısı                          |
+| ------------------ | ------------------------------------------ |
+| `acltype=posixacl` | `posix` — belgelenmiş alias                |
+| `xattr=sa`         | **`on`** — belgelenmiş bir alias **değil** |
+
+Ayarın sessizce düşüp düşmediğini okumayla anlamak mümkün olmadığı için **davranışsal**
+ölçüldü: beş dosya, her birinde bir user xattr.
+
+| Ayar        | `userobjused@root` |
+| ----------- | ------------------ |
+| `xattr=dir` | **16**             |
+| `xattr=sa`  | **6**              |
+
+`zfsprops(7)`'nin tarif ettiği "dosya başına ek nesne" farkı bu. Yani `sa` gerçekten yürürlükte;
+yalnız raporlanan dize farklı.
+
+**Sonuç — bu ADR'nin doğrulama kuralını değiştiriyor.** ADR, aracının dataset oluştururken
+`acltype`/`xattr` doğrulamasını şart koşuyordu. `xattr == "sa"` diye karşılaştıran bir kontrol
+**doğru yapılandırılmış bir dataset'i reddeder**. Doğru kontrol:
+
+- `acltype` ∈ {`posixacl`, `posix`} kabul, diğer her şey **ret**
+- `xattr` ∈ {`sa`, `on`} kabul, `dir` ve `off` **ret**
+
+### 2. Düz `zfs send | zfs receive` `acltype`'ı taşımıyor — replika ACL'siz geliyor
+
+P0-A'da ölçüldü: kaynak dataset `acltype=posix` iken, düz `zfs send | zfs receive` ile üretilen
+replikada **`acltype=off`**.
+
+Bu, bu ADR'nin baştaki bulgusunun yedekleme katmanındaki tekrarıdır: `acltype=off` bir dataset
+**hiç ACL uygulamaz**, ve bunu hiçbir yerde söylemez. Yani bir replikadan geri yükleme,
+kullanıcı dosyalarını erişim kontrolü olmadan geri getirir.
+
+**Kural:** DEPSIS'in replikasyonu **`zfs send -p`** (veya `-R`) kullanmak zorundadır; düz
+`send` yasaktır. Ayrıca geri yükleme işi, hedef dataset'i kullanıma açmadan önce §1'deki
+doğrulamayı **tekrar** çalıştırmalıdır — replikasyon yolunun özelliği taşıdığına güvenilmez,
+ölçülür.
+
+Bu, Faz 2'nin yedekleme/replikasyon tasarımını bağlar ve oraya taşınacaktır.
 
 ## S5 kararıyla ilişki — allow-only artık bir tercih değil, zorunluluk
 
