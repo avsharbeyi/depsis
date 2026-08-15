@@ -56,7 +56,14 @@ havuz yazma amplifikasyonu iki katına çıkar, yayınlama süresi iki katına �
 yayınlama **atomik olmaktan çıkar**: yarı kopyalanmış dosya gözlemlenebilir hâle gelir ve kopyalama
 ortasında bir çökme çöp bırakır.
 
-### 4. `RENAME_NOREPLACE` güvenilir değil
+### 4. `RENAME_NOREPLACE` güvenilir değil — ⚠️ P0-G BUNU ÇÜRÜTTÜ
+
+> **Bu madde yanlış çıktı.** İçeriği ADR kuralı gereği olduğu gibi bırakılıyor (yanlış çıkmış bir
+> kararın izi projede kalmalı), ama **buna göre hareket etmeyin**: ölçüm `RENAME_NOREPLACE`'in
+> ZFS 2.3.2'de çalıştığını gösterdi. Doğrusu için "Ölçüldü — P0-G" bölümüne bakınız.
+>
+> Hatanın kaynağı: `RENAME_EXCHANGE`/`RENAME_WHITEOUT` (pool feature flag'i ister) ile
+> `RENAME_NOREPLACE` (istemez) birbirine karıştırılmış.
 
 OpenZFS'in renameat2 bayrak çalışması (PR #12209) WIP'te kaldı; `rename_exchange` ve
 `rename_whiteout` pool feature flag'leri güncel OpenZFS master `zpool-features(7)`'de **yok**.
@@ -109,7 +116,12 @@ Kullanıcı dosyayı iki paylaşım dataset'i arasında taşırsa bu **uzun sür
 hedef dataset'in `.depsis/staging`'ine ilerleme raporlayarak kopyala → `fsync` → dataset içi
 `rename` → kaynağı `unlink`. **Asla `fs.rename()` çağırıp umut edilmez.**
 
-### `RENAME_NOREPLACE` yerine taşınabilir deyim
+### `RENAME_NOREPLACE` ve taşınabilir yedeği
+
+> **Güncelleme (P0-G):** `renameat2(RENAME_NOREPLACE)` ZFS 2.3.2'de **çalışıyor** ve hedef
+> varken `EEXIST` döndürüyor — yani sessizce yok sayılmıyor. Birincil yol odur. Aşağıdaki
+> `linkat` deyimi **yedek** olarak kalır; runtime-probe kuralı da geçerliliğini korur, çünkü bu
+> bir sürüm ölçümüdür, evrensel garanti değil.
 
 İlk açılışta runtime-probe edilir ve sonuç önbelleklenir. Her yerde çalışan fallback:
 
