@@ -1,6 +1,7 @@
 # ADR-0011: Dosya sistemi olay yakalama ve indeks tutarlılığı
 
-- **Durum:** Accepted (provisional, PoC: P0-D)
+- **Durum:** **Accepted** — P0-D koştu (2026-08-15), kanıt: [`evidence/p0-d.tsv`](evidence/p0-d.tsv).
+  Ölçüm iki iddiayı düzeltti; bkz. "Ölçüldü — P0-D".
 - **Tarih:** 2026-08-14
 - **Faz:** 0
 - **Etkilenen bileşenler:** `apps/worker/src/jobs/indexer.ts`, `services/system-agent`, `deploy/systemd`, Samba share şablonu
@@ -181,10 +182,11 @@ zfs destroy pool/ds@depsis-PREV
 hem yeni yolu taşır** — yeniden adlandırmalar doğru mutabık kılınır; inotify'ın temelde yapamadığı
 şey budur.
 
-Neden root: `zfs allow -u depsis diff,snapshot pool/data` diff'i verir ama snapshot adımı `mount`
-ister ve `mount` Linux'ta delege edilemez. Bu yüzden snapshot+diff minimal bir root unit'te koşar
-ve yalnız kuyruğa yazar; tüketici yetkisizdir. Yine de `zfs allow -u depsis diff pool/data`
-uygulanır ki mevcut snapshot'ları ad-hoc diff'lemek root istemesin.
+**Yetki — P0-D'de düzeltildi.** Bu paragraf başlangıçta "snapshot `mount` ister, `mount` delege
+edilemez, bu yüzden root gerekir" diyordu. Ölçüm bunu çürüttü: `zfs allow -u depsis
+diff,snapshot` ile yetkisiz kullanıcı **`mount` izni olmadan bile** snapshot alabiliyor.
+Katman 3 bu yüzden **root çalışmaz**; `depsis` kullanıcısı olarak koşar ve yalnız kuyruğa yazar.
+Ayrıntı ve kabul edilen `/dev/zfs` bedeli için "Ölçüldü — P0-D" bölümüne bakınız.
 
 Maliyet: kısa aralık deltayı küçük tutar. HDD havuzlarda `secondarycache=metadata` ve/veya
 special/L2ARC vdev ile ZAP metadata yerleşik kalır. Diff süresi ölçülür; aralığa yaklaşırsa alarm.
@@ -201,6 +203,91 @@ sonrası. Walk + stat, `(path, ino, size, mtime, ctime)` karşılaştırması, *
 rename eşleştirilemez, dizin başına watch kurulum maliyeti) ve Samba'nın kendi `notifyd`'sinin
 tükettiği aynı `max_user_watches` bütçesiyle yarışır. Katman 2 imkânsız çıkarsa cevap **daha sık
 `zfs diff`**'tir, inotify değil.
+
+## Ölçüldü — P0-D (2026-08-15, ZFS 2.3.2 / Samba 4.22.10 / kernel 6.12.101)
+
+### fanotify FID modu ZFS'te **ÇALIŞIYOR** — 2020'den beri kimsenin yeniden test etmediği şey
+
+Bu ADR'nin §5'i "kanıtlanmamış kalan tek şey, tam da bağımlı olduğumuz şey" diyordu. Ölçüldü:
+
+```
+fanotify_init(FAN_CLASS_NOTIF|FAN_REPORT_DFID_NAME) rc=3
+fanotify_mark(FAN_MARK_FILESYSTEM, ...)              rc=0   ← KABUL EDİLDİ
+4/4 handle gerçek yola çözüldü, empty_handles=0
+FAN_RENAME tek olayda OLD_DFID_NAME + NEW_DFID_NAME verdi
+```
+
+mocukie'nin 2020 raporu ZFS 2.3.2'de **geçerli değil**. Katman 2 teknik olarak uygulanabilir.
+
+**Ama bu kararı değiştirmiyor.** Katman 2 opsiyonel kalır: uygulanabilir olması,
+`CAP_SYS_ADMIN` + `CAP_DAC_READ_SEARCH` vermek için bir gerekçe değildir. Katman 1 SLA'yı
+zaten sıfır yetkiyle karşılıyor.
+
+### Superblock kapsamı — tahmin doğrulandı
+
+Üst ve alt dataset **farklı fsid** taşıyor (`48269c99…` vs `01834c68…`, `st_dev` 57 vs 58) ve
+alt dataset olayları üst mark'a **hiç görünmüyor** (4 olay üstte, 0 altta). Dataset başına
+işaretleme kontrol döngüsü zorunlu; `zfs create` ile mark arasındaki yarış gerçek.
+
+### Katman 1 tam doğrulandı
+
+| İddia                                                        | Sonuç                                        |
+| ------------------------------------------------------------ | -------------------------------------------- |
+| Syslog kimliği `smbd_audit`                                  | ✅                                           |
+| `%u\|%I\|%S` öneki                                           | ✅ `depsis_poc_dana\|127.0.0.1\|p0dshare\|…` |
+| `create_file`, `close`, `renameat`, `unlinkat` denetleniyor  | ✅                                           |
+| **`close` dosya başına tam bir kez**                         | ✅ (dedup gerekmiyor)                        |
+| **`renameat` tek satırda hem eski hem yeni ad**              | ✅                                           |
+| Explorer atomik-kaydet deseni (`tmp.partial` → `final.txt`)  | ✅ `final.txt` için de `close` var           |
+| SMB rename sonrası inode, generation ve handle **korunuyor** | ✅ ADR-0005 adım 2 çalışır                   |
+
+**Taşıma notu:** olaylar ayrı bir rsyslog dosyasına değil **journald**'a düştü. Tüketici
+tasarımı buna göre yapılacak (`journalctl -t smbd_audit -f` veya journal API), ayrı bir
+rsyslog kuralı varsayılmayacak.
+
+### ⚠ Düzeltme — `zfs snapshot` **delege edilebiliyor**
+
+Bu ADR şöyle diyordu: _"snapshot adımı `mount` ister ve `mount` Linux'ta delege edilemez.
+Bu yüzden snapshot+diff minimal bir root unit'te koşar."_
+
+**Yanlış.** Ölçüm:
+
+| Delege edilen                   | `zfs snapshot` sonucu |
+| ------------------------------- | --------------------- |
+| `diff,snapshot` (mount **yok**) | **BAŞARILI**          |
+| `diff,snapshot,mount`           | BAŞARILI              |
+
+Yani **Katman 3 tamamen yetkisiz çalışabilir**; root unit gerekmiyor. Bu bir güvenlik
+iyileştirmesidir ve tasarım buna göre değişir: `zfs allow -u depsis diff,snapshot,destroy`
+yeterli.
+
+**Kabul edilen bedel:** delegasyonun yetkisiz kullanıcıya ulaşabilmesi `/dev/zfs`'in
+`666 root:root` olmasına dayanıyor (OpenZFS'in udev kuralı). Yani her yerel kullanıcı ZFS
+ioctl'i açabilir — yalnız delegasyon tablosuyla sınırlı olarak. Tehdit modeline kalıntı risk
+olarak eklenmelidir; `/dev/zfs`'i 0660 + özel gruba almak delegasyonu da kırar.
+
+### `zfs diff` R satırı üretiyor — ama testin doğru kurulması şartıyla
+
+İlk koşu "R satırı yok" dedi. Testin hatasıydı: dosya base snapshot'tan **sonra** yaratılıp
+yeniden adlandırılmıştı, dolayısıyla `+` doğru çıktıydı. Doğru kurulumda:
+
+```
+R	/srv/pd/ds/d/before.txt	/srv/pd/ds/d/after.txt
+```
+
+Katman 3'ün rename'i mutabık kılma yeteneği **doğrulandı**.
+
+### ⚠ `zfs diff` performansı — 15 dakikalık aralık için endişe verici
+
+| Delta                | Süre                  |
+| -------------------- | --------------------- |
+| Küçük (birkaç dosya) | **41 ms**             |
+| ~20.000 nesne        | **21.332 ms (21 sn)** |
+
+Bunlar **sıcak ARC** rakamları; `drop_caches` ARC'ı boşaltmıyor, yani gerçek soğuk maliyet
+daha yüksek. 20 bin nesnede 21 saniye, 1 milyon dosyalık bir dataset'te 15 dakikalık aralığın
+içine sığmayabilir. ADR'nin "diff süresi ölçülür; aralığa yaklaşırsa alarm" kuralı bu yüzden
+**opsiyonel değil**. Ölçek testi Faz 4'ün performans süitine kalıyor.
 
 ## SLA matematiği
 

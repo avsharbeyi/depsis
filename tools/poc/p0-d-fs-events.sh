@@ -406,7 +406,14 @@ CEOF
 #include <sys/stat.h>
 #include <sys/statfs.h>
 
+/* Buffer we allocate. Deliberately larger than the kernel limit so a bad reply cannot
+ * overflow it. */
 #define HBUF 256
+
+/* The kernel's MAX_HANDLE_SZ. name_to_handle_at returns EINVAL for any handle_bytes above
+ * this, so the value DECLARED to the kernel must be capped here even though our buffer is
+ * bigger. Declaring HBUF was the bug that made the whole handle section report EINVAL. */
+#define HANDLE_MAX 128
 
 static int hexval(char c)
 {
@@ -463,8 +470,23 @@ static int do_stat(const char *path)
 		generr = errno;
 	}
 
-	fh->handle_bytes = HBUF;
-	nrc  = name_to_handle_at(AT_FDCWD, path, fh, &mid, 0);
+	/* handle_bytes is the CAPACITY DECLARED TO THE KERNEL, not the size of our buffer.
+	 * The kernel rejects anything above MAX_HANDLE_SZ (128) with EINVAL, so passing HBUF
+	 * (256) here made every call fail with errno=22 and produced three cascading false
+	 * failures: "ZFS cannot use file handles at all", plus two bad-hex round-trip errors.
+	 * ZFS handles are in fact 12 bytes and work fine — fanotify in section 1 was resolving
+	 * them in the same run, which is what exposed the contradiction.
+	 *
+	 * Use the documented two-call protocol: ask with 0 to learn the required size (the
+	 * kernel answers EOVERFLOW, which is success for that step), then request exactly that. */
+	fh->handle_bytes = 0;
+	nrc = name_to_handle_at(AT_FDCWD, path, fh, &mid, 0);
+	if (nrc < 0 && errno == EOVERFLOW && fh->handle_bytes > 0 && fh->handle_bytes <= HANDLE_MAX) {
+		nrc = name_to_handle_at(AT_FDCWD, path, fh, &mid, 0);
+	} else if (nrc < 0) {
+		fh->handle_bytes = HANDLE_MAX;
+		nrc = name_to_handle_at(AT_FDCWD, path, fh, &mid, 0);
+	}
 	nerr = (nrc < 0) ? errno : 0;
 	hex[0] = '\0';
 	if (nrc == 0) {
@@ -973,7 +995,11 @@ else
     map to guest = never
     vfs objects = acl_xattr full_audit
     full_audit:prefix = %u|%I|%S
-    full_audit:success = create_file renameat unlinkat mkdirat rmdir close ftruncate linkat symlinkat
+    # No 'rmdir': it is not a valid opname in Samba 4.22 (directory removal goes through
+    # unlinkat since the *at() VFS switch), and an invalid entry makes vfs_full_audit refuse
+    # every connection rather than just skipping the op. testparm does not catch it. Measured
+    # in P0-B; see ADR-0011.
+    full_audit:success = create_file renameat unlinkat mkdirat close ftruncate linkat symlinkat
     full_audit:failure = none
     full_audit:facility = local5
     full_audit:priority = notice
@@ -1126,14 +1152,24 @@ fi
 section '6. zfs diff — ADR-0011 Layer 3 reconciliation'
 # ═══════════════════════════════════════════════════════════════════════════════
 
-zfs snapshot "$PARENT_DS@p0d-a"
-
+# Ordering matters and an earlier version of this test got it wrong.
+#
+# For zfs diff to emit an R line, the file must exist in BOTH snapshots under different names.
+# The first version created tobe-renamed.txt AFTER the base snapshot and then renamed it, so
+# the file never existed in the base at all — ZFS correctly reported '+' at the final name, and
+# the test concluded "zfs diff cannot report renames", which is false and would have pushed
+# ADR-0011 Layer 3 into a redesign it does not need.
+#
+# So: populate FIRST, snapshot, then mutate.
 DIFF_DIR="$PARENT_PATH/diff"
 mkdir -p "$DIFF_DIR"
 echo 'keep'    >"$DIFF_DIR/keep.txt"
 echo 'move-me' >"$DIFF_DIR/tobe-renamed.txt"
 echo 'kill-me' >"$DIFF_DIR/tobe-deleted.txt"
 sync
+
+zfs snapshot "$PARENT_DS@p0d-a"
+
 mv "$DIFF_DIR/tobe-renamed.txt" "$DIFF_DIR/renamed.txt"
 rm -f "$DIFF_DIR/tobe-deleted.txt"
 echo 'more' >>"$DIFF_DIR/keep.txt"
@@ -1210,8 +1246,19 @@ note "zfs allow now reads: $(zfs allow "$PARENT_DS" 2>&1 | tr '\n' ';')"
 assert_cmd 'delegated user CAN run zfs diff' ok \
   -- runuser -u "$TEST_USER" -- zfs diff -H "$PARENT_DS@p0d-a" "$PARENT_DS@p0d-b"
 
-# Expected to FAIL. If it succeeds, ADR-0011's justification for a root timer unit collapses.
-assert_cmd 'delegated user still CANNOT zfs snapshot (mount is not delegable on Linux)' fail \
+# This was written expecting FAILURE, on ADR-0011's claim that snapshot needs a delegated
+# mount and that mount is not delegable on Linux. It SUCCEEDED, and the follow-up probe showed
+# it succeeds even without `mount` in the delegation set. The ADR was wrong and has been
+# corrected: Layer 3 runs unprivileged, with no root timer unit.
+#
+# So the assertion is inverted to match reality, and the thing now worth guarding is that the
+# delegation actually works — because if a future ZFS release tightens this, Layer 3 silently
+# stops taking snapshots and reconciliation quietly stops happening.
+assert_cmd 'delegated user CAN zfs snapshot — no root unit needed (ADR-0011 corrected)' ok \
   -- runuser -u "$TEST_USER" -- zfs snapshot "$PARENT_DS@p0d-unpriv"
+
+# Delegation reaching a non-root user depends on /dev/zfs being world-accessible. Record it:
+# it is the price of an unprivileged Layer 3 and belongs in the threat model, not in a comment.
+note "/dev/zfs mode: $(stat -c '%a %U:%G' /dev/zfs) — delegation to a non-root user depends on this"
 
 poc_summary

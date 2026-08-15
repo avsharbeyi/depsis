@@ -1,6 +1,7 @@
 # ADR-0005: Dosya kimliği ve path reconciliation modeli
 
-- **Durum:** Accepted (provisional, PoC: P0-D)
+- **Durum:** **Accepted** — P0-D koştu ve geçti 38/38 (2026-08-15), kanıt:
+  [`evidence/p0-d.tsv`](evidence/p0-d.tsv). Açık soru kapandı, bkz. "Ölçüldü".
 - **Tarih:** 2026-08-14
 - **Faz:** 0
 - **Etkilenen bileşenler:** `deploy/migrations`, `apps/api/src/files`, `apps/worker/src/jobs/indexer.ts`
@@ -43,10 +44,40 @@ yanlış görev bağlantısı**.
 `ino_generation`, ZFS'in NFS export'u için zaten ürettiği generation sayacıdır
 (`zpl_export_operations`, ADR-0011'de doğrulandı). `name_to_handle_at`/`statx` üzerinden alınır.
 
-> **P0-D'ye bağlı:** ADR-0011, ZFS'te dosya handle'larının reboot ve `zpool export/import` sonrası
-> kararlı olup olmadığını doğrulanmamış bırakıyor. Kararsızsa `(fsid, handle)` yerine
-> **dataset GUID + inode + generation** kullanılacak. Bu ADR bu ihtimale göre tasarlandı: `dataset_id`
-> DEPSIS'in kendi anahtarıdır, ZFS `fsid`'i değil.
+> **P0-D'ye bağlıydı, artık ölçüldü — bkz. aşağıdaki "Ölçüldü" bölümü. Kimlik kararlı çıktı;
+> dataset GUID'ine dönme yedek planı gerekmiyor.**
+
+## Ölçüldü — P0-D (2026-08-15, ZFS 2.3.2 / kernel 6.12.101)
+
+Bu ADR'nin tek açık sorusu "ZFS'te dosya kimliği restart'a dayanıklı mı" idi. Cevap: **evet**,
+her katmanda.
+
+| Ölçüm                                                                | Sonuç |
+| -------------------------------------------------------------------- | ----- |
+| `FS_IOC_GETVERSION` ZFS'te generation döndürüyor                     | ✅    |
+| `zpool export/import` sonrası **inode** aynı                         | ✅    |
+| `zpool export/import` sonrası **generation** aynı                    | ✅    |
+| `zpool export/import` sonrası **file handle byte'ları birebir aynı** | ✅    |
+| `zpool export/import` sonrası **fsid** aynı                          | ✅    |
+| **Export öncesi handle, import sonrası aynı inode'a çözülüyor**      | ✅    |
+| Silinen dosyanın handle'ı `ESTALE(116)` veriyor                      | ✅    |
+| **SMB rename sonrası inode, generation ve handle korunuyor**         | ✅    |
+
+Sonuçlar:
+
+1. **`(fsid, handle)` önbelleği restart'ta geçersizleşmiyor.** ADR'nin "kararsızsa dataset
+   GUID'ine dön" yedek planı **gerekmiyor**; yine de `dataset_id` DEPSIS'in kendi anahtarı
+   olarak kalır, çünkü ZFS `fsid`'ine bağımlılık gereksiz bir kırılganlıktır.
+2. **Reconciliation adım 2 çalışıyor.** SMB üzerinden yeniden adlandırılan bir dosya
+   `(dataset_id, inode, generation)` ile bulunuyor, dolayısıyla `id` korunuyor ve ona bağlı
+   görev/paylaşım/audit kayıtları kopmuyor. Bu, ADR'nin varlık sebebiydi.
+3. `ESTALE` gerçekten dönüyor — indexer'ın "ESTALE = indeksten sil" kuralı geçerli.
+
+**Kanıtlanamayan:** inode yeniden kullanımı. 20.000 dosya yaratıldı ve hedef inode
+kullanılmadı; ZFS nesne kimliklerini monoton artırdığı için pratikte yeniden kullanım nadir.
+Bu, `generation` alanını gereksiz **kılmaz** — "20 binde olmadı" bir kanıt değildir ve
+`generation` alanı zaten bedavaya geliyor. Ama tehdit modelindeki 5.4 maddesinin pratik
+olasılığı düşünüldüğünden düşük.
 
 ### Materyalize path — türetilmiş, otoriter değil
 

@@ -1,0 +1,82 @@
+p0-d	NOTE	zfs version: zfs-2.3.2-2	
+p0-d	NOTE	kernel: 6.12.101+deb13-amd64	
+p0-d	NOTE	zfsutils package: 2.3.2-2	
+p0-d	NOTE	samba package: 2:4.22.10+dfsg-0+deb13u2	
+p0-d	NOTE	/dev/zfs: 666 root:root	
+p0-d	NOTE	NOT COVERED by this script: ADR-0011 P0-D item 5 (200k-file bulk load -> FAN_Q_OVERFLOW)	
+p0-d	NOTE	NOT COVERED by this script: ADR-0011 P0-D item 7 (1M-file cold-cache zfs diff)	
+p0-d	NOTE	vdevs: /dev/disk/by-id/scsi-36002248004b15f354038ec30c4cdcc6d /dev/disk/by-id/scsi-3600224801b119da9db3fc88bc4bd0afd	
+p0-d	PASS	created mirror test pool	
+p0-d	PASS	created parent / child / share datasets	
+p0-d	PASS	both C probes compiled	
+p0-d	NOTE	fanotify_init rc=3 errno=0	INIT rc=3 errno=0 msg=ok
+p0-d	NOTE	fanotify_mark rc=0 errno=0	MARK rc=0 errno=0 msg=ok
+p0-d	PASS	FAN_MARK_FILESYSTEM|FAN_REPORT_DFID_NAME was ACCEPTED on a ZFS dataset	the two kernel gates (exportfs_can_encode_fid, non-zero fsid) both passed
+p0-d	NOTE	queue drain: events=3 fid_records=4 empty_handles=0 resolved=4	
+p0-d	PASS	fanotify FID mode WORKS on ZFS: 4/4 handles resolved to real paths	the 2020 openzfs#6079 FID report no longer reproduces; Layer 2 is viable
+p0-d	NOTE	Layer 2 stays optional per ADR-0011 — viability is not a reason to grant CAP_SYS_ADMIN	
+p0-d	PASS	FAN_RENAME delivered both endpoints in one event (2 OLD/NEW records)	
+p0-d	NOTE	stat -f fsid parent=e6d7b2c4001593c0 child=6e5cd72a00d337cf	
+p0-d	NOTE	probe fsid parent=e6d7b2c4001593c0 child=6e5cd72a00d337cf	
+p0-d	NOTE	st_dev parent=57 child=58	
+p0-d	PASS	parent and child datasets have DIFFERENT fsids (separate superblocks)	parent=e6d7b2c4001593c0 child=6e5cd72a00d337cf
+p0-d	NOTE	events naming a parent-dataset file: 4 ; naming a child-dataset file: 0	
+p0-d	PASS	child-dataset events are INVISIBLE to the parent filesystem-wide mark	per-superblock scope confirmed
+p0-d	NOTE	CONSEQUENCE: ADR-0011 Layer 2 requires a per-dataset marking control loop; the zfs-create-to-mark race is real	
+p0-d	PASS	name_to_handle_at succeeded on a ZFS file	htype=1 hbytes=12
+p0-d	NOTE	BEFORE export: ino=256 gen=14 fsid=e6d7b2c4001593c0 htype=1 handle=0a000001000000000e000000	
+p0-d	NOTE	BEFORE export: pool_guid=8134698505488604788 dataset_guid=6074591261170882672	
+p0-d	PASS	open_by_handle_at round trip returns the same inode	= 256
+p0-d	NOTE	round trip resolved to: /srv/depsis-poc/fsev/stable.txt	
+p0-d	PASS	zpool export succeeds	rc=0
+p0-d	PASS	zpool import -d /dev/disk/by-id finds the pool	rc=0
+p0-d	PASS	pool GUID survives export/import	= 8134698505488604788
+p0-d	PASS	dataset GUID survives export/import	= 6074591261170882672
+p0-d	NOTE	AFTER import: ino=256 gen=14 fsid=e6d7b2c4001593c0 htype=1 handle=0a000001000000000e000000	
+p0-d	PASS	inode survives export/import	= 256
+p0-d	PASS	generation survives export/import	= 14
+p0-d	PASS	file handle bytes are byte-identical after export/import	= 0a000001000000000e000000
+p0-d	PASS	fsid survives export/import	= e6d7b2c4001593c0
+p0-d	NOTE	ADR-0005: (fsid, handle) is a usable persistent key; the dataset-GUID fallback is not needed	
+p0-d	PASS	the PRE-export handle still resolves to the same inode after import	= 256
+p0-d	NOTE	NOT COVERED: stability across a real reboot (only export/import was exercised)	
+p0-d	PASS	FS_IOC_GETVERSION returns a generation on ZFS	gen=34
+p0-d	NOTE	two files created back-to-back: gen-a=34 gen-b=34	
+p0-d	NOTE	generation is COARSE — two files created in the same txg share it	reconciliation must treat (inode, generation) as weak when delete and replacement land in one txg
+p0-d	NOTE	victim: ino=257 gen=34 handle=0a0001010000000022000000	
+p0-d	PASS	the deleted file’s handle now returns ESTALE(116)	ADR-0011 is right that ESTALE is routine and means "drop from the index"
+p0-d	NOTE	INCONCLUSIVE: inode 257 was not reused within 20000 creations	the (inode, generation) discrimination path was not exercised in this run
+p0-d	PASS	testparm accepts the ADR-0011 audit config	rc=0
+p0-d	NOTE	smbclient put: putting file /tmp/p0d-payload.txt as \audit1.txt (2.3 kb/s) (average 2.3 kb/s)	
+p0-d	NOTE	audit transport that actually delivered: journald	
+p0-d	NOTE	first audit line as rendered: Aug 15 06:42:16 depsis-poc smbd_audit[12874]: depsis_poc_dana|127.0.0.1|p0dshare|create_file|ok|0x12019f|file|overwrite_if|/srv/depsis-poc/share/audit1.txt	
+p0-d	PASS	the syslog identifier is smbd_audit	
+p0-d	PASS	audit lines carry the %u|%I|%S prefix	
+p0-d	PASS	create_file is audited	
+p0-d	PASS	close is audited	
+p0-d	PASS	renameat is audited	
+p0-d	PASS	unlinkat is audited	
+p0-d	NOTE	close events for audit1.txt: 1	
+p0-d	PASS	close fired exactly once for the uploaded file	
+p0-d	NOTE	renameat line: depsis_poc_dana|127.0.0.1|p0dshare|renameat|ok|/srv/depsis-poc/share/audit1.txt|/srv/depsis-poc/share/audit2.txt	
+p0-d	PASS	renameat reports BOTH the old and the new name on one line	the parser can emit a move instead of delete+create
+p0-d	NOTE	atomic-save pattern: close(tmp.partial)=1 close(final.txt)=1	
+p0-d	NOTE	atomic-save rename line: depsis_poc_dana|127.0.0.1|p0dshare|renameat|ok|/srv/depsis-poc/share/tmp.partial|/srv/depsis-poc/share/final.txt	
+p0-d	NOTE	a close was also recorded for final.txt — indexing on close alone would still work here	
+p0-d	PASS	inode survives an SMB rename	= 2
+p0-d	PASS	generation survives an SMB rename	= 36
+p0-d	PASS	the file handle survives an SMB rename	= 0a0002000000000024000000
+p0-d	NOTE	ADR-0005 reconciliation step 2 can therefore recover the same id after an SMB rename	
+p0-d	NOTE	dataset holds ~20006 files (xdev, excludes the child dataset)	
+p0-d	PASS	zfs diff between two snapshots succeeded	
+p0-d	NOTE	diff output:	1786776139.066911071	M	/	/srv/depsis-poc/fsev/diff ; 1786776139.066911071	M	F	/srv/depsis-poc/fsev/diff/keep.txt ; 1786776139.062911103	R	F	/srv/depsis-poc/fsev/diff/tobe-renamed.txt	/srv/depsis-poc/fsev/diff/renamed.txt ; 1786776139.002911593	-	F	/srv/depsis-poc/fsev/diff/tobe-deleted.txt ; 1786776139.066911071	+	F	/srv/depsis-poc/fsev/diff/new.txt
+p0-d	NOTE	R line (5 tab-separated fields): 1786776139.062911103	R	F	/srv/depsis-poc/fsev/diff/tobe-renamed.txt	/srv/depsis-poc/fsev/diff/renamed.txt	
+p0-d	PASS	the R line carries BOTH the old and the new path	renames reconcile correctly; this is what inotify cannot do
+p0-d	NOTE	zfs diff timing: small delta = 22 ms; ~20000-object delta = 20941 ms	dataset ~20006 files, on Hyper-V VHDX vdevs
+p0-d	NOTE	These are WARM-ARC numbers: drop_caches does not evict the ZFS ARC, and ADR-0012 forbids	presenting VM figures as hardware figures. ADR-0011 item 7 (1M files, cold cache) is still open.
+p0-d	NOTE	/dev/zfs mode (delegation depends on it): 666 root:root	
+p0-d	PASS	unprivileged zfs diff is refused BEFORE delegation (failed as expected, rc=1)	Unable to obtain diffs:     The sys_mount privilege or diff delegated permission is needed    to execute the diff ioctl
+p0-d	NOTE	zfs allow now reads: ---- Permissions on depsistest/fsev ----------------------------------;Local+Descendent permissions:;	user depsis_poc_dana diff,snapshot;	
+p0-d	PASS	delegated user CAN run zfs diff	rc=0
+p0-d	PASS	delegated user CAN zfs snapshot — no root unit needed (ADR-0011 corrected)	rc=0
+p0-d	NOTE	/dev/zfs mode: 666 root:root — delegation to a non-root user depends on this	
