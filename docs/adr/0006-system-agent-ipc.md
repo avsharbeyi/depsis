@@ -133,30 +133,30 @@ Kritik ayrıntılar:
 
 ## Kanıt
 
-| İddia                                                                                                    | Güven                                           |
-| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Rust stable 1.97.1; `rustix` 1.1.4; `schemars` 1.2.2; `json-schema-to-typescript` 15.0.4; `pathrs` 0.2.5 | verified                                        |
-| Debian trixie çekirdeği 6.12.101                                                                         | verified                                        |
-| `openat` crate 2021'den beri hareketsiz                                                                  | verified                                        |
-| `execvp` PATH yokken `/bin:/usr/bin`'e düşer                                                             | verified                                        |
+| İddia                                                                                                    | Güven                                                         |
+| -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Rust stable 1.97.1; `rustix` 1.1.4; `schemars` 1.2.2; `json-schema-to-typescript` 15.0.4; `pathrs` 0.2.5 | verified                                                      |
+| Debian trixie çekirdeği 6.12.101                                                                         | verified                                                      |
+| `openat` crate 2021'den beri hareketsiz                                                                  | verified                                                      |
+| `execvp` PATH yokken `/bin:/usr/bin`'e düşer                                                             | verified                                                      |
 | `LoadCredential=` mode-0400 servis-kullanıcısı dosyası üretir, `NoNewPrivileges` altında çalışır         | verified — ama **kullanılmıyor**: ajanın sırrı yok (P0-E §8c) |
-| Windows Build Tools'un tam bileşen listesi                                                               | **unverified** → temiz makinede doğrulanacak    |
-| `cap-std`'nin Linux çözümleme stratejisi                                                                 | **unverified** (seçilmediği için bloke etmiyor) |
+| Windows Build Tools'un tam bileşen listesi                                                               | **unverified** → temiz makinede doğrulanacak                  |
+| `cap-std`'nin Linux çözümleme stratejisi                                                                 | **unverified** (seçilmediği için bloke etmiyor)               |
 
 ### P0-E'nin ölçtükleri (2026-08-19, Debian 13 / systemd 257 / rustc 1.97.1)
 
-| İddia                                                                    | Sonuç                                       |
-| ------------------------------------------------------------------------ | ------------------------------------------- |
-| Serbest biçimli komut yolu yok — 8 deneme parse aşamasında reddedildi     | ✅ ölçüldü                                  |
-| Kimlik `SO_PEERCRED`'den; `{"uid":0}` iddiası sonucu değiştirmiyor        | ✅ ölçüldü                                  |
-| root reddediliyor ve ret audit'e düşüyor                                 | ✅ ölçüldü                                  |
-| `openat2(BENEATH\|NO_SYMLINKS)` kaçışı **hata** olarak reddediyor         | ✅ ölçüldü (crate testleri, gerçek çekirdek) |
-| `NO_XDEV` iç içe dataset'e geçişi engelliyor                             | ✅ ölçüldü (gerçek ZFS mount sınırı)        |
-| `-` ile başlayan operand `zfs`'e ulaşmıyor                               | ✅ ölçüldü                                  |
-| `cargo check --target x86_64-pc-windows-msvc` yeşil                      | ✅ ölçüldü                                  |
-| Soket 0660 root:depsis-api; grup dışı kullanıcı **connect edemiyor**     | ✅ ölçüldü (EACCES, çekirdekten)            |
-| Audit satırı enjekte edilemiyor (`reason`'da kontrol karakteri reddi)     | ✅ ölçüldü                                  |
-| Bilinmeyen alan **sessizce yutulmuyor** (`deny_unknown_fields`)           | ✅ ölçüldü — bu ADR'nin öngörmediği bir açıktı |
+| İddia                                                                 | Sonuç                                          |
+| --------------------------------------------------------------------- | ---------------------------------------------- |
+| Serbest biçimli komut yolu yok — 8 deneme parse aşamasında reddedildi | ✅ ölçüldü                                     |
+| Kimlik `SO_PEERCRED`'den; `{"uid":0}` iddiası sonucu değiştirmiyor    | ✅ ölçüldü                                     |
+| root reddediliyor ve ret audit'e düşüyor                              | ✅ ölçüldü                                     |
+| `openat2(BENEATH\|NO_SYMLINKS)` kaçışı **hata** olarak reddediyor     | ✅ ölçüldü (crate testleri, gerçek çekirdek)   |
+| `NO_XDEV` iç içe dataset'e geçişi engelliyor                          | ✅ ölçüldü (gerçek ZFS mount sınırı)           |
+| `-` ile başlayan operand `zfs`'e ulaşmıyor                            | ✅ ölçüldü                                     |
+| `cargo check --target x86_64-pc-windows-msvc` yeşil                   | ✅ ölçüldü                                     |
+| Soket 0660 root:depsis-api; grup dışı kullanıcı **connect edemiyor**  | ✅ ölçüldü (EACCES, çekirdekten)               |
+| Audit satırı enjekte edilemiyor (`reason`'da kontrol karakteri reddi) | ✅ ölçüldü                                     |
+| Bilinmeyen alan **sessizce yutulmuyor** (`deny_unknown_fields`)       | ✅ ölçüldü — bu ADR'nin öngörmediği bir açıktı |
 
 **P0-E'nin bulduğu ve bu ADR'yi değiştiren üç şey:**
 
