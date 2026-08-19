@@ -259,13 +259,16 @@ tablo değişti — ama **bayat kötümserlik de yanlışlıktır**, o yüzden g
 | Kimlik `zpool export/import` sonrası kararlı                         | ✅ [P0-D](../adr/evidence/p0-d.tsv)                                    |
 | Arama sayacı/sonucu kiracı sızdırmıyor                               | ✅ [P0-C](../adr/evidence/p0-c.tsv) · [P0-H](../adr/evidence/p0-h.tsv) |
 | Atomik yayınlama ve kota semantiği                                   | ✅ [P0-G](../adr/evidence/p0-g.tsv)                                    |
-| **Aracının serbest komutu reddettiği, `openat2` hapsinin çalıştığı** | ❌ **P0-E — Rust aracısı henüz yazılmadı**                             |
+| **Aracının serbest komutu reddettiği, `openat2` hapsinin çalıştığı** | ✅ [P0-E](../adr/evidence/p0-e.tsv)                                    |
 
 ### Hâlâ tasarım, kanıt değil
 
-1. **TB4'ün tamamı.** Bu modelin "en kritik sınır" dediği yer, tek kanıtlanmamış sınır. ADR-0006
-   `Accepted (provisional)` ve öyle kalmalı. Aracı yazılana kadar §4 ve §6'daki TB4/TB6
-   satırları **iddia**dır.
+1. **TB4'ün paylaşım-içi yol yarısı.** Sınırın kendisi artık ölçülü: P0-E 82 assertion ile
+   serbest komut yolunun yokluğunu, `SO_PEERCRED`'in wire'dan etkilenmediğini, soket DAC'ını ve
+   `openat2` haps bayraklarını (`BENEATH`, `NO_SYMLINKS`, gerçek ZFS mount sınırında `NO_XDEV`)
+   doğruladı. Kalan boşluk dar ve adı konmuş: **hiçbir operasyon henüz çağırandan paylaşım-içi
+   yol almıyor**, dolayısıyla `SafePath` dispatch'e bağlı değil ve bir traversal denemesi audit'e
+   düşmüyor. Faz 1'in ilk yol alan operasyonu bunu kapatmak zorunda.
 2. **SMB → POSIX aşağı yönlü eşleme** (ADR-0004). Duruş A'da bloke edici değil, ama "tek köprü"
    ifadesi ölçülmedi.
 3. **Güç kesintisi dayanıklılığı.** `fsync(dirfd)` çalışıyor ve sıralama uçtan uca koşuyor
@@ -273,5 +276,9 @@ tablo değişti — ama **bayat kötümserlik de yanlışlıktır**, o yüzden g
 4. **Ölçek.** Tüm ölçümler tek bir VM'de, küçük veri kümeleriyle. §18.2'nin p95 hedefleri
    **hiçbir** koşuda test edilmedi ve edilmiş gibi sunulmamalıdır.
 
-**P0-B ve P0-D geçti; Faz 1'in yetki ve indeksleme kodu artık yazılabilir.** P0-E, sistem
-aracısı kodu ortaya çıktığında koşulacak ve TB4 o zamana kadar kanıtsız kalacak.
+**Üç kapı da geçti: P0-B (yetki), P0-D (indeksleme), P0-E (ayrıcalık sınırı). Faz 1 yazılabilir.**
+
+P0-E'nin asıl çıktısı yeşil satırlar değil, tasarımı değiştiren üç bulgu oldu: iki systemd
+sertleştirme direktifi ajanın oluşturduğu mount'ları görünmez yapıyordu, serde bilinmeyen alanı
+sessizce yutuyordu, ve boyut sınırı sıradan bir istemciyi reddediyordu. Üçü de **hiçbir hata
+mesajı üretmeyen** türdendi — Faz 0'ın baştan beri aradığı imza.

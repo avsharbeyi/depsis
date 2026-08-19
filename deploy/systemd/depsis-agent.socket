@@ -1,0 +1,46 @@
+# The control socket for the DEPSIS system agent.
+#
+# systemd creates and owns this socket; the agent never creates one. That is the point: the
+# socket file's ownership and mode are the FIRST authorization gate, enforced by the kernel
+# before the agent has read a byte, and declared here where they can be reviewed without
+# reading any Rust. See ADR-0006 and threat-model boundary TB4.
+#
+# The second gate is SO_PEERCRED inside the agent. Two gates, because DAC alone cannot tell
+# root apart from the API, and SO_PEERCRED alone would mean every local user can at least
+# reach the parser of a root daemon.
+
+[Unit]
+Description=DEPSIS system agent control socket
+Documentation=file:///usr/share/doc/depsis/adr/0006-system-agent.md
+# The agent is useless before ZFS is up, and starting the socket early would let the API
+# connect and get failures that look like bugs rather than like "not ready yet".
+After=zfs.target
+
+[Socket]
+ListenStream=/run/depsis/agent.sock
+
+# 0660 root:depsis-api. Not 0666, not world-readable, and deliberately NOT owned by the API
+# user: the API may connect, but must not be able to unlink or replace the socket and stand a
+# fake agent up in its place.
+SocketUser=root
+SocketGroup=depsis-api
+SocketMode=0660
+
+# One long-lived service handling connections in turn, NOT one process per connection.
+# Accept=yes would fork a root process per inbound connection, turning connection rate into
+# process count on the one daemon that must never be a denial-of-service target.
+Accept=no
+
+# /run is a tmpfs, so the directory has to be recreated on every boot.
+RuntimeDirectory=depsis
+RuntimeDirectoryMode=0755
+
+# Leave nothing behind that a later, differently-configured agent might inherit.
+RemoveOnStop=yes
+
+# A backlog at all is a bit generous for a single-caller socket, but a backlog of 0 turns a
+# transient burst into connection refusals the API would have to distinguish from a crash.
+Backlog=16
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,88 @@
+p0-e	NOTE	toolchain: rustc 1.97.1 (8bab26f4f 2026-07-14)	
+p0-e	PASS	toolchain matches the ADR-0006 pin (1.97.1)	rustc 1.97.1 (8bab26f4f 2026-07-14)
+p0-e	PASS	cargo build --release succeeds	rc=0
+p0-e	PASS	cargo test passes (unit + openat2 containment)	rc=0
+p0-e	PASS	clippy is clean under the crate denials	rc=0
+p0-e	PASS	cargo fmt --check: source matches rustfmt.toml	rc=0
+p0-e	PASS	the core compiles for x86_64-pc-windows-msvc (ADR-0006 portability claim)	rc=0
+p0-e	NOTE	operations advertised by the binary: create_dataset,create_snapshot,diff_snapshots,ping,pool_status,publish_samba_config,read_smart_summary	
+p0-e	PASS	the binary advertises exactly the seven Phase 0 operations	= create_dataset,create_snapshot,diff_snapshots,ping,pool_status,publish_samba_config,read_smart_summary
+p0-e	NOTE	every property name in the request schema: acltype dataset disk_by_id from name op pool read_only refquota_bytes shares to	
+p0-e	PASS	no request property named 'raw'	
+p0-e	PASS	no request property named 'command'	
+p0-e	PASS	no request property named 'cmd'	
+p0-e	PASS	no request property named 'exec'	
+p0-e	PASS	no request property named 'shell'	
+p0-e	PASS	no request property named 'args'	
+p0-e	PASS	no request property named 'argv'	
+p0-e	PASS	no request property named 'script'	
+p0-e	PASS	no request property named 'path'	
+p0-e	PASS	no request property named 'passthrough'	
+p0-e	PASS	AclType permits exactly one value, and it is posixacl	= posixacl
+p0-e	NOTE	api uid = 999	
+p0-e	PASS	systemd-analyze verify accepts both units	rc=0
+p0-e	PASS	depsis-agent.socket starts	rc=0
+p0-e	PASS	the service is not running until a client connects (socket activation)	
+p0-e	NOTE	systemd 257, pid 1 mnt ns mnt:[4026531841]	
+p0-e	PASS	stays in pid 1's mount namespace: NoNewPrivileges=yes	
+p0-e	PASS	stays in pid 1's mount namespace: RestrictAddressFamilies=AF_UNIX	
+p0-e	PASS	stays in pid 1's mount namespace: IPAddressDeny=any	
+p0-e	PASS	stays in pid 1's mount namespace: RestrictNamespaces=yes	
+p0-e	PASS	stays in pid 1's mount namespace: RestrictRealtime=yes	
+p0-e	PASS	stays in pid 1's mount namespace: RestrictSUIDSGID=yes	
+p0-e	PASS	stays in pid 1's mount namespace: LockPersonality=yes	
+p0-e	PASS	stays in pid 1's mount namespace: SystemCallArchitectures=native	
+p0-e	PASS	stays in pid 1's mount namespace: ProtectClock=yes	
+p0-e	PASS	stays in pid 1's mount namespace: ProtectHostname=yes	
+p0-e	PASS	stays in pid 1's mount namespace: CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYSLOG CAP_SYS_TIME CAP_WAKE_ALARM	
+p0-e	PASS	stays in pid 1's mount namespace: SystemCallFilter=~@module	
+p0-e	PASS	still namespaces, still correctly absent from the unit: ProtectKernelModules=yes	
+p0-e	PASS	still namespaces, still correctly absent from the unit: ProtectKernelLogs=yes	
+p0-e	PASS	socket exists at /run/depsis/agent.sock	
+p0-e	PASS	socket mode is 0660	= 660
+p0-e	PASS	socket owner is root	= root
+p0-e	PASS	socket group is depsis-api	= depsis-api
+p0-e	PASS	a user outside depsis-api cannot even connect (EACCES from the kernel)	
+p0-e	PASS	the API can ping the agent	
+p0-e	PASS	a request with no trailing newline is answered normally	
+p0-e	PASS	a request WITH a trailing newline is answered too	
+p0-e	PASS	ping returns the schema version, so a mismatched build fails loudly	
+p0-e	PASS	root is refused even though it can open the socket	
+p0-e	PASS	the refusal says why	
+p0-e	PASS	a request asserting uid 0 is still treated as the API, not as root	
+p0-e	PASS	refused at parse: {"op":"exec","command":"id"}	
+p0-e	PASS	refused at parse: {"op":"raw","argv":["/bin/sh","-c","id"]}	
+p0-e	PASS	refused at parse: {"op":"ping","extra":"; id"}	
+p0-e	PASS	refused at parse: {"op":"pool_status","pool":"depsistest; id"}	
+p0-e	PASS	refused at parse: {"op":"pool_status","pool":"-o"}	
+p0-e	PASS	refused at parse: {"op":"create_snapshot","dataset":"depsistest","name":"../../etc/shadow"}	
+p0-e	PASS	refused at parse: {"op":"read_smart_summary","disk_by_id":"../../../dev/sda"}	
+p0-e	PASS	refused at parse: {"op":"create_dataset","dataset":"depsistest/x","acltype":"nfsv4"}	
+p0-e	PASS	a misspelled field is refused rather than ignored	
+p0-e	PASS	no dataset was created by the refused request	
+p0-e	PASS	a reason containing a newline is refused (log injection)	
+p0-e	PASS	an over-long reason is refused	
+p0-e	PASS	a bare request with no envelope is refused (would be unattributable)	
+p0-e	PASS	a 400 kB request is refused rather than buffered	
+p0-e	PASS	the journal carries structured audit entries	
+p0-e	PASS	an audit entry names the operation	
+p0-e	PASS	the refusal of root is in the audit trail	
+p0-e	PASS	the injected audit line never reached the journal	
+p0-e	PASS	the agent creates a dataset when properly asked	
+p0-e	PASS	the dataset exists outside the agent	
+p0-e	PASS	the dataset is mounted in pid 1's namespace, i.e. visible to Samba	/srv/depsis-poc/agentds
+p0-e	PASS	the created dataset really has posixacl	= posix
+p0-e	PASS	refquota was applied as asked	= 33554432
+p0-e	PASS	the nested dataset really is a separate mount (different st_dev)	
+p0-e	PASS	openat2 NO_XDEV refuses to cross into the nested dataset	rc=0
+p0-e	NOTE	agent environment: LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin LISTEN_PID=30855 LISTEN_FDS=1 LISTEN_FDNAMES=depsis-agent.socket USER=root INVOCATION_ID=8a5dc6fc6d7c4d46bfeab4394584487b JOURNAL_STREAM=9:129429 SYSTEMD_EXEC_PID=30855 MEMORY_PRESSURE_WATCH=/sys/fs/cgroup/system.slice/depsis-agent.service/memory.pressure MEMORY_PRESSURE_WRITE=c29tZSAyMDAwMDAgMjAwMDAwMAA= DEPSIS_API_UID=999 	
+p0-e	PASS	the agent has the API uid in its environment	
+p0-e	PASS	no 'PASSWORD' in the agent's environment	
+p0-e	PASS	no 'SECRET' in the agent's environment	
+p0-e	PASS	no 'TOKEN' in the agent's environment	
+p0-e	PASS	no 'CREDENTIAL' in the agent's environment	
+p0-e	PASS	no 'PRIVATE_KEY' in the agent's environment	
+p0-e	PASS	no 'DATABASE_URL' in the agent's environment	
+p0-e	PASS	the unit declares no LoadCredential=, consistent with the agent having no secret	
+p0-e	PASS	the agent still answers after a run of malformed input	
+p0-e	PASS	the agent did not restart (no crash on malformed input)	= 30855

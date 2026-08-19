@@ -381,6 +381,13 @@ runcmd:
   - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib" ]
   - [ sh, -c, "modprobe zfs && zfs version > /var/log/depsis-zfs-version.txt 2>&1 || true" ]
   - [ sh, -c, "dpkg -l samba postgresql zfsutils-linux > /var/log/depsis-pkg-versions.txt 2>&1 || true" ]
+  # The system agent is Rust and is built on the target platform, so the toolchain belongs in
+  # the image. Installing it by hand over SSH proved fragile: the download was interrupted
+  # three times and twice left a half-written toolchain that failed with "Missing manifest".
+  # Doing it here means it happens once, unattended, before anyone needs it.
+  - [ sh, -c, "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh" ]
+  - [ sh, -c, "su - depsis -c 'sh /tmp/rustup.sh -y --no-modify-path --profile minimal --default-toolchain stable' >> /var/log/depsis-rustup.log 2>&1" ]
+  - [ sh, -c, "su - depsis -c '$HOME/.cargo/bin/cargo --version' >> /var/log/depsis-rustup.log 2>&1 || echo 'WARN: rust toolchain unusable' >&2" ]
   - [ sh, -c, "touch /var/lib/depsis-cloud-init-done" ]
 
 final_message: "DEPSIS PoC VM ready after `$UPTIME seconds."

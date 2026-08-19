@@ -1,6 +1,7 @@
 # ADR-0006: Sistem aracısı ayrıcalık sınırı ve IPC sözleşmesi
 
-- **Durum:** Accepted (provisional, PoC: P0-E)
+- **Durum:** Accepted
+- **Provizyon kalktı:** 2026-08-19, [P0-E](evidence/p0-e.tsv) ile — 82 assertion, sıfır hata
 - **Tarih:** 2026-08-14
 - **Faz:** 0
 - **Etkilenen bileşenler:** `services/system-agent`, `packages/contracts`, `deploy/systemd`
@@ -138,19 +139,57 @@ Kritik ayrıntılar:
 | Debian trixie çekirdeği 6.12.101                                                                         | verified                                        |
 | `openat` crate 2021'den beri hareketsiz                                                                  | verified                                        |
 | `execvp` PATH yokken `/bin:/usr/bin`'e düşer                                                             | verified                                        |
-| `LoadCredential=` mode-0400 servis-kullanıcısı dosyası üretir, `NoNewPrivileges` altında çalışır         | verified                                        |
+| `LoadCredential=` mode-0400 servis-kullanıcısı dosyası üretir, `NoNewPrivileges` altında çalışır         | verified — ama **kullanılmıyor**: ajanın sırrı yok (P0-E §8c) |
 | Windows Build Tools'un tam bileşen listesi                                                               | **unverified** → temiz makinede doğrulanacak    |
 | `cap-std`'nin Linux çözümleme stratejisi                                                                 | **unverified** (seçilmediği için bloke etmiyor) |
 
-## P0-E — bu ADR'yi doğrulayacak PoC
+### P0-E'nin ölçtükleri (2026-08-19, Debian 13 / systemd 257 / rustc 1.97.1)
 
-1. Aracı serbest biçimli komutu **reddediyor** mu? (tiplenmiş enum dışında hiçbir giriş yolu yok)
-2. `peer_cred` doğru uid/gid veriyor mu; yanlış uid **reddediliyor** mu?
-3. `openat2(BENEATH|NO_SYMLINKS|NO_XDEV)` symlink kaçışını **audit olayı üreterek** engelliyor mu?
-4. `-` ile başlayan dosya adı `zfs`/`smbcacls`'e bayrak olarak ulaşabiliyor mu?
-5. Dataset sınırını geçen bir yol `NO_XDEV` ile engelleniyor mu?
-6. `cargo check --target x86_64-pc-windows-msvc` yeşil mi?
-7. `LoadCredential` ile teslim edilen secret loglara veya `/proc/<pid>/environ`'a sızıyor mu?
+| İddia                                                                    | Sonuç                                       |
+| ------------------------------------------------------------------------ | ------------------------------------------- |
+| Serbest biçimli komut yolu yok — 8 deneme parse aşamasında reddedildi     | ✅ ölçüldü                                  |
+| Kimlik `SO_PEERCRED`'den; `{"uid":0}` iddiası sonucu değiştirmiyor        | ✅ ölçüldü                                  |
+| root reddediliyor ve ret audit'e düşüyor                                 | ✅ ölçüldü                                  |
+| `openat2(BENEATH\|NO_SYMLINKS)` kaçışı **hata** olarak reddediyor         | ✅ ölçüldü (crate testleri, gerçek çekirdek) |
+| `NO_XDEV` iç içe dataset'e geçişi engelliyor                             | ✅ ölçüldü (gerçek ZFS mount sınırı)        |
+| `-` ile başlayan operand `zfs`'e ulaşmıyor                               | ✅ ölçüldü                                  |
+| `cargo check --target x86_64-pc-windows-msvc` yeşil                      | ✅ ölçüldü                                  |
+| Soket 0660 root:depsis-api; grup dışı kullanıcı **connect edemiyor**     | ✅ ölçüldü (EACCES, çekirdekten)            |
+| Audit satırı enjekte edilemiyor (`reason`'da kontrol karakteri reddi)     | ✅ ölçüldü                                  |
+| Bilinmeyen alan **sessizce yutulmuyor** (`deny_unknown_fields`)           | ✅ ölçüldü — bu ADR'nin öngörmediği bir açıktı |
+
+**P0-E'nin bulduğu ve bu ADR'yi değiştiren üç şey:**
+
+1. **`ProtectKernelModules=` ve `ProtectKernelLogs=` özel mount ad-alanı yaratıyor.** Unit dosyası
+   bunun tersini iddia ediyordu. Sonuç sessizdi: ajan üzerinden oluşturulan dataset yalnızca
+   ajanın göremediği yerde mount oluyor, `zfs list` host'ta onu gösteriyor, ajan `created`
+   dönüyor, Samba boş dizin sunuyordu. Hiçbir katmanda hata yok. İkisi de çıkarıldı; aynı
+   kısıtlama `CapabilityBoundingSet=~…` + `SystemCallFilter=~@module` ile ad-alanı olmadan
+   sağlanıyor. `MountFlags=shared` reddedildi: ters yönde de yayılır ve erişilemez-yol bind
+   mount'larını host'a taşır.
+2. **Serde varsayılanı bilinmeyen alanı yok sayıyordu.** API `refquota` yazsa `refquota_bytes`
+   yerine, kotasız bir dataset başarıyla oluşurdu. `deny_unknown_fields` eklendi. Bu, içten
+   etiketli enum'ların **birim** varyantlarında çalışmadığı için `Ping` yapı varyantına çevrildi.
+3. **Çerçeveleme hatası.** Newline olmadan istek gönderip yazma yönünü kapatan — yani sıradan
+   bir istek/yanıt istemcisi — "request exceeds 262144 bytes" cevabı alıyordu. Boyut sınırı artık
+   bayt sayısıyla ölçülüyor, newline'ın varlığıyla değil.
+
+## P0-E — koşuldu
+
+Yedi maddenin altısı doğrudan ölçüldü ([kanıt](evidence/p0-e.tsv), `tools/poc/p0-e-agent-boundary.sh`).
+
+Madde 3'ün ikinci yarısı ve madde 7 olduğu gibi geçerli değil, ve bunu gizlemek yerine yazıyoruz:
+
+- **Madde 3 — "audit olayı üreterek".** `openat2` reddi bir **hata** olarak dönüyor ve bu ölçüldü;
+  ancak henüz hiçbir operasyon çağırandan paylaşım-içi yol almadığı için ortada audit'e düşecek
+  bir çağrı yok. `SafePath` uygulanmış ve gerçek çekirdeğe karşı test edilmiş durumda; dispatch'e
+  Faz 1'in ilk yol alan operasyonuyla (upload publish, move) bağlanacak. `lib.rs`'in başlığı da
+  buna göre düzeltildi — "her yol hapsedilir" ifadesi bugün için doğru değildi.
+- **Madde 7 — `LoadCredential`.** Aracının sırrı yok: tek yapılandırması API'nin uid'i, ki gizli
+  değil. Unit dosyası `LoadCredential=` içermiyor, dolayısıyla sızma sorusu yazıldığı biçimiyle
+  konusuz. P0-E bunun yerine kalıcı olanı ölçüyor: ajanın `/proc/<pid>/environ`'unda parola/token
+  deseni bulunmadığını ve unit'in `LoadCredential=` beyan etmediğini. Birisi o `EnvironmentFile`'a
+  bir veritabanı parolası eklediği gün assertion patlar.
 
 ## Sonuçlar
 

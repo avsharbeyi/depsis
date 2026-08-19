@@ -72,3 +72,6 @@ pnpm-debug.log*
 
 # Scratch copy written by `pnpm generate:check` to diff against the committed output.
 **/.generated-check.d.ts
+
+# Rust build output
+/target/

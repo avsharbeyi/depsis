@@ -1,0 +1,9 @@
+# Workspace root. CI runs cargo from here (see .github/workflows/ci.yml), so the manifest has
+# to exist even while system-agent is the only member.
+[workspace]
+resolver = "2"
+members = ["services/system-agent"]
+
+[workspace.package]
+edition = "2021"
+publish = false

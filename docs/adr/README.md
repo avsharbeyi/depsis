@@ -38,7 +38,7 @@ Master prompt §0.2 gereği her büyük değişiklikten önce bir ADR yazılır.
 | [0003](0003-job-queue.md)                       | İş kuyruğu (PostgreSQL `SKIP LOCKED`)                     | **Accepted**                                                                                 |
 | [0004](0004-authz-authority-and-smb-mapping.md) | Yetki otoritesi ve SMB eşlemesi                           | **Accepted** ✅ P0-B geçti 17/17 — `nfsv4` tuzağı ölçüldü; aşağı eşleme hâlâ kanıtsız        |
 | [0005](0005-file-identity.md)                   | Dosya kimliği ve path reconciliation                      | **Accepted** ✅ P0-D geçti 38/38 — kimlik restart-kararlı                                    |
-| [0006](0006-system-agent-ipc.md)                | Sistem aracısı ayrıcalık sınırı ve IPC                    | **Accepted (provisional, P0-E)**                                                             |
+| [0006](0006-system-agent-ipc.md)                | Sistem aracısı ayrıcalık sınırı ve IPC                    | Accepted ([P0-E](evidence/p0-e.tsv))                                                         |
 | [0007](0007-storage-abstraction.md)             | Depolama soyutlaması (ZFS/Mock; Btrfs'in gerçek maliyeti) | **Accepted**                                                                                 |
 | [0008](0008-resumable-upload.md)                | Devam ettirilebilir yükleme, atomik yayınlama, kota       | **Accepted** ✅ P0-G geçti 41/41 — EXDEV kanıtlandı; `RENAME_NOREPLACE` düzeltildi           |
 | [0009](0009-auth-session-mfa.md)                | Oturum ve MFA modeli; WebAuthn RP ID kısıtı               | **Accepted**                                                                                 |

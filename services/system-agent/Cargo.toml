@@ -1,0 +1,37 @@
+[package]
+name = "depsis-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+description = "DEPSIS privileged system agent — a closed, typed operation surface over a Unix socket"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+thiserror = "2"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "net", "process"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+# `deny`, not `forbid`, and only because `forbid` applies to every target in the crate and
+# cannot be lifted locally. The binary needs exactly one `unsafe`: adopting the listening
+# descriptor systemd hands over, which no safe API can express. That site carries an
+# `#[allow(unsafe_code)]` with its SAFETY argument spelled out and is covered by three tests.
+#
+# The core is not softened by this: `lib.rs` carries its own `#![forbid(unsafe_code)]`, so the
+# library half of the crate still permits no exceptions at all.
+unsafe_code = "deny"
+
+[lints.clippy]
+# The agent runs as root. A panic in a request handler is a denial of service on the one
+# component that cannot be restarted casually, so the usual ergonomic shortcuts are denied.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"

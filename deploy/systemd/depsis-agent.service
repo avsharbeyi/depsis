@@ -1,0 +1,119 @@
+# The DEPSIS system agent.
+#
+# It runs as root and ADR-0006 does not pretend otherwise: `zpool` operations cannot be
+# delegated, and CAP_SYS_ADMIN is root-equivalent, so an ambient-capability set here would buy
+# the appearance of least privilege and none of the substance. Safety comes from the surface
+# being small — a closed typed operation enum, peer-credential authorization, and an audit
+# entry for every call — not from this file.
+#
+# What this file DOES buy is the hardening that costs nothing and the hardening that would cost
+# correctness, kept apart and labelled. Every directive below is exercised by P0-E; a hardening
+# directive that is never tested against the real workload is a directive that gets removed in
+# a panic at 3am when something inexplicably fails.
+
+[Unit]
+Description=DEPSIS system agent
+Documentation=file:///usr/share/doc/depsis/adr/0006-system-agent.md
+Requires=depsis-agent.socket
+After=depsis-agent.socket zfs.target
+
+[Service]
+# Type=exec, not simple: systemd then considers the unit started only once execve has actually
+# succeeded, so a missing binary or a bad interpreter fails the start job instead of being
+# reported as a success followed by a mysterious exit.
+Type=exec
+ExecStart=/usr/local/lib/depsis/depsis-agent --serve
+
+# The uid the API runs as. Read from the environment, never inferred: looking a username up at
+# runtime would mean a rename or a uid reuse silently changed who may drive privileged
+# operations. The installer writes this drop-in; the agent refuses to start without it, and
+# refuses uid 0.
+EnvironmentFile=/etc/depsis/agent.env
+
+# Socket-activated and long-lived. Restart on failure, but rate-limited: a crash loop on a root
+# daemon that shells out to zfs should stop and be noticed, not retry forever.
+Restart=on-failure
+RestartSec=2s
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# ─── hardening that is free here ──────────────────────────────────────────────
+# "Free" means measured, not assumed. P0-E timed every directive below against
+# `readlink /proc/self/ns/mnt` on systemd 257 and kept only the ones that leave the service in
+# pid 1's mount namespace. An earlier version of this file asserted the same thing from reading
+# the documentation and was wrong about two of them — see the block after this one.
+
+# The agent must never gain privileges it did not start with. It runs as root, so this is not
+# about the agent itself — it is about the four binaries it execs. A setuid binary appearing on
+# the box cannot become a privilege escalation path through this service.
+NoNewPrivileges=yes
+
+# The agent speaks to exactly one socket family and reaches no network. If a future change
+# introduces an HTTP client into a root daemon, it fails here instead of shipping.
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+# Measured safe: neither of these puts the service in its own mount namespace.
+ProtectClock=yes
+ProtectHostname=yes
+
+# What ProtectKernelModules= and ProtectKernelLogs= would have bought, bought a different way.
+#
+# Those two directives look like pure capability removal and are not: both make paths
+# inaccessible (/proc/kmsg, /dev/kmsg, the module tree), which puts the service in a private
+# mount namespace. P0-E measured the consequence rather than the directive — a dataset created
+# through the agent was mounted where only the agent could see it, while the agent returned
+# `created` and `zfs list` on the host showed the dataset existing. Samba would have served an
+# empty directory with no error anywhere.
+#
+# Subtracting the capabilities directly, and filtering the module syscalls with seccomp, gets the
+# same restriction with no namespace at all. The `~` form of SystemCallFilter= is a deny list, so
+# it does not impose an allow list and cannot break mount(2) the way @system-service would.
+CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYSLOG CAP_SYS_TIME CAP_WAKE_ALARM
+SystemCallFilter=~@module
+
+# ─── hardening deliberately NOT enabled, with reasons ─────────────────────────
+#
+# ProtectSystem=, ProtectHome=, PrivateTmp=, ReadWritePaths=, ProtectProc=, PrivateDevices=,
+# ProtectKernelModules=, ProtectKernelLogs=
+#   Every one of these puts the service in a private mount namespace — measured, one directive
+#   at a time, in P0-E section 3a. systemd sets that namespace's propagation to slave, so mounts
+#   made INSIDE it do not propagate out. `zfs create` mounts the new dataset there and nowhere
+#   else. The dataset exists, the agent reports success, `zfs list` on the host shows it, and
+#   Samba serves an empty directory. No error is produced at any layer.
+#
+#   MountFlags=shared would make the mounts propagate out, and is refused because it propagates
+#   in the other direction too: the inaccessible-path bind mounts those directives create would
+#   then land on the host, making /dev/kmsg or /dev/rtc unusable system-wide. Trading a silent
+#   share failure for a silent host failure is not an improvement.
+#
+#   P0-E asserts the observable consequence directly: a dataset created through the agent must
+#   be visible in /proc/1/mountinfo, not merely in the agent's own view.
+#
+# PrivateDevices= additionally would hide /dev/sd* and break smartctl, which needs SG_IO on the
+#   real block device.
+#
+# SystemCallFilter= in its ALLOW-LIST form (e.g. =@system-service)
+#   @system-service excludes @mount, and `zfs create` calls mount(2). The filter is inherited by
+#   every child process, so a filter tight enough to be worth having is a filter that breaks the
+#   agent's primary operation, and one widened to @mount @privileged @raw-io buys little against
+#   a root process. Only the deny-list form is used above, which adds no allow list and so
+#   cannot have this effect.
+
+# ─── audit ────────────────────────────────────────────────────────────────────
+# The agent writes one JSON object per audit entry to stderr; systemd routes it to the journal.
+# No journald library in a root process, and `journalctl -u depsis-agent -o cat` reads it on a
+# box with nothing else installed.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=depsis-agent
+
+[Install]
+# Deliberately absent: WantedBy=multi-user.target. The unit is started by its socket, on demand.
+# Enabling it directly would start a root daemon at boot whether or not the API exists.
