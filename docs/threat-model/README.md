@@ -76,9 +76,14 @@ flowchart TB
 
 ## 4. Kabul edilen ayrıcalık: aracı root çalışır
 
-Bunu gizlemek yerine yazıyoruz. `zpool` operasyonları ve ZFS dataset `mount` işlemi delege
-edilemez; seçenek root ya da `CAP_SYS_ADMIN`'dir ve **`CAP_SYS_ADMIN` root-eşdeğeridir**.
-Ambient capability'lerin burada güvenlik satın aldığını iddia etmek kendini kandırmaktır.
+Bunu gizlemek yerine yazıyoruz. `zpool` operasyonları delege edilemez; seçenek root ya da
+`CAP_SYS_ADMIN`'dir ve **`CAP_SYS_ADMIN` root-eşdeğeridir**. Ambient capability'lerin burada
+güvenlik satın aldığını iddia etmek kendini kandırmaktır.
+
+> **P0-D düzeltmesi:** bu paragrafın ilk hâli `mount` işleminin de delege edilemediğini ve bu
+> yüzden ADR-0011 Katman 3'ün root gerektirdiğini söylüyordu. Ölçüm bunu çürüttü — `zfs allow`
+> ile yetkisiz kullanıcı `mount` izni olmadan bile snapshot alabiliyor. **Katman 3 artık root
+> çalışmıyor.** Root kalan tek bileşen sistem aracısının kendisidir.
 
 Güvenlik capability daraltmasından değil, **yüzey daraltmasından** gelir (ADR-0006):
 
@@ -98,12 +103,26 @@ görünürken açık kalır.
 
 ### 5.1 `acltype=nfsv4` → ACL'lerin tamamen kapanması
 
-`zfsprops(7)`: _"The nfsv4 ZFS ACL type is not yet supported on Linux"_ ve desteklenmeyen bir
-acltype _"the same as if it were set to off"_ davranır. Yani `acltype=nfsv4` ile kurulmuş bir
-dataset **hiç ACL uygulamaz** — her kullanıcı mod bit'lerinin izin verdiği her şeye erişir.
+`zfsprops(7)`: _"The nfsv4 ZFS ACL type is not yet supported on Linux"_. Bir `acltype=nfsv4`
+dataset'i **hiç ACL uygulamaz** — her kullanıcı mod bit'lerinin izin verdiği her şeye erişir.
 
-**Kontrol:** dataset oluşturma anında `acltype` doğrulanır; `posixacl` değilse dataset kullanıma
-açılmaz. CI'da `acltype=nfsv4` geçen bir yapılandırma reddedilir. → P0-B
+**P0-B'de ölçüldü ve belgenin ima ettiğinden daha kötü çıktı.** Belge desteklenmeyen bir
+acltype'ın `off` gibi davranacağını söylüyor; beklenti, `zfs get` çıktısında `off` görüp durumu
+fark etmekti. Gerçek:
+
+```
+zfs set acltype=nfsv4  → rc=0 (BAŞARILI)
+zfs get acltype        → 'nfsv4'   ← off'a düşmüyor
+setfacl                → BAŞARISIZ
+```
+
+Özellik **yapılandırılmış görünüyor.** Operatör de, bir doğrulama kontrolü de `nfsv4` okuyup
+"bir ACL türü ayarlanmış" diye geçebilir. Görünür hiçbir sinyal yok.
+
+**Kontrol:** dataset oluşturma anında `acltype` doğrulanır ve doğrulama **`nfsv4`'ü açıkça
+reddeder**. "Değeri boş değilse tamam" veya "`off` değilse tamam" mantığı bu tuzağa düşer —
+kabul edilecek küme yalnız {`posixacl`, `posix`}. CI'da `acltype=nfsv4` geçen bir yapılandırma
+reddedilir. → [P0-B, geçti](../adr/evidence/p0-b.tsv)
 
 ### 5.2 RLS'in tablo sahibi tarafından atlanması
 
@@ -156,16 +175,17 @@ Karantina dizini **asla** paylaşılabilir olmamalıdır. → P0-B
 
 ## 7. Kalıntı riskler — bilinen ve kabul edilen
 
-| Risk                                             | Neden kabul edildi                                                  | Ne zaman kapanır                                    |
-| ------------------------------------------------ | ------------------------------------------------------------------- | --------------------------------------------------- |
-| **MFA phishing'e dayanıklı değil** (yalnız TOTP) | WebAuthn RP ID çıplak IP olamaz; hostname yok (ADR-0009)            | Alan adı + güvenilen sertifika sağlandığında, Faz 2 |
-| **Aracı root çalışıyor**                         | `zpool`/mount delege edilemez (ADR-0006)                            | Kapanmıyor; yüzey daraltmasıyla yönetiliyor         |
-| **HSTS gönderilmiyor**                           | IP tabanlı erişimde HSTS o IP'yi ileride kilitler                   | Alan adı geldiğinde                                 |
-| **Self-signed sertifika uyarısı**                | Güvenilen CA yok                                                    | Alan adı geldiğinde                                 |
-| **POSIX ACL'de deny yok**                        | Uygulanan substrat deny'yi ifade edemez (ADR-0004)                  | Substrat değişmedikçe kapanmıyor                    |
-| **Disk şifrelemesi yok**                         | Faz 0–3 kapsamında değil                                            | Faz 4                                               |
-| **PGDG üçüncü taraf apt deposu**                 | PG 18 `uuidv7()` ve `LIKE` için seçildi (ADR-0013)                  | PG 18 Debian stable'a girdiğinde                    |
-| **Prebuilt native binding indirme**              | `@node-rs/argon2` derleme zinciri gerektirmiyor ama ikili indiriyor | CI bağımlılık+imza taramasıyla yönetiliyor          |
+| Risk                                                             | Neden kabul edildi                                                               | Ne zaman kapanır                                                                       |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| **MFA phishing'e dayanıklı değil** (yalnız TOTP)                 | WebAuthn RP ID çıplak IP olamaz; hostname yok (ADR-0009)                         | Alan adı + güvenilen sertifika sağlandığında, Faz 2                                    |
+| **Aracı root çalışıyor**                                         | `zpool` operasyonları delege edilemez (ADR-0006)                                 | Kapanmıyor; yüzey daraltmasıyla yönetiliyor                                            |
+| **`/dev/zfs` mode 666** — her yerel kullanıcı ZFS ioctl açabilir | OpenZFS'in udev kuralı; ADR-0011 Katman 3'ün yetkisiz koşabilmesi buna dayanıyor | Delegasyon tablosuyla sınırlı. 0660 + özel gruba almak Katman 3'ü root'a geri döndürür |
+| **HSTS gönderilmiyor**                                           | IP tabanlı erişimde HSTS o IP'yi ileride kilitler                                | Alan adı geldiğinde                                                                    |
+| **Self-signed sertifika uyarısı**                                | Güvenilen CA yok                                                                 | Alan adı geldiğinde                                                                    |
+| **POSIX ACL'de deny yok**                                        | Uygulanan substrat deny'yi ifade edemez (ADR-0004)                               | Substrat değişmedikçe kapanmıyor                                                       |
+| **Disk şifrelemesi yok**                                         | Faz 0–3 kapsamında değil                                                         | Faz 4                                                                                  |
+| **PGDG üçüncü taraf apt deposu**                                 | PG 18 `uuidv7()` ve `LIKE` için seçildi (ADR-0013)                               | PG 18 Debian stable'a girdiğinde                                                       |
+| **Prebuilt native binding indirme**                              | `@node-rs/argon2` derleme zinciri gerektirmiyor ama ikili indiriyor              | CI bağımlılık+imza taramasıyla yönetiliyor                                             |
 
 ## 8. Kapsam dışı bırakılanlar
 
@@ -224,17 +244,34 @@ Her sürüm öncesi doğrulanır. Kaynağı olan maddeler ADR'ye bağlıdır.
 - [ ] Yedek ayrı hedefe replike ediliyor; snapshot "yedek" olarak sunulmuyor
 - [ ] Restore tatbikatı geçti
 
-## 10. Bu modelin doğrulanmamış kısımları
+## 10. Bu modelin kanıt durumu
 
-Dürüstlük gereği: aşağıdakiler **tasarımdır, kanıt değil.** İlgili PoC koşana kadar bu tehdit
-modelinin o maddeleri bir iddiadır.
+Bu bölümün ilk hâli "hiçbiri kanıtlanmadı, hepsi tasarım" diyordu. Beş PoC koştuktan sonra
+tablo değişti — ama **bayat kötümserlik de yanlışlıktır**, o yüzden güncellendi.
 
-| Madde                                                              | Bekleyen PoC |
-| ------------------------------------------------------------------ | ------------ |
-| ACL'in kernel tarafından gerçekten uygulanması ve SMB'ye yansıması | P0-B         |
-| RLS baypaslarının kapatıldığı                                      | P0-C         |
-| Reconciliation'ın kimliği koruduğu                                 | P0-D         |
-| Aracının serbest komutu reddettiği, `openat2` hapsinin çalıştığı   | P0-E         |
-| `.depsis` veto'sunun gerçekten engellediği                         | P0-B         |
+| Madde                                                                | Durum                                                                  |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| ACL'i çekirdek gerçekten uyguluyor; yetkisiz kullanıcı reddediliyor  | ✅ [P0-B](../adr/evidence/p0-b.tsv)                                    |
+| DEPSIS'in verdiği POSIX ACL SMB descriptor'ında görünüyor            | ✅ [P0-B](../adr/evidence/p0-b.tsv)                                    |
+| `.depsis` veto'su gerçekten **engelliyor**, yalnız gizlemiyor        | ✅ [P0-B](../adr/evidence/p0-b.tsv)                                    |
+| İki RLS baypası (sahip + kısıt covert channel) kapatıldı             | ✅ [P0-C](../adr/evidence/p0-c.tsv)                                    |
+| Reconciliation SMB rename'inden sonra kimliği koruyor                | ✅ [P0-D](../adr/evidence/p0-d.tsv)                                    |
+| Kimlik `zpool export/import` sonrası kararlı                         | ✅ [P0-D](../adr/evidence/p0-d.tsv)                                    |
+| Arama sayacı/sonucu kiracı sızdırmıyor                               | ✅ [P0-C](../adr/evidence/p0-c.tsv) · [P0-H](../adr/evidence/p0-h.tsv) |
+| Atomik yayınlama ve kota semantiği                                   | ✅ [P0-G](../adr/evidence/p0-g.tsv)                                    |
+| **Aracının serbest komutu reddettiği, `openat2` hapsinin çalıştığı** | ❌ **P0-E — Rust aracısı henüz yazılmadı**                             |
 
-**P0-B ve P0-D geçmeden Faz 1'in yetki ve indeksleme kodu yazılmayacaktır.**
+### Hâlâ tasarım, kanıt değil
+
+1. **TB4'ün tamamı.** Bu modelin "en kritik sınır" dediği yer, tek kanıtlanmamış sınır. ADR-0006
+   `Accepted (provisional)` ve öyle kalmalı. Aracı yazılana kadar §4 ve §6'daki TB4/TB6
+   satırları **iddia**dır.
+2. **SMB → POSIX aşağı yönlü eşleme** (ADR-0004). Duruş A'da bloke edici değil, ama "tek köprü"
+   ifadesi ölçülmedi.
+3. **Güç kesintisi dayanıklılığı.** `fsync(dirfd)` çalışıyor ve sıralama uçtan uca koşuyor
+   (P0-G), ama gerçek kesinti testi yapılmadı. "Sıralama çalıştı" ≠ "dayanıklı".
+4. **Ölçek.** Tüm ölçümler tek bir VM'de, küçük veri kümeleriyle. §18.2'nin p95 hedefleri
+   **hiçbir** koşuda test edilmedi ve edilmiş gibi sunulmamalıdır.
+
+**P0-B ve P0-D geçti; Faz 1'in yetki ve indeksleme kodu artık yazılabilir.** P0-E, sistem
+aracısı kodu ortaya çıktığında koşulacak ve TB4 o zamana kadar kanıtsız kalacak.

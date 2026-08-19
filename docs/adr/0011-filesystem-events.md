@@ -298,16 +298,16 @@ nedeni budur: sert gereksinim zaten hiçbir zaman fanotify'a bağlı değildi.
 
 ## Kanıt
 
-| İddia                                                   | Kaynak                                                                                 | Güven                                                                                        |
-| ------------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `FAN_MARK_FILESYSTEM` `CAP_SYS_ADMIN` ister             | [fanotify_mark(2)](https://man7.org/linux/man-pages/man2/fanotify_mark.2.html)         | verified                                                                                     |
-| `open_by_handle_at` `CAP_DAC_READ_SEARCH` ister         | [open_by_handle_at(2)](https://man7.org/linux/man-pages/man2/open_by_handle_at.2.html) | verified                                                                                     |
-| ZFS tam `zpl_export_operations` tanımlıyor              | `module/os/linux/zfs/zpl_export.c`                                                     | verified                                                                                     |
-| #6079'daki başarısızlık büyük ölçüde fatrace hatasıydı  | [openzfs/zfs#6079](https://github.com/openzfs/zfs/issues/6079)                         | verified                                                                                     |
-| **FID modu ZFS 2.2+/2.3+'ta hiç yeniden test edilmedi** | [openzfs/zfs#6079](https://github.com/openzfs/zfs/issues/6079)                         | **unverified → P0-D**                                                                        |
-| `full_audit:prefix` varsayılanı `%u                     | %I`                                                                                    | [vfs_full_audit(8)](https://www.samba.org/samba/docs/current/man-html/vfs_full_audit.8.html) | verified |
-| `zfs diff` `R` satırlarında iki yol verir               | [zfs-diff(8)](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-diff.8.html)     | verified                                                                                     |
-| `zfs diff` performansı                                  | —                                                                                      | **unverified → P0-D**                                                                        |
+| İddia                                                                        | Kaynak                                                                                 | Güven                                                                                        |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `FAN_MARK_FILESYSTEM` `CAP_SYS_ADMIN` ister                                  | [fanotify_mark(2)](https://man7.org/linux/man-pages/man2/fanotify_mark.2.html)         | verified                                                                                     |
+| `open_by_handle_at` `CAP_DAC_READ_SEARCH` ister                              | [open_by_handle_at(2)](https://man7.org/linux/man-pages/man2/open_by_handle_at.2.html) | verified                                                                                     |
+| ZFS tam `zpl_export_operations` tanımlıyor                                   | `module/os/linux/zfs/zpl_export.c`                                                     | verified                                                                                     |
+| #6079'daki başarısızlık büyük ölçüde fatrace hatasıydı                       | [openzfs/zfs#6079](https://github.com/openzfs/zfs/issues/6079)                         | verified                                                                                     |
+| **FID modu ZFS 2.3.2'de ÇALIŞIYOR** (2020 raporu artık geçerli değil)        | [P0-D kanıtı](evidence/p0-d.tsv)                                                       | **verified**                                                                                 |
+| `full_audit:prefix` varsayılanı `%u                                          | %I`                                                                                    | [vfs_full_audit(8)](https://www.samba.org/samba/docs/current/man-html/vfs_full_audit.8.html) | verified |
+| `zfs diff` `R` satırlarında iki yol verir                                    | [zfs-diff(8)](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-diff.8.html)     | verified                                                                                     |
+| `zfs diff` performansı: 41 ms küçük delta, **21 sn / 20k nesne** (sıcak ARC) | [P0-D kanıtı](evidence/p0-d.tsv)                                                       | **verified** — 1M ölçeği hâlâ açık                                                           |
 
 ## P0-D — bu ADR'yi doğrulayacak PoC
 

@@ -225,17 +225,17 @@ açılmalıdır.
 
 ## Kanıt
 
-| İddia                                                                           | Kaynak                                                                                             | Güven                                              |
-| ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| "The nfsv4 ZFS ACL type is not yet supported on Linux."                         | [zfsprops(7), Debian trixie](https://manpages.debian.org/trixie/zfsutils-linux/zfsprops.7.en.html) | verified                                           |
-| Desteklenmeyen ACL türü = `off` davranışı                                       | [zfsprops(7), OpenZFS master](https://openzfs.github.io/openzfs-docs/man/master/7/zfsprops.7.html) | verified                                           |
-| Linux'ta `acltype` varsayılanı `off`                                            | [zfsprops(7), Debian trixie](https://manpages.debian.org/trixie/zfsutils-linux/zfsprops.7.en.html) | verified                                           |
-| PR #13186 kapatıldı, #16967 ile değiştirildi                                    | [openzfs/zfs#13186](https://github.com/openzfs/zfs/pull/13186)                                     | verified                                           |
-| PR #16967 hâlâ açık, hiçbir sürümde yok                                         | [openzfs/zfs#16967](https://github.com/openzfs/zfs/pull/16967)                                     | verified                                           |
-| Debian trixie `zfsutils-linux` = 2.3.2-2                                        | [manpages.debian.org](https://manpages.debian.org/trixie/zfsutils-linux/zfsprops.7.en.html)        | verified                                           |
-| `acl_xattr` "POSIX ACL taslağı olan sistemler için", POSIX'e best-effort eşleme | [vfs_acl_xattr(8)](https://www.samba.org/samba/docs/current/man-html/vfs_acl_xattr.8.html)         | verified                                           |
-| `vfs_zfsacl` var ama NFSv4 ACL katmanına passthrough                            | [vfs_zfsacl(8)](https://www.samba.org/samba/docs/current/man-html/vfs_zfsacl.8.html)               | verified                                           |
-| Debian trixie Samba sürüm dizesi                                                | —                                                                                                  | **unverified** → VM'de `dpkg -l samba` ile doğrula |
+| İddia                                                                           | Kaynak                                                                                             | Güven           |
+| ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | --------------- |
+| "The nfsv4 ZFS ACL type is not yet supported on Linux."                         | [zfsprops(7), Debian trixie](https://manpages.debian.org/trixie/zfsutils-linux/zfsprops.7.en.html) | verified        |
+| Desteklenmeyen ACL türü = `off` davranışı                                       | [zfsprops(7), OpenZFS master](https://openzfs.github.io/openzfs-docs/man/master/7/zfsprops.7.html) | verified        |
+| Linux'ta `acltype` varsayılanı `off`                                            | [zfsprops(7), Debian trixie](https://manpages.debian.org/trixie/zfsutils-linux/zfsprops.7.en.html) | verified        |
+| PR #13186 kapatıldı, #16967 ile değiştirildi                                    | [openzfs/zfs#13186](https://github.com/openzfs/zfs/pull/13186)                                     | verified        |
+| PR #16967 hâlâ açık, hiçbir sürümde yok                                         | [openzfs/zfs#16967](https://github.com/openzfs/zfs/pull/16967)                                     | verified        |
+| Debian trixie `zfsutils-linux` = 2.3.2-2                                        | [manpages.debian.org](https://manpages.debian.org/trixie/zfsutils-linux/zfsprops.7.en.html)        | verified        |
+| `acl_xattr` "POSIX ACL taslağı olan sistemler için", POSIX'e best-effort eşleme | [vfs_acl_xattr(8)](https://www.samba.org/samba/docs/current/man-html/vfs_acl_xattr.8.html)         | verified        |
+| `vfs_zfsacl` var ama NFSv4 ACL katmanına passthrough                            | [vfs_zfsacl(8)](https://www.samba.org/samba/docs/current/man-html/vfs_zfsacl.8.html)               | verified        |
+| Debian trixie Samba sürüm dizesi                                                | VM'de ölçüldü: `2:4.22.10+dfsg-0+deb13u2`                                                          | verified (P0-B) |
 
 ## P0-B — bu ADR'yi doğrulayacak PoC
 

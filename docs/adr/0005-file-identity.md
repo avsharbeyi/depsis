@@ -129,12 +129,12 @@ meşru dosyaları reddeder.
 
 ## Kanıt
 
-| İddia                                                          | Güven                      |
-| -------------------------------------------------------------- | -------------------------- |
-| PG 18 yerleşik `uuidv7()`                                      | verified (ADR-0013)        |
-| ZFS `zpl_export_operations` generation üretir                  | verified (ADR-0011)        |
-| **Handle/fsid'in reboot ve export/import sonrası kararlılığı** | **unverified → P0-D**      |
-| Inode yeniden kullanımı                                        | verified (POSIX davranışı) |
+| İddia                                                | Güven                                |
+| ---------------------------------------------------- | ------------------------------------ |
+| PG 18 yerleşik `uuidv7()`                            | verified (ADR-0013)                  |
+| ZFS `zpl_export_operations` generation üretir        | verified (ADR-0011)                  |
+| **Handle/fsid'in export/import sonrası kararlılığı** | **verified (P0-D)** — bkz. "Ölçüldü" |
+| Inode yeniden kullanımı                              | verified (POSIX davranışı)           |
 
 ## P0-D eki — bu ADR'yi doğrulayacak testler
 
