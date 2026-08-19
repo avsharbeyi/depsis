@@ -52,6 +52,13 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
+
+      - name: OpenAPI types are in sync with the spec
+        # src/generated/api.d.ts is committed so reviewers can see API surface changes in the
+        # diff. That only works if it cannot drift: this regenerates from openapi/depsis.yaml
+        # and fails on any difference, which also catches someone editing the output by hand.
+        run: pnpm generate:check
+
       - run: pnpm test:unit
       - run: pnpm build
 

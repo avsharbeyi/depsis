@@ -4,7 +4,16 @@ import prettier from 'eslint-config-prettier';
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', '**/node_modules/**', '**/.turbo/**', '**/coverage/**', 'target/**'],
+    ignores: [
+      '**/dist/**',
+      '**/node_modules/**',
+      '**/.turbo/**',
+      '**/coverage/**',
+      'target/**',
+      // Emitted by openapi-typescript from openapi/depsis.yaml. Committed so CI can
+      // detect drift; linting it would be linting a build artifact.
+      '**/src/generated/**',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,

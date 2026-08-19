@@ -16,7 +16,9 @@
     "lint": "turbo run lint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:unit"
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm generate:check && pnpm test:unit",
+    "generate": "turbo run generate",
+    "generate:check": "turbo run generate:check"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

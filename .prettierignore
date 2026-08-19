@@ -5,3 +5,6 @@ node_modules/
 target/
 deploy/vm/artifacts/
 docs/adr/evidence/
+
+# Generated from openapi/depsis.yaml — committed so CI can detect drift, never edited by hand.
+**/src/generated/

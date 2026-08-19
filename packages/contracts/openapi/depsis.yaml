@@ -1,0 +1,677 @@
+openapi: 3.1.0
+
+info:
+  title: DEPSIS API
+  version: 0.1.0-phase1
+  summary: Debian tabanlı çok kullanıcılı NAS platformu — Faz 1 yüzeyi
+  description: |
+    Bu belge tek doğruluk kaynağıdır. `apps/web` istemcisi buradan üretilir
+    (`openapi-typescript`, ADR-0002); elle yazılmış istemci tipi bulunamaz.
+
+    Kapsam: yalnızca Faz 1 uçları. Görevler, yedekleme, ZeroTier ve uygulama kataloğu
+    Faz 2-3'e aittir ve kasıtlı olarak yoktur — tanımlanmamış bir uç, "yakında" diye
+    duran boş bir uçtan iyidir.
+
+    Sistem aracısı IPC şeması burada DEĞİLDİR. ADR-0006 gereği onu Rust sahiplenir ve
+    schemars ile üretir: bir güven sınırının sözleşmesini, o sınırı uygulayan taraf
+    tanımlamalıdır.
+
+servers:
+  - url: /api/v1
+
+tags:
+  - name: auth
+    description: Oturum ve MFA. Faz 1'de MFA yalnız TOTP (ADR-0009).
+  - name: files
+    description: Dosya ağacı. Yetki her zaman id üzerinden çözülür, asla yol üzerinden (ADR-0005).
+  - name: uploads
+    description: tus 1.0.0 devam ettirilebilir yükleme (ADR-0008).
+  - name: search
+    description: Türkçe-duyarlı ad araması (ADR-0010).
+  - name: system
+    description: Telemetri ve işler.
+
+security:
+  - sessionCookie: []
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Parola ile oturum aç
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Oturum açıldı veya MFA gerekiyor
+          headers:
+            Set-Cookie:
+              description: HttpOnly + Secure + SameSite=Lax oturum çerezi
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResult' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+
+  /auth/mfa/verify:
+    post:
+      tags: [auth]
+      summary: TOTP kodunu doğrula
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MfaVerifyRequest' }
+      responses:
+        '204':
+          description: Doğrulandı; oturum çerezi kuruldu
+        '401': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Bu oturumu sonlandır
+      responses:
+        '204':
+          description: Sonlandırıldı
+
+  /me:
+    get:
+      tags: [auth]
+      summary: Oturum sahibinin profili ve etkin yetkileri
+      responses:
+        '200':
+          description: Profil
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CurrentUser' }
+        '401': { $ref: '#/components/responses/Problem' }
+
+  /files:
+    get:
+      tags: [files]
+      summary: Bir klasörün içeriğini listele
+      description: |
+        Cursor pagination zorunlu (§14). Offset kullanılmaz: bir NAS'ta küme sürekli
+        değiştiği için offset sayfalama sessizce kayıt atlar.
+
+        Yanıtta toplam sayı yoktur, yalnız hasMore. Filtrelenmiş bir liste yanında
+        filtrelenmemiş bir sayaç, kiracının göremediği satırların varlığını sızdırır.
+      parameters:
+        - name: parentId
+          in: query
+          description: Yoksa kullanıcının kökleri döner.
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [name, modified, size]
+            default: name
+      responses:
+        '200':
+          description: Sayfa
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileEntryPage' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /files/folders:
+    post:
+      tags: [files]
+      summary: Klasör oluştur
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateFolderRequest' }
+      responses:
+        '201':
+          description: Oluşturuldu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileEntry' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /files/{id}:
+    parameters:
+      - $ref: '#/components/parameters/FileId'
+    get:
+      tags: [files]
+      summary: Tek bir girdinin ayrıntısı
+      responses:
+        '200':
+          description: Girdi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileEntryDetail' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [files]
+      summary: Yeniden adlandır
+      description: |
+        Taşıma burada değil, /file-operations üzerinden yapılır — taşımada hem kaynak
+        hem hedef yetkisi gerekir (§6.2).
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RenameRequest' }
+      responses:
+        '200':
+          description: Güncellendi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileEntry' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [files]
+      summary: Çöp kutusuna taşı
+      responses:
+        '202':
+          description: İş kuyruğa alındı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobRef' }
+        '403': { $ref: '#/components/responses/Problem' }
+
+  /files/{id}/content:
+    parameters:
+      - $ref: '#/components/parameters/FileId'
+    get:
+      tags: [files]
+      summary: Dosya içeriğini indir
+      description: |
+        RFC 9110 §14 Range destekler. Sunucu dosyayı belleğe almaz, akıtır. Güçlü ETag ile
+        If-Range; dosya değiştiyse 206 yerine 200 döner ve bozuk splice engellenir.
+      parameters:
+        - name: Range
+          in: header
+          schema: { type: string }
+        - name: If-Range
+          in: header
+          schema: { type: string }
+      responses:
+        '200':
+          description: Tam içerik
+          headers:
+            Accept-Ranges:
+              schema: { type: string }
+            ETag:
+              schema: { type: string }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206':
+          description: Kısmi içerik
+          headers:
+            Content-Range:
+              schema: { type: string }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/Problem' }
+        '416': { $ref: '#/components/responses/Problem' }
+
+  /file-operations:
+    post:
+      tags: [files]
+      summary: Taşı, kopyala veya geri yükle — uzun süren iş olarak
+      description: |
+        Taşımada hem kaynak hem hedef yetkisi doğrulanır (§6.2).
+
+        Dataset sınırını geçen bir taşıma rename DEĞİLDİR: ölçüldüğü üzere dataset'ler
+        arası rename(2) EXDEV verir (ADR-0008). Böyle bir istek kopyala+sil işine dönüşür
+        ve ilerleme raporlar.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FileOperationRequest' }
+      responses:
+        '202':
+          description: İş kuyruğa alındı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobRef' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /uploads:
+    post:
+      tags: [uploads]
+      summary: Devam ettirilebilir yükleme oluştur (tus creation)
+      description: |
+        Yükleme, hedefin kendi dataset'i içindeki .depsis/staging/ altına iner; ayrı bir
+        staging dataset'i yoktur, çünkü dataset'ler arası yayınlama atomik olamaz (ADR-0008).
+
+        Kota aşımı EDQUOT üretir ve bu 507 olarak döner, 500 olarak değil.
+      parameters:
+        - name: Upload-Length
+          in: header
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: Upload-Metadata
+          in: header
+          required: true
+          description: tus base64 metadata; filename ve parentId taşır.
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: Oluşturuldu
+          headers:
+            Location:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '507': { $ref: '#/components/responses/Problem' }
+
+  /uploads/{uploadId}:
+    parameters:
+      - name: uploadId
+        in: path
+        required: true
+        schema: { type: string }
+    head:
+      tags: [uploads]
+      summary: Kaldığı yeri sor (tus HEAD)
+      responses:
+        '200':
+          description: Mevcut offset
+          headers:
+            Upload-Offset:
+              schema: { type: integer, format: int64 }
+            Upload-Length:
+              schema: { type: integer, format: int64 }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [uploads]
+      summary: Parça gönder (tus PATCH)
+      description: |
+        Gövde ham bayttır. Bu route'ta body parser kapalı olmalıdır; stream'e dokunan
+        herhangi bir parser yüklemeyi sessizce bozar (ADR-0008).
+      parameters:
+        - name: Upload-Offset
+          in: header
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: Upload-Checksum
+          in: header
+          description: sha256 base64. Tarayıcı SubtleCrypto yalnız SHA ailesini destekler.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/offset+octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '204':
+          description: Parça kabul edildi
+          headers:
+            Upload-Offset:
+              schema: { type: integer, format: int64 }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '507': { $ref: '#/components/responses/Problem' }
+
+  /search:
+    get:
+      tags: [search]
+      summary: Ad araması
+      description: |
+        Sorgu normalize edilmiş kolona karşı çalışır (ADR-0010). İstanbul yazan da istanbul
+        yazan da aynı sonucu alır; cagri yazmak Çağrı dosyalarını bulur.
+
+        Sonuçlar yalnız çağıranın ACL/RLS kapsamındaki nesnelerden gelir. Sayaç ve öneriler
+        de aynı kapsamdan üretilir.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+        - name: scope
+          in: query
+          description: Yoksa tüm erişilebilir alan.
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Sonuçlar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileEntryPage' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /system/telemetry:
+    get:
+      tags: [system]
+      summary: Donanım ve depolama durumu
+      description: |
+        Kapasite zfs get değerlerinden gelir, statvfs'ten DEĞİL — ölçüldüğü üzere statvfs
+        kotayı yanlış raporluyor (ADR-0008).
+
+        Yetkisiz kullanıcıya sistem ayrıntısı gösterilmez; yanıt role göre daralır.
+      responses:
+        '200':
+          description: Durum
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Telemetry' }
+        '403': { $ref: '#/components/responses/Problem' }
+
+  /jobs/{jobId}:
+    parameters:
+      - name: jobId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [system]
+      summary: Uzun süren bir işin durumu
+      responses:
+        '200':
+          description: İş durumu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: depsis_session
+      description: |
+        Sunucu tarafı oturum. JWT kullanılmaz — güvenlik olayında tüm oturumların iptal
+        edilebilmesi gerekiyor ve stateless token bunu ucuz yapmıyor (ADR-0009).
+
+  parameters:
+    FileId:
+      name: id
+      in: path
+      required: true
+      description: Kararlı dosya kimliği. Yol asla kimlik olarak kullanılmaz (ADR-0005).
+      schema: { type: string, format: uuid }
+    Cursor:
+      name: cursor
+      in: query
+      description: Opak. İstemci bunu üretmez ve ayrıştırmaz; kodlaması sunucuya aittir.
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: |
+        Kullanıcı ve uç kapsamında benzersiz. Aynı anahtar farklı bir istek parmak iziyle
+        gelirse 409 döner. RFC yoktur — IETF taslağı Expired and archived durumundadır — bu
+        yüzden semantik burada tanımlanır (ADR-0008).
+      schema: { type: string, maxLength: 255 }
+    IfMatch:
+      name: If-Match
+      in: header
+      description: Çakışma kontrolü. Eşleşmezse 412.
+      schema: { type: string }
+
+  responses:
+    Problem:
+      description: RFC 9457 Problem Details
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  schemas:
+    ProblemDetails:
+      type: object
+      required: [type, title, status, code, correlationId]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail:
+          type: string
+          description: Secret, dosya içeriği veya çağıranın görmeye yetkili olmadığı yol içermez.
+        instance: { type: string }
+        code:
+          type: string
+          description: Kapalı küme. Kaynak tanım packages/contracts/src/errors.ts.
+        correlationId:
+          type: string
+          description: Her yanıtta ve aynı isteğin her log satırında bulunur (§14).
+        errors:
+          type: array
+          items: { $ref: '#/components/schemas/ProblemFieldError' }
+        retryAfter: { type: integer, minimum: 0 }
+
+    ProblemFieldError:
+      type: object
+      required: [pointer, code, message]
+      properties:
+        pointer: { type: string }
+        code: { type: string }
+        message: { type: string }
+
+    FileName:
+      type: string
+      minLength: 1
+      maxLength: 255
+      description: |
+        Windows'ta yasak karakterler, ayrılmış adlar (CON, PRN, AUX, NUL, COM1 vb.) ve
+        sondaki nokta/boşluk sunucu tarafında reddedilir — SMB istemcileri o dosyalara
+        erişemezdi.
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, maxLength: 255 }
+        password: { type: string, maxLength: 1024 }
+
+    MfaVerifyRequest:
+      type: object
+      required: [challengeId, code]
+      properties:
+        challengeId: { type: string }
+        code:
+          type: string
+          pattern: '^[0-9]{6}$'
+          description: TOTP kodu. Kurtarma kodu ayrı uçtan verilir.
+
+    LoginResult:
+      type: object
+      required: [status]
+      description: |
+        Kimlik bilgisi yanlışsa 401 döner ve gövde kullanıcının var olup olmadığını ayırt
+        ettirmez.
+      properties:
+        status:
+          type: string
+          enum: [authenticated, mfa_required]
+        challengeId:
+          type: string
+          description: Yalnız status=mfa_required iken bulunur.
+
+    CurrentUser:
+      type: object
+      required: [id, username, displayName, permissions]
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        displayName: { type: string }
+        permissions:
+          type: array
+          description: Etkin yetkiler. UI bunu gizleme için kullanır; zorlama sunucudadır.
+          items: { $ref: '#/components/schemas/Permission' }
+
+    Permission:
+      type: string
+      description: |
+        Allow-only. deny yoktur — POSIX ACL'de deny ACE diye bir şey yok ve uygulanan
+        substrat onu ifade edemez (ADR-0004).
+      enum:
+        - list
+        - read
+        - download
+        - create
+        - modify
+        - move
+        - delete
+        - share
+        - manage_acl
+        - view_versions
+        - view_audit
+
+    FileEntry:
+      type: object
+      required: [id, parentId, name, kind, size, modifiedAt]
+      properties:
+        id: { type: string, format: uuid }
+        parentId:
+          type: [string, 'null']
+          format: uuid
+        name: { type: string }
+        kind:
+          type: string
+          enum: [file, folder]
+        size: { type: integer, format: int64 }
+        modifiedAt: { type: string, format: date-time }
+        mimeType: { type: string }
+
+    FileEntryDetail:
+      allOf:
+        - $ref: '#/components/schemas/FileEntry'
+        - type: object
+          properties:
+            createdAt: { type: string, format: date-time }
+            ownerId: { type: string, format: uuid }
+            checksum:
+              type: string
+              description: Sunucu tarafı kanonik digest.
+            effectivePermissions:
+              type: array
+              items: { $ref: '#/components/schemas/Permission' }
+
+    FileEntryPage:
+      type: object
+      required: [items, hasMore]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/FileEntry' }
+        nextCursor: { type: string }
+        hasMore:
+          type: boolean
+          description: |
+            Toplam sayı bilerek yok. Filtrelenmemiş bir sayaç, kiracının göremediği
+            satırların varlığını sızdırır.
+
+    CreateFolderRequest:
+      type: object
+      required: [name]
+      properties:
+        parentId: { type: string, format: uuid }
+        name: { $ref: '#/components/schemas/FileName' }
+
+    RenameRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { $ref: '#/components/schemas/FileName' }
+
+    FileOperationRequest:
+      type: object
+      required: [operation, sourceIds, destinationId]
+      properties:
+        operation:
+          type: string
+          enum: [move, copy, restore]
+        sourceIds:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items: { type: string, format: uuid }
+        destinationId: { type: string, format: uuid }
+        conflictPolicy:
+          type: string
+          enum: [replace, keep_both, version, skip]
+          default: keep_both
+
+    JobRef:
+      type: object
+      required: [jobId]
+      properties:
+        jobId: { type: string, format: uuid }
+
+    Job:
+      type: object
+      required: [id, kind, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, dead]
+          description: |
+            dead, max_attempts aşıldığında verilir ve sessizce kaybolmaz — sistem alarmı
+            üretir (ADR-0003).
+        progress: { type: number, minimum: 0, maximum: 1 }
+        createdAt: { type: string, format: date-time }
+        error: { $ref: '#/components/schemas/ProblemDetails' }
+
+    Telemetry:
+      type: object
+      required: [pools, cpu, memory]
+      properties:
+        pools:
+          type: array
+          items: { $ref: '#/components/schemas/PoolStatus' }
+        cpu:
+          type: object
+          properties:
+            loadAverage:
+              type: array
+              items: { type: number }
+            temperatureCelsius: { type: number }
+        memory:
+          type: object
+          properties:
+            totalBytes: { type: integer, format: int64 }
+            usedBytes: { type: integer, format: int64 }
+
+    PoolStatus:
+      type: object
+      required: [name, health, used, available]
+      properties:
+        name: { type: string }
+        health:
+          type: string
+          enum: [ONLINE, DEGRADED, FAULTED, OFFLINE, UNAVAIL]
+        used: { type: integer, format: int64 }
+        available: { type: integer, format: int64 }
+        usedBySnapshots: { type: integer, format: int64 }
+        scrubState: { type: string }

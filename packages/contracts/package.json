@@ -10,6 +10,8 @@
     }
   },
   "scripts": {
+    "generate": "openapi-typescript openapi/depsis.yaml -o src/generated/api.d.ts",
+    "generate:check": "openapi-typescript openapi/depsis.yaml -o .generated-check.d.ts && diff -u src/generated/api.d.ts .generated-check.d.ts",
     "build": "tsc -b tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint src",
@@ -19,6 +21,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "openapi-typescript": "7.13.0",
     "typescript": "6.0.3",
     "vitest": "4.1.10"
   }
