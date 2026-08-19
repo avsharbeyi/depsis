@@ -46,6 +46,7 @@ Master prompt §0.2 gereği her büyük değişiklikten önce bir ADR yazılır.
 | [0011](0011-filesystem-events.md)               | Dosya sistemi olay yakalama                               | **Accepted** ✅ P0-D geçti 38/38 — fanotify FID ZFS'te çalışıyor; snapshot delege edilebilir |
 | [0012](0012-dev-test-environment.md)            | Geliştirme/test ortamı topolojisi                         | **Accepted**                                                                                 |
 | [0013](0013-postgres-version-and-tenancy.md)    | PostgreSQL majör sürümü, RLS ve kiracı yalıtımı           | **Accepted** ✅ P0-C geçti 45/45 — iki RLS baypası üretilip kapatıldı                        |
+| [0014](0014-schema-migrations.md)               | Şema göçü: ham SQL, iki rol, iki hat                      | Accepted — 0001 gerçek PG 18.6'da koşuldu; iki hata koşarken bulundu                         |
 
 ⚠️ = Faz 0 kickoff belgesindeki varsayım araştırmayla çürütüldü. Ayrıntı ADR'nin "Bulunan gerçek"
 bölümünde; özet [ADR-0000 §5](0000-version-baseline.md)'te.

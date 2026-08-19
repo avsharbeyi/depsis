@@ -1,0 +1,15 @@
+{
+  "name": "@depsis/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "migrate:up": "node-pg-migrate up",
+    "migrate:down": "node-pg-migrate down",
+    "migrate:status": "node-pg-migrate --dry-run up"
+  },
+  "dependencies": {
+    "node-pg-migrate": "9.0.0",
+    "pg": "8.23.0"
+  }
+}

@@ -385,6 +385,19 @@ runcmd:
   # the image. Installing it by hand over SSH proved fragile: the download was interrupted
   # three times and twice left a half-written toolchain that failed with "Missing manifest".
   # Doing it here means it happens once, unattended, before anyone needs it.
+  # PostgreSQL 18 from PGDG, not Debian stock 17. ADR-0013 requires 18 for the built-in uuidv7(),
+  # and the first migration refuses to run without it. This was installed by hand once and then
+  # went missing, taking P0-C's whole environment with it; putting it here means the VM is
+  # reproducible instead of depending on what someone typed months ago.
+  - [ sh, -c, "install -d -m 0755 /usr/share/postgresql-common/pgdg && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc" ]
+  - [ sh, -c, ". /etc/os-release; printf 'Types: deb
+URIs: https://apt.postgresql.org/pub/repos/apt
+Suites: %s-pgdg
+Components: main
+Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+' \"$VERSION_CODENAME\" > /etc/apt/sources.list.d/pgdg.sources" ]
+  - [ sh, -c, "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-18 postgresql-contrib-18" ]
+  - [ sh, -c, "pg_lsclusters > /var/log/depsis-pg-clusters.txt 2>&1 || echo 'WARN: no pg cluster' >&2" ]
   - [ sh, -c, "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh" ]
   - [ sh, -c, "su - depsis -c 'sh /tmp/rustup.sh -y --no-modify-path --profile minimal --default-toolchain stable' >> /var/log/depsis-rustup.log 2>&1" ]
   - [ sh, -c, "su - depsis -c '$HOME/.cargo/bin/cargo --version' >> /var/log/depsis-rustup.log 2>&1 || echo 'WARN: rust toolchain unusable' >&2" ]
