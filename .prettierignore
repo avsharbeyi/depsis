@@ -8,3 +8,7 @@ docs/adr/evidence/
 
 # Generated from openapi/depsis.yaml — committed so CI can detect drift, never edited by hand.
 **/src/generated/
+
+# Claude Code's scratch worktrees. Already gitignored; prettier needs telling separately, and a
+# formatting failure from a directory that is not part of the project makes `pnpm check` useless.
+.claude/worktrees/

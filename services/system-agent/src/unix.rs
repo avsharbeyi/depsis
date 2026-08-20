@@ -5,13 +5,13 @@
 //! without anyone noticing; keeping it at one declaration means the boundary is visible.
 
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use depsis_agent::audit::Sink;
 use depsis_agent::dispatch::Agent;
@@ -263,16 +263,7 @@ fn serve_one<R: CommandRunner, S: Sink>(
     // Nothing on the wire can influence it (ADR-0006, threat model TB4).
     let peer = peer_of(stream)?;
 
-    let cloned = stream
-        .try_clone()
-        .map_err(|e| SeamError::Io(format!("clone stream: {e}")))?;
-    // `BufReader::new(x).take(n)` would give `Take<BufReader<_>>`, which is `Read` but not
-    // `BufRead`, so `read_line` would not compile. Bound the stream first, then buffer it.
-    let mut reader = BufReader::new(cloned.take(MAX_REQUEST_BYTES));
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|e| SeamError::Io(format!("read request: {e}")))?;
+    let line = read_request_line(stream)?;
 
     if line.is_empty() {
         // Peer closed without sending anything — a liveness probe, typically.
@@ -305,6 +296,95 @@ fn serve_one<R: CommandRunner, S: Sink>(
 
     let response = agent.handle(&request_json, peer, &correlation_id, &reason);
     respond(stream, &response)
+}
+
+/// Read one newline-terminated request under an ABSOLUTE deadline.
+///
+/// `set_read_timeout` arms `SO_RCVTIMEO`, which bounds a single `recv(2)` — not a connection. A
+/// peer that sends one byte every twenty-nine seconds re-arms the window on every byte, so
+/// `read_line` returns only on a newline or at the size cap. With a 30-second timeout and a 256 kB
+/// cap that is a single connection holding the agent for roughly 88 days, and because `serve_loop`
+/// handles one connection at a time, nothing else is served for the duration. Any member of the
+/// `depsis-api` group can do it, which under threat-model TB4 includes a compromised API.
+///
+/// The fix is a deadline the peer cannot push back: the socket timeout is re-armed before every
+/// read to whatever remains of the budget, and the budget is checked between reads. A slow client
+/// is then bounded by `IO_TIMEOUT` in total rather than per syscall.
+///
+/// Reading by hand rather than through `BufRead::read_line` is what makes that possible — the
+/// buffered reader owns its own loop and offers no place to re-arm.
+fn read_request_line(stream: &UnixStream) -> Result<String, SeamError> {
+    read_request_line_within(stream, IO_TIMEOUT)
+}
+
+/// The budget is a parameter so a test can use one short enough to run. `IO_TIMEOUT` is thirty
+/// seconds, and a test that waits thirty seconds to prove a timeout works is a test that gets
+/// deleted.
+fn read_request_line_within(stream: &UnixStream, budget: Duration) -> Result<String, SeamError> {
+    let deadline = Instant::now() + budget;
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 8192];
+    let mut reader = stream;
+
+    let expired = || SeamError::Io(format!("request not complete within {budget:?}"));
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(expired());
+        }
+        // A zero Duration means "no timeout" to setsockopt, which would be the opposite of what is
+        // wanted; `remaining` is known non-zero here.
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|e| SeamError::Io(format!("re-arm read timeout: {e}")))?;
+
+        // Stop at the cap rather than growing without bound. The cap is the memory-exhaustion
+        // guard and has to hold even though the caller is authenticated.
+        let room = (MAX_REQUEST_BYTES as usize).saturating_sub(buf.len());
+        if room == 0 {
+            break;
+        }
+
+        // `.get_mut(..n)` rather than `&mut chunk[..n]`: the crate denies indexing_slicing because
+        // a panic in a root daemon is a denial of service on the one component that cannot be
+        // restarted casually. `want` is bounded by `chunk.len()` so this cannot actually be None,
+        // and the error path says so rather than unwrapping.
+        let want = room.min(chunk.len());
+        let target = chunk
+            .get_mut(..want)
+            .ok_or_else(|| SeamError::Io("read buffer window out of range".into()))?;
+
+        let read = match reader.read(target) {
+            Ok(0) => break, // peer closed its write side; whatever we have is the request
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            // A timeout here IS the deadline expiring, because the window was armed from it.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(expired())
+            }
+            Err(e) => return Err(SeamError::Io(format!("read request: {e}"))),
+        };
+
+        let data = chunk
+            .get(..read)
+            .ok_or_else(|| SeamError::Io("short read window out of range".into()))?;
+        let saw_newline = data.contains(&b'\n');
+        buf.extend_from_slice(data);
+        if saw_newline {
+            break;
+        }
+    }
+
+    // Lossy rather than strict: invalid UTF-8 should be refused by the JSON parser as a malformed
+    // request, with the audit entry that goes with it, not dropped as an IO error before the
+    // dispatcher ever sees it.
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 fn respond(stream: &UnixStream, response: &Response) -> Result<(), SeamError> {
@@ -746,6 +826,55 @@ mod tests {
             false,
         );
         assert!(out.contains(r#""status":"ok""#), "got: {out}");
+    }
+
+    #[test]
+    fn a_dribbling_client_is_cut_off_by_the_deadline() {
+        // The regression: `set_read_timeout` arms SO_RCVTIMEO, which bounds ONE recv(2), not a
+        // connection. A peer that sends a byte just under the timeout re-arms the window forever,
+        // and because the agent serves one connection at a time that wedges the whole daemon.
+        //
+        // The writer end is held open for the duration, so `read` cannot see EOF — only the
+        // deadline can end this. With the per-syscall behaviour the call would never return.
+        let (client, server) = socket_pair();
+        let mut c = client;
+        c.write_all(b"{\"correlation_id\":\"d\"")
+            .expect("partial write");
+
+        let budget = Duration::from_millis(250);
+        let started = Instant::now();
+        let result = read_request_line_within(&server, budget);
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(SeamError::Io(msg)) => assert!(
+                msg.contains("not complete"),
+                "expected a deadline error, got: {msg}"
+            ),
+            Ok(partial) => panic!("a partial request was accepted as complete: {partial:?}"),
+            Err(other) => panic!("unexpected error kind: {other:?}"),
+        }
+        assert!(
+            elapsed < budget * 8,
+            "the read ran for {elapsed:?}, far past its {budget:?} budget"
+        );
+
+        drop(c);
+    }
+
+    #[test]
+    fn a_complete_request_still_arrives_well_inside_the_budget() {
+        // The other half: bounding the read must not have broken the normal path.
+        let (client, server) = socket_pair();
+        let mut c = client;
+        c.write_all(
+            b"{\"correlation_id\":\"ok\",\"reason\":\"r\",\"request\":{\"op\":\"ping\"}}\n",
+        )
+        .expect("write");
+
+        let line = read_request_line_within(&server, Duration::from_secs(5)).expect("read");
+        assert!(line.contains("\"op\":\"ping\""), "got: {line}");
+        drop(c);
     }
 
     #[test]

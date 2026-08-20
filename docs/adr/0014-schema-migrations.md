@@ -28,12 +28,11 @@ Faz 0'da hiçbir göç aracı kararlaştırılmadı. Bu ADR onu kapatıyor.
 - `CREATE POLICY … USING (organization_id = current_setting('depsis.organization_id', true)::uuid)`
 - `ALTER TABLE … FORCE ROW LEVEL SECURITY` — `ENABLE` yetmiyor (ADR-0013 §2.1, P0-C ile ölçüldü)
 - `GRANT`/`REVOKE` matrisi ve rol bazlı politikalar (`TO depsis_app`)
-- İfade indeksleri: `public.unaccent('public.unaccent'::regdictionary, name)`
+- İfade indeksleri ve onların gerektirdiği `IMMUTABLE` sarmalayıcılar
+- Üretilmiş (`GENERATED ... STORED`) kimlik sütunları ve üzerlerindeki kısıtlar
 
-Sonuncusu özellikle öğretici. P0-H, `unaccent(...)` niteliksiz çağrısının sorgularda ve
-`GENERATED` sütunlarda çalıştığını ama **ayrı bir oturum ifade indeksi kurarken başarısız
-olduğunu** ölçtü: indeks derlemesi sırasında `search_path` kısıtlanıyor. Bir DSL'in ürettiği SQL'i
-bu ayrıntıya zorlamak, DSL'i kullanmamaktan daha zahmetli.
+Sonuncular özellikle öğretici, ve bu ADR'nin ilk hâli burayı **yanlış** anlatıyordu. Düzeltmesi
+aşağıda, "P1-A'nın çürüttükleri" başlığında.
 
 Karışık bir kod tabanı — bazı göçler JS, bazıları SQL — gözden geçirenin ikisini birden bilmesini
 gerektirir ve "bu politika gerçekte hangi SQL'e dönüşüyor?" sorusunu her incelemede yeniden
@@ -44,12 +43,16 @@ sordurur. Bu yüzden **tüm göçler `.sql`**; JS göçü yazmak yasak.
 Araç bir _koşucu_ olarak seçildi, bir şema yöneticisi olarak değil. Aşağıdakiler paketin
 **kendisinden** doğrulandı (npm tarball'ı açılıp `dist/` okundu; belgeye güvenilmedi):
 
-| Gereksinim                       | Doğrulama                                                         |
-| -------------------------------- | ----------------------------------------------------------------- |
-| Ham `.sql` göç dosyaları         | `parseSqlFile` `<id>.up.sql` / `<id>.down.sql` çiftlerini tanıyor |
-| Eşzamanlı koşuya karşı kilit     | `pg_advisory_lock` çağrısı `dist/bundle/index.js`'te mevcut       |
-| Geçmiş tablosu adı ayarlanabilir | `migrationsTable` seçeneği mevcut                                 |
-| Bağımlılık yüzeyi                | `glob`, `jiti`, `yargs` — üç doğrudan bağımlılık                  |
+| Gereksinim                       | Doğrulama                                                          |
+| -------------------------------- | ------------------------------------------------------------------ |
+| Ham `.sql` göç dosyaları         | ✅ tek dosya + `-- Up/Down Migration` işaretçisi, P1-A ile koşuldu |
+| Eşzamanlı koşuya karşı kilit     | ✅ iki yarışan süreç, göç tam bir kez uygulandı (P1-A §6)          |
+| Geçmiş tablosu adı ayarlanabilir | ✅ ama **yalnız `-t` CLI bayrağıyla**; config dosyasından değil    |
+| Bağımlılık yüzeyi                | `glob`, `jiti`, `yargs` — üç doğrudan bağımlılık                   |
+
+> **Bu tablonun ilk hâli üç satırda yanılıyordu ve üçü de aynı hatanın ürünüydü:** paketin
+> `dist/`'inde bir fonksiyonun _var olduğunu_ görüp onun _devrede olduğu_ sonucuna varmak. Kaynağa
+> bakmak, belgeye bakmakla aynı tuzağı taşıyor. Ayrıntısı aşağıda.
 
 `prisma` ve `drizzle` elendi: ikisi de şemayı kendi modelinde sahiplenmek ister, oysa burada
 şemanın sahibi SQL. `sqitch`/`flyway` elendi: monorepo'ya Node dışı bir çalışma zamanı sokuyorlar.
@@ -80,6 +83,47 @@ bir rolle koşmak zorunda kalırdı — ve sonraki her göç o gücü sebepsiz d
 güvenlik kontrolü olarak sunmuyoruz: aynı makinede `psql` çalıştırabilen biri zaten oradadır. Amaç,
 uygulamanın **kazara** sahip rolüyle bağlanmasını imkânsız kılmak.
 
+### 3a. Göç dosyası düzeni: tek dosya, işaretçili — ayrı `.up`/`.down` değil
+
+Bu ADR ilk yazıldığında göçler `0001_foundation.up.sql` + `0001_foundation.down.sql` çifti olarak
+tasarlanmıştı. P1-A ölçtü: node-pg-migrate 9.0.0'ın `.sql` için **varsayılan stratejisi
+`legacySql`** ve orada **bir dosya bir göçtür**; `.up`/`.down` sonekleri hiçbir anlam taşımaz.
+
+Sonuç sessizdi. Boş bir veritabanında `up` komutu önce `0001_foundation.down.sql`'i (alfabetik
+olarak `.up`'tan önce gelir), sonra `0001_foundation.up.sql`'i uyguladı, geçmişe **iki** kayıt yazdı
+ve "Migrations complete!" diyerek sıfırla çıktı. Zararsız kalmasının tek sebebi o down dosyasının
+tamamen `DROP ... IF EXISTS` olması ve boş bir şemaya çarpmasıydı.
+
+İkinci bir göçle zararsız olmazdı: sıralı düzen `0001.down, 0001.up, 0002.down, 0002.up` olur, yani
+**her deploy 0002'nin geri almasını 0001'in az önce kurduğu şemaya karşı koşar.** Zaten verisi olan
+bir kümede — ki bu projenin kendi test VM'i tam o durumdaydı — ilk gerçek deploy bütün kiracı
+satırlarını düşürür, tabloları boş yeniden yaratır ve sıfırla çıkardı.
+
+Çiftleri gerçekten eşleyen yükleyici (`builtInLoaders.sql`) yalnızca `migrationLoaderStrategies`
+ile seçilebiliyor, ve P1-A CLI'ın bu seçeneği **denenen her config dosyası şeklinde yok saydığını**
+ölçtü. Yani çift düzeni komut satırından erişilemez.
+
+Bu yüzden düzen **tek dosya + `-- Up Migration` / `-- Down Migration` işaretçisi**: aracın
+varsayılanı, hiçbir yapılandırma gerektirmiyor, ve bütün hata sınıfını yapısal olarak imkânsız
+kılıyor — ileri koşulabilecek ayrı bir down dosyası yok.
+
+### 3b. Config dosyası yok; her ayar açık bir CLI bayrağı
+
+`migrate.config.js` silindi. P1-A iki şey ölçtü: CLI bir config dosyasını **yalnız `-f` verilirse**
+okuyor (hiçbir betiğimiz vermiyordu, dolayısıyla dosya tamamen ölüydü ve geçmiş varsayılan
+`pgmigrations` tablosuna yazılıyordu), ve `-f` verilse bile `migrationsTable` ile
+`migrationLoaderStrategies` denenen hiçbir şekilde işlemiyordu.
+
+Okunmayan bir config dosyası hiç olmamasından kötüdür: davranışın ikinci, inandırıcı görünen ama
+hiç gerçekleşmeyen bir tarifidir — bu projenin başka yerde "iki gerçeklik" diye yasakladığı şeyin
+ta kendisi. Ayarlar artık `package.json`'daki üç betikte, açıkça:
+
+    node-pg-migrate -d DEPSIS_MIGRATION_DATABASE_URL -m migrations -t depsis_migrations \
+                    --advisory-lock-mode wait --no-single-transaction <up|down>
+
+`--advisory-lock-mode`'un varsayılanı `fail`, `--single-transaction`'ın varsayılanı `true`. İkisi de
+bu ADR'nin istediğinin tersi, ve config dosyası okunmadığı için sessizce yürürlükteydiler.
+
 ### 4. Organizasyon oluşturmak bir operatör işlemidir, API işlemi değil
 
 Bu, 0001'i koşarken zorunlu hale geldi (aşağıdaki kanıt bölümü). `organizations` üzerinde
@@ -104,8 +148,10 @@ ama `down` dosyası o zaman **açıkça başarısız olmalı** ve nedenini söyl
 | `.sql` çifti, advisory lock, ayarlanabilir geçmiş tablosu            | verified — paketin `dist/`'i okundu                 |
 | `unaccent` niteliksiz çağrısı ayrı oturumda indeks kurarken patlıyor | verified — [P0-H](evidence/p0-h.tsv)                |
 | `FORCE` olmadan sahip rolü RLS'i atlıyor                             | verified — [P0-C](evidence/p0-c.tsv)                |
-| Kısmi uygulanmış bir göçten kurtarma davranışı                       | **unverified** → P1-A ile ölçülecek                 |
-| İki eşzamanlı göç sürecinin advisory lock ile serileştiği            | **unverified** → P1-A ile ölçülecek                 |
+| Kısmi uygulanmış bir göç **applied olarak kaydedilmiyor**            | ✅ [P1-A](evidence/p1-a.tsv) §5                     |
+| İki eşzamanlı göç advisory lock ile serileşiyor                      | ✅ [P1-A](evidence/p1-a.tsv) §6                     |
+| `down` sonrası şema gerçekten geri dönüyor (`pg_dump` farkı boş)     | ✅ [P1-A](evidence/p1-a.tsv) §4                     |
+| `depsis_app` göçten sonra DDL yapamıyor                              | ✅ [P1-A](evidence/p1-a.tsv) §3                     |
 | `uuidv7()` kimliklerinin monoton arttığı                             | **unverified** — ölçmeye çalışıldı, test kusurluydu |
 
 ### 0001'in gerçek bir PG 18.6 kümesinde ölçülenleri (2026-08-19)
@@ -137,6 +183,32 @@ ama `down` dosyası o zaman **açıkça başarısız olmalı** ve nedenini söyl
    politika eklendi ve kiracılık modeli netleşti: organizasyon oluşturmak bir **operatör** işlemi,
    API işlemi değil.
 
+### P1-A'nın çürüttükleri
+
+Üçü de bu ADR'nin **`verified` diye işaretlediği** iddialardı.
+
+1. **"`.up.sql`/`.down.sql` çifti tanınıyor."** Tanınmıyor — varsayılan yükleyici öyle çalışmıyor
+   (§3a). İddia paketin `dist/`'inde `parseSqlFile`'ı görüp yazılmıştı. Bir fonksiyonun kaynakta
+   bulunması, o fonksiyonun çağrıldığı anlamına gelmiyor; kaynağa bakmak belgeye bakmakla aynı
+   tuzağı taşıyor ve bu ADR ona düştü.
+
+2. **"Geçmiş tablosu adı config'den ayarlanabilir."** CLI bayrağından ayarlanabiliyor, config
+   dosyasından değil — ve config dosyası zaten hiç okunmuyordu (§3b).
+
+3. **"`unaccent` niteliksiz çağrısı ayrı oturumda ifade indeksi kurarken patlıyor, sebebi
+   `search_path`."** Sebep bu değil. PostgreSQL 18'de `unaccent`'in **her iki aşırı yüklemesi de
+   `STABLE`** (`provolatile='s'`, P1-A §7'de ölçüldü), dolayısıyla niteleme yapılsın yapılmasın
+   ifade indeksinde kullanılamıyor: hata `functions in index expression must be marked IMMUTABLE`.
+
+   P0-H'nin gerçekte ölçtüğü daha dar ve farklı: `depsis_norm is declared IMMUTABLE
+(provolatile=i)` ve `an expression index on depsis_norm() can be created`. Ham bir `unaccent`
+   çağrısı üzerine hiç indeks kurmadı. ADR-0010 §85 zaten "fonksiyon IMMUTABLE olmalı" diyor;
+   **yanlış olan bu ADR'nin P0-H'ye yaptığı atıftı.** Şema niteleme gereksinimi sarmalayıcının
+   _içindeki_ sözlük araması için geçerli, indeksin kendisi için değil.
+
+   Çalışan desen P1-A §7'de koşuldu: sabit `search_path`'li `IMMUTABLE` bir SQL sarmalayıcı,
+   gövdesinde `public.unaccent('public.unaccent'::regdictionary, …)`.
+
 ## P1-A — bu ADR'yi doğrulayacak PoC
 
 1. Göç `depsis_owner` ile koşup bittikten sonra `depsis_app` gerçekten **DDL yapamıyor** mu?
@@ -145,6 +217,35 @@ ama `down` dosyası o zaman **açıkça başarısız olmalı** ve nedenini söyl
 4. `down` koşulduktan sonra şema gerçekten başlangıç durumuna dönüyor mu? (yalnız "hata vermedi"
    değil — `pg_dump --schema-only` farkı boş mu?)
 5. `public.unaccent(...)` nitelikli ifade indeksi göç oturumunda kuruluyor mu?
+
+### 0001'in koşarken bulunan diğer iki hatası
+
+Bu ikisi şemanın kendisindeydi ve yalnızca gerçek bir kümede ölçülünce göründü.
+
+4. **`lower(email)` Türkçe noktalı İ'yi katlamıyor.** `bootstrap.sql`'in kurduğu ICU
+   veritabanında `lower('İsmail')` = `i` + U+0307 + `smail`, `lower('ismail')`'e **eşit değil**
+   (ölçüm: P1-A §9). `UNIQUE (organization_id, lower(email))` bu yüzden `İsmail@firma.com` ile
+   `ismail@firma.com`'u ayrı kovalara koyuyordu: aynı kiracıda tek adres için iki hesap, hiçbir
+   katmanda hata yok — ve uygulamanın kendi "bu adres alınmış mı?" kontrolü de aynı ifadeyi
+   kullanmak zorunda olduğu için hiçbir şey bulmuyor. Türkçe klavye büyük harfli biçimi kendiliğinden
+   üretiyor.
+
+   Çözüm `public.fold_identity()`: `NFKC` normalize → i-ailesi `translate` → `lower`, sonucu
+   `GENERATED ... STORED` bir sütunda saklanıyor. **Aksan sökmüyor**, çünkü P0-H aramada
+   `Çağrı`/`Cagri` çakışmasını ölçtü — arama için doğru, kimlik için ölümcül: iki farklı insanı tek
+   hesapta birleştirirdi. P1-A §9 dört yönü de sınıyor: İ, ASCII, NFC/NFD, ve aksanların ayrı
+   kalması.
+
+5. **`CREATE UNIQUE INDEX` `pg_constraint`'te görünmüyor.** P0-C'nin, ADR-0013 §2.2'nin
+   `organization_id` kuralını uygulayan denetimi `contype IN ('u','x')` tarıyor (p0-c satır 425), ve
+   çıplak bir benzersiz indeksin `pg_constraint` satırı yok — P1-A §9'da ölçüldü. Yani 0001'in ilk
+   hâlindeki iki benzersiz indeks o denetime **görünmezdi**, ve gelecekteki bir göç aynı deyimle
+   global bir benzersiz indeks eklese denetim yine temiz raporlardı.
+
+   İki taraflı düzeltildi: 0001'deki benzersizlikler artık `ALTER TABLE ... ADD CONSTRAINT` ile
+   kuruluyor (ifade yerine üretilmiş sütun kullanıldığı için bu mümkün), ve P1-A `pg_index`
+   üzerinden — `indisunique OR indisexclusion`, `pg_get_indexdef` ile ifade indeksleri dahil —
+   çalışan bir denetim koşuyor.
 
 ## Sonuçlar
 

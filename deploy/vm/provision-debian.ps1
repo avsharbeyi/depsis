@@ -398,6 +398,12 @@ Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
 ' \"$VERSION_CODENAME\" > /etc/apt/sources.list.d/pgdg.sources" ]
   - [ sh, -c, "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-18 postgresql-contrib-18" ]
   - [ sh, -c, "pg_lsclusters > /var/log/depsis-pg-clusters.txt 2>&1 || echo 'WARN: no pg cluster' >&2" ]
+  # Node, because the migration runner (ADR-0014) and the API are Node, and P1-A has to exercise
+  # the real runner rather than applying the SQL with psql and calling it proven. Debian trixie
+  # ships no nodejs at all, so this comes from NodeSource. The repo's engines field wants >= 24.19.
+  - [ sh, -c, "curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource.sh && bash /tmp/nodesource.sh" ]
+  - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs && corepack enable && corepack prepare pnpm@11.21.0 --activate" ]
+  - [ sh, -c, "node --version > /var/log/depsis-node-version.txt 2>&1 || echo 'WARN: node unusable' >&2" ]
   - [ sh, -c, "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh" ]
   - [ sh, -c, "su - depsis -c 'sh /tmp/rustup.sh -y --no-modify-path --profile minimal --default-toolchain stable' >> /var/log/depsis-rustup.log 2>&1" ]
   - [ sh, -c, "su - depsis -c '$HOME/.cargo/bin/cargo --version' >> /var/log/depsis-rustup.log 2>&1 || echo 'WARN: rust toolchain unusable' >&2" ]

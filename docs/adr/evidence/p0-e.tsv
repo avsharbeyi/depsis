@@ -75,7 +75,7 @@ p0-e	PASS	the created dataset really has posixacl	= posix
 p0-e	PASS	refquota was applied as asked	= 33554432
 p0-e	PASS	the nested dataset really is a separate mount (different st_dev)	
 p0-e	PASS	openat2 NO_XDEV refuses to cross into the nested dataset	rc=0
-p0-e	NOTE	agent environment: LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin LISTEN_PID=30855 LISTEN_FDS=1 LISTEN_FDNAMES=depsis-agent.socket USER=root INVOCATION_ID=8a5dc6fc6d7c4d46bfeab4394584487b JOURNAL_STREAM=9:129429 SYSTEMD_EXEC_PID=30855 MEMORY_PRESSURE_WATCH=/sys/fs/cgroup/system.slice/depsis-agent.service/memory.pressure MEMORY_PRESSURE_WRITE=c29tZSAyMDAwMDAgMjAwMDAwMAA= DEPSIS_API_UID=999 	
+p0-e	NOTE	agent environment: LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin LISTEN_PID=9430 LISTEN_FDS=1 LISTEN_FDNAMES=depsis-agent.socket USER=root INVOCATION_ID=65e8c76e25f44824b0f4f96c1f4b16ab JOURNAL_STREAM=9:50976 SYSTEMD_EXEC_PID=9430 MEMORY_PRESSURE_WATCH=/sys/fs/cgroup/system.slice/depsis-agent.service/memory.pressure MEMORY_PRESSURE_WRITE=c29tZSAyMDAwMDAgMjAwMDAwMAA= DEPSIS_API_UID=999 	
 p0-e	PASS	the agent has the API uid in its environment	
 p0-e	PASS	no 'PASSWORD' in the agent's environment	
 p0-e	PASS	no 'SECRET' in the agent's environment	
@@ -85,4 +85,4 @@ p0-e	PASS	no 'PRIVATE_KEY' in the agent's environment
 p0-e	PASS	no 'DATABASE_URL' in the agent's environment	
 p0-e	PASS	the unit declares no LoadCredential=, consistent with the agent having no secret	
 p0-e	PASS	the agent still answers after a run of malformed input	
-p0-e	PASS	the agent did not restart (no crash on malformed input)	= 30855
+p0-e	PASS	the agent did not restart (no crash on malformed input)	= 9430

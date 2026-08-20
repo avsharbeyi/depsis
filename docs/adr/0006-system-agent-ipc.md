@@ -158,6 +158,20 @@ Kritik ayrıntılar:
 | Audit satırı enjekte edilemiyor (`reason`'da kontrol karakteri reddi) | ✅ ölçüldü                                     |
 | Bilinmeyen alan **sessizce yutulmuyor** (`deny_unknown_fields`)       | ✅ ölçüldü — bu ADR'nin öngörmediği bir açıktı |
 
+**Sonradan bulunan dördüncü şey — bağlantı başına son tarih.**
+
+Faz 1'in temel gözden geçirmesi, `set_read_timeout`'un `SO_RCVTIMEO`'yu kurduğunu ve onun **tek bir
+`recv(2)`'yi** sınırladığını, bağlantıyı değil, işaret etti. Zaman aşımının hemen altında bayt
+gönderen bir eş pencereyi her baytta yeniliyor; 30 saniyelik zaman aşımı ve 256 kB'lik üst sınırla
+tek bir bağlantı ajanı yaklaşık 88 gün tutabiliyordu. `serve_loop` aynı anda tek bağlantı işlediği
+için bu süre boyunca başka hiçbir çağrı hizmet almazdı, ve `depsis-api` grubundaki herhangi bir
+süreç bunu yapabilirdi — TB4 altında bu, ele geçirilmiş bir API demek.
+
+Okuma artık `read_request_line_within` ile, **mutlak bir son tarihe** karşı yapılıyor: soket zaman
+aşımı her okumadan önce bütçenin kalanına yeniden kuruluyor. `BufRead::read_line` yerine elle
+döngü, tam da bu yüzden — tamponlu okuyucu kendi döngüsünü sahipleniyor ve yeniden kurmaya yer
+bırakmıyor. İki test eşlik ediyor: damlatan istemci bütçesinde kesiliyor, normal istek hâlâ geçiyor.
+
 **P0-E'nin bulduğu ve bu ADR'yi değiştiren üç şey:**
 
 1. **`ProtectKernelModules=` ve `ProtectKernelLogs=` özel mount ad-alanı yaratıyor.** Unit dosyası

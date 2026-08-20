@@ -46,6 +46,20 @@ BEGIN
 END
 $$;
 
+-- Attributes applied UNCONDITIONALLY, outside the creation branch above.
+--
+-- The DO block only creates a role that is absent, so a `depsis_app` that already exists — from
+-- an earlier provisioning run, from another product sharing the cluster, or from an operator who
+-- once typed `ALTER ROLE depsis_app BYPASSRLS` while debugging a query — is left exactly as it
+-- was found. Every policy the migration then installs is decorative: the application connects,
+-- reads every tenant's rows, and nothing errors at any layer.
+--
+-- BYPASSRLS and SUPERUSER are the two that matter; the rest are stated so the roles cannot
+-- accumulate privileges by inheritance from a template or an earlier life.
+ALTER ROLE depsis_owner  NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION;
+ALTER ROLE depsis_app    NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION;
+ALTER ROLE depsis_backup NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION;
+
 -- ─── database ─────────────────────────────────────────────────────────────────
 --
 -- CREATE DATABASE cannot run inside a transaction block or a DO block, so it is guarded with a

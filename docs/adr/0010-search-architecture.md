@@ -101,6 +101,13 @@ Kritik ayrıntılar:
   | `public.unaccent('public.unaccent'::regdictionary, x)` | ✅                                                    |
   | `public.unaccent(x)` (tek argüman)                     | ✅ ama `STABLE` riski taşır                           |
 
+  **Ölçüm (P1-A §7, PG 18.6):** `unaccent`'in **her iki** aşırı yüklemesi de `provolatile='s'`.
+  Yani yukarıdaki ✅'ler yalnızca _çağrının çözülmesi_ içindir; hiçbiri doğrudan bir ifade
+  indeksinde kullanılamaz — ikisi de `functions in index expression must be marked IMMUTABLE`
+  veriyor. §85'in `IMMUTABLE` sarmalayıcı şartı bu yüzden isteğe bağlı değil, tek yol. Niteleme
+  şartı da sarmalayıcının _gövdesi_ için geçerli: indeks derlemesi kısıtlı `search_path` ile koştuğu
+  için sözlük orada nitelenmezse bulunamıyor.
+
 Şema:
 
 ```sql
