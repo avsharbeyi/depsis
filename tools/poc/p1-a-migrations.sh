@@ -106,14 +106,14 @@ section '1. Provision the cluster the way a deployment would'
 
 drop_scratch_db >/dev/null 2>&1
 cp "$DB_SRC/bootstrap.sql" "$WORK/bootstrap.sql"
-# bootstrap.sql hard-codes the database name; this run uses a scratch one so it cannot disturb a
-# database someone is using. Rewriting it here rather than parameterising the real file keeps the
-# shipped script free of a substitution nobody would ever use in production.
-sed -i "s/\bdepsis\b/$PGDB/g; s/DATABASE $PGDB/DATABASE $PGDB/" "$WORK/bootstrap.sql"
+# The SHIPPED file, with the database name passed as a parameter. An earlier version copied it
+# and `sed`-ed the name, which meant the file under test was not the file that ships — and the CI
+# gate needed the same workaround, which is what prompted making the name a real parameter.
 chmod 0644 "$WORK/bootstrap.sql"
 
-assert_cmd 'bootstrap.sql runs as a superuser' ok \
-  -- runuser -u postgres -- psql -X -q -p "$PGPORT_18" -v ON_ERROR_STOP=1 -f "$WORK/bootstrap.sql"
+assert_cmd 'bootstrap.sql runs as a superuser with a parameterised database name' ok \
+  -- runuser -u postgres -- psql -X -q -p "$PGPORT_18" -v ON_ERROR_STOP=1 -v db_name="$PGDB" \
+     -f "$WORK/bootstrap.sql"
 
 # The owner needs a password to be reachable over TCP, which is how the runner connects.
 OWNER_PW="p1a-$(head -c 12 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9')"
@@ -648,7 +648,7 @@ else
 fi
 
 # bootstrap.sql must repair it unconditionally, not only when creating the role.
-runuser -u postgres -- psql -X -q -p "$PGPORT_18" -v ON_ERROR_STOP=1 -f "$WORK/bootstrap.sql" >/dev/null 2>&1
+runuser -u postgres -- psql -X -q -p "$PGPORT_18" -v ON_ERROR_STOP=1 -v db_name="$PGDB" -f "$WORK/bootstrap.sql" >/dev/null 2>&1
 STILL_BYPASS=$(_admin -c "SELECT rolbypassrls FROM pg_roles WHERE rolname='$APP'")
 assert_eq 'bootstrap.sql clears BYPASSRLS on an existing role' 'f' "$STILL_BYPASS"
 

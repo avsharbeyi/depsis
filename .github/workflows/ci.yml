@@ -102,6 +102,69 @@ jobs:
         env:
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
+  migrations:
+    name: migrations · tenant isolation (PostgreSQL 18)
+    runs-on: ubuntu-latest
+    # ADR-0013 says its two RLS bypasses were "made permanent by a migration test". That sentence
+    # was untrue until this job existed: the isolation guarantees had been measured once, by hand,
+    # on a developer VM. Everything asserted here needs only PostgreSQL — no ZFS, no systemd — so
+    # there is no reason for it not to run on every push.
+    #
+    # What it cannot cover stays in P1-A on the Debian VM: the agent, ZFS, Samba.
+    services:
+      postgres:
+        # 18, not the runner's default. The schema uses the built-in uuidv7(), which does not
+        # exist before 18, and bootstrap.sql refuses to proceed without it.
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: ci-postgres
+        # No POSTGRES_INITDB_ARGS. The locale provider matters enormously here — the Turkish dotted
+        # capital I folds differently under ICU than under libc, and the identity key depends on
+        # getting it right — but bootstrap.sql sets it per DATABASE, not per cluster. Measured on
+        # the VM: the cluster there is libc (datlocprovider='c') while depsis and depsis_ci are ICU
+        # ('i', datlocale='und-x-icu'), and every folding assertion passes. Forcing it at initdb
+        # would add a way for the container to fail to start in exchange for nothing, so the job
+        # asserts the provider instead of configuring it.
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install the PostgreSQL 18 client
+        # The runner image ships an older psql, and bootstrap.sql uses `\if :{?var}`, which needs a
+        # recent client. Pulling the client from PGDG matches what the target actually runs.
+        run: |
+          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-18
+          psql --version
+
+      - name: Migration and tenant-isolation gate
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: postgres
+          PGPASSWORD: ci-postgres
+          DB_NAME: depsis_ci
+          DB_DIR: packages/db
+        run: bash tools/ci/migration-check.sh
+
   # ── Declared but not yet implemented ────────────────────────────────────────
   # These exist so their absence is visible in every CI run. Each is enabled by the
   # PoC named in its ADR.
@@ -111,8 +174,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "::notice::Not yet implemented. Requires the Hyper-V/Debian target."
-          echo "Gated on P0-B (ADR-0004), P0-C (ADR-0013), P0-D (ADR-0011), P0-E (ADR-0006)."
+          echo "::notice::Partially implemented. The PostgreSQL half now runs on every push"
+          echo "in the 'migrations' job above (P1-A's schema assertions, ADR-0013/0014)."
+          echo "What still needs the Hyper-V/Debian target: ZFS (P0-A/G), Samba ACLs (P0-B),"
+          echo "filesystem events (P0-D) and the privileged agent (P0-E)."
 
   e2e:
     name: e2e (Playwright — desktop + mobile-360)

@@ -19,6 +19,18 @@
 
 \set ON_ERROR_STOP on
 
+-- The database name is a parameter with a default, so the same file provisions production and a
+-- throwaway CI database. It was hard-coded at first, and both P1-A and the CI gate worked around
+-- that by `sed`-ing a copy — a workaround that means the file being tested is not the file that
+-- ships.
+--
+--   psql -f bootstrap.sql                      -> depsis
+--   psql -v db_name=depsis_ci -f bootstrap.sql -> depsis_ci
+\if :{?db_name}
+\else
+  \set db_name depsis
+\endif
+
 -- ─── roles ────────────────────────────────────────────────────────────────────
 --
 -- NOINHERIT throughout: a role must be assumed explicitly with SET ROLE, never picked up
@@ -70,23 +82,24 @@ ALTER ROLE depsis_backup NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHER
 -- depends on collation behaviour, and libc collations change under the operating system without
 -- warning, which silently invalidates every index built on them.
 SELECT format(
-         'CREATE DATABASE depsis OWNER depsis_owner '
-         'ENCODING ''UTF8'' LOCALE_PROVIDER icu ICU_LOCALE ''und-x-icu'' TEMPLATE template0'
+         'CREATE DATABASE %I OWNER depsis_owner '
+         'ENCODING ''UTF8'' LOCALE_PROVIDER icu ICU_LOCALE ''und-x-icu'' TEMPLATE template0',
+         :'db_name'
        )
-WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'depsis')
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db_name')
 \gexec
 
 -- Nobody but the three DEPSIS roles may connect. PUBLIC has CONNECT on every new database by
 -- default, which means any role in the cluster can open it and start probing.
-REVOKE CONNECT ON DATABASE depsis FROM PUBLIC;
-GRANT  CONNECT ON DATABASE depsis TO depsis_owner, depsis_app, depsis_backup;
+REVOKE CONNECT ON DATABASE :"db_name" FROM PUBLIC;
+GRANT  CONNECT ON DATABASE :"db_name" TO depsis_owner, depsis_app, depsis_backup;
 
 -- ─── extensions ───────────────────────────────────────────────────────────────
 --
 -- CREATE EXTENSION needs privileges depsis_owner does not have for some extensions, and both of
 -- these are cluster-provided rather than schema content, so they are installed here. The
 -- migration checks that they are present and refuses to proceed if they are not.
-\connect depsis
+\connect :"db_name"
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm  WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA public;

@@ -120,6 +120,18 @@ PgBouncer transaction pooling ile uyumlu; **session pooling veya `SET` (LOCAL'si
 **Olumlu:** `uuidv7()` yerleşik. İki sessiz sızıntı yolu Faz 0'da kapatıldı ve migration testiyle
 kalıcı hâle getirildi.
 
+> **Bu cümle 2026-08-20'ye kadar doğru değildi.** "Migration testi" diye bir şey yoktu; iki sızıntı
+> yolu P0-C'de bir kez, elle, bir geliştirici VM'inde ölçülmüştü ve CI'ın `integration` işi bir
+> `echo` taslağıydı. Artık `tools/ci/migration-check.sh` her push'ta koşuyor (CI işi `migrations`,
+> `postgres:18` servis konteyneriyle) ve şunları canlı sunucuya karşı doğruluyor: bağlamsız sorguda
+> fail-closed, iki yönlü kiracı yalıtımı, `depsis_app`'in DDL yapamaması, çapraz kiracı e-posta
+> tekrarının serbest / kiracı içi tekrarın reddedilmesi, ve `organization_id` içermeyen her benzersiz
+> indeksin yakalanması.
+>
+> Sonuncusu P0-C'nin denetiminin **göremediği** bir şeydi: o denetim `pg_constraint`'i tarıyor, ama
+> çıplak bir `CREATE UNIQUE INDEX`'in `pg_constraint` satırı yok (P1-A §9'da ölçüldü). CI'daki
+> sürüm `pg_index` üzerinden, ifade indeksleri dahil tarıyor. Ayrıntı: [ADR-0014](0014-schema-migrations.md).
+
 **Olumsuz / kabul edilen bedel:** Ek apt deposu = ek güven kökü ve ek güncelleme yolu. Rol ayrımı
 migration ve deployment akışını karmaşıklaştırır. Her sorgunun transaction içinde olma zorunluluğu
 bir disiplin gerektirir.
