@@ -11,8 +11,19 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import type { OpenApi } from '@depsis/contracts';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
+
+/**
+ * Response bodies typed against the generated view of `openapi/depsis.yaml`.
+ *
+ * This is what makes ADR-0001's "contract is the single source" enforceable rather than aspirational
+ * — renaming a field in the YAML now breaks the build here, instead of silently producing a client
+ * that asks for something the server does not send. The route-level check in `contract.test.ts`
+ * catches a path that exists in one place and not the other; these catch the shape.
+ */
+type Schemas = OpenApi.components['schemas'];
 
 import { AuthService } from './auth.service.js';
 import {
@@ -42,7 +53,7 @@ const secondFactorSchema = z.object({
   code: z.string().min(1).max(64),
 });
 
-type LoginResponse = { status: 'ok' } | { status: 'mfa_required' };
+type LoginResponse = Schemas['LoginResult'];
 
 @Controller('auth')
 export class AuthController {
@@ -118,13 +129,17 @@ export class AuthController {
    * being authenticated. All of that comes from the challenge token, which the server issued —
    * ADR-0015 §6 applied to a request that is halfway through authenticating.
    */
-  @Post('login/mfa')
+  // The path comes from packages/contracts/openapi/depsis.yaml, not from what reads best here.
+  // ADR-0001 makes the contract the single source and generates the web client from it, so an
+  // endpoint the spec does not describe is an endpoint the client cannot call. `/auth/login/mfa`
+  // was the first spelling and it lost to the one already written down.
+  @Post('mfa/verify')
   @HttpCode(200)
   async secondFactor(
     @Body() body: unknown,
     @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
-  ): Promise<{ status: 'ok'; usedRecoveryCode: boolean }> {
+  ): Promise<Schemas['MfaVerifyResult']> {
     requireSameOrigin(request);
 
     const token = readCookie(request.headers.cookie, PENDING_COOKIE);

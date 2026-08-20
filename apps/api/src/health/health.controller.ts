@@ -1,12 +1,10 @@
 import { Controller, Get } from '@nestjs/common';
+import type { OpenApi } from '@depsis/contracts';
 
 import { DbService } from '../db/db.service.js';
 
-interface HealthResponse {
-  status: 'ok' | 'degraded';
-  database: 'reachable' | 'unreachable';
-  role: string | null;
-}
+/** See the note in auth.controller.ts: the contract owns this shape. */
+type HealthResponse = OpenApi.components['schemas']['HealthStatus'];
 
 /**
  * Liveness, and one fact worth reporting: which role the API is connected as.

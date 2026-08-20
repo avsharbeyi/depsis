@@ -12,7 +12,7 @@
   "scripts": {
     "generate": "openapi-typescript openapi/depsis.yaml -o src/generated/api.d.ts",
     "generate:check": "openapi-typescript openapi/depsis.yaml -o .generated-check.d.ts && diff -u src/generated/api.d.ts .generated-check.d.ts",
-    "build": "tsc -b tsconfig.build.json",
+    "build": "tsc -b tsconfig.build.json && node -e \"const fs=require('node:fs');fs.mkdirSync('dist/generated',{recursive:true});fs.copyFileSync('src/generated/api.d.ts','dist/generated/api.d.ts');\"",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint src",
     "test:unit": "vitest run --passWithNoTests"

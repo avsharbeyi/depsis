@@ -9,3 +9,16 @@
 
 export * from './errors.js';
 export * from './pagination.js';
+
+/**
+ * The generated view of `openapi/depsis.yaml`.
+ *
+ * Re-exported under a namespace rather than flattened, because these names come from the document
+ * and the document owns them: a collision between a generated `LoginRequest` and a hand-written one
+ * should be impossible to create by accident.
+ *
+ * Server code importing this is what turns contract drift into a compile error rather than a
+ * discrepancy somebody notices later. `apps/api` types its request and response bodies against
+ * `components['schemas'][...]`, so renaming a field in the YAML breaks the build.
+ */
+export type * as OpenApi from './generated/api.js';

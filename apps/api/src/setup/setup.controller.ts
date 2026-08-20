@@ -1,5 +1,13 @@
 import { Body, Controller, Get, HttpCode, HttpException, HttpStatus, Post } from '@nestjs/common';
+import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
+
+/** See the note in auth.controller.ts: the contract owns these shapes, not this file. */
+type Paths = OpenApi.paths;
+type SetupStatusBody =
+  Paths['/setup/status']['get']['responses']['200']['content']['application/json'];
+type SetupClaimBody =
+  Paths['/setup/claim']['post']['responses']['200']['content']['application/json'];
 
 import { SetupService } from './setup.service.js';
 
@@ -28,13 +36,13 @@ export class SetupController {
    * hint about what exists.
    */
   @Get('status')
-  async status(): Promise<{ setupRequired: boolean }> {
+  async status(): Promise<SetupStatusBody> {
     return { setupRequired: !(await this.setup.isComplete()) };
   }
 
   @Post('claim')
   @HttpCode(200)
-  async claim(@Body() body: unknown): Promise<{ status: 'ok'; organizationSlug: string }> {
+  async claim(@Body() body: unknown): Promise<SetupClaimBody> {
     const parsed = claimSchema.safeParse(body);
     if (!parsed.success) {
       throw new HttpException(

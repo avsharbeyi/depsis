@@ -4,6 +4,154 @@
  */
 
 export interface paths {
+    "/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Canlılık ve hangi rolle bağlanıldığı
+         * @description Rolü de bildirir. Süs değil: ADR-0015 §4 satırları görebilen bir rolle açılmayı
+         *     reddediyor, ama yanlış VERİTABANINA yönlendirilmiş bir dağıtım o kontrolü geçebilir —
+         *     rolün görünür olması, operatörün bunu destek talebinden önce fark etme yoludur.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Yanıt her durumda 200; sağlık gövdededir */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["HealthStatus"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/setup/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Kurulum gerekiyor mu
+         * @description Kimlik doğrulaması yok, çünkü web arayüzü kimse giriş yapamadan önce hangi ekranı
+         *     göstereceğini bilmek zorunda. Yalnız bir boole döner — organizasyon adı, yönetici
+         *     adresi veya neyin var olduğuna dair bir ipucu yok.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Durum */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            setupRequired: boolean;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/setup/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sistemi tek seferlik belirteçle sahiplen
+         * @description İlk organizasyonu ve yöneticisini yaratır. Belirteç, kurulum beklerken API'nin her
+         *     açılışta journal'a bastığı tek kullanımlık değerdir; okumak konsol veya SSH erişimi
+         *     gerektirir ve ilk yöneticinin kim olacağına karar vermesi gereken yetki budur
+         *     (ADR-0015 §5d).
+         *
+         *     Doğrulama hataları burada ALANI SÖYLER, giriş yolunun aksine: karşı taraf makinenin
+         *     sahibi, formu bir kez dolduruyor.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SetupClaimRequest"];
+                };
+            };
+            responses: {
+                /** @description Sahiplenildi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {string} */
+                            status: "ok";
+                            organizationSlug: string;
+                        };
+                    };
+                };
+                400: components["responses"]["Problem"];
+                401: components["responses"]["Problem"];
+                /** @description Kurulum zaten tamamlandı; bu uç kalıcı olarak kapalı */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["ProblemDetails"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/login": {
         parameters: {
             query?: never;
@@ -71,12 +219,14 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Doğrulandı; oturum çerezi kuruldu */
-                204: {
+                /** @description Doğrulandı; bekleyen çerez temizlendi ve oturum çerezi kuruldu */
+                200: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["MfaVerifyResult"];
+                    };
                 };
                 401: components["responses"]["Problem"];
                 429: components["responses"]["Problem"];
@@ -779,24 +929,69 @@ export interface components {
          *     erişemezdi.
          */
         FileName: string;
+        /**
+         * @description `username` değil. DEPSIS çok kiracılı ve kiracı, kullanıcıdan ÖNCE çözülmek zorunda:
+         *     `organizations` üzerindeki politika kiracıyı bilmeyi gerektiriyor, dolayısıyla giriş
+         *     slug ile başlıyor (ADR-0015 §5). Bu şema planlama sırasında tek kiracılı yazılmıştı ve
+         *     uygulama sırasında düzeltildi.
+         */
         LoginRequest: {
-            username: string;
+            organizationSlug: string;
+            email: string;
             password: string;
         };
+        /** @description `challengeId` taşımıyor — meydan okuma çerezde (bkz. LoginResult). */
         MfaVerifyRequest: {
-            challengeId: string;
-            /** @description TOTP kodu. Kurtarma kodu ayrı uçtan verilir. */
+            /**
+             * @description TOTP kodu VEYA kurtarma kodu. Ayrı uç yok ve desen dar değil, ikisi de kasıtlı:
+             *     sunucu hangisi olduğunu ŞEKİLDEN anlıyor, çağırana sormuyor. Soran bir arayüz,
+             *     saldırganın zayıf bulduğu dala yönlendirme yapmasına izin verirdi.
+             */
             code: string;
         };
         /**
          * @description Kimlik bilgisi yanlışsa 401 döner ve gövde kullanıcının var olup olmadığını ayırt
          *     ettirmez.
+         *
+         *     `challengeId` YOK, ve bu kasıtlı bir değişiklik: bekleyen giriş bir gövde alanı değil,
+         *     `HttpOnly` + `SameSite=Strict` bir çerez. Gövdedeki bir kimlik script tarafından
+         *     okunabilir ve istemciler arasında taşınabilirdi; çerez okunamıyor. Gövde yalnız hangi
+         *     ekranın gösterileceğini söylüyor.
          */
         LoginResult: {
             /** @enum {string} */
-            status: "authenticated" | "mfa_required";
-            /** @description Yalnız status=mfa_required iken bulunur. */
-            challengeId?: string;
+            status: "ok" | "mfa_required";
+        };
+        /**
+         * @description 204 değil, çünkü söylenmeye değer bir şey var: bir kurtarma kodu harcandıysa arayüz
+         *     kaç tane kaldığını gösterip yeniden kayda yönlendirebilmeli. Kullanıcıyı arayıp
+         *     bulmaya bırakmak, fark etmekle bitirmek arasındaki fark.
+         */
+        MfaVerifyResult: {
+            /** @enum {string} */
+            status: "ok";
+            usedRecoveryCode: boolean;
+        };
+        HealthStatus: {
+            /** @enum {string} */
+            status: "ok" | "degraded";
+            /** @enum {string} */
+            database: "reachable" | "unreachable";
+            /** @description Bağlanılan veritabanı rolü; erişilemiyorsa null. */
+            role: string | null;
+        };
+        SetupClaimRequest: {
+            token: string;
+            organizationSlug: string;
+            organizationName: string;
+            adminEmail: string;
+            adminDisplayName: string;
+            /**
+             * @description Yalnız uzunluk tabanı. Bileşim kuralı (bir büyük, bir rakam, bir sembol) arama
+             *     uzayını genişletmekten çok daraltıyor ve NIST SP 800-63B tam bu yüzden tavsiyeyi
+             *     geri çekti.
+             */
+            adminPassword: string;
         };
         CurrentUser: {
             /** Format: uuid */

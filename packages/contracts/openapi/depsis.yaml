@@ -20,6 +20,10 @@ servers:
   - url: /api/v1
 
 tags:
+  - name: setup
+    description: |
+      Tek seferlik ilk kurulum. Bu uçlar kurulum tamamlandığında kalıcı olarak 410 döner
+      (ADR-0009).
   - name: auth
     description: Oturum ve MFA. Faz 1'de MFA yalnız TOTP (ADR-0009).
   - name: files
@@ -35,6 +39,79 @@ security:
   - sessionCookie: []
 
 paths:
+  /health:
+    get:
+      tags: [system]
+      summary: Canlılık ve hangi rolle bağlanıldığı
+      security: []
+      description: |
+        Rolü de bildirir. Süs değil: ADR-0015 §4 satırları görebilen bir rolle açılmayı
+        reddediyor, ama yanlış VERİTABANINA yönlendirilmiş bir dağıtım o kontrolü geçebilir —
+        rolün görünür olması, operatörün bunu destek talebinden önce fark etme yoludur.
+      responses:
+        '200':
+          description: Yanıt her durumda 200; sağlık gövdededir
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthStatus' }
+
+  /setup/status:
+    get:
+      tags: [setup]
+      summary: Kurulum gerekiyor mu
+      security: []
+      description: |
+        Kimlik doğrulaması yok, çünkü web arayüzü kimse giriş yapamadan önce hangi ekranı
+        göstereceğini bilmek zorunda. Yalnız bir boole döner — organizasyon adı, yönetici
+        adresi veya neyin var olduğuna dair bir ipucu yok.
+      responses:
+        '200':
+          description: Durum
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [setupRequired]
+                properties:
+                  setupRequired: { type: boolean }
+
+  /setup/claim:
+    post:
+      tags: [setup]
+      summary: Sistemi tek seferlik belirteçle sahiplen
+      security: []
+      description: |
+        İlk organizasyonu ve yöneticisini yaratır. Belirteç, kurulum beklerken API'nin her
+        açılışta journal'a bastığı tek kullanımlık değerdir; okumak konsol veya SSH erişimi
+        gerektirir ve ilk yöneticinin kim olacağına karar vermesi gereken yetki budur
+        (ADR-0015 §5d).
+
+        Doğrulama hataları burada ALANI SÖYLER, giriş yolunun aksine: karşı taraf makinenin
+        sahibi, formu bir kez dolduruyor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetupClaimRequest' }
+      responses:
+        '200':
+          description: Sahiplenildi
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, organizationSlug]
+                properties:
+                  status: { type: string, enum: [ok] }
+                  organizationSlug: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '410':
+          description: Kurulum zaten tamamlandı; bu uç kalıcı olarak kapalı
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
   /auth/login:
     post:
       tags: [auth]
@@ -69,8 +146,11 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/MfaVerifyRequest' }
       responses:
-        '204':
-          description: Doğrulandı; oturum çerezi kuruldu
+        '200':
+          description: Doğrulandı; bekleyen çerez temizlendi ve oturum çerezi kuruldu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MfaVerifyResult' }
         '401': { $ref: '#/components/responses/Problem' }
         '429': { $ref: '#/components/responses/Problem' }
 
@@ -487,20 +567,33 @@ components:
 
     LoginRequest:
       type: object
-      required: [username, password]
+      required: [organizationSlug, email, password]
+      description: |
+        `username` değil. DEPSIS çok kiracılı ve kiracı, kullanıcıdan ÖNCE çözülmek zorunda:
+        `organizations` üzerindeki politika kiracıyı bilmeyi gerektiriyor, dolayısıyla giriş
+        slug ile başlıyor (ADR-0015 §5). Bu şema planlama sırasında tek kiracılı yazılmıştı ve
+        uygulama sırasında düzeltildi.
       properties:
-        username: { type: string, maxLength: 255 }
+        organizationSlug:
+          type: string
+          maxLength: 63
+          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+        email: { type: string, maxLength: 320 }
         password: { type: string, maxLength: 1024 }
 
     MfaVerifyRequest:
       type: object
-      required: [challengeId, code]
+      required: [code]
+      description: |
+        `challengeId` taşımıyor — meydan okuma çerezde (bkz. LoginResult).
       properties:
-        challengeId: { type: string }
         code:
           type: string
-          pattern: '^[0-9]{6}$'
-          description: TOTP kodu. Kurtarma kodu ayrı uçtan verilir.
+          maxLength: 64
+          description: |
+            TOTP kodu VEYA kurtarma kodu. Ayrı uç yok ve desen dar değil, ikisi de kasıtlı:
+            sunucu hangisi olduğunu ŞEKİLDEN anlıyor, çağırana sormuyor. Soran bir arayüz,
+            saldırganın zayıf bulduğu dala yönlendirme yapmasına izin verirdi.
 
     LoginResult:
       type: object
@@ -508,13 +601,58 @@ components:
       description: |
         Kimlik bilgisi yanlışsa 401 döner ve gövde kullanıcının var olup olmadığını ayırt
         ettirmez.
+
+        `challengeId` YOK, ve bu kasıtlı bir değişiklik: bekleyen giriş bir gövde alanı değil,
+        `HttpOnly` + `SameSite=Strict` bir çerez. Gövdedeki bir kimlik script tarafından
+        okunabilir ve istemciler arasında taşınabilirdi; çerez okunamıyor. Gövde yalnız hangi
+        ekranın gösterileceğini söylüyor.
       properties:
         status:
           type: string
-          enum: [authenticated, mfa_required]
-        challengeId:
+          enum: [ok, mfa_required]
+
+    MfaVerifyResult:
+      type: object
+      required: [status, usedRecoveryCode]
+      description: |
+        204 değil, çünkü söylenmeye değer bir şey var: bir kurtarma kodu harcandıysa arayüz
+        kaç tane kaldığını gösterip yeniden kayda yönlendirebilmeli. Kullanıcıyı arayıp
+        bulmaya bırakmak, fark etmekle bitirmek arasındaki fark.
+      properties:
+        status: { type: string, enum: [ok] }
+        usedRecoveryCode: { type: boolean }
+
+    HealthStatus:
+      type: object
+      required: [status, database, role]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        database: { type: string, enum: [reachable, unreachable] }
+        role:
+          type: [string, 'null']
+          description: Bağlanılan veritabanı rolü; erişilemiyorsa null.
+
+    SetupClaimRequest:
+      type: object
+      required:
+        [token, organizationSlug, organizationName, adminEmail, adminDisplayName, adminPassword]
+      properties:
+        token: { type: string, maxLength: 128 }
+        organizationSlug:
           type: string
-          description: Yalnız status=mfa_required iken bulunur.
+          maxLength: 63
+          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+        organizationName: { type: string, maxLength: 200 }
+        adminEmail: { type: string, maxLength: 320 }
+        adminDisplayName: { type: string, maxLength: 200 }
+        adminPassword:
+          type: string
+          minLength: 12
+          maxLength: 1024
+          description: |
+            Yalnız uzunluk tabanı. Bileşim kuralı (bir büyük, bir rakam, bir sembol) arama
+            uzayını genişletmekten çok daraltıyor ve NIST SP 800-63B tam bu yüzden tavsiyeyi
+            geri çekti.
 
     CurrentUser:
       type: object
