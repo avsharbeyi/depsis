@@ -76,9 +76,9 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all
-      - run: cargo check --target x86_64-pc-windows-msvc
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all
+      - run: cargo check --locked --target x86_64-pc-windows-msvc
 
       - name: The committed agent schema matches what the binary emits
         # ADR-0006 puts this contract on the Rust side, and packages/agent-protocol generates its
@@ -86,7 +86,7 @@ jobs:
         # boundary, so it only stays honest if something compares it to the original — which only
         # this job can do, because only this job has the binary.
         run: |
-          cargo build --release --bin depsis-agent
+          cargo build --locked --release --bin depsis-agent
           ./target/release/depsis-agent --emit-schema > /tmp/agent-schema.json
           if ! diff -u packages/agent-protocol/schema/agent.schema.json /tmp/agent-schema.json; then
             echo "::error::packages/agent-protocol/schema/agent.schema.json is stale."
@@ -226,17 +226,48 @@ jobs:
           DEPSIS_TEST_SETUP_DATABASE_URL: postgresql://depsis_app:ci-app@127.0.0.1:5432/depsis_setup_ci
           DEPSIS_TEST_SETUP_OWNER_DATABASE_URL: postgresql://depsis_owner:ci-owner@127.0.0.1:5432/depsis_setup_ci
         run: |
-          out=$(pnpm --filter @depsis/api exec vitest run --reporter=json 2>/dev/null || true)
-          skipped=$(node -e "
-            let d={};try{d=JSON.parse(process.argv[1])}catch{process.exit(0)}
-            const t=(d.testResults||[]).flatMap(f=>f.assertionResults||[]);
-            console.log(t.filter(a=>a.status==='pending'||a.status==='skipped').length);
-          " "$out")
-          echo "skipped: ${skipped:-unknown}"
-          if [ "${skipped:-0}" != "0" ]; then
-            echo "::error::the tenant-context integration tests skipped; the database gate was not open"
-            exit 1
-          fi
+          # --outputFile, NOT captured stdout. The application's Nest logger writes to stdout
+          # while the suite runs, so capturing stdout captures log lines wrapped around the JSON.
+          # Measured on Linux: 68KB of output beginning with a DbService log line, which JSON.parse
+          # rejected. The first version of this step swallowed that in a catch, printed nothing, and
+          # the shell's ${skipped:-0} default turned "could not measure" into "zero skipped" — so
+          # the guard against a silently-skipping suite was itself silently measuring nothing, and
+          # would have reported success on every run.
+          # An ABSOLUTE path, expanded by this shell before pnpm runs: `--filter ... exec` executes
+          # in apps/api, so a relative --outputFile lands there while the reader below looks in the
+          # workspace root. Measured: ENOENT, which the reader correctly turns into a failure —
+          # but a failure for the wrong reason is still a job nobody can trust.
+          # Outside the workspace. Written into it, the report is an untracked JSON file that
+          # `pnpm format:check` then reports as unformatted — harmless across CI's separate jobs,
+          # but it broke a local full-pipeline run and would break any step added after this one.
+          report="${RUNNER_TEMP:-/tmp}/vitest-report.json"
+          rm -f "$report"
+          pnpm --filter @depsis/api exec vitest run \
+            --reporter=json --outputFile="$report" > /dev/null 2>&1 || true
+
+          # Every way of failing to measure is now an error, not a zero.
+          node -e '
+            const fs = require("node:fs");
+            let report;
+            try {
+              report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            } catch (e) {
+              console.error("::error::could not read the vitest report: " + e.message);
+              process.exit(1);
+            }
+            const tests = (report.testResults || []).flatMap((f) => f.assertionResults || []);
+            if (tests.length === 0) {
+              console.error("::error::the vitest report contains no tests at all");
+              process.exit(1);
+            }
+            const skipped = tests.filter((a) => a.status === "pending" || a.status === "skipped");
+            console.log(tests.length + " test(s) ran, " + skipped.length + " skipped");
+            if (skipped.length > 0) {
+              console.error("::error::the tenant-context integration tests skipped; the database gate was not open");
+              for (const t of skipped.slice(0, 10)) console.error("  skipped: " + t.fullName);
+              process.exit(1);
+            }
+          ' "$report"
 
   # ── Declared but not yet implemented ────────────────────────────────────────
   # These exist so their absence is visible in every CI run. Each is enabled by the

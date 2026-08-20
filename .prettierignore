@@ -9,6 +9,13 @@ docs/adr/evidence/
 # Generated from openapi/depsis.yaml — committed so CI can detect drift, never edited by hand.
 **/src/generated/
 
+# Emitted by `depsis-agent --emit-schema`, byte for byte. The `rust` job diffs this file against a
+# fresh emit, so its BYTES are the contract — and prettier reformats JSON, which silently made the
+# two jobs demand opposite things. Measured: the emit is 374 lines, the formatted copy 313, and the
+# schema-diff step failed on its first real run with a 686-line diff. Formatting a build artefact
+# buys nothing and cost exactly this.
+packages/agent-protocol/schema/
+
 # Claude Code's scratch worktrees. Already gitignored; prettier needs telling separately, and a
 # formatting failure from a directory that is not part of the project makes `pnpm check` useless.
 .claude/worktrees/

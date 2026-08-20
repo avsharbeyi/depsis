@@ -14,7 +14,19 @@
       "dependsOn": ["^build"],
       "outputs": ["coverage/**"]
     },
-    "lint": {},
+    "lint": {
+      // `^build`, exactly like typecheck and test:unit, because this lint is TYPE-AWARE:
+      // typescript-eslint's no-unsafe-* and strict-boolean-expressions rules need to resolve
+      // `@depsis/contracts`, which resolves to its `dist/`. Without this the rules do not go quiet
+      // when the types are missing — they go LOUD, reporting every generated response type as an
+      // "error typed value", so a clean checkout produced 38 errors in apps/web.
+      //
+      // It never failed on a developer machine because a previous build had left dist/ behind, and
+      // `pnpm lint` runs before `pnpm typecheck` in both the pipeline and CI. Measured on a fresh
+      // Linux clone: lint fails, then typecheck builds the dependencies as a side effect, and the
+      // identical lint command passes. That is the whole bug.
+      "dependsOn": ["^build"]
+    },
     "generate": {
       "outputs": ["src/generated/**"]
     },

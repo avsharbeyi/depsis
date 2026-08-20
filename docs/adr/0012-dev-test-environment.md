@@ -226,6 +226,28 @@ Sağlama script'i artık bunu bir parametreyle sunuyor; varsayılan hâlâ Secur
 Seri konsol `\\.\pipe\depsis-poc-console` üzerinde — açılmayan bir sistemi teşhis etmenin en ucuz
 yolu; Debian cloud imajları `ttyS0`'ı zaten etkinleştirir.
 
+### CI'ı yerelde koşmak — ve neyi kanıtlamadığı
+
+`.github/workflows/ci.yml` yirmi sekiz commit boyunca **hiç çalışmadı**. Depo bir uzak sunucuya
+itilmemişti; YAML ayrıştırılıyordu ve çağırdığı betikler VM'de elle koşulmuştu, ama adımlar
+_iş akışının tanımladığı hâliyle, sırayla, Linux'ta_ hiç koşmadı. Orada dört hata bekliyordu ve
+dördü de ilk yerel koşuşta çıktı (aşağıdaki kanıt tablosuna bakınız).
+
+`tools/ci/run-workflow-locally.mjs` bunu tekrarlanabilir hâle getirir: `ci.yml`'ı okur ve
+seçilen işin kabuk adımlarını, iş akışının bildirdiği ortamla, sırayla çalıştırır. Adımları elle
+bir betiğe kopyalamak da bir yanılma yolu olduğu için iş akışının kendisini okur.
+
+Neyi **kanıtlamadığı** açıkça belirtilmelidir: `uses:` adımları atlanır — onlar başkasının kodudur
+ve yarısı bu makinede zaten var olan bir araç zincirini kurmak içindir. Servis konteynerleri,
+`actions/cache`, ve `secrets.*` de yoktur. Buradaki yeşil, "bu işin kabuğu çalışıyor" demektir;
+"iş GitHub'da geçer" demek değildir. **İlk gerçek koşuşun yerine hiçbir şey geçmez.**
+
+Yerel ölçüm Debian 13 / WSL2 üzerinde yapıldı; PostgreSQL 18.6 kümesi ve Node 24.19.0 (CI'ın
+sabitlediği sürüm) ile. Tek koşulamayan adım PGDG istemci kurulumu oldu: bu dağıtımda **zaten**
+bir PGDG kaynağı var ve anahtarı `.gpg`, adım ise `.asc` ekliyor; apt aynı kaynak için çelişen
+`Signed-By` değerini reddediyor. Temiz bir apt yapılandırmasında adım ayrıca ölçüldü ve geçti —
+`ubuntu-latest` koşucusunda önceden PGDG olmadığı için orada bu çakışma oluşamaz.
+
 ## Kanıt
 
 | İddia                                                                   | Kaynak                                                                                                              | Güven                                        |
@@ -237,6 +259,16 @@ yolu; Debian cloud imajları `ttyS0`'ı zaten etkinleştirir.
 | `storvsc` page 0x80'i bozuk sayar → seri numarası yok                   | `drivers/scsi/storvsc_drv.c`                                                                                        | verified                                     |
 | `/dev/disk/by-id` sembolik bağ **biçimi** (wwn- vs scsi-)               | —                                                                                                                   | **inferred → PoC ilk dakikada doğrulayacak** |
 | Debian trixie çekirdeğinde bu davranışların varlığı                     | —                                                                                                                   | **inferred**                                 |
+
+### CI'ın ilk yerel koşuşunda bulunan dört hata (2026-08-20, Debian 13 / WSL2)
+
+| Bulgu                                                                                                                   | Nasıl ölçüldü                                                                                                   | Güven                                      |
+| ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `lint`, `turbo.json`'da `^build`'e bağlı değildi; tip-farkında kurallar çözülemeyen tipler için 38 hata veriyordu       | Temiz klonda `pnpm lint` düşer, `typecheck` bağımlılıkları derler, **aynı komut** geçer                         | verified (aynı makinede iki yönlü ölçüldü) |
+| "Sessizce atlanmadı" bekçisi hiçbir şey ölçmüyordu: Nest logger stdout'a yazdığı için JSON bozuluyor, `catch` yutuyordu | Yakalanan 68 KB çıktı bir `DbService` log satırıyla başlıyor; `JSON.parse` reddediyor                           | verified                                   |
+| Taahhüt edilmiş ajan şeması, ikilinin ürettiğiyle uyuşmuyordu — Prettier onu yeniden biçimlendirmişti                   | Şema-diff adımı 686 satırlık farkla düştü; emit 374 satır, biçimlenmiş kopya 313                                | verified                                   |
+| `Cargo.lock` hiç commit edilmemişti; ayrıcalıklı ikili her koşuda taze çözülen sürümlerden derlenirdi (§0.4 ihlali)     | Linux klonunda `?? Cargo.lock`; eklendikten sonra `cargo --locked` adımları geçiyor                             | verified                                   |
+| PGDG istemci kurulum adımı, önceden PGDG kaynağı olmayan bir apt yapılandırmasında geçiyor                              | Dağıtımın kendi `pgdg.sources`'ı geçici olarak kenara alındı; adım exit 0, psql 18.6 kuruldu, sonra geri alındı | verified                                   |
 
 ## Sonuçlar
 

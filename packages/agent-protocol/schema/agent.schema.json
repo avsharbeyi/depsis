@@ -1,313 +1,374 @@
-{
-  "request": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "Request",
-    "description": "The closed operation set.\n\nEvery variant is something the API cannot do for itself because it needs root. Nothing here\ntakes a command, a shell fragment, or a free-form argument list.",
-    "oneOf": [
-      {
-        "description": "Liveness plus a schema-version handshake, so a mismatched API build fails loudly at\nstartup instead of on the first privileged call.\nAn empty struct variant, not a unit variant, and the braces are load-bearing.\n`deny_unknown_fields` has no effect on a unit variant of an internally tagged enum —\nserde deserializes it by ignoring the rest of the map — so `{\"op\":\"ping\",\"x\":1}` would\nparse. Every other variant refuses unknown fields; a rule with one silent exception is\nthe kind of thing that is forgotten the day a second unit variant is added.",
-        "type": "object",
-        "properties": {
-          "op": {
-            "type": "string",
-            "const": "ping"
-          }
+{"request":{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Request",
+  "description": "The closed operation set.\n\nEvery variant is something the API cannot do for itself because it needs root. Nothing here\ntakes a command, a shell fragment, or a free-form argument list.",
+  "oneOf": [
+    {
+      "description": "Liveness plus a schema-version handshake, so a mismatched API build fails loudly at\nstartup instead of on the first privileged call.\nAn empty struct variant, not a unit variant, and the braces are load-bearing.\n`deny_unknown_fields` has no effect on a unit variant of an internally tagged enum —\nserde deserializes it by ignoring the rest of the map — so `{\"op\":\"ping\",\"x\":1}` would\nparse. Every other variant refuses unknown fields; a rule with one silent exception is\nthe kind of thing that is forgotten the day a second unit variant is added.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "ping"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "Report pool health and capacity. Reads `zfs get`, never `statvfs` — P0-G measured\nstatvfs disagreeing with the dataset by ~131 kB on a 32 MB dataset (ADR-0008).",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "pool_status"
         },
-        "additionalProperties": false,
-        "required": ["op"]
+        "pool": {
+          "$ref": "#/$defs/DatasetName"
+        }
       },
-      {
-        "description": "Report pool health and capacity. Reads `zfs get`, never `statvfs` — P0-G measured\nstatvfs disagreeing with the dataset by ~131 kB on a 32 MB dataset (ADR-0008).",
-        "type": "object",
-        "properties": {
-          "op": {
-            "type": "string",
-            "const": "pool_status"
-          },
-          "pool": {
-            "$ref": "#/$defs/DatasetName"
-          }
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "pool"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "acltype": {
+          "description": "Only `posixacl` is expressible. See `AclType`.",
+          "$ref": "#/$defs/AclType"
         },
-        "additionalProperties": false,
-        "required": ["op", "pool"]
-      },
-      {
-        "type": "object",
-        "properties": {
-          "acltype": {
-            "description": "Only `posixacl` is expressible. See `AclType`.",
-            "$ref": "#/$defs/AclType"
-          },
-          "dataset": {
-            "$ref": "#/$defs/DatasetName"
-          },
-          "op": {
-            "type": "string",
-            "const": "create_dataset"
-          },
-          "refquota_bytes": {
-            "description": "Per-user visible limit. `refquota` excludes snapshots, so admin snapshot policy\ncannot block a user out of their own space (ADR-0008).",
-            "type": ["integer", "null"],
-            "format": "uint64",
-            "minimum": 0
-          }
+        "dataset": {
+          "$ref": "#/$defs/DatasetName"
         },
-        "additionalProperties": false,
-        "required": ["op", "dataset", "acltype"]
-      },
-      {
-        "type": "object",
-        "properties": {
-          "dataset": {
-            "$ref": "#/$defs/DatasetName"
-          },
-          "name": {
-            "$ref": "#/$defs/SafeComponent"
-          },
-          "op": {
-            "type": "string",
-            "const": "create_snapshot"
-          }
+        "op": {
+          "type": "string",
+          "const": "create_dataset"
         },
-        "additionalProperties": false,
-        "required": ["op", "dataset", "name"]
+        "refquota_bytes": {
+          "description": "Per-user visible limit. `refquota` excludes snapshots, so admin snapshot policy\ncannot block a user out of their own space (ADR-0008).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
       },
-      {
-        "description": "Diff two snapshots for reconciliation (ADR-0011 layer 3). Runs unprivileged via\n`zfs allow` — P0-D disproved the earlier belief that this needed root.",
-        "type": "object",
-        "properties": {
-          "dataset": {
-            "$ref": "#/$defs/DatasetName"
-          },
-          "from": {
-            "$ref": "#/$defs/SafeComponent"
-          },
-          "op": {
-            "type": "string",
-            "const": "diff_snapshots"
-          },
-          "to": {
-            "$ref": "#/$defs/SafeComponent"
-          }
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "dataset",
+        "acltype"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "dataset": {
+          "$ref": "#/$defs/DatasetName"
         },
-        "additionalProperties": false,
-        "required": ["op", "dataset", "from", "to"]
-      },
-      {
-        "type": "object",
-        "properties": {
-          "disk_by_id": {
-            "description": "Stable device identity only. `/dev/sdX` is rejected by construction because a\nby-id name is a `SafeComponent` under `/dev/disk/by-id` (risk R1).",
-            "$ref": "#/$defs/SafeComponent"
-          },
-          "op": {
-            "type": "string",
-            "const": "read_smart_summary"
-          }
+        "name": {
+          "$ref": "#/$defs/SafeComponent"
         },
-        "additionalProperties": false,
-        "required": ["op", "disk_by_id"]
+        "op": {
+          "type": "string",
+          "const": "create_snapshot"
+        }
       },
-      {
-        "description": "Validate and atomically publish a Samba configuration.\n\nP0-B measured why `testparm` alone is not a sufficient gate: an invalid\n`full_audit:success` opname passes `testparm` cleanly and then makes smbd refuse every\nconnection. The implementation must follow validation with a live connection smoke test\nand roll back on failure (ADR-0011, §17).",
-        "type": "object",
-        "properties": {
-          "op": {
-            "type": "string",
-            "const": "publish_samba_config"
-          },
-          "shares": {
-            "type": "array",
-            "items": {
-              "$ref": "#/$defs/ShareSpec"
-            }
-          }
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "dataset",
+        "name"
+      ]
+    },
+    {
+      "description": "Diff two snapshots for reconciliation (ADR-0011 layer 3). Runs unprivileged via\n`zfs allow` — P0-D disproved the earlier belief that this needed root.",
+      "type": "object",
+      "properties": {
+        "dataset": {
+          "$ref": "#/$defs/DatasetName"
         },
-        "additionalProperties": false,
-        "required": ["op", "shares"]
-      }
-    ],
-    "$defs": {
-      "AclType": {
-        "description": "The ACL type a dataset may be created with.\n\n`Nfsv4` is deliberately ABSENT and unrepresentable. P0-B measured what happens on\nZFS-on-Linux: `zfs set acltype=nfsv4` succeeds, `zfs get` reports `nfsv4`, and ACLs do not\nwork at all — with no error anywhere. A validation that merely checks \"acltype is not empty\"\nor \"is not off\" walks straight into it. Making the value impossible to express is stronger\nthan checking for it.",
-        "oneOf": [
-          {
-            "description": "The only type the Linux kernel actually enforces on ZFS (ADR-0004).",
-            "type": "string",
-            "const": "posixacl"
-          }
-        ]
-      },
-      "DatasetName": {
-        "description": "A ZFS dataset name, e.g. `tank/depsis/users/1001`.\n\nThe leading-dash check is not paranoia: P0-E's whole point is that `zfs`, `zpool`,\n`smbcacls` and `smartctl` parse their own argv, so an operand that begins with `-` becomes a\nflag even when it arrives as a separate argument. Inserting `--` helps but is not sufficient\nbecause these tools do not all honour it consistently, so the value is rejected outright.",
-        "type": "string"
-      },
-      "SafeComponent": {
-        "description": "A single path component under a share root — never a path, never absolute.\n\nADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access\nto `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle\n`/` or `..` through, so this type refuses them rather than sanitising.",
-        "type": "string"
-      },
-      "ShareSpec": {
-        "type": "object",
-        "properties": {
-          "dataset": {
-            "$ref": "#/$defs/DatasetName"
-          },
-          "name": {
-            "$ref": "#/$defs/SafeComponent"
-          },
-          "read_only": {
-            "type": "boolean"
-          }
+        "from": {
+          "$ref": "#/$defs/SafeComponent"
         },
-        "required": ["name", "dataset", "read_only"]
-      }
+        "op": {
+          "type": "string",
+          "const": "diff_snapshots"
+        },
+        "to": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "dataset",
+        "from",
+        "to"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "disk_by_id": {
+          "description": "Stable device identity only. `/dev/sdX` is rejected by construction because a\nby-id name is a `SafeComponent` under `/dev/disk/by-id` (risk R1).",
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "op": {
+          "type": "string",
+          "const": "read_smart_summary"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "disk_by_id"
+      ]
+    },
+    {
+      "description": "Validate and atomically publish a Samba configuration.\n\nP0-B measured why `testparm` alone is not a sufficient gate: an invalid\n`full_audit:success` opname passes `testparm` cleanly and then makes smbd refuse every\nconnection. The implementation must follow validation with a live connection smoke test\nand roll back on failure (ADR-0011, §17).",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "publish_samba_config"
+        },
+        "shares": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ShareSpec"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "shares"
+      ]
     }
-  },
-  "response": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "Response",
-    "oneOf": [
-      {
-        "type": "object",
-        "properties": {
-          "schema_version": {
-            "type": "integer",
-            "format": "uint32",
-            "minimum": 0
-          },
-          "status": {
-            "type": "string",
-            "const": "ok"
-          }
+  ],
+  "$defs": {
+    "AclType": {
+      "description": "The ACL type a dataset may be created with.\n\n`Nfsv4` is deliberately ABSENT and unrepresentable. P0-B measured what happens on\nZFS-on-Linux: `zfs set acltype=nfsv4` succeeds, `zfs get` reports `nfsv4`, and ACLs do not\nwork at all — with no error anywhere. A validation that merely checks \"acltype is not empty\"\nor \"is not off\" walks straight into it. Making the value impossible to express is stronger\nthan checking for it.",
+      "oneOf": [
+        {
+          "description": "The only type the Linux kernel actually enforces on ZFS (ADR-0004).",
+          "type": "string",
+          "const": "posixacl"
+        }
+      ]
+    },
+    "DatasetName": {
+      "description": "A ZFS dataset name, e.g. `tank/depsis/users/1001`.\n\nThe leading-dash check is not paranoia: P0-E's whole point is that `zfs`, `zpool`,\n`smbcacls` and `smartctl` parse their own argv, so an operand that begins with `-` becomes a\nflag even when it arrives as a separate argument. Inserting `--` helps but is not sufficient\nbecause these tools do not all honour it consistently, so the value is rejected outright.",
+      "type": "string"
+    },
+    "SafeComponent": {
+      "description": "A single path component under a share root — never a path, never absolute.\n\nADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access\nto `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle\n`/` or `..` through, so this type refuses them rather than sanitising.",
+      "type": "string"
+    },
+    "ShareSpec": {
+      "type": "object",
+      "properties": {
+        "dataset": {
+          "$ref": "#/$defs/DatasetName"
         },
-        "required": ["status", "schema_version"]
+        "name": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "read_only": {
+          "type": "boolean"
+        }
       },
-      {
-        "type": "object",
-        "properties": {
-          "available_bytes": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "health": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string",
-            "const": "pool_status"
-          },
-          "used_bytes": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          }
-        },
-        "required": ["status", "health", "used_bytes", "available_bytes"]
-      },
-      {
-        "type": "object",
-        "properties": {
-          "dataset": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string",
-            "const": "created"
-          }
-        },
-        "required": ["status", "dataset"]
-      },
-      {
-        "type": "object",
-        "properties": {
-          "full_name": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string",
-            "const": "snapshot"
-          }
-        },
-        "required": ["status", "full_name"]
-      },
-      {
-        "type": "object",
-        "properties": {
-          "lines": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "status": {
-            "type": "string",
-            "const": "diff"
-          }
-        },
-        "required": ["status", "lines"]
-      },
-      {
-        "type": "object",
-        "properties": {
-          "healthy": {
-            "type": "boolean"
-          },
-          "raw": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string",
-            "const": "smart"
-          },
-          "temperature_celsius": {
-            "type": ["integer", "null"],
-            "format": "int32"
-          }
-        },
-        "required": ["status", "healthy", "raw"]
-      },
-      {
-        "type": "object",
-        "properties": {
-          "shares": {
-            "type": "integer",
-            "format": "uint",
-            "minimum": 0
-          },
-          "status": {
-            "type": "string",
-            "const": "published"
-          }
-        },
-        "required": ["status", "shares"]
-      },
-      {
-        "type": "object",
-        "properties": {
-          "reason": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string",
-            "const": "refused"
-          }
-        },
-        "required": ["status", "reason"]
-      },
-      {
-        "type": "object",
-        "properties": {
-          "reason": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string",
-            "const": "failed"
-          }
-        },
-        "required": ["status", "reason"]
-      }
-    ]
+      "required": [
+        "name",
+        "dataset",
+        "read_only"
+      ]
+    }
   }
-}
+},"response":{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Response",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "const": "ok"
+        }
+      },
+      "required": [
+        "status",
+        "schema_version"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "available_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "health": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "pool_status"
+        },
+        "used_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "status",
+        "health",
+        "used_bytes",
+        "available_bytes"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "dataset": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "created"
+        }
+      },
+      "required": [
+        "status",
+        "dataset"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "full_name": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "snapshot"
+        }
+      },
+      "required": [
+        "status",
+        "full_name"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "lines": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "diff"
+        }
+      },
+      "required": [
+        "status",
+        "lines"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "healthy": {
+          "type": "boolean"
+        },
+        "raw": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "smart"
+        },
+        "temperature_celsius": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        }
+      },
+      "required": [
+        "status",
+        "healthy",
+        "raw"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "shares": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "const": "published"
+        }
+      },
+      "required": [
+        "status",
+        "shares"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "refused"
+        }
+      },
+      "required": [
+        "status",
+        "reason"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "failed"
+        }
+      },
+      "required": [
+        "status",
+        "reason"
+      ]
+    }
+  ]
+}}
