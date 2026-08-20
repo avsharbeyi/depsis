@@ -7,6 +7,7 @@ import { parse } from 'yaml';
 
 import { AppModule } from './app.module.js';
 import { DbService } from './db/db.service.js';
+import { API_PREFIX } from './config.js';
 
 /**
  * Does the API actually serve what the contract describes?
@@ -30,6 +31,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const SPEC_PATH = resolve(here, '../../../packages/contracts/openapi/depsis.yaml');
 
 interface OpenApiDocument {
+  servers?: Array<{ url?: string }>;
   paths?: Record<string, Record<string, unknown>>;
 }
 
@@ -93,6 +95,10 @@ describe('the API and its contract describe the same system', () => {
       .compile();
 
     const app = moduleRef.createNestApplication();
+    // The same prefix production sets. Without it this test compared unprefixed router paths to
+    // unprefixed spec paths and passed while the running API served everything one level up from
+    // where the generated client looks — the drift check missing the drift.
+    app.setGlobalPrefix(API_PREFIX);
     await app.init();
 
     try {
@@ -100,7 +106,16 @@ describe('the API and its contract describe the same system', () => {
       const specPaths = new Set(Object.keys(spec.paths ?? {}));
       expect(specPaths.size, 'the spec must describe some paths').toBeGreaterThan(0);
 
-      const served = routesOf(app).map((r) => ({ ...r, openapi: toOpenApiPath(r.path) }));
+      // The prefix is part of the contract too, and it lives in `servers` rather than in the paths.
+      const declaredServer = spec.servers?.[0]?.url;
+      expect(declaredServer, 'the spec must declare a server').toBeDefined();
+      expect(`/${API_PREFIX}`, 'the API prefix must match the spec server').toBe(declaredServer);
+
+      const prefix = `/${API_PREFIX}`;
+      const served = routesOf(app).map((r) => ({
+        ...r,
+        openapi: toOpenApiPath(r.path.startsWith(prefix) ? r.path.slice(prefix.length) : r.path),
+      }));
       expect(served.length, 'the app must serve some routes').toBeGreaterThan(0);
 
       // Direction 1 — drift that already happened, and therefore a failure.

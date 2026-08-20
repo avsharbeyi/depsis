@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "noEmit": true,
+    "composite": false,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["node", "vite/client", "vitest/globals"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "_comment_types": "'node' is here for the TEST files, which read the OpenAPI document off disk. Application code must not use Node builtins, and the backstop is real rather than a convention: Vite externalises node: imports for the browser and the production build fails on them."
+}

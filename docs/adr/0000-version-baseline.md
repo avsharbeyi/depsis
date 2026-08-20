@@ -66,19 +66,26 @@ Altı konu da doğrulandı. Sürüm tablosu:
 | pnpm / turbo                       | 11.21.0 / 2.10.9                                            | ADR-0002               |
 | TypeScript                         | **7.0.2**                                                   | ADR-0002               |
 | NestJS                             | **11.2.1** (varsayılan adapter Express)                     | ADR-0002               |
-| Vite / React                       | 8.2.1 / 19.2.8                                              | ADR-0002               |
+| Vite / React                       | **8.2.2** / 19.2.8                                          | ADR-0002               |
 | Vitest / Playwright                | 4.1.10 / 1.62.1                                             | ADR-0002               |
 | zod                                | 4.4.3                                                       | ADR-0002               |
 | @node-rs/argon2                    | 2.1.0 (prebuilt, node-gyp gerekmez)                         | ADR-0002               |
 | otplib                             | 13.4.1 (terk edilmemiş)                                     | ADR-0002               |
 | pino / pino-http                   | 10.3.1 / 11.0.0                                             | ADR-0002               |
 | openapi-typescript / openapi-fetch | 7.13.0 / 0.17.0                                             | ADR-0002               |
-| Rust                               | 1.97.1 (`rust-toolchain.toml`)                              | ADR-0006               |
-| rustix / schemars                  | 1.1.4 / 1.2.2                                               | ADR-0006               |
-| @tus/server                        | 2.4.4 (Node >= 20.19.0)                                     | ADR-0008               |
-| archiver / zip-stream / yazl       | 8.0.0 / 7.0.5 / 3.3.1                                       | ADR-0008               |
-| tus protokolü                      | **1.0.0** (IETF taslağı -12, RFC **değil**)                 | ADR-0008               |
-| Debian trixie çekirdeği            | 6.12.101                                                    | ADR-0006               |
+| @vitejs/plugin-react               | 6.1.0                                                       | ADR-0002               |
+| @types/react / @types/react-dom    | 19.2.18 / 19.2.4                                            | ADR-0002               |
+
+> **Kayda geçen sapma (2026-08-20):** TypeScript'in güncel sürümü **7.0.2**, depo ise 6.0.3'te.
+> Majör bir atlama ve `apps/web` işinin kapsamında değerlendirilmesi doğru olmazdı, bu yüzden
+> ertelendi — ama "fark edilmedi" ile "ertelendi" arasındaki farkı korumak için buraya yazıldı.
+> Yükseltme kendi işi ve kendi ölçümünü hak ediyor.
+> | Rust | 1.97.1 (`rust-toolchain.toml`) | ADR-0006 |
+> | rustix / schemars | 1.1.4 / 1.2.2 | ADR-0006 |
+> | @tus/server | 2.4.4 (Node >= 20.19.0) | ADR-0008 |
+> | archiver / zip-stream / yazl | 8.0.0 / 7.0.5 / 3.3.1 | ADR-0008 |
+> | tus protokolü | **1.0.0** (IETF taslağı -12, RFC **değil**) | ADR-0008 |
+> | Debian trixie çekirdeği | 6.12.101 | ADR-0006 |
 
 ### Hâlâ doğrulanmamış
 

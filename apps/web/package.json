@@ -1,0 +1,30 @@
+{
+  "name": "@depsis/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint src",
+    "test:unit": "vitest run",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@depsis/contracts": "workspace:*",
+    "openapi-fetch": "0.17.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.1.0",
+    "typescript": "6.0.3",
+    "vite": "8.2.2",
+    "vitest": "4.1.10",
+    "yaml": "2.9.0"
+  }
+}

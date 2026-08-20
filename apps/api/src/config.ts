@@ -1,6 +1,16 @@
 import { z } from 'zod';
 
 /**
+ * The URL prefix every route sits behind.
+ *
+ * Must match the `servers` entry in packages/contracts/openapi/depsis.yaml, and `contract.test.ts`
+ * asserts that it does. It lives here rather than in `main.ts` because importing a constant should
+ * not start a web server: the test that reads it was, briefly, booting the application as a side
+ * effect of an import.
+ */
+export const API_PREFIX = 'api/v1';
+
+/**
  * ADR-0001 makes runtime validation mandatory at every boundary, and process.env is a boundary:
  * TypeScript will happily type `process.env.X` as `string | undefined` and then let a `!` silence
  * it. A missing DEPSIS_DATABASE_URL should stop the process at startup with a sentence someone can
