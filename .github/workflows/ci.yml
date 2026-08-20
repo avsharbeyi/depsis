@@ -80,6 +80,21 @@ jobs:
       - run: cargo test --all
       - run: cargo check --target x86_64-pc-windows-msvc
 
+      - name: The committed agent schema matches what the binary emits
+        # ADR-0006 puts this contract on the Rust side, and packages/agent-protocol generates its
+        # TypeScript from a COMMITTED copy of the emit. A copy is a second description of the
+        # boundary, so it only stays honest if something compares it to the original — which only
+        # this job can do, because only this job has the binary.
+        run: |
+          cargo build --release --bin depsis-agent
+          ./target/release/depsis-agent --emit-schema > /tmp/agent-schema.json
+          if ! diff -u packages/agent-protocol/schema/agent.schema.json /tmp/agent-schema.json; then
+            echo "::error::packages/agent-protocol/schema/agent.schema.json is stale."
+            echo "Regenerate it with: cargo run --release --bin depsis-agent -- --emit-schema > packages/agent-protocol/schema/agent.schema.json"
+            echo "then: pnpm --filter @depsis/agent-protocol generate"
+            exit 1
+          fi
+
   security:
     name: dependency · secret scan
     runs-on: ubuntu-latest
