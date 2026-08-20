@@ -35,6 +35,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@depsis/agent-protocol':
+        specifier: workspace:*
+        version: link:../../packages/agent-protocol
       '@depsis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

@@ -11,6 +11,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
+    "@depsis/agent-protocol": "workspace:*",
     "@depsis/contracts": "workspace:*",
     "@nestjs/common": "11.2.1",
     "@nestjs/core": "11.2.1",

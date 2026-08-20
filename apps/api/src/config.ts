@@ -23,12 +23,24 @@ const schema = z.object({
   DEPSIS_DATABASE_URL: z.string().min(1, 'DEPSIS_DATABASE_URL is required'),
   DEPSIS_API_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+
+  // Optional, unlike the database URL, and the asymmetry is deliberate. Without a database the API
+  // can do nothing at all; without the agent it can still authenticate, and a development machine
+  // has no agent to point at. Absence is a warning at startup and a 503 on the endpoints that need
+  // it — see AgentService. An empty string is treated as absent, because that is what a shell
+  // exports when a variable is set from an unset variable and it should not read as a valid path.
+  DEPSIS_AGENT_SOCKET: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => (value === undefined || value === '' ? null : value)),
 });
 
 export interface AppConfig {
   databaseUrl: string;
   port: number;
   nodeEnv: 'development' | 'test' | 'production';
+  agentSocket: string | null;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -41,5 +53,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     databaseUrl: parsed.data.DEPSIS_DATABASE_URL,
     port: parsed.data.DEPSIS_API_PORT,
     nodeEnv: parsed.data.NODE_ENV,
+    agentSocket: parsed.data.DEPSIS_AGENT_SOCKET,
   };
 }

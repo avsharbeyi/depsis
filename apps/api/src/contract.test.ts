@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
 import { AppModule } from './app.module.js';
+import { AgentService } from './agent/agent.service.js';
 import { DbService } from './db/db.service.js';
 import { API_PREFIX } from './config.js';
 
@@ -89,9 +90,19 @@ describe('the API and its contract describe the same system', () => {
       withoutTenant: () => Promise.resolve([{ done: true }]),
     };
 
+    // Likewise the agent. Overriding it replaces the factory, which would otherwise call
+    // loadConfig() and demand a database URL this test has no use for — and, on a machine that has
+    // one exported, would try to open a Unix socket while comparing route tables.
+    const stubAgent = {
+      onModuleInit: () => Promise.resolve(),
+      isAvailable: () => false,
+    };
+
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(DbService)
       .useValue(stubDb)
+      .overrideProvider(AgentService)
+      .useValue(stubAgent)
       .compile();
 
     const app = moduleRef.createNestApplication();
