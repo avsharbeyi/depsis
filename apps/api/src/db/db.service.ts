@@ -34,7 +34,10 @@ export type UntenantedJustification =
   | 'login-throttle'
   // The second factor step. Same shape as resolve-session: an opaque token names the tenant, and
   // the tenant cannot be known until it is resolved.
-  | 'resolve-pending-login';
+  | 'resolve-pending-login'
+  // Setup precedes every tenant by definition: the question is whether ANY tenant exists, and the
+  // claim that answers it is what creates the first one. ADR-0015 §5d.
+  | 'setup-status';
 
 const SET_TENANT_SQL = `SELECT set_config('depsis.organization_id', $1, true) AS applied,
                                public.current_organization_id()::text  AS observed`;

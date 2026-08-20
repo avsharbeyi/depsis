@@ -183,8 +183,19 @@ jobs:
         run: |
           psql -d postgres -c "ALTER ROLE depsis_owner PASSWORD 'ci-owner'"
           psql -d postgres -c "ALTER ROLE depsis_app   PASSWORD 'ci-app'"
+
+          # A SECOND database, with the migrations applied and nothing claimed. The setup tests need
+          # a system that has never been set up, and the first database has tenants in it by the
+          # time they would run — so sharing one would leave them permanently skipped or, worse,
+          # asserting against a state they did not create.
+          psql -d postgres -c "DROP DATABASE IF EXISTS depsis_setup_ci"
+          psql -d postgres -v db_name=depsis_setup_ci -f packages/db/bootstrap.sql
+          DEPSIS_MIGRATION_DATABASE_URL="postgresql://depsis_owner:ci-owner@127.0.0.1:5432/depsis_setup_ci"             pnpm --filter @depsis/db run migrate:up
+
           export DEPSIS_TEST_DATABASE_URL="postgresql://depsis_app:ci-app@127.0.0.1:5432/depsis_ci"
           export DEPSIS_TEST_OWNER_DATABASE_URL="postgresql://depsis_owner:ci-owner@127.0.0.1:5432/depsis_ci"
+          export DEPSIS_TEST_SETUP_DATABASE_URL="postgresql://depsis_app:ci-app@127.0.0.1:5432/depsis_setup_ci"
+          export DEPSIS_TEST_SETUP_OWNER_DATABASE_URL="postgresql://depsis_owner:ci-owner@127.0.0.1:5432/depsis_setup_ci"
           pnpm --filter @depsis/api test:unit
 
       - name: Prove the integration tests were not silently skipped
@@ -197,6 +208,8 @@ jobs:
           PGPASSWORD: ci-postgres
           DEPSIS_TEST_DATABASE_URL: postgresql://depsis_app:ci-app@127.0.0.1:5432/depsis_ci
           DEPSIS_TEST_OWNER_DATABASE_URL: postgresql://depsis_owner:ci-owner@127.0.0.1:5432/depsis_ci
+          DEPSIS_TEST_SETUP_DATABASE_URL: postgresql://depsis_app:ci-app@127.0.0.1:5432/depsis_setup_ci
+          DEPSIS_TEST_SETUP_OWNER_DATABASE_URL: postgresql://depsis_owner:ci-owner@127.0.0.1:5432/depsis_setup_ci
         run: |
           out=$(pnpm --filter @depsis/api exec vitest run --reporter=json 2>/dev/null || true)
           skipped=$(node -e "

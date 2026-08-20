@@ -6,8 +6,8 @@ p1-a	PASS	bootstrap.sql runs as a superuser with a parameterised database name	r
 p1-a	PASS	depsis_owner can connect over TCP with a password	
 p1-a	PASS	node-pg-migrate applies 0001 as depsis_owner	 Migrations complete! 
 p1-a	PASS	the history table is owned by depsis_owner	= depsis_owner
-p1-a	PASS	all 4 migration file(s) are recorded as applied	= 4
-p1-a	PASS	the history names one migration, with no up/down suffix	0001_foundation,0002_resolve_organization,0003_sessions,0004_mfa
+p1-a	PASS	all 5 migration file(s) are recorded as applied	= 5
+p1-a	PASS	the history names one migration, with no up/down suffix	0001_foundation,0002_resolve_organization,0003_sessions,0004_mfa,0005_system_setup
 p1-a	PASS	no migration uses the unsupported .up.sql / .down.sql split layout	
 p1-a	PASS	organizations exists	
 p1-a	PASS	users exists	
@@ -22,7 +22,7 @@ p1-a	PASS	depsis_app refused: ALTER TABLE users NO FORCE ROW LEVEL SECURITY
 p1-a	PASS	depsis_app cannot SET ROLE to depsis_owner	
 p1-a	PASS	node-pg-migrate rolls 0001 back	
 p1-a	PASS	up then down leaves the schema byte-identical to the rolled-back baseline	
-p1-a	PASS	down rolled back exactly one migration	= 3
+p1-a	PASS	down rolled back exactly one migration	= 4
 p1-a	PASS	the migration re-applies cleanly after a rollback	
 p1-a	PASS	the runner exits non-zero on a failing migration	rc=1
 p1-a	PASS	the failed migration is NOT recorded as applied	

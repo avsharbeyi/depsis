@@ -590,6 +590,11 @@ BAD_KEYS=$(_db -c "
      AND i.relname NOT IN ('organizations_slug_key',
                            'sessions_token_hash_key',
                            'pending_logins_token_hash_key',
+                           -- A singleton key on a boolean, not an identifier. The only value it
+                           -- can hold is true, so a violation says only that setup is already
+                           -- complete, which the unauthenticated status endpoint answers anyway.
+                           -- Argued in full in migration 0005.
+                           'system_setup_pkey',
                            'depsis_migrations_pkey')
 " || echo ERR)
 if [ -z "$BAD_KEYS" ]; then

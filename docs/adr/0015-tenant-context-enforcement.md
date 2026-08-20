@@ -47,15 +47,38 @@ güncellenmesi gerekir.
 | `resolve-session`              | Aynısı, bir adım daha içeride — göç 0003, aşağıda §5b |
 | `login-throttle`               | Deneme, kiracı **çözülmeden önce** sayılmalı — §5c    |
 | `resolve-pending-login`        | İkinci faktör adımı; kiracı yine belirteçten gelir    |
+| `setup-status`                 | Hiç kiracı yokken sorulan tek soru — §5d              |
 
 Dördüncüsü oturum katmanı, beşincisi kısıtlama, altıncısı ikinci faktör tasarlanırken eklendi —
 yani kural her seferinde işledi: listeyi genişletmek kod değişikliği değil, karar değişikliği oldu.
 
-Altısı da tek bir desende buluşuyor ve liste bu yüzden burada bitiyor: **bir kiracı bağlamı
-kurulabilmesi için önce bir şeyin çözülmesi gerekiyorsa, o çözüm bağlamsız olmak zorundadır.**
-Sağlık kontrolü ve göç durumu hiçbir kiracı tablosuna dokunmuyor; kalan dördü opak bir belirteci
-(slug, oturum çerezi, giriş denemesi anahtarı, bekleyen giriş belirteci) kimliğe çeviriyor. Yedinci
-bir gerekçe bu desene uymuyorsa, muhtemelen `withTenant` ile yazılabilecek bir iş demektir.
+Hepsi tek bir desende buluşuyor: **bir kiracı bağlamı kurulabilmesi için önce bir şeyin çözülmesi
+gerekiyorsa, o çözüm bağlamsız olmak zorundadır.** Sağlık kontrolü ve göç durumu hiçbir kiracı
+tablosuna dokunmuyor; dördü opak bir belirteci (slug, oturum çerezi, giriş denemesi anahtarı,
+bekleyen giriş belirteci) kimliğe çeviriyor; sonuncusu ise kiracının **var olup olmadığını**
+soruyor. Bu desene uymayan bir gerekçe, muhtemelen `withTenant` ile yazılabilecek bir iş demektir.
+
+Not: bu ADR'nin önceki hâli "liste altıda bitiyor" diyordu. Bitmedi — kurulum akışı tasarlanınca
+yedincisi geldi. Cümleyi düzeltmek, listeyi sessizce uzatmaktan iyi: bir ADR'nin yanlış çıkmış
+tahmini, düzeltilirse hâlâ bilgi taşır.
+
+### 5d. Kurulum: kiracılardan önce gelen soru
+
+`system_setup` kiracıya kapsanamaz, çünkü **ilk kiracıyı yaratan kayıt odur.** Tabloda
+`organization_id` yok ve RLS politikası yok; kontrol yetki. Sütun eklemek, ikinci bir kiracının
+kurulumu yeniden sahiplenebilmesi demek olurdu.
+
+Uygulamanın `organizations`'a `INSERT` yetkisi ADR-0014 §4 gereği yok — API hatası kiracı
+basmamalı. Bu yetenek `claim_system_setup` adında dar bir `SECURITY DEFINER` fonksiyonda, tek
+işlemde ve **kurulum tamamlanmışsa reddederek** veriliyor. İki eşzamanlı talep arasındaki yarışı
+uygulama değil, tekil satırın birincil anahtarı çözüyor.
+
+Kurulumu kimin çalıştırabileceği ADR-0009'da yazılı değildi ve bu akışta karara bağlandı: API,
+kurulum bekliyorken her açılışta journal'a tek kullanımlık bir **talep belirteci** basıyor. Onu
+okumak konsol veya SSH erişimi gerektiriyor — ilk yöneticinin kim olacağına karar vermesi gereken
+yetki tam olarak bu. §6.3 ihlali değil: §6.3 **parolanın** loga düşmesini yasaklıyor, bu ise parola
+değil; tek kullanımlık, her açılışta yenileniyor (eski bir journal'dan toplanan belirteç ölü) ve
+kurulum bitince hiçbir şey ifade etmiyor.
 
 ### 5b. Oturum çözümü: aynı desen, bir adım içeride
 
