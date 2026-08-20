@@ -45,6 +45,7 @@ güncellenmesi gerekir.
 | `migration-status`             | Kiracı tablosuna dokunmuyor                           |
 | `resolve-organization-by-slug` | Kiracı kimliği **henüz bilinmiyor** — §5              |
 | `resolve-session`              | Aynısı, bir adım daha içeride — göç 0003, aşağıda §5b |
+| `login-throttle`               | Deneme, kiracı **çözülmeden önce** sayılmalı — §5c    |
 
 Dördüncüsü, bu ADR yazıldıktan sonra oturum katmanı tasarlanırken eklendi — yani kural işledi:
 listeyi genişletmek kod değişikliği değil, karar değişikliği oldu.
@@ -59,6 +60,23 @@ aynısı.
 veritabanına ve loglarına hiç ulaşmıyor), yalnız bağlamı kurmaya yetecek dört alanı döndürüyor, ve
 süresi dolmuş / iptal edilmiş / kullanıcısı devre dışı bir oturum için **hiçbir şey** döndürmüyor —
 çağıran bu üç durumu "böyle bir oturum yok"tan ayıramıyor ve ölü bir oturumla kazara işlem yapamıyor.
+
+### 5c. Giriş kısıtlaması: kiracıdan önce gelen tek sayaç
+
+Bir giriş denemesi kiracı çözülmeden **önce** sayılmalı — kısıtlamanın işe yaradığı an tam olarak
+orası. Dahası, var olmayan bir slug'a yapılan denemenin atfedilecek bir kiracısı yok; onu bir
+kiracıya yazmak, saldırganın başka bir kiracının denetim izini doldurabilmesi demek olurdu.
+
+`login_attempts` bu yüzden `organization_id` taşımıyor ve RLS politikası yok. Bu bir eksiklik değil,
+kararın kendisi: filtrelenecek kiracı anahtarı yok, kontrol **yetki**. Göç 0003 aynı gerekçeyi
+tablonun `COMMENT`'inde de taşıyor — eksik politikayı "düzeltmek" isteyen birinin ekleyeceği kiracı
+sütunu, saldırganın hangi kovayı dolduracağını seçmesine izin verirdi.
+
+ADR-0009'un "kilit değil artan gecikme" şartına iki inceltme yapıldı, gerekçeleri kodda: gecikme
+1 saniyeyle sınırlı (beş saniye uyuyan bir sunucu saldırgana kendi havuz yuvasını hediye eder) ve
+bir eşikten sonra cevap uyumak yerine doğrudan ret. Ret **çift** üzerine anahtarlı olduğu için
+ADR-0009'un reddettiği kurban-kilitleme geri gelmiyor: kurban kendi adresinden sorunsuz giriyor.
+**Hiçbiri yük altında ölçülmedi**; sayılar gerekçeli, kalibre değil.
 
 `sessions.token_hash` üzerindeki `UNIQUE` ise ADR-0013'ün `organization_id` kuralının bilinçli tek
 istisnası. Gerekçe göç 0003'te tam olarak yazılı ve özeti şu: bu kısıtta çakışma üretebilmek için

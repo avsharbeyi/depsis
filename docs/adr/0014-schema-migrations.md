@@ -263,7 +263,16 @@ gerekçelerle o kapı kapalı. Yerine, sorgu katmanının tipleri `packages/cont
 - JS/TS göç dosyası yazılamaz; tüm göçler `.sql`.
 - Uygulama `depsis_owner` ile bağlanamaz; ayrı ortam değişkeni zorunlu.
 - `down` dosyası atlanamaz; geri alınamayan göç açıkça başarısız olmalı.
-- Uygulanmış bir göç dosyası düzenlenemez — yeni göç yazılır.
+- Uygulanmış bir göç dosyası düzenlenemez — yeni göç yazılır. **İlk sürüme kadar tek istisna:**
+  henüz hiçbir yere dağıtılmamış göçler düzenlenebilir, ama o zaman **her mevcut veritabanı
+  sıfırdan kurulmalıdır.** Bu istisna ilk sürümle birlikte kalkar.
+
+  Bunu yazmak gerekti çünkü tam olarak burada tökezlendi: `assert_rls_roles_sane` 0001'e sonradan
+  eklendi, CI kapısı her koşuda veritabanını sıfırdan kurduğu için sorun görünmedi, ama uzun ömürlü
+  test veritabanı eski 0001 ile kalmıştı ve 0003 "böyle bir fonksiyon yok" diyerek patladı. Kural
+  düzenlemeyi yasaklıyordu; istisnayı yazmak yerine sessizce kullanmak, kuralın kendisini
+  değersizleştirirdi.
+
 - ORM veya şema DSL'i şemanın sahibi olamaz.
 
 ## Geri alma maliyeti

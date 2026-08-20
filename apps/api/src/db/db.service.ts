@@ -23,7 +23,15 @@ export interface TenantQuery {
  * half of that list.
  */
 export type UntenantedJustification =
-  'health-check' | 'migration-status' | 'resolve-organization-by-slug';
+  | 'health-check'
+  | 'migration-status'
+  // Both of these run BEFORE a tenant is known, which is the only reason they are here.
+  | 'resolve-organization-by-slug'
+  | 'resolve-session'
+  // Login throttling counts attempts against an address that may belong to no tenant at all, and
+  // has to bite before the tenant is resolved. Migration 0003 explains why the table carries no
+  // organization_id and why adding one would let an attacker pick their own throttling bucket.
+  | 'login-throttle';
 
 const SET_TENANT_SQL = `SELECT set_config('depsis.organization_id', $1, true) AS applied,
                                public.current_organization_id()::text  AS observed`;

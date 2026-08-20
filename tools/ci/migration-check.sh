@@ -82,6 +82,10 @@ else
   exit 1
 fi
 
+# These ALTER ROLE statements change the password CLUSTER-WIDE, not per database — roles are
+# cluster objects. On a CI runner the cluster is disposable so that costs nothing, but on a shared
+# development cluster it will break any other database whose connection strings use these roles.
+# Said out loud because it cost one confusing "password authentication failed" already.
 OWNER_PW="ci-owner-$RANDOM$RANDOM"
 APP_PW="ci-app-$RANDOM$RANDOM"
 admin -c "ALTER ROLE depsis_owner PASSWORD '$OWNER_PW'" >/dev/null
