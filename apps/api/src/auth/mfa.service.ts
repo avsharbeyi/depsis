@@ -114,6 +114,28 @@ export class MfaService {
     return codes;
   }
 
+  /**
+   * Replace the recovery codes with a fresh set.
+   *
+   * The old ones stop working, which is the point and also the risk: a user who regenerates and
+   * then loses the new sheet has locked themselves out of their own recovery path. That is why the
+   * endpoint asks for the password (§0.5) rather than doing it on a click.
+   */
+  async regenerateRecoveryCodes(organizationId: string, userId: string): Promise<string[]> {
+    const codes = Array.from({ length: RECOVERY_CODE_COUNT }, () => generateRecoveryCode());
+    await this.db.withTenant(organizationId, async (q) => {
+      await q.query(`DELETE FROM user_recovery_codes WHERE user_id = $1`, [userId]);
+      for (const plain of codes) {
+        await q.query(
+          `INSERT INTO user_recovery_codes (organization_id, user_id, code_hash)
+           VALUES ($1, $2, $3)`,
+          [organizationId, userId, hashRecoveryCode(plain)],
+        );
+      }
+    });
+    return codes;
+  }
+
   /** Whether this user must present a second factor. */
   async isEnrolled(organizationId: string, userId: string): Promise<boolean> {
     const rows = await this.db.withTenant(organizationId, (q) =>

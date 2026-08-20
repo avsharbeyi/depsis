@@ -131,3 +131,35 @@ button:disabled {
 .muted {
   color: var(--muted);
 }
+
+/* Recovery codes are read off the screen and typed elsewhere, so they get a monospace face and
+   generous spacing — a mistyped code is indistinguishable from a wrong one. */
+.codes {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: 0.4rem;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  letter-spacing: 0.05em;
+}
+
+.row {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 1.75rem 0;
+}
+
+img {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+}

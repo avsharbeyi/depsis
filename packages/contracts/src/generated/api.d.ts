@@ -279,7 +279,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Oturum sahibinin profili ve etkin yetkileri */
+        /** Oturum sahibinin profili */
         get: {
             parameters: {
                 query?: never;
@@ -303,6 +303,189 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me/mfa/enrolment": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * TOTP kaydını başlat
+         * @description Bir sır üretir ve **onaylanmamış** olarak saklar. Onaylanmamış bir sır girişi
+         *     engellemez: QR'ı okutup telefonu kaybeden bir kullanıcı aksi hâlde hiç kullanamadığı bir
+         *     sır yüzünden kilitlenirdi — ve kurtarma kodları onayda veriliyor.
+         *
+         *     Zaten onaylanmış bir kayıt varsa 409 döner; değiştirmek için önce kaldırmak gerekir.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Okutulacak sır */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MfaEnrolment"];
+                    };
+                };
+                401: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me/mfa/enrolment/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Kaydı bir kodla onayla ve kurtarma kodlarını al
+         * @description Kurtarma kodları **yalnız burada** okunabilir hâlde döner; saklanan yalnız hash'leri.
+         *     Onay kodu da harcanır, dolayısıyla aynı 30 saniye içinde girişte kullanılamaz —
+         *     arayüz bunu söylemeli.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        code: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Kayıt tamam; kodlar bir kez gösterilir */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RecoveryCodes"];
+                    };
+                };
+                401: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me/mfa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * TOTP kaydını kaldır
+         * @description Parola yeniden isteniyor. §0.5: güvenlik riski taşıyan bir işlem sessizce
+         *     yapılamaz — ikinci faktörü kaldırmak, ele geçirilmiş bir oturumun yapmak isteyeceği ilk
+         *     şeydir.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PasswordConfirmation"];
+                };
+            };
+            responses: {
+                /** @description Kaldırıldı */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me/mfa/recovery-codes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Kurtarma kodlarını yenile
+         * @description Eskiler geçersiz olur. Parola yeniden isteniyor, aynı §0.5 gerekçesiyle: yeni bir set
+         *     üretmek, eskisini elinde tutan sahibi sessizce kilitleyebilir.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PasswordConfirmation"];
+                };
+            };
+            responses: {
+                /** @description Yeni kodlar, bir kez */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RecoveryCodes"];
+                    };
+                };
+                401: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -993,13 +1176,44 @@ export interface components {
              */
             adminPassword: string;
         };
+        /**
+         * @description `username` değil `email` — LoginRequest ile aynı düzeltme, aynı gerekçeyle.
+         *
+         *     `permissions` alanı KALDIRILDI. Şemanın ilk hâlinde vardı, ama ACL modeli henüz yok ve bu
+         *     alan bugün her istekte boş bir dizi dönerdi. Her zaman boş dönen bir alan, "bu kullanıcının
+         *     hiçbir yetkisi yok" diyen bir alandır — arayüz de ona bakıp her şeyi gizlerdi. Yetkiler
+         *     geldiğinde alan da geri gelir; o zamana kadar yokluğu, yalan söylemesinden iyi.
+         */
         CurrentUser: {
             /** Format: uuid */
             id: string;
-            username: string;
+            email: string;
             displayName: string;
-            /** @description Etkin yetkiler. UI bunu gizleme için kullanır; zorlama sunucudadır. */
-            permissions: components["schemas"]["Permission"][];
+            organizationSlug: string;
+            /** @description Onaylanmış bir TOTP kaydı var mı. */
+            mfaEnrolled: boolean;
+            /** @description Harcanmamış kurtarma kodu sayısı. Kayıt yoksa 0. */
+            recoveryCodesRemaining: number;
+        };
+        MfaEnrolment: {
+            /** @description QR olarak gösterilecek otpauth:// bağlantısı. */
+            otpauthUri: string;
+            /** @description Tarama yapamayan bir uygulama için aynı sır, metin olarak. */
+            secretBase32: string;
+        };
+        /**
+         * @description Kodlar yalnız üretildikleri anda okunabilir; sunucu hash'lerini saklıyor. İkinci kez
+         *     istemenin yolu yenilemek, ve yenilemek eskileri geçersiz kılar.
+         */
+        RecoveryCodes: {
+            codes: string[];
+        };
+        /**
+         * @description §0.5 gereği yeniden kimlik doğrulama. Oturum çerezi kimin olduğunu söyler; bu, o kişinin
+         *     hâlâ klavyenin başında olduğunu söyler.
+         */
+        PasswordConfirmation: {
+            password: string;
         };
         /**
          * @description Allow-only. deny yoktur — POSIX ACL'de deny ACE diye bir şey yok ve uygulanan

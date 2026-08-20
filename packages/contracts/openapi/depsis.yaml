@@ -165,7 +165,7 @@ paths:
   /me:
     get:
       tags: [auth]
-      summary: Oturum sahibinin profili ve etkin yetkileri
+      summary: Oturum sahibinin profili
       responses:
         '200':
           description: Profil
@@ -173,6 +173,89 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CurrentUser' }
         '401': { $ref: '#/components/responses/Problem' }
+
+  /me/mfa/enrolment:
+    post:
+      tags: [auth]
+      summary: TOTP kaydını başlat
+      description: |
+        Bir sır üretir ve **onaylanmamış** olarak saklar. Onaylanmamış bir sır girişi
+        engellemez: QR'ı okutup telefonu kaybeden bir kullanıcı aksi hâlde hiç kullanamadığı bir
+        sır yüzünden kilitlenirdi — ve kurtarma kodları onayda veriliyor.
+
+        Zaten onaylanmış bir kayıt varsa 409 döner; değiştirmek için önce kaldırmak gerekir.
+      responses:
+        '200':
+          description: Okutulacak sır
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MfaEnrolment' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /me/mfa/enrolment/confirm:
+    post:
+      tags: [auth]
+      summary: Kaydı bir kodla onayla ve kurtarma kodlarını al
+      description: |
+        Kurtarma kodları **yalnız burada** okunabilir hâlde döner; saklanan yalnız hash'leri.
+        Onay kodu da harcanır, dolayısıyla aynı 30 saniye içinde girişte kullanılamaz —
+        arayüz bunu söylemeli.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        '200':
+          description: Kayıt tamam; kodlar bir kez gösterilir
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecoveryCodes' }
+        '401': { $ref: '#/components/responses/Problem' }
+
+  /me/mfa:
+    delete:
+      tags: [auth]
+      summary: TOTP kaydını kaldır
+      description: |
+        Parola yeniden isteniyor. §0.5: güvenlik riski taşıyan bir işlem sessizce
+        yapılamaz — ikinci faktörü kaldırmak, ele geçirilmiş bir oturumun yapmak isteyeceği ilk
+        şeydir.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PasswordConfirmation' }
+      responses:
+        '204':
+          description: Kaldırıldı
+        '401': { $ref: '#/components/responses/Problem' }
+
+  /me/mfa/recovery-codes:
+    post:
+      tags: [auth]
+      summary: Kurtarma kodlarını yenile
+      description: |
+        Eskiler geçersiz olur. Parola yeniden isteniyor, aynı §0.5 gerekçesiyle: yeni bir set
+        üretmek, eskisini elinde tutan sahibi sessizce kilitleyebilir.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PasswordConfirmation' }
+      responses:
+        '200':
+          description: Yeni kodlar, bir kez
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecoveryCodes' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
 
   /files:
     get:
@@ -656,15 +739,56 @@ components:
 
     CurrentUser:
       type: object
-      required: [id, username, displayName, permissions]
+      required: [id, email, displayName, organizationSlug, mfaEnrolled, recoveryCodesRemaining]
+      description: |
+        `username` değil `email` — LoginRequest ile aynı düzeltme, aynı gerekçeyle.
+
+        `permissions` alanı KALDIRILDI. Şemanın ilk hâlinde vardı, ama ACL modeli henüz yok ve bu
+        alan bugün her istekte boş bir dizi dönerdi. Her zaman boş dönen bir alan, "bu kullanıcının
+        hiçbir yetkisi yok" diyen bir alandır — arayüz de ona bakıp her şeyi gizlerdi. Yetkiler
+        geldiğinde alan da geri gelir; o zamana kadar yokluğu, yalan söylemesinden iyi.
       properties:
         id: { type: string, format: uuid }
-        username: { type: string }
+        email: { type: string }
         displayName: { type: string }
-        permissions:
+        organizationSlug: { type: string }
+        mfaEnrolled:
+          type: boolean
+          description: Onaylanmış bir TOTP kaydı var mı.
+        recoveryCodesRemaining:
+          type: integer
+          description: Harcanmamış kurtarma kodu sayısı. Kayıt yoksa 0.
+
+    MfaEnrolment:
+      type: object
+      required: [otpauthUri, secretBase32]
+      properties:
+        otpauthUri:
+          type: string
+          description: QR olarak gösterilecek otpauth:// bağlantısı.
+        secretBase32:
+          type: string
+          description: Tarama yapamayan bir uygulama için aynı sır, metin olarak.
+
+    RecoveryCodes:
+      type: object
+      required: [codes]
+      description: |
+        Kodlar yalnız üretildikleri anda okunabilir; sunucu hash'lerini saklıyor. İkinci kez
+        istemenin yolu yenilemek, ve yenilemek eskileri geçersiz kılar.
+      properties:
+        codes:
           type: array
-          description: Etkin yetkiler. UI bunu gizleme için kullanır; zorlama sunucudadır.
-          items: { $ref: '#/components/schemas/Permission' }
+          items: { type: string }
+
+    PasswordConfirmation:
+      type: object
+      required: [password]
+      description: |
+        §0.5 gereği yeniden kimlik doğrulama. Oturum çerezi kimin olduğunu söyler; bu, o kişinin
+        hâlâ klavyenin başında olduğunu söyler.
+      properties:
+        password: { type: string, maxLength: 1024 }
 
     Permission:
       type: string

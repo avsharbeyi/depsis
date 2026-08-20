@@ -1,7 +1,12 @@
+import type { OpenApi } from '@depsis/contracts';
 import { useEffect, useState } from 'react';
 
 import { api } from './api.js';
+
+/** Straight from the contract, so a field renamed in the YAML breaks this file. */
+type CurrentUser = OpenApi.components['schemas']['CurrentUser'];
 import { SetupWizard } from './SetupWizard.js';
+import { Security } from './Security.js';
 import { SignIn } from './SignIn.js';
 
 type Screen =
@@ -59,28 +64,68 @@ export function App(): React.JSX.Element {
       return <SignIn onSignedIn={(note) => setScreen({ name: 'signed-in', note })} />;
 
     case 'signed-in':
-      return (
-        <main className="card">
-          <h1>Signed in</h1>
-          {screen.note !== null && (
-            <p className="warning" role="alert">
-              {screen.note}
-            </p>
-          )}
-          <p>
-            There is nothing here yet. Files, shares and search are Phase 1 work that has not been
-            built — this page exists so the sign-in flow has somewhere to land, and it says so
-            rather than pretending to be a dashboard.
-          </p>
-          <button
-            type="button"
-            onClick={() => {
-              void api.POST('/auth/logout', {}).then(() => setScreen({ name: 'sign-in' }));
-            }}
-          >
-            Sign out
-          </button>
-        </main>
-      );
+      return <SignedIn note={screen.note} onSignedOut={() => setScreen({ name: 'sign-in' })} />;
   }
+}
+
+interface SignedInProps {
+  note: string | null;
+  onSignedOut: () => void;
+}
+
+/**
+ * The landing page, such as it is.
+ *
+ * It reads `/me` rather than carrying anything over from the sign-in screen: the session is the
+ * cookie, and the server is the only thing that knows what it means. Passing a user object down
+ * from the login form would mean the page believed something the server had not been asked about.
+ */
+function SignedIn({ note, onSignedOut }: SignedInProps): React.JSX.Element {
+  const [me, setMe] = useState<CurrentUser | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    void loadMe().then(setMe);
+  }, [reloadKey]);
+
+  if (me === null) return <main className="card">Loading…</main>;
+
+  return (
+    <main className="card">
+      <h1>Signed in as {me.displayName}</h1>
+      <p className="muted">
+        {me.email} · {me.organizationSlug}
+      </p>
+      {note !== null && (
+        <p className="warning" role="alert">
+          {note}
+        </p>
+      )}
+
+      <Security
+        mfaEnrolled={me.mfaEnrolled}
+        recoveryCodesRemaining={me.recoveryCodesRemaining}
+        onChanged={() => setReloadKey((k) => k + 1)}
+      />
+
+      <hr />
+      <p className="muted">
+        Files, shares and search are not built yet. This page says so rather than pretending to be a
+        dashboard.
+      </p>
+      <button
+        type="button"
+        onClick={() => {
+          void api.POST('/auth/logout', {}).then(onSignedOut);
+        }}
+      >
+        Sign out
+      </button>
+    </main>
+  );
+}
+
+async function loadMe(): Promise<CurrentUser | null> {
+  const { data } = await api.GET('/me', {});
+  return data ?? null;
 }
