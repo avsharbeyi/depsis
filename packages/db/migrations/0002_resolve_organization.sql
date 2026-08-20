@@ -12,6 +12,10 @@
 
 -- Up Migration
 
+-- First statement of every migration after 0001. See the comment on the function in 0001: the
+-- check used to be inline there, which meant it guarded exactly one migration.
+SELECT public.assert_rls_roles_sane();
+
 CREATE FUNCTION public.resolve_organization_by_slug(slug text)
 RETURNS uuid
 LANGUAGE sql

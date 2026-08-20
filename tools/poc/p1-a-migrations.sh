@@ -179,8 +179,12 @@ assert_eq 'the history table is owned by depsis_owner' "$OWNER" "$HIST_OWNER"
 # treated as a migration in its own right — which is exactly what P1-A's first run found, before
 # migrate.config.js declared migrationLoaderStrategies. The `up` command had run the DOWN file
 # first, in alphabetical order.
+# Counted, not hard-coded. This asserted '1' while only 0001 existed and then failed the moment a
+# second migration was added — a test that breaks on correct changes trains people to edit tests
+# without reading them.
+EXPECTED_MIGRATIONS=$(ls "$DB_SRC/migrations"/*.sql | wc -l)
 APPLIED=$(_db -c "SELECT count(*) FROM depsis_migrations" 2>/dev/null || echo ERR)
-assert_eq 'exactly one migration is recorded as applied' '1' "$APPLIED"
+assert_eq "all $EXPECTED_MIGRATIONS migration file(s) are recorded as applied"   "$EXPECTED_MIGRATIONS" "$APPLIED"
 
 RECORDED_NAMES=$(_db -c "SELECT string_agg(name, ',' ORDER BY id) FROM depsis_migrations" 2>/dev/null || echo ERR)
 case "$RECORDED_NAMES" in
@@ -290,8 +294,10 @@ else
        "$(diff -u "$BASE_DUMP" "$AFTER_DOWN" 2>/dev/null | head -20 | tr '\n' ' ' || true)"
 fi
 
+# `down` with no argument rolls back exactly ONE migration — measured, and the same correction the
+# CI gate needed. Asserting zero here only worked while a single migration existed.
 REMAINING=$(_db -c "SELECT count(*) FROM depsis_migrations" || echo ERR)
-assert_eq 'the history table records zero applied migrations after down' '0' "$REMAINING"
+assert_eq 'down rolled back exactly one migration' "$((EXPECTED_MIGRATIONS - 1))" "$REMAINING"
 
 # Re-applying after a rollback must work. A down that leaves a stray object turns the next deploy
 # into a duplicate-object error that looks like a bug in the migration rather than in the rollback.
@@ -558,7 +564,10 @@ BAD_KEYS=$(_db -c "
    WHERE n.nspname = 'public'
      AND (x.indisunique OR x.indisexclusion)
      AND pg_get_indexdef(i.oid) NOT LIKE '%organization_id%'
-     AND i.relname NOT IN ('organizations_pkey','users_pkey','organizations_slug_key','depsis_migrations_pkey')
+     -- Same rule as tools/ci/migration-check.sh, and it has to stay the same rule: two audits that
+     -- drift apart mean the one that runs less often is the one nobody trusts.
+     AND pg_get_indexdef(i.oid) NOT LIKE '%(id)'
+     AND i.relname NOT IN ('organizations_slug_key','sessions_token_hash_key','depsis_migrations_pkey')
 " || echo ERR)
 if [ -z "$BAD_KEYS" ]; then
   pass 'every unique/exclusion index either includes organization_id or is on the allow-list'
@@ -638,7 +647,9 @@ section '10. The migration refuses a role that would ignore its policies'
 # Finding from the foundation review: bootstrap.sql only creates a role that is absent, so a
 # pre-existing depsis_app carrying BYPASSRLS is left as found and every policy becomes decorative.
 _admin -c "ALTER ROLE $APP BYPASSRLS;" >/dev/null
-run_migrate down >/dev/null 2>&1
+# ALL the way back, not one step. With the guard in every migration a single-step rollback would
+# still exercise it, but rolling back fully also proves 0001's own inline check still fires.
+run_migrate down 0 >/dev/null 2>&1
 REFUSED=$(run_migrate up 2>&1) && REFUSED_RC=0 || REFUSED_RC=$?
 if [ "$REFUSED_RC" -ne 0 ] && grep -qi 'ignore it\|BYPASSRLS' <<<"$REFUSED"; then
   pass 'the migration refuses to install RLS for a role holding BYPASSRLS'

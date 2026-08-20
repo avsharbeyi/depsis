@@ -36,8 +36,35 @@ withoutTenant(justification, fn); // kiracı tablosuna dokunmayan işler için, 
 ```
 
 `withoutTenant` bir kaçış kapısı değil, **isimlendirilmiş bir istisna**: gerekçe bir dize
-parametresidir, log'a düşer, ve bu ADR onu üç işe sınırlar — sağlık kontrolü, göç durumu, ve
-aşağıdaki slug çözümleyici. Dördüncüsü için bu ADR'nin güncellenmesi gerekir.
+parametresidir, log'a düşer, ve bu ADR onu sayılı işe sınırlar. Yenisi için bu ADR'nin
+güncellenmesi gerekir.
+
+| Gerekçe                        | Neden bağlam kurulamıyor                              |
+| ------------------------------ | ----------------------------------------------------- |
+| `health-check`                 | Kiracı tablosuna dokunmuyor                           |
+| `migration-status`             | Kiracı tablosuna dokunmuyor                           |
+| `resolve-organization-by-slug` | Kiracı kimliği **henüz bilinmiyor** — §5              |
+| `resolve-session`              | Aynısı, bir adım daha içeride — göç 0003, aşağıda §5b |
+
+Dördüncüsü, bu ADR yazıldıktan sonra oturum katmanı tasarlanırken eklendi — yani kural işledi:
+listeyi genişletmek kod değişikliği değil, karar değişikliği oldu.
+
+### 5b. Oturum çözümü: aynı desen, bir adım içeride
+
+İstek bir çerezle geliyor; çerez bir belirteç, belirteç bir oturum, oturum bir kiracı veriyor. Ama
+`sessions` üzerindeki politika kiracıyı biliyor olmayı gerektiriyor — §5'teki tavuk-yumurtanın
+aynısı.
+
+`public.resolve_session(bytea)` aynı biçimde dar: belirtecin **hash'ini** alıyor (ham belirteç
+veritabanına ve loglarına hiç ulaşmıyor), yalnız bağlamı kurmaya yetecek dört alanı döndürüyor, ve
+süresi dolmuş / iptal edilmiş / kullanıcısı devre dışı bir oturum için **hiçbir şey** döndürmüyor —
+çağıran bu üç durumu "böyle bir oturum yok"tan ayıramıyor ve ölü bir oturumla kazara işlem yapamıyor.
+
+`sessions.token_hash` üzerindeki `UNIQUE` ise ADR-0013'ün `organization_id` kuralının bilinçli tek
+istisnası. Gerekçe göç 0003'te tam olarak yazılı ve özeti şu: bu kısıtta çakışma üretebilmek için
+saldırganın **zaten geçerli bir belirtece sahip olması** gerekiyor, dolayısıyla sızan bilgi
+("bu 32 bayt kullanımda") çağıranın sormadan önce zaten sahip olduğu bilgi. Diğer bütün UNIQUE
+kısıtlarında durum bunun tersi.
 
 ### 2. `SET LOCAL` bind parametresi almaz — `set_config` alır
 

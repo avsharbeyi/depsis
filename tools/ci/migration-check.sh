@@ -46,6 +46,9 @@ step() { printf '\n== %s ==\n' "$1"; }
 admin()  { psql -X -q -At -d "$PGDATABASE_ADMIN" -v ON_ERROR_STOP=1 "$@"; }
 db()     { psql -X -q -At -d "$DB_NAME" "$@" 2>&1; }
 as_app() { PGPASSWORD="$APP_PW" psql -X -q -At "postgresql://depsis_app@$PGHOST:$PGPORT/$DB_NAME" -c "$1" 2>&1; }
+# Same as `db`, named so a reader can see at a glance that the caller EXPECTS a failure and is
+# reading the message rather than the exit code.
+_lax_db() { psql -X -q -At -d "$DB_NAME" -c "$1" 2>&1 || true; }
 
 # ─── 0. the server must be the one the schema requires ────────────────────────
 step 'server'
@@ -116,6 +119,21 @@ if [ -z "$SPLIT" ]; then
 else
   bad 'a migration uses the split layout' \
       "$SPLIT — the CLI cannot select the loader that pairs them, so these run as separate forward migrations and every deploy applies the previous rollback"
+fi
+
+# Every migration after the first must call the shared guard as its first statement. P1-A measured
+# what happens otherwise: the check lived inline in 0001, so applying a LATER migration onto a role
+# that had since been granted BYPASSRLS installed its policies without a word. Forgetting the call
+# is now a red build rather than a silent hole.
+MISSING_GUARD=""
+for f in "$DB_DIR"/migrations/*.sql; do
+  case "$(basename "$f")" in 0001_*) continue ;; esac
+  grep -q 'assert_rls_roles_sane' "$f" || MISSING_GUARD="$MISSING_GUARD $(basename "$f")"
+done
+if [ -z "$MISSING_GUARD" ]; then
+  ok 'every migration after 0001 calls assert_rls_roles_sane()'
+else
+  bad "migration(s) missing the RLS role guard:$MISSING_GUARD"       'applying them onto a BYPASSRLS role would install policies that role ignores'
 fi
 
 if [ -f "$DB_DIR/migrate.config.js" ] && ! grep -q -- '-f\|--config-file' "$DB_DIR/package.json"; then
@@ -286,6 +304,93 @@ case "$SP" in
                      'a caller can shadow public.organizations and run it as the owner' ;;
 esac
 
+# ─── 6c. sessions, and what resolve_session refuses to tell a caller ──────────
+step 'sessions (migration 0003)'
+
+SESSION_TOKEN_HASH="\\x$(printf 'a%.0s' $(seq 1 64))"
+EXPIRED_HASH="\\x$(printf 'b%.0s' $(seq 1 64))"
+REVOKED_HASH="\\x$(printf 'c%.0s' $(seq 1 64))"
+DISABLED_HASH="\\x$(printf 'd%.0s' $(seq 1 64))"
+
+USER_A=$(db -c "SET ROLE depsis_owner; SELECT id FROM users WHERE organization_id='$A' LIMIT 1")
+db -c "SET ROLE depsis_owner;
+       INSERT INTO users (organization_id,email,display_name,disabled_at)
+       VALUES ('$A','disabled@acme.test','Disabled',now());" >/dev/null
+USER_OFF=$(db -c "SET ROLE depsis_owner; SELECT id FROM users WHERE email='disabled@acme.test'")
+
+# The expired row needs an explicit older created_at, because `sessions_expires_after` requires
+# expires_at > created_at. The first version of this seed set expires_at in the past while letting
+# created_at default to now(), so the CHECK correctly refused it — and, because all four rows were
+# one statement, took the live session down with it. Every negative assertion below then passed
+# against an empty table. The errors were suppressed, which is why it looked like one failure
+# instead of five meaningless successes.
+SEED_ERR=$(db -c "SET ROLE depsis_owner;
+  INSERT INTO sessions (organization_id,user_id,token_hash,created_at,expires_at) VALUES
+    ('$A','$USER_A','$SESSION_TOKEN_HASH'::bytea, now(),                     now() + interval '1 hour'),
+    ('$A','$USER_A','$EXPIRED_HASH'::bytea,       now() - interval '2 hours', now() - interval '1 minute'),
+    ('$A','$USER_OFF','$DISABLED_HASH'::bytea,    now(),                     now() + interval '1 hour');
+  INSERT INTO sessions (organization_id,user_id,token_hash,expires_at,revoked_at) VALUES
+    ('$A','$USER_A','$REVOKED_HASH'::bytea,       now() + interval '1 hour', now());")
+
+# The seed is asserted, not assumed. Four rows must exist or every check below is measuring an
+# empty table and reporting success for it.
+SEEDED=$(db -c "SET ROLE depsis_owner; SELECT count(*) FROM sessions")
+if [ "$SEEDED" = "4" ]; then
+  ok 'four session fixtures seeded (live, expired, revoked, disabled-user)'
+else
+  bad "the session fixtures did not seed (count=$SEEDED)"       "every assertion below would pass against an empty table. ${SEED_ERR:-no error reported}"
+fi
+
+# The expiry CHECK has to bite, or a caller could create a session that was never valid and the
+# resolver's expiry test would be the only thing standing between it and a live context.
+BAD_EXP=$(_lax_db "SET ROLE depsis_owner;
+                   INSERT INTO sessions (organization_id,user_id,token_hash,created_at,expires_at)
+                   VALUES ('$A','$USER_A','\\x00'::bytea, now(), now() - interval '1 day');")
+grep -qi 'violates check\|sessions_expires_after\|sessions_token_hash_len' <<<"$BAD_EXP" \
+  && ok 'a session that expires before it was created is refused' \
+  || bad 'an already-expired session was accepted' "${BAD_EXP:-no error}"
+
+RESOLVED_S=$(as_app "SELECT organization_id::text FROM public.resolve_session('$SESSION_TOKEN_HASH'::bytea)")
+[ "$RESOLVED_S" = "$A" ] && ok 'a live session resolves to its organization with no tenant context' \
+                         || bad 'the live session did not resolve' "got '$RESOLVED_S', want '$A'"
+
+for pair in "expired:$EXPIRED_HASH" "revoked:$REVOKED_HASH" "disabled-user:$DISABLED_HASH"; do
+  label=${pair%%:*}; h=${pair#*:}
+  OUT=$(as_app "SELECT count(*) FROM public.resolve_session('$h'::bytea)")
+  [ "$OUT" = "0" ] && ok "resolve_session returns nothing for a $label session" \
+                   || bad "a $label session resolved" "rows=$OUT"
+done
+
+# Indistinguishable from a token that never existed — otherwise the caller learns that a token WAS
+# valid, which is a different and more useful fact than "not valid".
+NEVER=$(as_app "SELECT count(*) FROM public.resolve_session('\\x$(printf 'e%.0s' $(seq 1 64))'::bytea)")
+[ "$NEVER" = "0" ] && ok 'an unknown token is indistinguishable from a dead one' \
+                   || bad 'an unknown token behaved differently' "rows=$NEVER"
+
+# Resolving does not hand over the session row itself.
+BLIND_S=$(as_app "SELECT count(*) FROM sessions")
+[ "$BLIND_S" = "0" ] && ok 'resolving a session does NOT make the sessions table readable' \
+                     || bad 'sessions are readable with no tenant context' "count=$BLIND_S"
+
+# The backup role must never carry replayable material.
+BK=$(admin -d "$DB_NAME" -c "SELECT has_table_privilege('depsis_backup','public.sessions','SELECT')")
+if [ "$BK" = "f" ]; then
+  ok 'depsis_backup has no SELECT on sessions'
+else
+  # The GRANT is absent, but the policy is what actually decides; check the policy too.
+  POL=$(admin -d "$DB_NAME" -c "SELECT qual FROM pg_policies
+                                WHERE tablename='sessions' AND policyname='sessions_backup_denied'")
+  case "$POL" in
+    *false*) ok 'the backup role is denied sessions by policy' ;;
+    *)       bad 'the backup role can read session token hashes' \
+                 'a restored backup would carry replayable session material' ;;
+  esac
+fi
+
+PUB_S=$(admin -d "$DB_NAME" -c "SELECT has_function_privilege('public','public.resolve_session(bytea)','EXECUTE')")
+[ "$PUB_S" = "f" ] && ok 'PUBLIC cannot execute resolve_session' \
+                   || bad 'PUBLIC holds EXECUTE on resolve_session' 'it is SECURITY DEFINER'
+
 # ─── 7. the constraint audit, written so it can actually see ──────────────────
 step 'uniqueness audit'
 # A bare CREATE UNIQUE INDEX has no pg_constraint row, so an audit that scans only pg_constraint is
@@ -299,7 +404,14 @@ BAD=$(db -c "
    WHERE n.nspname = 'public'
      AND (x.indisunique OR x.indisexclusion)
      AND pg_get_indexdef(i.oid) NOT LIKE '%organization_id%'
-     AND i.relname NOT IN ('organizations_pkey','users_pkey','organizations_slug_key','depsis_migrations_pkey')
+     -- A surrogate primary key on a single uuidv7 \`id\` is not an oracle: provoking a collision
+     -- means guessing 122 random bits, so the caller must already hold the value to learn that it
+     -- exists. Expressed as a rule rather than a list, because a list grows with every table and
+     -- eventually somebody appends a genuinely global natural key to it without noticing.
+     AND pg_get_indexdef(i.oid) NOT LIKE '%(id)'
+     -- The two named exceptions, each argued in the migration that creates it. Anything else that
+     -- wants on this list needs its own argument, not an analogy to these.
+     AND i.relname NOT IN ('organizations_slug_key','sessions_token_hash_key','depsis_migrations_pkey')
 ")
 [ -z "$BAD" ] && ok 'every unique/exclusion index carries organization_id or is allow-listed' \
               || bad "unique index without organization_id: $BAD" \

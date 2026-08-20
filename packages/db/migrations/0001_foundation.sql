@@ -41,9 +41,23 @@
 -- passes a name-only check, and then every policy below is installed onto a role that ignores all
 -- of them. The application connects, reads every tenant's rows, and nothing errors anywhere.
 
-DO $$
+-- The guard is a FUNCTION rather than an inline block, and that is not tidiness.
+--
+-- The first version of this check lived inline here, so it protected migration 0001 and nothing
+-- else. P1-A measured the consequence: once 0001 is applied, granting BYPASSRLS to depsis_app and
+-- running a LATER migration installs its policies onto a role that ignores every one of them, with
+-- no complaint at any layer — the assertion that was supposed to fail passed instead.
+--
+-- Every migration after this one calls `public.assert_rls_roles_sane()` as its first statement, and
+-- both the CI gate and P1-A fail if a migration file does not. That turns "somebody forgot" from a
+-- silent hole into a red build.
+CREATE OR REPLACE FUNCTION public.assert_rls_roles_sane()
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $guard$
 DECLARE
-  missing text;
+  missing  text;
   ignoring text;
 BEGIN
   SELECT string_agg(r, ', ')
@@ -57,7 +71,7 @@ BEGIN
       missing;
   END IF;
 
-  -- A role that bypasses RLS makes every policy in this file decorative.
+  -- A role that bypasses row level security makes every policy in this schema decorative.
   SELECT string_agg(rolname || CASE WHEN rolsuper THEN ' (SUPERUSER)' ELSE ' (BYPASSRLS)' END, ', ')
     INTO ignoring
     FROM pg_roles
@@ -70,6 +84,16 @@ BEGIN
       'Re-run bootstrap.sql, which applies NOSUPERUSER NOBYPASSRLS unconditionally.',
       ignoring;
   END IF;
+END
+$guard$;
+
+COMMENT ON FUNCTION public.assert_rls_roles_sane() IS
+  'Called first by every migration. Refuses to proceed if a role that policies are written for '
+  'would ignore them. Lived inline in 0001 until P1-A showed that protected only 0001.';
+
+DO $$
+BEGIN
+  PERFORM public.assert_rls_roles_sane();
 
   IF to_regprocedure('pg_catalog.uuidv7()') IS NULL THEN
     RAISE EXCEPTION
@@ -339,6 +363,7 @@ DROP TABLE IF EXISTS public.organizations;
 DROP FUNCTION IF EXISTS public.set_updated_at();
 DROP FUNCTION IF EXISTS public.fold_identity(text);
 DROP FUNCTION IF EXISTS public.current_organization_id();
+DROP FUNCTION IF EXISTS public.assert_rls_roles_sane();
 
 -- Extensions are deliberately NOT dropped. pg_trgm and unaccent are database-wide and another
 -- schema may depend on them; dropping an extension to undo a migration that merely required it is
