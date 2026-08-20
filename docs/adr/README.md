@@ -47,6 +47,7 @@ Master prompt §0.2 gereği her büyük değişiklikten önce bir ADR yazılır.
 | [0012](0012-dev-test-environment.md)            | Geliştirme/test ortamı topolojisi                         | **Accepted**                                                                                   |
 | [0013](0013-postgres-version-and-tenancy.md)    | PostgreSQL majör sürümü, RLS ve kiracı yalıtımı           | **Accepted** ✅ P0-C geçti 45/45 — iki RLS baypası üretilip kapatıldı                          |
 | [0014](0014-schema-migrations.md)               | Şema göçü: ham SQL, iki rol, iki hat                      | Accepted ([P1-A](evidence/p1-a.tsv) 49/49) — üç `verified` iddiası çürütüldü, beş hata bulundu |
+| [0015](0015-tenant-context-enforcement.md)      | Kiracı bağlamının API tarafında zorlanması                | Accepted — P1-B gerçek PG 18.6'da koşuldu; rol kapısı niteliksel değil davranışsal             |
 
 ⚠️ = Faz 0 kickoff belgesindeki varsayım araştırmayla çürütüldü. Ayrıntı ADR'nin "Bulunan gerçek"
 bölümünde; özet [ADR-0000 §5](0000-version-baseline.md)'te.

@@ -6,6 +6,7 @@
   "scripts": {
     "migrate:up": "node-pg-migrate -d DEPSIS_MIGRATION_DATABASE_URL -m migrations -t depsis_migrations --advisory-lock-mode wait --no-single-transaction up",
     "migrate:down": "node-pg-migrate -d DEPSIS_MIGRATION_DATABASE_URL -m migrations -t depsis_migrations --advisory-lock-mode wait --no-single-transaction down",
+    "migrate:down:all": "node-pg-migrate -d DEPSIS_MIGRATION_DATABASE_URL -m migrations -t depsis_migrations --advisory-lock-mode wait --no-single-transaction down 0",
     "migrate:status": "node-pg-migrate -d DEPSIS_MIGRATION_DATABASE_URL -m migrations -t depsis_migrations --advisory-lock-mode wait --no-single-transaction --dry-run up"
   },
   "dependencies": {

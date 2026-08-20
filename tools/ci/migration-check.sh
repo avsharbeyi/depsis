@@ -40,6 +40,9 @@ ok()   { pass_count=$((pass_count + 1)); printf '  ok    %s\n' "$1"; }
 bad()  { fail_count=$((fail_count + 1)); printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "${2:0:400}"; }
 step() { printf '\n== %s ==\n' "$1"; }
 
+# `-d` defaults to the admin database but callers may override it by passing their own -d, which
+# psql resolves last-wins. Several checks below need to inspect the catalog of the database under
+# test rather than the one the superuser connected to.
 admin()  { psql -X -q -At -d "$PGDATABASE_ADMIN" -v ON_ERROR_STOP=1 "$@"; }
 db()     { psql -X -q -At -d "$DB_NAME" "$@" 2>&1; }
 as_app() { PGPASSWORD="$APP_PW" psql -X -q -At "postgresql://depsis_app@$PGHOST:$PGPORT/$DB_NAME" -c "$1" 2>&1; }
@@ -223,6 +226,66 @@ grep -qi 'duplicate key' <<<"$DISTINCT" \
   && bad 'cagri@ and çağrı@ were folded together' 'an identity key must not strip accents' \
   || ok 'cagri@ and çağrı@ stay distinct'
 
+# ─── 6b. the slug resolver, and the limits of the privilege it borrows ────────
+step 'slug resolution (ADR-0015 §5)'
+
+# The function exists so login is possible at all: the policy on organizations requires a tenant
+# context, and a user arriving with a slug does not have one yet. What has to be true is that it
+# borrows the owner's privilege for exactly one column of one row and not a byte more.
+
+RESOLVED=$(as_app "SELECT public.resolve_organization_by_slug('acme')")
+[ "$RESOLVED" = "$A" ] && ok 'an unauthenticated caller can resolve a known slug to its id' \
+                       || bad 'the slug did not resolve to the expected id' "got '$RESOLVED', want '$A'"
+
+UNKNOWN=$(as_app "SELECT coalesce(public.resolve_organization_by_slug('no-such-tenant')::text,'NULL')")
+[ "$UNKNOWN" = "NULL" ] && ok 'an unknown slug resolves to NULL' \
+                        || bad 'an unknown slug returned something' "$UNKNOWN"
+
+# A malformed slug must be answered without touching the table — the CHECK shape is repeated inside
+# the function precisely so a probing value cannot reach a row.
+# Dollar-quoted, not single-quoted. The first version interpolated each payload into a normal SQL
+# literal, which meant the injection probe produced a psql syntax error and never reached the
+# function at all — a test that failed to deliver the thing it was testing. $probe$...$probe$
+# carries the bytes through verbatim, which is the only way to learn how the function treats them.
+for junk in "'; DROP TABLE users; --" "ACME" "a--very--long--$(printf 'x%.0s' $(seq 1 80))" "" "Acme " "../etc" ; do
+  OUT=$(as_app "SELECT coalesce(public.resolve_organization_by_slug(\$probe\$$junk\$probe\$)::text,'NULL')")
+  if [ "$OUT" = "NULL" ]; then
+    ok "a malformed slug resolves to NULL: ${junk:0:28}"
+  else
+    bad "a malformed slug resolved to something: ${junk:0:28}" "$OUT"
+  fi
+done
+
+# THE assertion this section exists for. Holding the id must not, by itself, let the caller read
+# the row — the function returns an id, it does not grant a context. If this ever passes, the
+# SECURITY DEFINER function has become a way around the policy rather than a way to start.
+STILL_BLIND=$(as_app "SELECT count(*) FROM organizations WHERE id = '$A'")
+[ "$STILL_BLIND" = "0" ] && ok 'resolving an id does NOT make the organizations row readable' \
+                         || bad 'the organizations row is readable without a tenant context' "count=$STILL_BLIND"
+
+# And with a context it is readable, so the previous assertion is not passing because the row is
+# simply absent.
+WITH_CTX=$(as_app "BEGIN; SET LOCAL depsis.organization_id='$A'; SELECT count(*) FROM organizations; COMMIT;")
+[ "$WITH_CTX" = "1" ] && ok 'with a tenant context the row IS readable (the control)' \
+                      || bad 'the row is not readable even with a context' "count=$WITH_CTX"
+
+# PUBLIC must not hold EXECUTE. PostgreSQL grants it by default on new functions, and on a
+# SECURITY DEFINER function that means every role in the cluster can borrow the owner's privileges.
+PUB=$(admin -d "$DB_NAME" -c "SELECT has_function_privilege('public','public.resolve_organization_by_slug(text)','EXECUTE')")
+[ "$PUB" = "f" ] && ok 'PUBLIC cannot execute the SECURITY DEFINER resolver' \
+                 || bad 'PUBLIC holds EXECUTE on a SECURITY DEFINER function' \
+                        'every role in the cluster can borrow depsis_owner through it'
+
+# A SECURITY DEFINER function without a fixed search_path is the classic privilege escalation. This
+# checks the shipped definition rather than trusting the comment above it.
+SP=$(admin -d "$DB_NAME" -c "SELECT coalesce(array_to_string(proconfig,','),'NONE')
+                             FROM pg_proc WHERE proname='resolve_organization_by_slug'")
+case "$SP" in
+  *search_path*) ok "the resolver pins its search_path ($SP)" ;;
+  *)             bad 'the SECURITY DEFINER resolver has no fixed search_path' \
+                     'a caller can shadow public.organizations and run it as the owner' ;;
+esac
+
 # ─── 7. the constraint audit, written so it can actually see ──────────────────
 step 'uniqueness audit'
 # A bare CREATE UNIQUE INDEX has no pg_constraint row, so an audit that scans only pg_constraint is
@@ -244,20 +307,57 @@ BAD=$(db -c "
 
 # ─── 8. down, and up again ────────────────────────────────────────────────────
 step 'rollback'
+BEFORE=$(db -c "SELECT count(*) FROM depsis_migrations")
 if ( cd "$DB_DIR" && npm run --silent migrate:down ) >/tmp/down.log 2>&1; then
   ok 'the shipped migrate:down script rolls back'
 else
   bad 'migrate:down failed' "$(tail -8 /tmp/down.log)"
 fi
+
+# One step, not all of them. Measured: `down` with no argument undoes exactly the most recent
+# migration. An earlier version of this check assumed it undid everything and failed the moment a
+# second migration existed — the assumption, not the tool, was wrong.
+AFTER=$(db -c "SELECT count(*) FROM depsis_migrations")
+if [ "$AFTER" = "$((BEFORE - 1))" ]; then
+  ok "migrate:down rolls back exactly one migration ($BEFORE -> $AFTER)"
+else
+  bad 'migrate:down did not roll back exactly one migration' "$BEFORE -> $AFTER"
+fi
+
+# And all the way back, through the separately-named script. `down 0` means ALL, which is a footgun
+# worth keeping out of the script a deploy would reach for.
+if ( cd "$DB_DIR" && npm run --silent migrate:down:all ) >/tmp/downall.log 2>&1; then
+  ok 'migrate:down:all rolls the rest back'
+else
+  bad 'migrate:down:all failed' "$(tail -8 /tmp/downall.log)"
+fi
 LEFT=$(db -c "SELECT count(*) FROM depsis_migrations")
-[ "$LEFT" = "0" ] && ok 'the history table is empty after rollback' \
+[ "$LEFT" = "0" ] && ok 'the history table is empty after a full rollback' \
                   || bad 'the history table still records migrations' "count=$LEFT"
 
+# Nothing of the schema may survive a full rollback except the history table itself.
+SURVIVORS=$(db -c "SELECT coalesce(string_agg(tablename,','),'') FROM pg_tables
+                   WHERE schemaname='public' AND tablename <> 'depsis_migrations'")
+[ -z "$SURVIVORS" ] && ok 'no table survives a full rollback' \
+                    || bad "tables survived the rollback: $SURVIVORS" \
+                           'the next deploy will hit "relation already exists"'
+
+FUNCS=$(db -c "SELECT coalesce(string_agg(proname,','),'') FROM pg_proc p
+               JOIN pg_namespace n ON n.oid=p.pronamespace
+               WHERE n.nspname='public' AND p.proname IN
+                     ('current_organization_id','fold_identity','set_updated_at','resolve_organization_by_slug')")
+[ -z "$FUNCS" ] && ok 'no function survives a full rollback' \
+                || bad "functions survived the rollback: $FUNCS" 
+
 if ( cd "$DB_DIR" && npm run --silent migrate:up ) >/tmp/up2.log 2>&1; then
-  ok 'the migration re-applies after a rollback'
+  ok 'the migrations re-apply after a full rollback'
 else
   bad 're-applying after rollback failed' "$(tail -8 /tmp/up2.log)"
 fi
+
+REAPPLIED=$(db -c "SELECT count(*) FROM depsis_migrations")
+[ "$REAPPLIED" = "$BEFORE" ] && ok "all $BEFORE migrations are applied again" \
+                             || bad 'a different number of migrations came back' "$BEFORE -> $REAPPLIED"
 
 # ─── summary ──────────────────────────────────────────────────────────────────
 printf '\n== summary ==\n  passed: %d   failed: %d\n' "$pass_count" "$fail_count"

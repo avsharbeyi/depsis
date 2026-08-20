@@ -165,6 +165,51 @@ jobs:
           DB_DIR: packages/db
         run: bash tools/ci/migration-check.sh
 
+      - name: Tenant-context integration tests (P1-B)
+        # The unit tests in apps/api run in the `static` job against a fake pool and settle the
+        # chokepoint's control flow. These are the other half — the parts that are PostgreSQL's
+        # behaviour rather than TypeScript's, and that ADR-0015 listed as unverified: that
+        # SET LOCAL refuses a bind parameter, that set_config's context really does vanish when a
+        # pooled connection is returned, and that the startup gate refuses an owner connection.
+        #
+        # They skip themselves when DEPSIS_TEST_DATABASE_URL is unset, which is why they can live
+        # beside the code without needing a database on every developer's machine — and why the
+        # variables have to be set HERE, or the job would report success having run nothing.
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: postgres
+          PGPASSWORD: ci-postgres
+        run: |
+          psql -d postgres -c "ALTER ROLE depsis_owner PASSWORD 'ci-owner'"
+          psql -d postgres -c "ALTER ROLE depsis_app   PASSWORD 'ci-app'"
+          export DEPSIS_TEST_DATABASE_URL="postgresql://depsis_app:ci-app@127.0.0.1:5432/depsis_ci"
+          export DEPSIS_TEST_OWNER_DATABASE_URL="postgresql://depsis_owner:ci-owner@127.0.0.1:5432/depsis_ci"
+          pnpm --filter @depsis/api test:unit
+
+      - name: Prove the integration tests were not silently skipped
+        # A gated suite that quietly skips is worse than no suite: the job goes green having
+        # measured nothing. This asserts the gate was actually open.
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: postgres
+          PGPASSWORD: ci-postgres
+          DEPSIS_TEST_DATABASE_URL: postgresql://depsis_app:ci-app@127.0.0.1:5432/depsis_ci
+          DEPSIS_TEST_OWNER_DATABASE_URL: postgresql://depsis_owner:ci-owner@127.0.0.1:5432/depsis_ci
+        run: |
+          out=$(pnpm --filter @depsis/api exec vitest run --reporter=json 2>/dev/null || true)
+          skipped=$(node -e "
+            let d={};try{d=JSON.parse(process.argv[1])}catch{process.exit(0)}
+            const t=(d.testResults||[]).flatMap(f=>f.assertionResults||[]);
+            console.log(t.filter(a=>a.status==='pending'||a.status==='skipped').length);
+          " "$out")
+          echo "skipped: ${skipped:-unknown}"
+          if [ "${skipped:-0}" != "0" ]; then
+            echo "::error::the tenant-context integration tests skipped; the database gate was not open"
+            exit 1
+          fi
+
   # ── Declared but not yet implemented ────────────────────────────────────────
   # These exist so their absence is visible in every CI run. Each is enabled by the
   # PoC named in its ADR.

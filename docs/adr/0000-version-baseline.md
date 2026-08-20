@@ -65,7 +65,7 @@ Altı konu da doğrulandı. Sürüm tablosu:
 | Node.js                            | **24.19.0** (Active LTS) — v22 **Maintenance**'ta           | ADR-0002               |
 | pnpm / turbo                       | 11.21.0 / 2.10.9                                            | ADR-0002               |
 | TypeScript                         | **7.0.2**                                                   | ADR-0002               |
-| NestJS                             | 11.1.29 (varsayılan adapter Express)                        | ADR-0002               |
+| NestJS                             | **11.2.1** (varsayılan adapter Express)                     | ADR-0002               |
 | Vite / React                       | 8.2.1 / 19.2.8                                              | ADR-0002               |
 | Vitest / Playwright                | 4.1.10 / 1.62.1                                             | ADR-0002               |
 | zod                                | 4.4.3                                                       | ADR-0002               |
