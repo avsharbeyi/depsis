@@ -4,7 +4,9 @@ import { DbService } from '../db/db.service.js';
 import { OrganizationsService } from '../organizations/organizations.service.js';
 import { AuthService } from './auth.service.js';
 import { LoginThrottleService } from './login-throttle.service.js';
+import { MfaService } from './mfa.service.js';
 import { PasswordService } from './password.service.js';
+import { PendingLoginService } from './pending-login.service.js';
 import { SessionService } from './session.service.js';
 
 /**
@@ -51,6 +53,8 @@ describeDb('login, against a real PostgreSQL', () => {
       passwords,
       sessions,
       new LoginThrottleService(db),
+      new MfaService(db),
+      new PendingLoginService(db),
     );
 
     const stored = await passwords.hash(PASSWORD);

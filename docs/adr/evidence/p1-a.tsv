@@ -6,8 +6,8 @@ p1-a	PASS	bootstrap.sql runs as a superuser with a parameterised database name	r
 p1-a	PASS	depsis_owner can connect over TCP with a password	
 p1-a	PASS	node-pg-migrate applies 0001 as depsis_owner	 Migrations complete! 
 p1-a	PASS	the history table is owned by depsis_owner	= depsis_owner
-p1-a	PASS	all 3 migration file(s) are recorded as applied	= 3
-p1-a	PASS	the history names one migration, with no up/down suffix	0001_foundation,0002_resolve_organization,0003_sessions
+p1-a	PASS	all 4 migration file(s) are recorded as applied	= 4
+p1-a	PASS	the history names one migration, with no up/down suffix	0001_foundation,0002_resolve_organization,0003_sessions,0004_mfa
 p1-a	PASS	no migration uses the unsupported .up.sql / .down.sql split layout	
 p1-a	PASS	organizations exists	
 p1-a	PASS	users exists	
@@ -22,33 +22,12 @@ p1-a	PASS	depsis_app refused: ALTER TABLE users NO FORCE ROW LEVEL SECURITY
 p1-a	PASS	depsis_app cannot SET ROLE to depsis_owner	
 p1-a	PASS	node-pg-migrate rolls 0001 back	
 p1-a	PASS	up then down leaves the schema byte-identical to the rolled-back baseline	
-p1-a	PASS	down rolled back exactly one migration	= 2
+p1-a	PASS	down rolled back exactly one migration	= 3
 p1-a	PASS	the migration re-applies cleanly after a rollback	
 p1-a	PASS	the runner exits non-zero on a failing migration	rc=1
 p1-a	PASS	the failed migration is NOT recorded as applied	
 p1-a	PASS	the failed migration left no partial object behind (per-migration transaction)	
-p1-a	NOTE	concurrent runners: rc_a=0 rc_b=0	
-p1-a	PASS	the raced migration produced exactly one row (it ran exactly once)	= 1
-p1-a	PASS	the raced migration is recorded exactly once	= 1
-p1-a	PASS	both concurrent runners exited zero (advisoryLockMode=wait)	
-p1-a	PASS	an IMMUTABLE wrapper around qualified unaccent builds a gin_trgm index in a migration session	
-p1-a	NOTE	unaccent volatility: unaccent(text)=s unaccent(regdictionary,text)=s	
-p1-a	PASS	both unaccent overloads are STABLE, so the wrapper is load-bearing	unaccent(text)=s unaccent(regdictionary,text)=s
-p1-a	PASS	a direct index on public.unaccent('public.unaccent'::regdictionary, name) is refused for volatility	
-p1-a	PASS	a direct index on public.unaccent(name) is refused for volatility	
-p1-a	PASS	the shipped scripts read DEPSIS_MIGRATION_DATABASE_URL	
-p1-a	PASS	the shipped scripts name the depsis_migrations history table	
-p1-a	PASS	the shipped scripts request advisory-lock-mode wait	
-p1-a	PASS	no migration script references the application connection string	
-p1-a	PASS	there is no unreferenced migration config file	
-p1-a	PASS	the runner refuses to run with no migration URL set	rc=1
-p1-a	PASS	a bare unique index is INVISIBLE to a pg_constraint audit	= 0
-p1-a	PASS	the same index IS visible in pg_index	= 1
-p1-a	PASS	every unique/exclusion index either includes organization_id or is on the allow-list	
-p1-a	PASS	the Turkish dotted capital I is folded: İsmail@ collides with ismail@ in one tenant	
-p1-a	PASS	plain ASCII case folding still works	
-p1-a	PASS	the decomposed (NFD) spelling collides with the precomposed (NFC) one	
-p1-a	PASS	fold_identity does NOT strip accents: cagri@ and çağrı@ stay distinct	
-p1-a	PASS	the migration refuses to install RLS for a role holding BYPASSRLS	
-p1-a	PASS	bootstrap.sql clears BYPASSRLS on an existing role	= f
-p1-a	PASS	re-applied after the role was repaired	
+p1-a	NOTE	concurrent runners: rc_a=1 rc_b=1	
+p1-a	FAIL	the raced migration produced exactly one row (it ran exactly once)	expected '1', got 'missing'
+p1-a	FAIL	the raced migration is recorded exactly once	expected '1', got '0'
+p1-a	NOTE	concurrent runners did not both exit zero	Error: Not run migration 0003_slow is preceding already run migration 0004_mfa     at checkOrder (file:///home/depsis/db/node_modules/node-pg-migrate/dist/bundle/index.js:3539:40)     at runner (file:///home/depsis/db/node_modules/node-pg-migrate/dist/bundle/index.js:3578:37) 

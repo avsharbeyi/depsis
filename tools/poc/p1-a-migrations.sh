@@ -564,10 +564,25 @@ BAD_KEYS=$(_db -c "
    WHERE n.nspname = 'public'
      AND (x.indisunique OR x.indisexclusion)
      AND pg_get_indexdef(i.oid) NOT LIKE '%organization_id%'
-     -- Same rule as tools/ci/migration-check.sh, and it has to stay the same rule: two audits that
-     -- drift apart mean the one that runs less often is the one nobody trusts.
-     AND pg_get_indexdef(i.oid) NOT LIKE '%(id)'
-     AND i.relname NOT IN ('organizations_slug_key','sessions_token_hash_key','depsis_migrations_pkey')
+     -- A single-column key on a uuid is not an existence oracle, and that is the actual reason
+     -- rather than a naming convention: provoking a collision means presenting a value that already
+     -- exists, and a uuid cannot be guessed. Expressed against the COLUMN TYPE, because an earlier
+     -- version keyed on the column being called `id` and would have wrongly exempted a
+     -- `UNIQUE (external_id)` on a caller-chosen string while wrongly flagging a legitimate
+     -- `PRIMARY KEY (user_id)`.
+     AND NOT (
+       x.indnatts = 1
+       AND EXISTS (
+         SELECT 1 FROM pg_attribute a
+          WHERE a.attrelid = t.oid AND a.attnum = x.indkey[0] AND a.atttypid = 'uuid'::regtype
+       )
+     )
+     -- The named exceptions. Each is argued in the migration that creates it; anything joining
+     -- this list needs its own argument, not an analogy to these.
+     AND i.relname NOT IN ('organizations_slug_key',
+                           'sessions_token_hash_key',
+                           'pending_logins_token_hash_key',
+                           'depsis_migrations_pkey')
 " || echo ERR)
 if [ -z "$BAD_KEYS" ]; then
   pass 'every unique/exclusion index either includes organization_id or is on the allow-list'

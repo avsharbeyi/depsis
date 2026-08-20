@@ -31,7 +31,10 @@ export type UntenantedJustification =
   // Login throttling counts attempts against an address that may belong to no tenant at all, and
   // has to bite before the tenant is resolved. Migration 0003 explains why the table carries no
   // organization_id and why adding one would let an attacker pick their own throttling bucket.
-  | 'login-throttle';
+  | 'login-throttle'
+  // The second factor step. Same shape as resolve-session: an opaque token names the tenant, and
+  // the tenant cannot be known until it is resolved.
+  | 'resolve-pending-login';
 
 const SET_TENANT_SQL = `SELECT set_config('depsis.organization_id', $1, true) AS applied,
                                public.current_organization_id()::text  AS observed`;

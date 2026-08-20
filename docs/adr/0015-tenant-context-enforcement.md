@@ -46,9 +46,16 @@ güncellenmesi gerekir.
 | `resolve-organization-by-slug` | Kiracı kimliği **henüz bilinmiyor** — §5              |
 | `resolve-session`              | Aynısı, bir adım daha içeride — göç 0003, aşağıda §5b |
 | `login-throttle`               | Deneme, kiracı **çözülmeden önce** sayılmalı — §5c    |
+| `resolve-pending-login`        | İkinci faktör adımı; kiracı yine belirteçten gelir    |
 
-Dördüncüsü, bu ADR yazıldıktan sonra oturum katmanı tasarlanırken eklendi — yani kural işledi:
-listeyi genişletmek kod değişikliği değil, karar değişikliği oldu.
+Dördüncüsü oturum katmanı, beşincisi kısıtlama, altıncısı ikinci faktör tasarlanırken eklendi —
+yani kural her seferinde işledi: listeyi genişletmek kod değişikliği değil, karar değişikliği oldu.
+
+Altısı da tek bir desende buluşuyor ve liste bu yüzden burada bitiyor: **bir kiracı bağlamı
+kurulabilmesi için önce bir şeyin çözülmesi gerekiyorsa, o çözüm bağlamsız olmak zorundadır.**
+Sağlık kontrolü ve göç durumu hiçbir kiracı tablosuna dokunmuyor; kalan dördü opak bir belirteci
+(slug, oturum çerezi, giriş denemesi anahtarı, bekleyen giriş belirteci) kimliğe çeviriyor. Yedinci
+bir gerekçe bu desene uymuyorsa, muhtemelen `withTenant` ile yazılabilecek bir iş demektir.
 
 ### 5b. Oturum çözümü: aynı desen, bir adım içeride
 

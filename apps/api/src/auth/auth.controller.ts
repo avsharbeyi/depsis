@@ -15,7 +15,14 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 
 import { AuthService } from './auth.service.js';
-import { serializeClearedSessionCookie, serializeSessionCookie } from './cookie.js';
+import {
+  PENDING_COOKIE,
+  readCookie,
+  serializeClearedPendingCookie,
+  serializeClearedSessionCookie,
+  serializePendingCookie,
+  serializeSessionCookie,
+} from './cookie.js';
 import { SessionGuard, type AuthenticatedRequest } from './session.guard.js';
 import { SessionService } from './session.service.js';
 
@@ -30,6 +37,13 @@ const loginSchema = z.object({
   password: z.string().min(1).max(1024),
 });
 
+/** A TOTP code is six digits and a recovery code is twenty characters; 64 is generous for both. */
+const secondFactorSchema = z.object({
+  code: z.string().min(1).max(64),
+});
+
+type LoginResponse = { status: 'ok' } | { status: 'mfa_required' };
+
 @Controller('auth')
 export class AuthController {
   constructor(
@@ -43,7 +57,7 @@ export class AuthController {
     @Body() body: unknown,
     @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
-  ): Promise<{ status: 'ok' }> {
+  ): Promise<LoginResponse> {
     requireSameOrigin(request);
 
     const parsed = loginSchema.safeParse(body);
@@ -70,6 +84,19 @@ export class AuthController {
       throw new UnauthorizedException();
     }
 
+    if (result.outcome === 'mfa-required') {
+      // A challenge cookie, NOT a session cookie. Nothing is authenticated yet, and giving this
+      // state the session's name is how it would eventually be treated as one.
+      response.setHeader(
+        'Set-Cookie',
+        serializePendingCookie(result.challenge.token, {
+          secure: isSecure(request),
+          expires: result.challenge.expiresAt,
+        }),
+      );
+      return { status: 'mfa_required' };
+    }
+
     response.setHeader(
       'Set-Cookie',
       serializeSessionCookie(result.session.token, {
@@ -78,10 +105,61 @@ export class AuthController {
       }),
     );
 
-    // The body carries nothing. The session is the cookie; echoing a user id or an organization id
-    // here would put tenant identifiers in a response body that a cross-site page could not read
-    // but a proxy log could.
+    // The body carries nothing beyond the outcome. The session is the cookie; echoing a user id or
+    // an organization id here would put tenant identifiers in a response body that a cross-site
+    // page could not read but a proxy log could.
     return { status: 'ok' };
+  }
+
+  /**
+   * The second step. Consumes the challenge cookie and, on success, replaces it with a session.
+   *
+   * Notice what this does NOT take: a user id, an organization, or any hint of which account is
+   * being authenticated. All of that comes from the challenge token, which the server issued —
+   * ADR-0015 §6 applied to a request that is halfway through authenticating.
+   */
+  @Post('login/mfa')
+  @HttpCode(200)
+  async secondFactor(
+    @Body() body: unknown,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<{ status: 'ok'; usedRecoveryCode: boolean }> {
+    requireSameOrigin(request);
+
+    const token = readCookie(request.headers.cookie, PENDING_COOKIE);
+    const parsed = secondFactorSchema.safeParse(body);
+
+    if (token === null || !parsed.success) {
+      throw new UnauthorizedException();
+    }
+
+    const result = await this.auth.completeSecondFactor({
+      challengeToken: token,
+      code: parsed.data.code,
+      userAgent: headerString(request, 'user-agent'),
+      ip: clientIp(request),
+    });
+
+    if (result.outcome !== 'ok') {
+      // The challenge cookie is deliberately LEFT in place on a wrong code: the challenge has a
+      // bounded attempt count of its own, and clearing the cookie would turn every typo into a
+      // restart of the whole login rather than a retry.
+      throw new UnauthorizedException();
+    }
+
+    response.setHeader('Set-Cookie', [
+      serializeClearedPendingCookie(isSecure(request)),
+      serializeSessionCookie(result.session.token, {
+        secure: isSecure(request),
+        expires: result.session.expiresAt,
+      }),
+    ]);
+
+    // The one thing worth telling the client: a recovery code was spent, so the UI can say how many
+    // are left and push the user to re-enrol. Saying it here rather than making them go looking is
+    // the difference between noticing and running out.
+    return { status: 'ok', usedRecoveryCode: result.used === 'recovery-code' };
   }
 
   @Post('logout')
