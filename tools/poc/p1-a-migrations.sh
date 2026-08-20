@@ -312,10 +312,18 @@ fi
 section '5. ADR-0014 item 3 — a migration that dies halfway is not recorded'
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Numbered 9xxx so they always sort AFTER every real migration.
+#
+# They were 0002/0003/0004 when this script was written and only 0001 existed. Real migrations then
+# reached 0004, the numbers collided, and the probes started interleaving with them — which broke
+# the advisory-lock race check in a way that looked like a lock failure and was actually a naming
+# collision. A probe that sorts into the middle of the real history is testing a different thing
+# than the one it claims to.
+#
 # The failure this guards against: a migration whose first statement succeeds and whose second
 # fails, recorded as applied. Every later deploy then skips it, and the schema is permanently
 # half-built with nothing ever erroring again.
-cat > "$WORK/migrations/0002_deliberately_broken.sql" <<'BROKEN'
+cat > "$WORK/migrations/9001_deliberately_broken.sql" <<'BROKEN'
 -- Written by P1-A. The first statement succeeds; the second cannot.
 -- Up Migration
 CREATE TABLE public.p1a_half_applied (id int PRIMARY KEY);
@@ -351,14 +359,14 @@ else
              'a later re-run will hit "relation already exists" and look like a different bug'
 fi
 
-rm -f "$WORK/migrations/0002_deliberately_broken.sql"
+rm -f "$WORK/migrations/9001_deliberately_broken.sql"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 section '6. ADR-0014 item 2 — two deploys racing serialise on the advisory lock'
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # A slow migration gives the race a window wide enough to be real rather than theoretical.
-cat > "$WORK/migrations/0003_slow.sql" <<'SLOW'
+cat > "$WORK/migrations/9002_slow.sql" <<'SLOW'
 -- Written by P1-A. Deliberately slow so two concurrent runners genuinely overlap.
 -- Up Migration
 SELECT pg_sleep(4);
@@ -398,7 +406,7 @@ else
 fi
 
 run_migrate down >/dev/null 2>&1
-rm -f "$WORK/migrations/0003_slow.sql"
+rm -f "$WORK/migrations/9002_slow.sql"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 section '7. ADR-0014 item 5 — the qualified unaccent expression index'
@@ -422,7 +430,7 @@ section '7. ADR-0014 item 5 — the qualified unaccent expression index'
 # The working pattern, which is what ADR-0010's search indexes must use: an IMMUTABLE SQL wrapper
 # with a fixed search_path, whose body carries the qualification so the dictionary resolves during
 # an index build in a session whose search_path is not the author's.
-cat > "$WORK/migrations/0004_unaccent_probe.sql" <<'UNACC'
+cat > "$WORK/migrations/9003_unaccent_probe.sql" <<'UNACC'
 -- Written by P1-A.
 -- Up Migration
 CREATE TABLE public.p1a_search (id int PRIMARY KEY, name text NOT NULL);
@@ -483,7 +491,7 @@ for expr in "public.unaccent('public.unaccent'::regdictionary, name)" "public.un
 done
 
 run_migrate down >/dev/null 2>&1
-rm -f "$WORK/migrations/0004_unaccent_probe.sql"
+rm -f "$WORK/migrations/9003_unaccent_probe.sql"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 section '8. The two connection strings really are separate'
