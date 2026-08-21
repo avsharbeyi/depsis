@@ -13,7 +13,10 @@ schemars = "1"
 thiserror = "2"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["fs", "net", "process"] }
+# `rand` is here for `getrandom(2)`, which mints transfer tokens. A userspace generator
+# seeded once at startup would be the wrong thing in a root daemon that hands out values
+# authorizing writes.
+rustix = { version = "1", features = ["fs", "net", "process", "rand"] }
 
 [dev-dependencies]
 tempfile = "3"

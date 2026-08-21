@@ -57,6 +57,7 @@ fn serve() -> std::process::ExitCode {
     use depsis_agent::audit::StderrSink;
     use depsis_agent::authz::Policy;
     use depsis_agent::dispatch::Agent;
+    use depsis_agent::transfer::TransferRegistry;
 
     // The uid the API runs as is configuration, not something to discover. Guessing it — by
     // looking up a username, say — would mean a rename or a uid collision silently widened who
@@ -89,7 +90,37 @@ fn serve() -> std::process::ExitCode {
 
     let runner = unix::ExecRunner;
     let audit = StderrSink;
-    let agent = Agent::new(Policy { api_uid }, &runner, &audit);
+    // The share tree, if this box has one yet. A NAS before setup has no storage configured, and
+    // refusing to start would make the agent unavailable for the very operations that set it up.
+    // Absent means the transfer operations refuse with a reason; it does not mean they are silently
+    // missing.
+    let shares = match std::env::var("DEPSIS_SHARES_ROOT") {
+        Ok(root) if !root.trim().is_empty() => {
+            match unix::Openat2SafePath::open_root(root.trim()) {
+                Ok(paths) => Some(paths),
+                Err(e) => {
+                    eprintln!("depsis-agent: DEPSIS_SHARES_ROOT is set but unusable: {e}");
+                    return std::process::ExitCode::FAILURE;
+                }
+            }
+        }
+        _ => {
+            eprintln!("depsis-agent: DEPSIS_SHARES_ROOT is not set; transfers will be refused");
+            None
+        }
+    };
+
+    let transfers = std::sync::Mutex::new(TransferRegistry::new());
+    let tokens = unix::KernelTokens;
+
+    let agent = Agent::new(
+        Policy { api_uid },
+        &runner,
+        &audit,
+        shares.as_ref(),
+        &tokens,
+        &transfers,
+    );
 
     eprintln!("depsis-agent: serving, api_uid={api_uid}");
     match unix::serve_loop(&listener, &agent) {

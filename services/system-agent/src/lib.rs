@@ -40,6 +40,7 @@ pub mod authz;
 pub mod dispatch;
 pub mod op;
 pub mod seams;
+pub mod transfer;
 
 /// Emit the JSON Schema for the request/response contract.
 ///

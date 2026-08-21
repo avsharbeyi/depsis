@@ -86,6 +86,39 @@ pub trait SafePath {
     /// `fsync` on the destination directory, and without it a power cut can lose the rename even
     /// though the file's own contents survived.
     fn open_dir(&self, relative: &[&str]) -> Result<std::fs::File, SeamError>;
+
+    /// Move a staged file into place and make the move durable.
+    ///
+    /// ONE method rather than a rename the caller then has to remember to fsync. ADR-0008 step 5
+    /// is precisely the step people skip, and a two-call API is an invitation to skip it — the
+    /// failure is invisible until a power cut, and then the data is on disk with nothing pointing
+    /// at it.
+    ///
+    /// Must refuse rather than overwrite. `RENAME_NOREPLACE` was measured working on ZFS 2.3.2 in
+    /// P0-G; `linkat` + `unlink` is the portable fallback. Either way, publishing never silently
+    /// destroys a file the user already has.
+    fn publish(
+        &self,
+        from_dir: &[&str],
+        from: &str,
+        to_dir: &[&str],
+        to: &str,
+    ) -> Result<(), SeamError>;
+}
+
+/// Where unguessable values come from.
+///
+/// A seam for the same reason the other four are: this marks a place where the agent touches
+/// something that can hurt. A transfer token authorizes writing to an already-chosen file, so a
+/// predictable one lets a process that has passed SO_PEERCRED — but was meant to be writing to
+/// its OWN upload — write into somebody else's. Putting it behind a trait keeps the core free of
+/// a randomness dependency and makes the real source a single, reviewable place.
+///
+/// A trait object rather than a generic parameter: this is called once per transfer, never in a
+/// loop, and a fifth type parameter on `Agent` would cost every call site more than it is worth.
+pub trait TokenSource {
+    /// A fresh, unguessable, printable token.
+    fn token(&self) -> String;
 }
 
 /// Run one of a fixed set of external programs.

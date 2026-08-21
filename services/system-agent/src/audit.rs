@@ -39,6 +39,8 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::DiffSnapshots { .. } => "diff_snapshots",
         Request::ReadSmartSummary { .. } => "read_smart_summary",
         Request::PublishSambaConfig { .. } => "publish_samba_config",
+        Request::OpenTransfer { .. } => "open_transfer",
+        Request::PublishTransfer { .. } => "publish_transfer",
     }
 }
 

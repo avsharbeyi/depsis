@@ -230,6 +230,43 @@ pub enum Request {
     /// connection. The implementation must follow validation with a live connection smoke test
     /// and roll back on failure (ADR-0011, §17).
     PublishSambaConfig { shares: Vec<ShareSpec> },
+
+    /// Open a staging file and hand back a one-time token for the bulk data channel.
+    ///
+    /// The API cannot write into a share itself. ADR-0008 says the durability sequence belongs
+    /// to the agent, and the cleanest way to honour that — the agent opens with `openat2` and
+    /// passes the descriptor over — is unreachable, because Node's `net` module has no
+    /// ancillary-data support and therefore cannot receive an `SCM_RIGHTS` descriptor from a
+    /// non-Node peer (checked against the Node documentation, not assumed).
+    ///
+    /// So the bytes travel instead. This operation resolves and opens the staging file under
+    /// `openat2(RESOLVE_BENEATH)`, keeps the descriptor, and returns a token. The API then
+    /// connects to the data socket, presents the token, and streams. The token names an
+    /// ALREADY-RESOLVED file: nothing the API sends on the data socket can change which file it
+    /// is writing to, which is what keeps the confinement meaningful across two connections.
+    OpenTransfer {
+        /// The share root this transfer is confined to.
+        share: SafeComponent,
+        /// The staging file, under `.depsis/staging/` inside that share.
+        staging_name: SafeComponent,
+    },
+
+    /// Move a completed staging file into its place, durably.
+    ///
+    /// ADR-0008's sequence, steps 4 and 5: rename, then `fsync` the DESTINATION DIRECTORY. The
+    /// second one is not optional — without it a power cut can lose the rename even though the
+    /// file's own contents survived, which is the worst outcome available: the data is on disk
+    /// and nothing points at it.
+    ///
+    /// Refuses if the destination exists. `RENAME_NOREPLACE` was measured working on ZFS 2.3.2
+    /// in P0-G; the `linkat` + `unlink` form is the portable fallback. Either way a publish
+    /// never silently overwrites a file the user already has.
+    PublishTransfer {
+        share: SafeComponent,
+        staging_name: SafeComponent,
+        /// Where it lands, relative to the share root. Components are validated individually.
+        destination: Vec<SafeComponent>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -266,6 +303,16 @@ pub enum Response {
     },
     Published {
         shares: usize,
+    },
+    /// A transfer is open. `offset` is how many bytes the staging file already holds, so a
+    /// resumed upload knows where to continue without asking the filesystem itself.
+    Transfer {
+        token: String,
+        offset: u64,
+    },
+    /// The staged file is in place and the destination directory has been fsynced.
+    Publish {
+        bytes: u64,
     },
     Refused {
         reason: String,

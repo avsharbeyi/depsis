@@ -56,6 +56,34 @@ export type AgentRequest =
   | {
       op: 'publish_samba_config';
       shares: ShareSpec[];
+    }
+  | {
+      op: 'open_transfer';
+      /**
+       * A single path component under a share root — never a path, never absolute.
+       *
+       * ADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access
+       * to `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle
+       * `/` or `..` through, so this type refuses them rather than sanitising.
+       */
+      share: string;
+      /**
+       * A single path component under a share root — never a path, never absolute.
+       *
+       * ADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access
+       * to `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle
+       * `/` or `..` through, so this type refuses them rather than sanitising.
+       */
+      staging_name: string;
+    }
+  | {
+      /**
+       * Where it lands, relative to the share root. Components are validated individually.
+       */
+      destination: SafeComponent[];
+      op: 'publish_transfer';
+      share: SafeComponent;
+      staging_name: SafeComponent;
     };
 /**
  * A ZFS dataset name, e.g. `tank/depsis/users/1001`.
@@ -113,6 +141,15 @@ export type AgentResponse =
   | {
       shares: number;
       status: 'published';
+    }
+  | {
+      offset: number;
+      status: 'transfer';
+      token: string;
+    }
+  | {
+      bytes: number;
+      status: 'publish';
     }
   | {
       reason: string;

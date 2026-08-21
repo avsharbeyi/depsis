@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use depsis_agent::audit::Sink;
 use depsis_agent::dispatch::Agent;
 use depsis_agent::op::Response;
-use depsis_agent::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError};
+use depsis_agent::seams::{
+    CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource,
+};
 
 /// Path resolution confined by the kernel, not by string inspection.
 ///
@@ -126,6 +128,69 @@ impl SafePath for Openat2SafePath {
             rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
             rustix::fs::Mode::empty(),
         )
+    }
+
+    fn publish(
+        &self,
+        from_dir: &[&str],
+        from: &str,
+        to_dir: &[&str],
+        to: &str,
+    ) -> Result<(), SeamError> {
+        let source = self.open_dir(from_dir)?;
+        let destination = self.open_dir(to_dir)?;
+
+        // renameat2 with NOREPLACE, aimed at two directory descriptors this call just resolved.
+        // Neither side is a path, so nothing re-resolves between the check and the move.
+        //
+        // P0-G measured this working on ZFS 2.3.2 and returning EEXIST when the destination is
+        // taken — the point of the measurement being that a silently-ignored flag would turn
+        // "refuse to overwrite" into "overwrite", which is the worst possible way for a flag to
+        // fail.
+        match rustix::fs::renameat_with(
+            &source,
+            from,
+            &destination,
+            to,
+            rustix::fs::RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::EXIST) => {
+                return Err(SeamError::Io(format!("{to}: already exists")));
+            }
+            Err(e) => return Err(SeamError::Io(format!("rename {from} -> {to}: {e}"))),
+        }
+
+        // ADR-0008 step 5, in the same call as the rename so it cannot be forgotten separately.
+        destination
+            .sync_all()
+            .map_err(|e| SeamError::Io(format!("fsync destination directory: {e}")))
+    }
+}
+
+/// Tokens from the kernel's CSPRNG.
+///
+/// `getrandom(2)`, not `/dev/urandom`: no descriptor to run out of, no path that can be replaced
+/// on a compromised box, and it cannot fail for want of an open file. The agent runs as root and
+/// mints values that authorize writes, so this is not a place for a userspace generator seeded
+/// once at startup.
+pub struct KernelTokens;
+
+impl TokenSource for KernelTokens {
+    fn token(&self) -> String {
+        let mut bytes = [0u8; depsis_agent::transfer::TOKEN_BYTES];
+        // On failure this loops rather than returning a weak value. getrandom only fails for
+        // EINTR or an unavailable pool, and a token is exactly the wrong thing to degrade: a
+        // predictable one lets a caller write into somebody else's upload.
+        while rustix::rand::getrandom(&mut bytes, rustix::rand::GetRandomFlags::empty()).is_err() {
+            std::thread::yield_now();
+        }
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{b:02x}");
+        }
+        out
     }
 }
 
@@ -268,9 +333,9 @@ pub fn listener_from_systemd() -> Result<UnixListener, SeamError> {
 /// everything anyway. Serialising at the accept loop makes that lock unnecessary and makes the
 /// audit log a true serial history of privileged actions. The call rate is a handful per minute;
 /// there is nothing to win by overlapping them.
-pub fn serve_loop<R: CommandRunner, S: Sink>(
+pub fn serve_loop<R: CommandRunner, S: Sink, P: SafePath>(
     listener: &UnixListener,
-    agent: &Agent<'_, R, S>,
+    agent: &Agent<'_, R, S, P>,
 ) -> Result<(), SeamError> {
     loop {
         let stream = match listener.accept() {
@@ -295,9 +360,9 @@ pub fn serve_loop<R: CommandRunner, S: Sink>(
     }
 }
 
-fn serve_one<R: CommandRunner, S: Sink>(
+fn serve_one<R: CommandRunner, S: Sink, P: SafePath>(
     stream: &UnixStream,
-    agent: &Agent<'_, R, S>,
+    agent: &Agent<'_, R, S, P>,
 ) -> Result<(), SeamError> {
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
@@ -500,7 +565,9 @@ mod tests {
     use super::*;
     use depsis_agent::audit::MemorySink;
     use depsis_agent::authz::Policy;
-    use depsis_agent::seams::mock::MockCommandRunner;
+    use depsis_agent::seams::mock::{MockCommandRunner, MockSafePath, MockTokenSource};
+    use depsis_agent::transfer::TransferRegistry;
+    use std::sync::Mutex;
 
     // ── SO_PEERCRED ──
     //
@@ -898,10 +965,20 @@ mod tests {
     // AF_UNIX stream socket, so SO_PEERCRED works and `shutdown` behaves as it does in
     // production — which is precisely what the in-memory mock transport cannot reproduce.
 
+    /// The collaborators the framing tests need, owned by the caller so the borrows outlive the
+    /// `Agent`. None of these tests exercise transfers — they are about the read path — so the
+    /// share root is absent and the registry stays empty.
+    #[derive(Default)]
+    struct ServeFixtures {
+        transfers: Mutex<TransferRegistry>,
+        tokens: MockTokenSource,
+    }
+
     fn serving_agent<'a>(
         runner: &'a MockCommandRunner,
         sink: &'a MemorySink,
-    ) -> Agent<'a, MockCommandRunner, MemorySink> {
+        fixtures: &'a ServeFixtures,
+    ) -> Agent<'a, MockCommandRunner, MemorySink, MockSafePath> {
         // The tests below connect to themselves, so the peer uid is this process's uid. Telling
         // the policy that this uid is the API is what lets the request through to the framing
         // code, which is what is under test here.
@@ -911,6 +988,9 @@ mod tests {
             },
             runner,
             sink,
+            None,
+            &fixtures.tokens,
+            &fixtures.transfers,
         )
     }
 
@@ -933,7 +1013,8 @@ mod tests {
 
         let runner = MockCommandRunner::default();
         let sink = MemorySink::default();
-        let agent = serving_agent(&runner, &sink);
+        let fixtures = ServeFixtures::default();
+        let agent = serving_agent(&runner, &sink, &fixtures);
         serve_one(&server, &agent).expect("serve_one");
         drop(server);
 

@@ -42,9 +42,16 @@ describe('the emitted agent schema', () => {
       'create_dataset',
       'create_snapshot',
       'diff_snapshots',
+      // The bulk data path's control half. `open_transfer` resolves and opens a staging file and
+      // returns a one-time token; the bytes travel on a separate socket, because Node cannot
+      // receive an SCM_RIGHTS descriptor and so the cleanest design — the agent passing the fd —
+      // is unreachable. `publish_transfer` is the durable move: rename, then fsync the
+      // destination directory (ADR-0008 steps 4 and 5).
+      'open_transfer',
       'ping',
       'pool_status',
       'publish_samba_config',
+      'publish_transfer',
       'read_smart_summary',
     ]);
 
@@ -68,7 +75,7 @@ describe('the emitted agent schema', () => {
   });
 
   it('has a response for every outcome the client must handle', () => {
-    expect(schema().response.oneOf?.length).toBeGreaterThanOrEqual(9);
+    expect(schema().response.oneOf?.length).toBeGreaterThanOrEqual(11);
   });
 });
 

@@ -151,6 +151,60 @@
         "op",
         "shares"
       ]
+    },
+    {
+      "description": "Open a staging file and hand back a one-time token for the bulk data channel.\n\nThe API cannot write into a share itself. ADR-0008 says the durability sequence belongs\nto the agent, and the cleanest way to honour that — the agent opens with `openat2` and\npasses the descriptor over — is unreachable, because Node's `net` module has no\nancillary-data support and therefore cannot receive an `SCM_RIGHTS` descriptor from a\nnon-Node peer (checked against the Node documentation, not assumed).\n\nSo the bytes travel instead. This operation resolves and opens the staging file under\n`openat2(RESOLVE_BENEATH)`, keeps the descriptor, and returns a token. The API then\nconnects to the data socket, presents the token, and streams. The token names an\nALREADY-RESOLVED file: nothing the API sends on the data socket can change which file it\nis writing to, which is what keeps the confinement meaningful across two connections.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "open_transfer"
+        },
+        "share": {
+          "description": "The share root this transfer is confined to.",
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "staging_name": {
+          "description": "The staging file, under `.depsis/staging/` inside that share.",
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "staging_name"
+      ]
+    },
+    {
+      "description": "Move a completed staging file into its place, durably.\n\nADR-0008's sequence, steps 4 and 5: rename, then `fsync` the DESTINATION DIRECTORY. The\nsecond one is not optional — without it a power cut can lose the rename even though the\nfile's own contents survived, which is the worst outcome available: the data is on disk\nand nothing points at it.\n\nRefuses if the destination exists. `RENAME_NOREPLACE` was measured working on ZFS 2.3.2\nin P0-G; the `linkat` + `unlink` form is the portable fallback. Either way a publish\nnever silently overwrites a file the user already has.",
+      "type": "object",
+      "properties": {
+        "destination": {
+          "description": "Where it lands, relative to the share root. Components are validated individually.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "op": {
+          "type": "string",
+          "const": "publish_transfer"
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "staging_name": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "staging_name",
+        "destination"
+      ]
     }
   ],
   "$defs": {
@@ -336,6 +390,48 @@
       "required": [
         "status",
         "shares"
+      ]
+    },
+    {
+      "description": "A transfer is open. `offset` is how many bytes the staging file already holds, so a\nresumed upload knows where to continue without asking the filesystem itself.",
+      "type": "object",
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "const": "transfer"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "token",
+        "offset"
+      ]
+    },
+    {
+      "description": "The staged file is in place and the destination directory has been fsynced.",
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "const": "publish"
+        }
+      },
+      "required": [
+        "status",
+        "bytes"
       ]
     },
     {

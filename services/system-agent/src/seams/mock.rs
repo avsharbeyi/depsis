@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use super::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, Transport};
+use super::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource, Transport};
 use crate::op::Response;
 
 /// An in-memory transport: requests are queued up front, responses are collected.
@@ -103,6 +103,43 @@ impl SafePath for MockSafePath {
     fn open_dir(&self, relative: &[&str]) -> Result<std::fs::File, SeamError> {
         let path = self.join(relative)?;
         std::fs::File::open(&path).map_err(|e| SeamError::Io(format!("{}: {e}", path.display())))
+    }
+
+    fn publish(
+        &self,
+        from_dir: &[&str],
+        from: &str,
+        to_dir: &[&str],
+        to: &str,
+    ) -> Result<(), SeamError> {
+        let source = self.join(from_dir)?.join(from);
+        let destination = self.join(to_dir)?.join(to);
+        // `std::fs::rename` OVERWRITES, which is the opposite of what the real one does, so the
+        // refusal is checked here first. That check is racy — which is the point of the note on
+        // this struct: the mock exercises the dispatcher, and storage claims come from the VM.
+        if destination.exists() {
+            return Err(SeamError::Io(format!("{to}: already exists")));
+        }
+        std::fs::rename(&source, &destination)
+            .map_err(|e| SeamError::Io(format!("rename {from} -> {to}: {e}")))
+    }
+}
+
+/// Predictable tokens, for tests only.
+///
+/// Deliberately NOT random: a test that cannot name the token it expects has to fish it out of a
+/// response and then proves less. Nothing constructs this outside tests, and the real source is
+/// `unix::KernelTokens`.
+#[derive(Default)]
+pub struct MockTokenSource {
+    next: RefCell<u32>,
+}
+
+impl TokenSource for MockTokenSource {
+    fn token(&self) -> String {
+        let mut n = self.next.borrow_mut();
+        *n += 1;
+        format!("token-{n}")
     }
 }
 
