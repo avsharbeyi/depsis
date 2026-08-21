@@ -1,0 +1,159 @@
+import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+
+/**
+ * Authenticated encryption for the one secret DEPSIS has to be able to read back.
+ *
+ * Passwords are hashed with Argon2id and recovery codes with SHA-256, because nothing ever needs
+ * the original. A TOTP secret is different: computing the expected code requires the secret itself,
+ * so it must be recoverable, and "recoverable" is exactly what makes it worth protecting.
+ *
+ * What a key on the same host buys, stated plainly so nobody overestimates it. It does NOT protect
+ * against an attacker who is root on the box — they can read the key file. What it does protect
+ * against is the far more likely case: database access WITHOUT filesystem access. A leaked
+ * `depsis_app` password, an SQL injection, a `pg_dump` taken as the owner for disaster recovery, a
+ * support bundle, a developer copying a database. Every one of those hands over the whole MFA
+ * estate today and none of them touches the key file. Splitting the capability so that database
+ * access alone is not enough is the same move the agent makes with SO_PEERCRED, applied here.
+ */
+
+/** AES-256-GCM. 12-byte nonce is the size the mode is specified for; 16-byte tag is the full tag. */
+const NONCE_BYTES = 12;
+const TAG_BYTES = 16;
+const KEY_BYTES = 32;
+
+/** Written into the envelope so a stored value always says what it is. */
+export const KEY_VERSION_PLAINTEXT = 0;
+export const KEY_VERSION_AES_GCM = 1;
+
+export class SecretKeyUnavailableError extends Error {
+  constructor(reason: string) {
+    super(`the secret key is unavailable: ${reason}`);
+    this.name = 'SecretKeyUnavailableError';
+  }
+}
+
+export class SecretDecryptionError extends Error {
+  constructor(reason: string) {
+    super(`could not decrypt a stored secret: ${reason}`);
+    this.name = 'SecretDecryptionError';
+  }
+}
+
+/**
+ * Read the key from a file, the way systemd's `LoadCredential=` presents it.
+ *
+ * A FILE rather than an environment variable. An environment variable is readable through
+ * /proc/<pid>/environ by anything running as the same user, is inherited by every child process the
+ * API spawns, and turns up in crash reporters and process listings. `LoadCredential=` gives a
+ * mode-0400 file owned by the service user under $CREDENTIALS_DIRECTORY, which ADR-0006 already
+ * relies on for the same reason.
+ *
+ * Base64 rather than raw bytes: a raw key file is indistinguishable from a truncated or corrupt
+ * one, and a stray trailing newline silently changes the key. Base64 that must decode to exactly 32
+ * bytes fails loudly instead.
+ */
+export function readKeyFile(path: string): Buffer {
+  let contents: string;
+  try {
+    contents = readFileSync(path, 'utf8');
+  } catch (error) {
+    throw new SecretKeyUnavailableError(
+      `cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return parseKey(contents, path);
+}
+
+export function parseKey(contents: string, source = 'the key'): Buffer {
+  const trimmed = contents.trim();
+  if (trimmed === '') throw new SecretKeyUnavailableError(`${source} is empty`);
+
+  const key = Buffer.from(trimmed, 'base64');
+  // Base64 decoding is permissive — it ignores what it cannot parse rather than failing — so the
+  // length check is what actually validates the input. Re-encoding and comparing catches a value
+  // that decoded to the right length from the wrong characters.
+  if (key.length !== KEY_BYTES) {
+    throw new SecretKeyUnavailableError(
+      `${source} must be base64 for exactly ${KEY_BYTES} bytes, got ${key.length}`,
+    );
+  }
+  if (key.toString('base64').replace(/=+$/, '') !== trimmed.replace(/=+$/, '')) {
+    throw new SecretKeyUnavailableError(`${source} is not valid base64`);
+  }
+  return key;
+}
+
+/** For generating one: `openssl rand -base64 32`. Here so tests and docs cannot disagree. */
+export function generateKey(): string {
+  return randomBytes(KEY_BYTES).toString('base64');
+}
+
+/**
+ * Seal a secret for one specific row.
+ *
+ * The associated data binds the ciphertext to the user and organization it belongs to. Without it,
+ * anyone who can UPDATE this table — but cannot decrypt — could copy Alice's stored secret onto
+ * Bob's row and then sign in as Bob using Alice's phone. The ciphertext would decrypt perfectly,
+ * because nothing in it would say whose it was. With it, the tag check fails.
+ */
+export class SecretBox {
+  constructor(private readonly key: Buffer) {
+    if (key.length !== KEY_BYTES) {
+      throw new SecretKeyUnavailableError(`key must be ${KEY_BYTES} bytes, got ${key.length}`);
+    }
+  }
+
+  seal(plaintext: Buffer, binding: SecretBinding): Buffer {
+    // A fresh random nonce per encryption. GCM fails catastrophically on nonce reuse — two messages
+    // under the same key and nonce leak their XOR and, worse, the authentication key.
+    const nonce = randomBytes(NONCE_BYTES);
+    const cipher = createCipheriv('aes-256-gcm', this.key, nonce);
+    cipher.setAAD(aad(binding));
+    const body = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    return Buffer.concat([Buffer.from([KEY_VERSION_AES_GCM]), nonce, body, cipher.getAuthTag()]);
+  }
+
+  open(envelope: Buffer, binding: SecretBinding): Buffer {
+    if (envelope.length < 1 + NONCE_BYTES + TAG_BYTES) {
+      throw new SecretDecryptionError('the stored value is too short to be an envelope');
+    }
+    const version = envelope[0];
+    if (version !== KEY_VERSION_AES_GCM) {
+      throw new SecretDecryptionError(`unknown envelope version ${String(version)}`);
+    }
+
+    const nonce = envelope.subarray(1, 1 + NONCE_BYTES);
+    const body = envelope.subarray(1 + NONCE_BYTES, envelope.length - TAG_BYTES);
+    const tag = envelope.subarray(envelope.length - TAG_BYTES);
+
+    const decipher = createDecipheriv('aes-256-gcm', this.key, nonce);
+    decipher.setAAD(aad(binding));
+    decipher.setAuthTag(tag);
+    try {
+      return Buffer.concat([decipher.update(body), decipher.final()]);
+    } catch {
+      // Deliberately not repeating the underlying message. A tampered ciphertext, a wrong key and a
+      // ciphertext moved to another row all fail here, and telling them apart helps only an
+      // attacker: the difference is exactly which guess was closer.
+      throw new SecretDecryptionError('authentication failed');
+    }
+  }
+
+  /** Whether two keys are the same, without leaking how far a comparison got. */
+  matches(other: Buffer): boolean {
+    return other.length === this.key.length && timingSafeEqual(other, this.key);
+  }
+}
+
+export interface SecretBinding {
+  userId: string;
+  organizationId: string;
+}
+
+function aad(binding: SecretBinding): Buffer {
+  // A separator that cannot occur in a UUID, so `aa|bb` and `aab|b` are different associated data.
+  // Concatenating identifiers without one is a classic way to make two distinct rows share a
+  // binding.
+  return Buffer.from(`${binding.userId}|${binding.organizationId}`, 'utf8');
+}

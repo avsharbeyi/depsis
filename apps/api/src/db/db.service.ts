@@ -43,7 +43,12 @@ export type UntenantedJustification =
   // and cannot be scoped to it (ADR-0015 §5d, and the table's own COMMENT). Reading it under a
   // tenant context would return nothing, which would silently deny the administrator rather than
   // fail. The query is a count against a supplied user id and reads no tenant-scoped table.
-  | 'system-admin-check';
+  | 'system-admin-check'
+  // Counts rows in user_totp_secrets by key_version and reads no secret. Untenanted because the
+  // question is about the WHOLE estate — "is any secret still stored in the clear" — and asking it
+  // per tenant would answer a different, less useful question at startup, before any tenant is
+  // known.
+  | 'mfa-key-inventory';
 
 const SET_TENANT_SQL = `SELECT set_config('depsis.organization_id', $1, true) AS applied,
                                public.current_organization_id()::text  AS observed`;

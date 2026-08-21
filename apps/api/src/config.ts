@@ -35,6 +35,22 @@ const schema = z.object({
     .optional()
     .transform((value) => (value === undefined || value === '' ? null : value)),
 
+  // The file holding the key that seals TOTP secrets at rest (ADR-0016).
+  //
+  // A FILE, not the key itself in the environment: an environment variable is readable through
+  // /proc/<pid>/environ by anything running as the same user, is inherited by every child process,
+  // and turns up in crash reporters. On a systemd deployment this is what LoadCredential= presents
+  // under $CREDENTIALS_DIRECTORY, mode 0400, owned by the service user.
+  //
+  // Optional, so the API still starts without it — but enrolment then refuses rather than quietly
+  // storing a raw secret, and existing sealed secrets stop verifying while recovery codes keep
+  // working. See MfaService.
+  DEPSIS_SECRET_KEY_FILE: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => (value === undefined || value === '' ? null : value)),
+
   // Which ZFS pools /system/telemetry reports on, comma-separated.
   //
   // Configuration rather than discovery: the agent's operation set is closed and has no "list
@@ -58,6 +74,7 @@ export interface AppConfig {
   port: number;
   nodeEnv: 'development' | 'test' | 'production';
   agentSocket: string | null;
+  secretKeyFile: string | null;
   zfsPools: readonly string[];
 }
 
@@ -72,6 +89,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     port: parsed.data.DEPSIS_API_PORT,
     nodeEnv: parsed.data.NODE_ENV,
     agentSocket: parsed.data.DEPSIS_AGENT_SOCKET,
+    secretKeyFile: parsed.data.DEPSIS_SECRET_KEY_FILE,
     zfsPools: parsed.data.DEPSIS_ZFS_POOLS,
   };
 }

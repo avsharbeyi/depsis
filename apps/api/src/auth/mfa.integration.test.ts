@@ -5,6 +5,7 @@ import { OrganizationsService } from '../organizations/organizations.service.js'
 import { AuthService } from './auth.service.js';
 import { LoginThrottleService } from './login-throttle.service.js';
 import { MfaService } from './mfa.service.js';
+import { generateKey, SecretBox } from './secret-box.js';
 import { PasswordService } from './password.service.js';
 import { PendingLoginService } from './pending-login.service.js';
 import { SessionService } from './session.service.js';
@@ -70,7 +71,7 @@ describeDb('second factor, against a real PostgreSQL', () => {
     await db.onModuleInit();
 
     const passwords = new PasswordService();
-    mfa = new MfaService(db);
+    mfa = new MfaService(db, testSecretBox());
     auth = new AuthService(
       db,
       new OrganizationsService(db),
@@ -404,3 +405,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
     expect(stale.outcome).toBe('rejected');
   });
 });
+
+/** A fresh key per run. These tests are about storage behaviour, not about any particular key. */
+function testSecretBox(): SecretBox {
+  return new SecretBox(Buffer.from(generateKey(), 'base64'));
+}

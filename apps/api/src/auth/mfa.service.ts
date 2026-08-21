@@ -1,7 +1,14 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 
 import { DbService } from '../db/db.service.js';
+import {
+  KEY_VERSION_AES_GCM,
+  KEY_VERSION_PLAINTEXT,
+  SecretDecryptionError,
+  SecretKeyUnavailableError,
+  type SecretBox,
+} from './secret-box.js';
 import { base32Encode, generateSecret, otpauthUri, PERIOD_SECONDS, verifyTotp } from './totp.js';
 
 export interface Enrolment {
@@ -27,8 +34,68 @@ const RECOVERY_CODE_COUNT = 10;
 const RECOVERY_CODE_CHARS = 20;
 
 @Injectable()
-export class MfaService {
-  constructor(private readonly db: DbService) {}
+export class MfaService implements OnModuleInit {
+  private readonly logger = new Logger(MfaService.name);
+
+  /**
+   * `secrets` is null when no key is configured.
+   *
+   * There is deliberately NO fallback to storing a raw secret in that case. An operator who
+   * configured encryption and got plaintext anyway — because a path was wrong, or a credential did
+   * not mount — would have exactly the protection they think they removed the need for. Enrolment
+   * refuses instead, loudly, while existing rows keep working to the extent they can: a plaintext
+   * row still verifies, and a sealed one cannot, which leaves recovery codes as the way in. That is
+   * a large part of why recovery codes are hashed rather than sealed.
+   */
+  constructor(
+    private readonly db: DbService,
+    private readonly secrets: SecretBox | null = null,
+  ) {}
+
+  /**
+   * Say, once, how much of the estate is still in the clear.
+   *
+   * A lazy upgrade that nobody can observe is indistinguishable from one that is not happening, and
+   * "we encrypt TOTP secrets" is the kind of claim that stops being true quietly. Non-fatal: an
+   * unreadable count is not a reason to refuse to serve.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const remaining = await this.plaintextSecretCount();
+      if (remaining === 0) return;
+      if (this.secrets === null) {
+        this.logger.warn(
+          `${remaining} TOTP secret(s) are stored in the clear and no key is configured to seal ` +
+            'them. Set DEPSIS_SECRET_KEY_FILE (ADR-0016).',
+        );
+      } else {
+        this.logger.log(
+          `${remaining} TOTP secret(s) are still stored in the clear; each is sealed the next ` +
+            'time its owner signs in.',
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `could not count unsealed TOTP secrets: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * How many secrets are still stored the way migration 0004 stored them.
+   *
+   * Counts rows without reading a single secret.
+   */
+  async plaintextSecretCount(): Promise<number> {
+    // Through the definer function, NOT a direct count. Counting the table here runs with no
+    // tenant context — the question is about the whole estate and is asked before any tenant is
+    // known — and row level security then hides every row, so the answer was always 0. Migration
+    // 0006 carries the reasoning; a test asserting the count could SEE a row is what caught it.
+    const rows = await this.db.withoutTenant('mfa-key-inventory', (q) =>
+      q.query<{ n: string }>('SELECT public.unsealed_totp_secret_count()::text AS n'),
+    );
+    return Number(rows[0]?.n ?? '0');
+  }
 
   /**
    * Begin enrolment: generate a secret, store it UNCONFIRMED, and return what the user scans.
@@ -42,20 +109,28 @@ export class MfaService {
     userId: string,
     accountName: string,
   ): Promise<Enrolment> {
+    if (this.secrets === null) {
+      // Refused rather than degraded. See the note on the constructor.
+      throw new SecretKeyUnavailableError(
+        'no secret key is configured, so a TOTP secret cannot be stored safely',
+      );
+    }
     const secret = generateSecret();
+    const sealed = this.secrets.seal(secret, { userId, organizationId });
 
     await this.db.withTenant(organizationId, (q) =>
       q.query(
-        `INSERT INTO user_totp_secrets (user_id, organization_id, secret)
-         VALUES ($1, $2, $3)
+        `INSERT INTO user_totp_secrets (user_id, organization_id, secret, key_version)
+         VALUES ($1, $2, $3, $4)
          ON CONFLICT (user_id) DO UPDATE
             SET secret = EXCLUDED.secret,
+                key_version = EXCLUDED.key_version,
                 -- A restarted enrolment clears the old confirmation and the replay counter with it.
                 -- Keeping either would mean the new secret inherits the old one's used steps.
                 confirmed_at = NULL,
                 last_used_step = NULL,
                 created_at = now()`,
-        [userId, organizationId, secret],
+        [userId, organizationId, sealed, KEY_VERSION_AES_GCM],
       ),
     );
 
@@ -265,8 +340,8 @@ export class MfaService {
     options: { requireConfirmed: boolean },
   ): Promise<{ secret: Buffer; lastUsedStep: number | null } | null> {
     const rows = await this.db.withTenant(organizationId, (q) =>
-      q.query<{ secret: Buffer; last_used_step: string | null }>(
-        `SELECT secret, last_used_step::text AS last_used_step
+      q.query<{ secret: Buffer; last_used_step: string | null; key_version: number }>(
+        `SELECT secret, last_used_step::text AS last_used_step, key_version
            FROM user_totp_secrets
           WHERE user_id = $1
             ${options.requireConfirmed ? 'AND confirmed_at IS NOT NULL' : ''}`,
@@ -275,10 +350,77 @@ export class MfaService {
     );
     const row = rows[0];
     if (row === undefined) return null;
+
+    const secret = await this.unseal(organizationId, userId, row.secret, row.key_version);
+    if (secret === null) return null;
+
     return {
-      secret: row.secret,
+      secret,
       lastUsedStep: row.last_used_step === null ? null : Number(row.last_used_step),
     };
+  }
+
+  /**
+   * Turn a stored value into the secret, upgrading it in place if it is still plaintext.
+   *
+   * Returning null rather than throwing on a failed decrypt is deliberate. Every caller treats null
+   * as "this user has no usable TOTP secret", which makes a lost or rotated key look to the user
+   * exactly like a wrong code — and leaves the recovery-code path, which needs no key, working.
+   * Throwing would turn a key problem into a 500 on a login attempt, which tells an attacker
+   * something and tells the user nothing.
+   */
+  private async unseal(
+    organizationId: string,
+    userId: string,
+    stored: Buffer,
+    keyVersion: number,
+  ): Promise<Buffer | null> {
+    if (keyVersion === KEY_VERSION_PLAINTEXT) {
+      if (this.secrets === null) return stored;
+      // A lazy upgrade: the row is read, used, and re-sealed. Doing it here rather than in a bulk
+      // job means the conversion happens under the same tenant context that is already established
+      // and needs no second code path. `plaintextSecretCount()` is what makes the remaining tail
+      // visible, since a migration nobody can observe is one nobody can finish.
+      const sealed = this.secrets.seal(stored, { userId, organizationId });
+      const updated = await this.db.withTenant(organizationId, (q) =>
+        q.query<{ user_id: string }>(
+          // Conditional on the row still being plaintext, so two concurrent logins cannot both
+          // re-seal and the second cannot overwrite the first's envelope with its own.
+          `UPDATE user_totp_secrets
+              SET secret = $2, key_version = $3
+            WHERE user_id = $1 AND key_version = $4
+            RETURNING user_id::text AS user_id`,
+          [userId, sealed, KEY_VERSION_AES_GCM, KEY_VERSION_PLAINTEXT],
+        ),
+      );
+      if (updated.length === 1) {
+        this.logger.log(`sealed the TOTP secret for user ${userId} on first use`);
+      }
+      return stored;
+    }
+
+    if (this.secrets === null) {
+      // Sealed, and nothing to open it with. Loud, because every enrolled user is now relying on
+      // recovery codes and the operator is the only one who can fix it.
+      this.logger.error(
+        `user ${userId} has a sealed TOTP secret but no key is configured; ` +
+          'DEPSIS_SECRET_KEY_FILE is missing or unreadable. Recovery codes still work.',
+      );
+      return null;
+    }
+
+    try {
+      return this.secrets.open(stored, { userId, organizationId });
+    } catch (error) {
+      if (error instanceof SecretDecryptionError) {
+        this.logger.error(
+          `could not open the TOTP secret for user ${userId}: ${error.message}. ` +
+            'The key may have been replaced, or the row may have been tampered with.',
+        );
+        return null;
+      }
+      throw error;
+    }
   }
 }
 

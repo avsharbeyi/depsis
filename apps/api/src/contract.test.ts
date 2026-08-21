@@ -106,6 +106,7 @@ describe('the API and its contract describe the same system', () => {
       port: 3000,
       nodeEnv: 'test',
       agentSocket: null,
+      secretKeyFile: null,
       zfsPools: [],
     };
 

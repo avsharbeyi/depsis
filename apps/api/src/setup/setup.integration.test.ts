@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { AuthService } from '../auth/auth.service.js';
 import { LoginThrottleService } from '../auth/login-throttle.service.js';
 import { MfaService } from '../auth/mfa.service.js';
+import { generateKey, SecretBox } from '../auth/secret-box.js';
 import { PasswordService } from '../auth/password.service.js';
 import { PendingLoginService } from '../auth/pending-login.service.js';
 import { SessionService } from '../auth/session.service.js';
@@ -154,7 +155,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
       new PasswordService(),
       new SessionService(db),
       new LoginThrottleService(db),
-      new MfaService(db),
+      new MfaService(db, testSecretBox()),
       new PendingLoginService(db),
     );
 
@@ -247,3 +248,8 @@ describeDb('system setup, against a real PostgreSQL', () => {
     expect(attempt).toMatch(/permission denied/i);
   });
 });
+
+/** A fresh key per run. These tests are about storage behaviour, not about any particular key. */
+function testSecretBox(): SecretBox {
+  return new SecretBox(Buffer.from(generateKey(), 'base64'));
+}
