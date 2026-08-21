@@ -51,6 +51,27 @@ if (!job) {
   process.exit(2);
 }
 
+// A job-level `if:` is NOT evaluated here, and staying quiet about that hid a real failure: the
+// rust job carried `if: hashFiles(...)`, which GitHub rejects outright — hashFiles has no
+// workspace to hash before checkout — and the whole workflow file was refused. Every local run
+// had passed, because this runner walked straight past the condition. Printing it does not
+// evaluate it; it just stops the omission from being invisible.
+if (typeof job.if === 'string') {
+  console.log(
+    `NOTE: job '${jobName}' has a condition this runner does not evaluate:\n  if: ${job.if}\n`,
+  );
+  // The one class worth refusing outright, because it is a syntax error rather than a judgement
+  // call: these functions need a checked-out workspace and are unavailable at job level.
+  for (const unavailable of ['hashFiles(', 'steps.', 'job.', 'runner.']) {
+    if (job.if.includes(unavailable)) {
+      console.error(
+        `ERROR: '${unavailable}' cannot be used in a job-level if — GitHub rejects the whole file.`,
+      );
+      process.exit(2);
+    }
+  }
+}
+
 // The workflow's `env:` block, plus whatever the caller supplied for things a real runner would
 // provide (a service container's host and password, say).
 const baseEnv = { ...process.env, ...(workflow.env ?? {}), ...(job.env ?? {}), ...extraEnv };

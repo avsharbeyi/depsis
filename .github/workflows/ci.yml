@@ -67,7 +67,17 @@ jobs:
     runs-on: ubuntu-latest
     # ADR-0006: the agent must keep compiling for Windows so cfg-gating regressions surface
     # immediately. Cross-checking from Linux CI is cheaper than a Windows runner.
-    if: hashFiles('services/system-agent/Cargo.toml') != ''
+    #
+    # There is deliberately NO `if:` guard here. It used to read
+    # `if: hashFiles('services/system-agent/Cargo.toml') != ''`, from when the crate might not have
+    # existed yet — and GitHub rejected the whole file for it, because at job level the repository
+    # has not been checked out and there is no workspace for hashFiles to hash.
+    #
+    # Removing it rather than rewriting it, because the guard had become the wrong shape anyway:
+    # the crate is committed, and a condition that SKIPS this job would mean that renaming the
+    # crate silently stops running `cargo clippy`, the Windows cross-check and the agent schema
+    # diff — and reports green. A security-relevant job that can quietly disappear is worse than
+    # one that fails loudly when its inputs move.
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
