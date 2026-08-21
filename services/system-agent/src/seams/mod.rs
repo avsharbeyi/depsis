@@ -41,7 +41,33 @@ pub enum SeamError {
     },
 }
 
-/// Resolve a caller-supplied relative path underneath a fixed root, or refuse.
+/// What a caller intends to do with a path, so the open can say so up front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenIntent {
+    /// An existing file, read-only.
+    Read,
+    /// A file that must NOT already exist. The exclusive create is the atomic part: two callers
+    /// racing to claim the same staging name cannot both win.
+    CreateNew,
+    /// Write, creating if absent. For resuming an upload into a `.part` that already exists.
+    Append,
+}
+
+/// Open a caller-supplied relative path underneath a fixed root, or refuse.
+///
+/// This hands back the OPEN FILE, never a path, and the difference is the whole point.
+///
+/// An earlier version resolved with `openat2`, dropped the descriptor, and returned a joined
+/// `PathBuf` for somebody else to open later. That uses `openat2` as a CHECK rather than as the
+/// operation, and check-then-use is the shape of every TOCTOU bug: between the check and the
+/// reopen, a component can be replaced with a symlink and the second resolution — an ordinary one,
+/// with none of the RESOLVE_ flags — follows it out of the root. Nothing called it yet, so nothing
+/// was exploitable, but the upload path was about to be built directly on top of it, which would
+/// have made the confinement decorative in the one operation that writes user data.
+///
+/// Returning `std::fs::File` rather than a raw descriptor keeps the core free of `cfg`: the type
+/// exists on every platform, the real implementation converts the `openat2` result into one, and
+/// the mock opens a real file under a temporary root.
 ///
 /// The real implementation uses `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
 /// RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV` from a root fd held open for the process lifetime.
@@ -52,7 +78,14 @@ pub enum SeamError {
 /// nobody ever finds out about.
 pub trait SafePath {
     /// `relative` is a sequence of already-validated single components (see `SafeComponent`).
-    fn resolve(&self, relative: &[&str]) -> Result<std::path::PathBuf, SeamError>;
+    fn open(&self, relative: &[&str], intent: OpenIntent) -> Result<std::fs::File, SeamError>;
+
+    /// The DIRECTORY at `relative`, opened under the same confinement.
+    ///
+    /// Needed because durability is not finished when the data is written: ADR-0008 step 5 is an
+    /// `fsync` on the destination directory, and without it a power cut can lose the rename even
+    /// though the file's own contents survived.
+    fn open_dir(&self, relative: &[&str]) -> Result<std::fs::File, SeamError>;
 }
 
 /// Run one of a fixed set of external programs.

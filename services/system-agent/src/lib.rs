@@ -19,9 +19,15 @@
 //!      As of Phase 0 no operation in `Request` takes such a path — `ReadSmartSummary` builds
 //!      `/dev/disk/by-id/<component>`, and `openat2` would be actively wrong there because a
 //!      by-id name IS a symlink. `SafePath` is implemented and tested against a real kernel
-//!      (`tests/openat2_containment.rs`) ahead of Phase 1, which introduces the first operations
-//!      that need it. Stating otherwise would be exactly the "two realities" this project
-//!      forbids elsewhere.
+//!      (the `openat2 containment` tests in `unix.rs`) ahead of Phase 1, which introduces the
+//!      first operations that need it. Stating otherwise would be exactly the "two realities"
+//!      this project forbids elsewhere.
+//!
+//!      `SafePath` hands back an OPEN FILE, never a path. An earlier version resolved with
+//!      `openat2`, dropped the descriptor and returned a joined path for somebody else to open
+//!      later — which uses the syscall as a check rather than as the operation, and leaves the
+//!      classic TOCTOU window between the two. Nothing called it, so nothing was exploitable,
+//!      but the upload path was about to be built on top of it.
 //!   4. Every call is audited with identity, reason and correlation id (`audit`).
 //!
 //! Nothing in this file is platform-specific. That is enforced by CI, which cross-checks the

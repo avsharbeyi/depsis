@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use depsis_agent::audit::Sink;
 use depsis_agent::dispatch::Agent;
 use depsis_agent::op::Response;
-use depsis_agent::seams::{CommandRunner, PeerIdentity, SafePath, SeamError};
+use depsis_agent::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError};
 
 /// Path resolution confined by the kernel, not by string inspection.
 ///
@@ -55,32 +55,77 @@ impl Openat2SafePath {
     }
 }
 
-impl SafePath for Openat2SafePath {
-    fn resolve(&self, relative: &[&str]) -> Result<PathBuf, SeamError> {
-        let joined = relative.join("/");
-
-        // BENEATH, not IN_ROOT. IN_ROOT would silently clamp an escape attempt to the root,
-        // which means a traversal succeeds quietly and nobody ever learns it was attempted.
-        // BENEATH refuses, and a refusal is an audit event.
-        //
-        // NO_XDEV matters specifically on a ZFS box: every dataset is its own mount, so without
-        // it a nested dataset mountpoint is a way out of the share the caller was confined to.
-        let flags = rustix::fs::ResolveFlags::BENEATH
+#[allow(
+    dead_code,
+    reason = "same as the struct: the helpers are exercised by the kernel tests below and are \
+              wired into dispatch with the first path-taking operation"
+)]
+impl Openat2SafePath {
+    /// The flag set, in one place so the two entry points cannot drift apart.
+    ///
+    /// BENEATH, not IN_ROOT. IN_ROOT would silently clamp an escape attempt to the root, which
+    /// means a traversal succeeds quietly and nobody ever learns it was attempted. BENEATH
+    /// refuses, and a refusal is an audit event.
+    ///
+    /// NO_XDEV matters specifically on a ZFS box: every dataset is its own mount, so without it a
+    /// nested dataset mountpoint is a way out of the share the caller was confined to.
+    fn resolve_flags() -> rustix::fs::ResolveFlags {
+        rustix::fs::ResolveFlags::BENEATH
             | rustix::fs::ResolveFlags::NO_SYMLINKS
             | rustix::fs::ResolveFlags::NO_MAGICLINKS
-            | rustix::fs::ResolveFlags::NO_XDEV;
+            | rustix::fs::ResolveFlags::NO_XDEV
+    }
 
+    fn openat2(
+        &self,
+        relative: &[&str],
+        oflags: rustix::fs::OFlags,
+        mode: rustix::fs::Mode,
+    ) -> Result<std::fs::File, SeamError> {
+        let joined = relative.join("/");
         let fd = rustix::fs::openat2(
             &self.root,
             OsStr::new(&joined).as_bytes(),
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-            flags,
+            oflags | rustix::fs::OFlags::CLOEXEC,
+            mode,
+            Self::resolve_flags(),
         )
         .map_err(|e| SeamError::PathEscape(format!("{joined}: {e}")))?;
 
-        drop(fd);
-        Ok(self.root_display.join(&joined))
+        // The descriptor IS the result. It is not dropped and no path is handed back: whoever
+        // holds this file holds the object the kernel just confined, and no second resolution
+        // happens anywhere.
+        Ok(std::fs::File::from(fd))
+    }
+}
+
+impl SafePath for Openat2SafePath {
+    fn open(&self, relative: &[&str], intent: OpenIntent) -> Result<std::fs::File, SeamError> {
+        let (oflags, mode) = match intent {
+            OpenIntent::Read => (rustix::fs::OFlags::RDONLY, rustix::fs::Mode::empty()),
+            // EXCL is the atomic part: two callers racing to claim the same staging name cannot
+            // both win, and the loser finds out rather than silently sharing a file.
+            OpenIntent::CreateNew => (
+                rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL,
+                // 0600 while it is being written. The agent runs as root and the data belongs to a
+                // user, so ownership is fixed up at publish; what must never happen is a staging
+                // file readable by everyone on the box in the meantime.
+                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            ),
+            OpenIntent::Append => (
+                rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE,
+                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            ),
+        };
+        self.openat2(relative, oflags, mode)
+    }
+
+    fn open_dir(&self, relative: &[&str]) -> Result<std::fs::File, SeamError> {
+        self.openat2(
+            relative,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        )
     }
 }
 
@@ -658,7 +703,7 @@ mod tests {
         std::fs::write(tmp.path().join("inside.txt"), b"hello").expect("write");
 
         let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
-        assert!(sp.resolve(&["inside.txt"]).is_ok());
+        assert!(sp.open(&["inside.txt"], OpenIntent::Read).is_ok());
     }
 
     #[test]
@@ -670,7 +715,7 @@ mod tests {
 
         let sp = Openat2SafePath::open_root(&root).expect("open root");
         assert!(
-            sp.resolve(&["..", "secret.txt"]).is_err(),
+            sp.open(&["..", "secret.txt"], OpenIntent::Read).is_err(),
             "RESOLVE_BENEATH must refuse .. — it escaped instead"
         );
     }
@@ -689,7 +734,7 @@ mod tests {
 
         let sp = Openat2SafePath::open_root(&root).expect("open root");
         assert!(
-            sp.resolve(&["link"]).is_err(),
+            sp.open(&["link"], OpenIntent::Read).is_err(),
             "RESOLVE_NO_SYMLINKS must refuse a symlink even before asking where it points"
         );
     }
@@ -702,7 +747,102 @@ mod tests {
         // Under a plain `join`, an absolute component discards everything before it. BENEATH
         // refuses instead. `SafeComponent` also rejects this earlier — belt and braces, because
         // the two defences fail for different reasons.
-        assert!(sp.resolve(&["/etc/passwd"]).is_err());
+        assert!(sp.open(&["/etc/passwd"], OpenIntent::Read).is_err());
+    }
+
+    #[test]
+    fn what_comes_back_is_the_object_that_was_checked_not_a_path_to_re_resolve() {
+        // The TOCTOU test, and the reason this trait hands back a File.
+        //
+        // The old implementation resolved with openat2, dropped the descriptor and returned a
+        // joined path for somebody else to open later. Between those two moments the name can be
+        // repointed — and the second open is an ordinary resolution with none of the RESOLVE_
+        // flags, so it follows the new target straight out of the root.
+        //
+        // Here the name is repointed at a file outside the root AFTER the open. Holding the
+        // descriptor, the agent still reads what it was given; a path would have read the
+        // attacker's file.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("share");
+        std::fs::create_dir(&root).expect("mkdir");
+        std::fs::write(root.join("upload.part"), b"the real contents").expect("write");
+        std::fs::write(tmp.path().join("secret.txt"), b"not yours").expect("write");
+
+        let sp = Openat2SafePath::open_root(&root).expect("open root");
+        let mut held = sp.open(&["upload.part"], OpenIntent::Read).expect("open");
+
+        // The swap, after the check.
+        std::fs::remove_file(root.join("upload.part")).expect("unlink");
+        std::os::unix::fs::symlink(tmp.path().join("secret.txt"), root.join("upload.part"))
+            .expect("symlink");
+
+        let mut got = String::new();
+        std::io::Read::read_to_string(&mut held, &mut got).expect("read");
+        assert_eq!(
+            got, "the real contents",
+            "the open descriptor must still be the file that was confined, not whatever the name \
+             now points at"
+        );
+
+        // And a fresh open of the same name is refused outright, because it is now a symlink.
+        assert!(
+            sp.open(&["upload.part"], OpenIntent::Read).is_err(),
+            "the swapped-in symlink must be refused on the next open"
+        );
+    }
+
+    #[test]
+    fn create_new_refuses_a_name_that_already_exists() {
+        // Two callers racing to claim the same staging name must not both win. EXCL is what makes
+        // the claim atomic; without it the loser silently shares a file with the winner and the
+        // upload is interleaved garbage.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+
+        assert!(sp.open(&["claim.part"], OpenIntent::CreateNew).is_ok());
+        assert!(
+            sp.open(&["claim.part"], OpenIntent::CreateNew).is_err(),
+            "the second claim on the same name must lose"
+        );
+    }
+
+    #[test]
+    fn a_created_file_is_not_readable_by_everyone_while_it_is_written() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+        sp.open(&["private.part"], OpenIntent::CreateNew)
+            .expect("create");
+
+        let mode = std::fs::metadata(tmp.path().join("private.part"))
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "staging data must not be world-readable while it is being written"
+        );
+    }
+
+    #[test]
+    fn a_directory_can_be_opened_for_its_own_fsync() {
+        // ADR-0008 step 5: the destination DIRECTORY is fsynced after the rename. Skipping it can
+        // lose the rename in a power cut even though the file's contents survived, so the
+        // confinement has to be able to hand back a directory too.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("dest")).expect("mkdir");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+
+        let dir = sp.open_dir(&["dest"]).expect("open dir");
+        dir.sync_all()
+            .expect("fsync on a directory fd must succeed");
+
+        // And a FILE must not come back from open_dir, or an fsync would be aimed at the wrong
+        // object and report success having flushed nothing relevant.
+        std::fs::write(tmp.path().join("plain.txt"), b"x").expect("write");
+        assert!(sp.open_dir(&["plain.txt"]).is_err());
     }
 
     /// NO_XDEV, against a real mount boundary.
@@ -725,17 +865,14 @@ mod tests {
         // for the wrong reason on any filesystem.
         std::fs::create_dir_all(format!("{root}/plain")).expect("mkdir");
         assert!(
-            sp.resolve(&["plain"]).is_ok(),
+            sp.open_dir(&["plain"]).is_ok(),
             "a same-mount subdirectory must still resolve"
         );
 
-        match sp.resolve(&[&child]) {
+        match sp.open_dir(&[&child]) {
             Err(SeamError::PathEscape(_)) => {}
             Err(other) => panic!("expected PathEscape crossing into {child}, got {other:?}"),
-            Ok(p) => panic!(
-                "NO_XDEV did not stop the crossing: resolved to {}",
-                p.display()
-            ),
+            Ok(_) => panic!("NO_XDEV did not stop the crossing: the nested mount opened"),
         }
     }
 
@@ -747,10 +884,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
 
-        match sp.resolve(&["..", "..", "etc"]) {
+        match sp.open_dir(&["..", "..", "etc"]) {
             Err(SeamError::PathEscape(_)) => {}
             Err(other) => panic!("expected PathEscape, got {other:?}"),
-            Ok(p) => panic!("traversal silently succeeded, resolved to {}", p.display()),
+            Ok(_) => panic!("traversal silently succeeded: /etc opened from inside the root"),
         }
     }
 

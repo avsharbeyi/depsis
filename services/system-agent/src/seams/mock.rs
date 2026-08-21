@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use super::{CommandRunner, PeerIdentity, SafePath, SeamError, Transport};
+use super::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, Transport};
 use crate::op::Response;
 
 /// An in-memory transport: requests are queued up front, responses are collected.
@@ -65,8 +65,11 @@ impl MockSafePath {
     }
 }
 
-impl SafePath for MockSafePath {
-    fn resolve(&self, relative: &[&str]) -> Result<PathBuf, SeamError> {
+impl MockSafePath {
+    /// String inspection, which is exactly what the real implementation does NOT rely on —
+    /// see the note on this struct. It is here so the portable tests can drive the
+    /// dispatcher, not so anyone believes it confines anything.
+    fn join(&self, relative: &[&str]) -> Result<PathBuf, SeamError> {
         let mut p = self.root.clone();
         for component in relative {
             if component.is_empty()
@@ -80,6 +83,26 @@ impl SafePath for MockSafePath {
             p.push(component);
         }
         Ok(p)
+    }
+}
+
+impl SafePath for MockSafePath {
+    fn open(&self, relative: &[&str], intent: OpenIntent) -> Result<std::fs::File, SeamError> {
+        let path = self.join(relative)?;
+        let mut options = std::fs::OpenOptions::new();
+        match intent {
+            OpenIntent::Read => options.read(true),
+            OpenIntent::CreateNew => options.write(true).create_new(true),
+            OpenIntent::Append => options.write(true).create(true),
+        };
+        options
+            .open(&path)
+            .map_err(|e| SeamError::Io(format!("{}: {e}", path.display())))
+    }
+
+    fn open_dir(&self, relative: &[&str]) -> Result<std::fs::File, SeamError> {
+        let path = self.join(relative)?;
+        std::fs::File::open(&path).map_err(|e| SeamError::Io(format!("{}: {e}", path.display())))
     }
 }
 
