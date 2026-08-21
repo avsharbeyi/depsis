@@ -7,33 +7,76 @@
 //! the first one was confined to — which is the whole reason the token exists rather than simply
 //! repeating the file name on the data channel.
 //!
+//! ONE-TIME-NESS IS A PROPERTY OF THE FILE, NOT OF THE TOKEN. An earlier version keyed only by
+//! token, which meant two `OpenTransfer` calls naming one staging file both succeeded, both sat at
+//! the same offset, and their data connections overwrote each other. It also dropped the entry the
+//! moment a token was claimed, so from the first byte to the last there was no record that the file
+//! was in flight — and a `PublishTransfer` arriving in that window would `renameat2` a file still
+//! being appended to, into the user's tree. That is exactly the half-written file that atomic
+//! publish exists to prevent. So the registry is keyed by `(share, staging_name)` and models both
+//! states: waiting for its data connection, and streaming (ADR-0017).
+//!
 //! Platform-neutral by construction: it holds `std::fs::File`, which exists everywhere, so the
 //! core keeps its zero-`cfg` property (ADR-0006).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::seams::PeerIdentity;
+
 /// How long an opened transfer waits for its data connection.
 ///
 /// Long enough for a client to be slow, short enough that an abandoned upload does not hold a
-/// descriptor and a partially written file open indefinitely. ADR-0008 also has a `expiration`
-/// reaper for the `.part` files themselves; this is the narrower in-process lifetime.
+/// descriptor and a partially written file open indefinitely.
 pub const TRANSFER_TTL: Duration = Duration::from_secs(300);
+
+/// How long a claimed transfer may stream before the agent reclaims the name.
+///
+/// Distinct from `TRANSFER_TTL`, which governs PICKUP only. A transfer that has started streaming
+/// is bounded by its declared length and an idle deadline on the connection itself; this is the
+/// backstop for a data thread that died without running its guard's `Drop` — which should be
+/// impossible, and is therefore exactly the kind of thing worth a backstop.
+pub const CLAIMED_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A token's length in bytes before hex encoding.
 ///
-/// 32 bytes. The token authorizes writing to an already-chosen file, so guessing one is only
-/// useful to a process that already passed SO_PEERCRED — but "only useful to an attacker who is
-/// already inside" is exactly the reasoning that turns a small number into a real one later.
+/// 32 bytes from `getrandom`. The token authorizes writing to an already-chosen file, so guessing
+/// one is only useful to a process that already passed SO_PEERCRED — but "only useful to an
+/// attacker who is already inside" is exactly the reasoning that turns a small number into a real
+/// one later.
+///
+/// This constant is also why the data socket carries no rate limit: 256 bits over a local AF_UNIX
+/// socket is not guessable at any rate. The two facts are coupled, and writing only one of them
+/// down would leave the next reader thinking a limiter had been forgotten.
 pub const TOKEN_BYTES: usize = 32;
 
+/// How many transfers may be open at once.
+///
+/// Every entry is a descriptor held by a root daemon. Unbounded, roughly a thousand `OpenTransfer`
+/// calls inside a second exhaust the default `RLIMIT_NOFILE` and take the CONTROL socket down with
+/// them — the queue's own denial of service. Sized against the unit's `LimitNOFILE=`, and small
+/// because a single appliance does not have sixty-four simultaneous uploads.
+pub const MAX_PENDING_TRANSFERS: usize = 64;
+
+/// The file a token names, plus everything the data connection will need to audit itself.
 pub struct PendingTransfer {
     pub file: std::fs::File,
-    /// Kept for the audit line when the data connection arrives, so the two halves of one upload
-    /// can be tied together by something other than timing.
     pub share: String,
     pub staging_name: String,
+    /// Who opened it. The data connection must present the same uid: without this, a token seen in
+    /// a log line or a traced response becomes a transferable bearer write into a tenant's share.
+    pub opened_by: PeerIdentity,
+    /// Carried from the control envelope so the data connection's audit entry can be tied to the
+    /// HTTP request that caused it. Taken from here, NEVER from the data wire — accepting it there
+    /// would let the unprivileged side write its own audit metadata (§16).
+    pub correlation_id: String,
+    pub reason: String,
     pub opened_at: Instant,
+}
+
+/// A transfer whose data connection is live.
+struct InFlight {
+    since: Instant,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -42,11 +85,50 @@ pub enum ClaimError {
     /// say whether a token ever existed, and a token is a secret.
     Unknown,
     Expired,
+    /// The right token, presented by the wrong uid.
+    NotYours,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum InsertError {
+    /// Another transfer already names this file — pending, or currently streaming.
+    Occupied,
+    /// The registry is at `MAX_PENDING_TRANSFERS`.
+    Full,
+}
+
+/// Held for as long as a data connection is streaming.
+///
+/// Its `Drop` clears the in-flight mark, so a thread that panics mid-transfer cannot leave the
+/// staging name permanently unpublishable. An explicit "release" call would be a call somebody can
+/// fail to reach on an error path — which is the same argument that put the directory fsync inside
+/// `SafePath::publish` rather than beside it.
+pub struct InFlightGuard<'a> {
+    registry: &'a std::sync::Mutex<TransferRegistry>,
+    key: (String, String),
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        // Poison is recovered rather than propagated: refusing to clear an in-flight mark because
+        // another thread panicked would make the name unpublishable forever.
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry.in_flight.remove(&self.key);
+    }
 }
 
 #[derive(Default)]
 pub struct TransferRegistry {
+    /// token → the open file it names.
     pending: HashMap<String, PendingTransfer>,
+    /// (share, staging_name) → the token holding it, so a second OpenTransfer on one file is
+    /// refused rather than silently racing.
+    by_name: HashMap<(String, String), String>,
+    /// (share, staging_name) → a live data connection. Publishing is refused while this exists.
+    in_flight: HashMap<(String, String), InFlight>,
 }
 
 impl TransferRegistry {
@@ -54,53 +136,116 @@ impl TransferRegistry {
         Self::default()
     }
 
-    /// Register an opened file and return its token.
+    /// Register an opened file under a token.
     ///
-    /// The token is supplied rather than generated here so the core stays free of a random-number
-    /// dependency and tests can pin one. Callers in production must pass a
-    /// cryptographically-random value; `unix::random_token` is the one that does.
-    pub fn insert(&mut self, token: String, transfer: PendingTransfer) {
+    /// Fallible, and both refusals matter: `Occupied` is the interlock that stops two transfers
+    /// sharing one file, and `Full` is the descriptor budget.
+    pub fn insert(&mut self, token: String, transfer: PendingTransfer) -> Result<(), InsertError> {
         self.expire_old();
+        let key = (transfer.share.clone(), transfer.staging_name.clone());
+        if self.by_name.contains_key(&key) || self.in_flight.contains_key(&key) {
+            return Err(InsertError::Occupied);
+        }
+        if self.pending.len() >= MAX_PENDING_TRANSFERS {
+            return Err(InsertError::Full);
+        }
+        self.by_name.insert(key, token.clone());
         self.pending.insert(token, transfer);
+        Ok(())
     }
 
-    /// Take a transfer, if the token names a live one.
+    /// Take a transfer, if the token names a live one opened by this peer.
     ///
-    /// Removes it: a token is ONE-TIME. Leaving it usable would mean a second data connection
-    /// could append to a file the first one already finished and published, which turns a stale
-    /// retry into corruption of a file the user can already see.
-    pub fn claim(&mut self, token: &str) -> Result<PendingTransfer, ClaimError> {
-        // Remove FIRST, decide second, sweep last. An earlier version swept before looking, which
-        // deleted the very entry the `Expired` branch needed and made every timed-out transfer
-        // report `Unknown` — the branch was unreachable, and an honest slow client would have been
-        // told its token never existed. The test caught it.
+    /// Remove FIRST, decide second, sweep last. An earlier version swept before looking, which
+    /// deleted the very entry the `Expired` branch needed and made every timed-out transfer report
+    /// `Unknown` — the branch was unreachable, and an honest slow client would have been told its
+    /// token never existed.
+    pub fn claim(
+        &mut self,
+        token: &str,
+        peer: PeerIdentity,
+    ) -> Result<(PendingTransfer, (String, String)), ClaimError> {
         let claimed = self.pending.remove(token);
         self.expire_old();
-        match claimed {
-            None => Err(ClaimError::Unknown),
-            Some(t) if t.opened_at.elapsed() > TRANSFER_TTL => Err(ClaimError::Expired),
-            Some(t) => Ok(t),
+
+        let transfer = match claimed {
+            None => return Err(ClaimError::Unknown),
+            Some(t) if t.opened_at.elapsed() > TRANSFER_TTL => {
+                self.by_name
+                    .remove(&(t.share.clone(), t.staging_name.clone()));
+                return Err(ClaimError::Expired);
+            }
+            Some(t) => t,
+        };
+
+        let key = (transfer.share.clone(), transfer.staging_name.clone());
+
+        if transfer.opened_by.uid != peer.uid {
+            // Put it back: a wrong peer must not be able to burn somebody else's live token by
+            // guessing at it. The name stays reserved too.
+            self.pending.insert(token.to_string(), transfer);
+            return Err(ClaimError::NotYours);
         }
+
+        // The name moves from "reserved by a token" to "being written". It is never unreserved in
+        // between, so a PublishTransfer cannot slip through the gap.
+        self.by_name.remove(&key);
+        self.in_flight.insert(
+            key.clone(),
+            InFlight {
+                since: Instant::now(),
+            },
+        );
+        Ok((transfer, key))
     }
 
-    pub fn len(&self) -> usize {
+    /// Is this staging file spoken for — waiting for data, or being written right now?
+    ///
+    /// `PublishTransfer` asks before it renames. Renaming a file that is still being appended to is
+    /// the half-written file in the user's tree that atomic publish exists to prevent.
+    pub fn is_busy(&self, share: &str, staging_name: &str) -> bool {
+        let key = (share.to_string(), staging_name.to_string());
+        self.by_name.contains_key(&key) || self.in_flight.contains_key(&key)
+    }
+
+    pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
     }
 
     /// Drop anything past its lifetime.
     ///
-    /// Called on every insert and claim rather than from a timer: a timer is another thread and
-    /// another failure mode, and the registry only changes size when one of these two runs. An
-    /// abandoned transfer therefore holds its descriptor until the next operation touches the
-    /// registry, which on an idle agent is the correct amount of work — none.
+    /// Two clocks, because the two states mean different things: a transfer waiting for pickup is
+    /// abandoned after `TRANSFER_TTL`, while one that is streaming is bounded by its own connection
+    /// and only reclaimed after `CLAIMED_TTL` as a backstop for a thread that vanished.
     fn expire_old(&mut self) {
-        self.pending
-            .retain(|_, t| t.opened_at.elapsed() <= TRANSFER_TTL);
+        let pending = &mut self.pending;
+        let by_name = &mut self.by_name;
+        pending.retain(|_, t| {
+            let alive = t.opened_at.elapsed() <= TRANSFER_TTL;
+            if !alive {
+                by_name.remove(&(t.share.clone(), t.staging_name.clone()));
+            }
+            alive
+        });
+        self.in_flight
+            .retain(|_, f| f.since.elapsed() <= CLAIMED_TTL);
     }
+}
+
+/// Mark a claimed transfer as streaming until the guard is dropped.
+///
+/// Free function rather than a method because the guard borrows the mutex, not the registry inside
+/// it — the lock must be released while the bytes flow, or one upload would serialise every other
+/// operation in the agent.
+pub fn guard_in_flight<'a>(
+    registry: &'a std::sync::Mutex<TransferRegistry>,
+    key: (String, String),
+) -> InFlightGuard<'a> {
+    InFlightGuard { registry, key }
 }
 
 #[cfg(test)]
@@ -116,74 +261,229 @@ impl TransferRegistry {
 mod tests {
     use super::*;
 
-    fn a_file() -> std::fs::File {
-        tempfile::tempfile().expect("tempfile")
-    }
+    const API: PeerIdentity = PeerIdentity {
+        uid: 999,
+        gid: 999,
+        pid: 1234,
+    };
+    const OTHER: PeerIdentity = PeerIdentity {
+        uid: 1000,
+        gid: 1000,
+        pid: 5678,
+    };
 
-    fn pending(age: Duration) -> PendingTransfer {
+    fn pending_named(share: &str, name: &str, age: Duration) -> PendingTransfer {
         PendingTransfer {
-            file: a_file(),
-            share: "share".into(),
-            staging_name: "x.part".into(),
+            file: tempfile::tempfile().expect("tempfile"),
+            share: share.into(),
+            staging_name: name.into(),
+            opened_by: API,
+            correlation_id: "c-1".into(),
+            reason: "upload".into(),
             opened_at: Instant::now()
                 .checked_sub(age)
                 .expect("Instant far enough from the epoch"),
         }
     }
 
+    fn pending(age: Duration) -> PendingTransfer {
+        pending_named("share", "x.part", age)
+    }
+
     #[test]
     fn a_token_works_once() {
         let mut r = TransferRegistry::new();
-        r.insert("t".into(), pending(Duration::ZERO));
+        r.insert("t".into(), pending(Duration::ZERO))
+            .expect("insert");
 
-        assert!(r.claim("t").is_ok());
-        // The second attempt must fail. A reusable token means a stale retry can append to a file
-        // the first connection already published — corruption of something the user can see.
+        assert!(r.claim("t", API).is_ok());
+        // A reusable token means a stale retry can append to a file the first connection already
+        // published — corruption of something the user can see.
         //
         // `matches!` rather than `assert_eq!`: a PendingTransfer holds an open descriptor and
-        // deriving Debug on it would put a file handle in a panic message. Not comparing it is
-        // the point — the interesting half is the error.
-        assert!(matches!(r.claim("t"), Err(ClaimError::Unknown)));
+        // deriving Debug on it would put a file handle in a panic message.
+        assert!(matches!(r.claim("t", API), Err(ClaimError::Unknown)));
     }
 
     #[test]
     fn an_unknown_token_and_a_used_one_are_the_same_answer() {
         let mut r = TransferRegistry::new();
-        r.insert("used".into(), pending(Duration::ZERO));
-        r.claim("used").expect("first claim");
+        r.insert("used".into(), pending(Duration::ZERO))
+            .expect("insert");
+        r.claim("used", API).expect("first claim");
 
         // Telling them apart would say whether a token ever existed, and a token is a secret.
-        assert!(matches!(r.claim("used"), Err(ClaimError::Unknown)));
-        assert!(matches!(r.claim("never-existed"), Err(ClaimError::Unknown)));
+        assert!(matches!(r.claim("used", API), Err(ClaimError::Unknown)));
+        assert!(matches!(
+            r.claim("never-existed", API),
+            Err(ClaimError::Unknown)
+        ));
     }
 
     #[test]
     fn an_expired_token_is_refused_and_says_so() {
         let mut r = TransferRegistry::new();
-        r.insert("old".into(), pending(TRANSFER_TTL + Duration::from_secs(1)));
+        r.insert("old".into(), pending(TRANSFER_TTL + Duration::from_secs(1)))
+            .expect("insert");
         // Distinct from Unknown on purpose: this one is reachable by an honest slow client, and
         // "your upload window closed" is a different thing to tell them than "no such token".
-        assert!(matches!(r.claim("old"), Err(ClaimError::Expired)));
+        assert!(matches!(r.claim("old", API), Err(ClaimError::Expired)));
+    }
+
+    #[test]
+    fn a_token_belongs_to_the_uid_that_opened_it() {
+        // Without this, a token seen in a log line or a traced response is a bearer write into
+        // somebody else's share — and depsis-worker runs as the same user as the API, so DAC on the
+        // socket does not separate them either.
+        let mut r = TransferRegistry::new();
+        r.insert("mine".into(), pending(Duration::ZERO))
+            .expect("insert");
+
+        assert!(matches!(r.claim("mine", OTHER), Err(ClaimError::NotYours)));
+        // And the refusal must not have burned it: the rightful owner can still redeem it.
+        assert!(r.claim("mine", API).is_ok());
+    }
+
+    #[test]
+    fn two_transfers_cannot_name_one_file() {
+        // The interlock. Both would sit at the same offset and their data connections would
+        // overwrite each other, with no error at any layer.
+        let mut r = TransferRegistry::new();
+        r.insert(
+            "first".into(),
+            pending_named("alice", "u.part", Duration::ZERO),
+        )
+        .expect("first insert");
+
+        assert_eq!(
+            r.insert(
+                "second".into(),
+                pending_named("alice", "u.part", Duration::ZERO)
+            ),
+            Err(InsertError::Occupied)
+        );
+        // A DIFFERENT file in the same share is fine.
+        assert!(r
+            .insert(
+                "third".into(),
+                pending_named("alice", "v.part", Duration::ZERO)
+            )
+            .is_ok());
+        // And the same name in a different share is a different file.
+        assert!(r
+            .insert(
+                "fourth".into(),
+                pending_named("bob", "u.part", Duration::ZERO)
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn a_file_being_written_cannot_be_claimed_again_or_published() {
+        let mutex = std::sync::Mutex::new(TransferRegistry::new());
+        {
+            let mut r = mutex.lock().expect("lock");
+            r.insert("t".into(), pending_named("alice", "u.part", Duration::ZERO))
+                .expect("insert");
+            let (_transfer, key) = r.claim("t", API).expect("claim");
+            assert_eq!(key, ("alice".to_string(), "u.part".to_string()));
+
+            // The name never became free between "reserved" and "streaming".
+            assert!(
+                r.is_busy("alice", "u.part"),
+                "a streaming file must read as busy"
+            );
+            assert_eq!(
+                r.insert(
+                    "again".into(),
+                    pending_named("alice", "u.part", Duration::ZERO)
+                ),
+                Err(InsertError::Occupied)
+            );
+            assert_eq!(r.in_flight_count(), 1);
+        }
+
+        // The guard releases it, so a crashed thread cannot leave the name unpublishable.
+        {
+            let _guard = guard_in_flight(&mutex, ("alice".into(), "u.part".into()));
+        }
+        let r = mutex.lock().expect("lock");
+        assert!(
+            !r.is_busy("alice", "u.part"),
+            "the guard must clear the mark"
+        );
+    }
+
+    #[test]
+    fn the_registry_has_a_ceiling() {
+        // Every entry is a descriptor held by a root daemon. Without a cap, a burst of opens
+        // exhausts RLIMIT_NOFILE and takes the control socket down with it.
+        let mut r = TransferRegistry::new();
+        for i in 0..MAX_PENDING_TRANSFERS {
+            r.insert(
+                format!("t{i}"),
+                pending_named("alice", &format!("{i}.part"), Duration::ZERO),
+            )
+            .expect("insert within the cap");
+        }
+        assert_eq!(
+            r.insert(
+                "one-too-many".into(),
+                pending_named("alice", "extra.part", Duration::ZERO)
+            ),
+            Err(InsertError::Full)
+        );
     }
 
     #[test]
     fn abandoned_transfers_do_not_accumulate() {
-        // The property: five abandoned uploads must not end up holding five descriptors and five
-        // half-written files open forever.
-        //
-        // The mechanism is a sweep on every insert, so they never pile up in the first place —
-        // each insert reaps the ones before it and only the newest survives its own call. An
-        // earlier version of this test asserted len() == 5 after the loop, which was asserting the
-        // absence of the behaviour it was written to check.
+        // Five abandoned uploads must not end up holding five descriptors and five half-written
+        // files open forever. The mechanism is a sweep on every insert, so they never pile up.
         let mut r = TransferRegistry::new();
         for i in 0..5 {
-            r.insert(format!("stale{i}"), pending(TRANSFER_TTL * 2));
+            let _ = r.insert(
+                format!("stale{i}"),
+                pending_named("alice", &format!("{i}.part"), TRANSFER_TTL * 2),
+            );
         }
-        assert_eq!(r.len(), 1, "stale transfers must not accumulate");
+        assert_eq!(r.pending_count(), 1, "stale transfers must not accumulate");
 
-        r.insert("fresh".into(), pending(Duration::ZERO));
-        assert_eq!(r.len(), 1, "and the last stale one goes on the next insert");
-        assert!(r.claim("fresh").is_ok());
-        assert!(r.is_empty());
+        r.insert(
+            "fresh".into(),
+            pending_named("alice", "fresh.part", Duration::ZERO),
+        )
+        .expect("insert");
+        assert_eq!(
+            r.pending_count(),
+            1,
+            "and the last stale one goes on the next insert"
+        );
+        assert!(r.claim("fresh", API).is_ok());
+    }
+
+    #[test]
+    fn expiring_a_transfer_frees_its_file_name() {
+        // Otherwise an abandoned upload makes its own staging name permanently unusable: the token
+        // is gone but the reservation outlives it, and every retry is refused as Occupied.
+        let mut r = TransferRegistry::new();
+        r.insert(
+            "old".into(),
+            pending_named("alice", "u.part", TRANSFER_TTL * 2),
+        )
+        .expect("insert");
+        assert!(r.is_busy("alice", "u.part"));
+
+        // Any operation sweeps.
+        let _ = r.claim("nothing", API);
+        assert!(
+            !r.is_busy("alice", "u.part"),
+            "an expired reservation must release the name"
+        );
+        assert!(r
+            .insert(
+                "retry".into(),
+                pending_named("alice", "u.part", Duration::ZERO)
+            )
+            .is_ok());
     }
 }

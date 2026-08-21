@@ -187,6 +187,12 @@
             "$ref": "#/$defs/SafeComponent"
           }
         },
+        "expected_bytes": {
+          "description": "How many bytes the caller believes are staged.\n\nChecked, not trusted. The agent must not rest on the API's belief that an upload\nfinished (ADR-0006): a client that dies at 90% plus a buggy API would otherwise rename a\nshort file to the user's chosen name, and RENAME_NOREPLACE then makes that name\npermanently unavailable to the good copy.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "op": {
           "type": "string",
           "const": "publish_transfer"
@@ -203,7 +209,8 @@
         "op",
         "share",
         "staging_name",
-        "destination"
+        "destination",
+        "expected_bytes"
       ]
     }
   ],

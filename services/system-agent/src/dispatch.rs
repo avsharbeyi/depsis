@@ -12,7 +12,7 @@ use crate::audit::{self, Outcome, Sink};
 use crate::authz::{Decision, Policy};
 use crate::op::{AclType, Request, Response, SCHEMA_VERSION};
 use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource};
-use crate::transfer::{PendingTransfer, TransferRegistry};
+use crate::transfer::{InsertError, PendingTransfer, TransferRegistry, MAX_PENDING_TRANSFERS};
 use std::io::Seek;
 use std::sync::Mutex;
 
@@ -34,6 +34,10 @@ pub mod bin {
 /// dataset so publishing is an O(1) same-dataset rename rather than a copy — a separate staging
 /// dataset would mean writing every byte twice and doubling the user's quota mid-upload.
 pub const STAGING_DIR: [&str; 2] = [".depsis", "staging"];
+
+fn depsis_agent_max_pending() -> usize {
+    MAX_PENDING_TRANSFERS
+}
 
 pub struct Agent<'a, R: CommandRunner, S: Sink, P: SafePath> {
     pub policy: Policy,
@@ -75,7 +79,14 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// that descriptor; nothing the caller sends on the data socket can change which file it
     /// writes to. That is the property which makes splitting one upload across two connections
     /// safe, and it is why the data socket takes a token rather than repeating the file name.
-    fn open_transfer(&self, share: &str, staging_name: &str) -> Result<Response, SeamError> {
+    fn open_transfer(
+        &self,
+        share: &str,
+        staging_name: &str,
+        peer: PeerIdentity,
+        correlation_id: &str,
+        reason: &str,
+    ) -> Result<Response, SeamError> {
         let Some(paths) = self.paths else {
             return Ok(Response::Refused {
                 reason: "no share root is configured; storage is not set up".to_string(),
@@ -108,18 +119,35 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             .transfers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        registry.insert(
+        let inserted = registry.insert(
             token.clone(),
             PendingTransfer {
                 file,
                 share: share.to_string(),
                 staging_name: staging_name.to_string(),
+                // The peer the CONTROL connection authenticated. The data connection must present
+                // the same uid, or a token that leaked into a log line becomes a bearer write.
+                opened_by: peer,
+                correlation_id: correlation_id.to_string(),
+                reason: reason.to_string(),
                 opened_at: std::time::Instant::now(),
             },
         );
         drop(registry);
 
-        Ok(Response::Transfer { token, offset })
+        match inserted {
+            Ok(()) => Ok(Response::Transfer { token, offset }),
+            // Both refusals are states a caller can legitimately hit, so both say which one it is.
+            Err(InsertError::Occupied) => Ok(Response::Refused {
+                reason: format!("{staging_name} already has a transfer open or streaming"),
+            }),
+            Err(InsertError::Full) => Ok(Response::Refused {
+                reason: format!(
+                    "too many transfers are open (limit {})",
+                    depsis_agent_max_pending()
+                ),
+            }),
+        }
     }
 
     /// Move a finished staging file into place, durably.
@@ -132,6 +160,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         share: &str,
         staging_name: &str,
         destination: &[&str],
+        expected_bytes: u64,
     ) -> Result<Response, SeamError> {
         let Some(paths) = self.paths else {
             return Ok(Response::Refused {
@@ -143,6 +172,22 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 reason: "destination is empty".to_string(),
             });
         };
+
+        // Publishing a file that is still being written renames a half-written object into the
+        // user's tree — the exact outcome atomic publish exists to prevent. The agent holds the
+        // state that answers this; it does not have to trust the API's belief that the upload
+        // finished, which is the one assumption ADR-0006 says it must not make.
+        {
+            let registry = self
+                .transfers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if registry.is_busy(share, staging_name) {
+                return Ok(Response::Refused {
+                    reason: format!("{staging_name} is still open or streaming"),
+                });
+            }
+        }
 
         let staged = [share, STAGING_DIR[0], STAGING_DIR[1], staging_name];
         let file = paths.open(&staged, OpenIntent::Read)?;
@@ -161,6 +206,17 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         // O_RDONLY descriptor is permitted on Linux.
         file.sync_all()
             .map_err(|e| SeamError::Io(format!("fsync staging file before publish: {e}")))?;
+
+        // The API says how many bytes it believes are there; the agent checks. Without this, a
+        // client that died at 90% plus a buggy or compromised API renames a short file to the name
+        // the user chose — and because publish uses RENAME_NOREPLACE, the good copy can then NEVER
+        // be written over it. The rule that publishing never destroys a file the user already has
+        // would have permanently given the name to a corrupt one.
+        if size != expected_bytes {
+            return Ok(Response::Refused {
+                reason: format!("staged file is {size} bytes, caller expected {expected_bytes}"),
+            });
+        }
 
         let mut dest_dir: Vec<&str> = vec![share];
         dest_dir.extend_from_slice(dirs);
@@ -218,7 +274,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             Outcome::Allowed,
         ));
 
-        match self.execute(&request) {
+        match self.execute(&request, peer, correlation_id, reason) {
             Ok(response) => response,
             Err(e) => {
                 let msg = e.to_string();
@@ -234,7 +290,19 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
-    fn execute(&self, request: &Request) -> Result<Response, SeamError> {
+    /// Run one already-parsed, already-authorized request.
+    ///
+    /// Takes the peer and the envelope's audit fields because the transfer operations must RECORD
+    /// them: a token has an owner (only that uid may redeem it on the data socket) and a data
+    /// connection has to be traceable back to the HTTP request that caused it. Threading them here
+    /// rather than looking them up later is what makes both properties impossible to forget.
+    fn execute(
+        &self,
+        request: &Request,
+        peer: PeerIdentity,
+        correlation_id: &str,
+        reason: &str,
+    ) -> Result<Response, SeamError> {
         match request {
             Request::Ping {} => Ok(Response::Ok {
                 schema_version: SCHEMA_VERSION,
@@ -350,15 +418,27 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             Request::OpenTransfer {
                 share,
                 staging_name,
-            } => self.open_transfer(share.as_str(), staging_name.as_str()),
+            } => self.open_transfer(
+                share.as_str(),
+                staging_name.as_str(),
+                peer,
+                correlation_id,
+                reason,
+            ),
 
             Request::PublishTransfer {
                 share,
                 staging_name,
                 destination,
+                expected_bytes,
             } => {
                 let dest: Vec<&str> = destination.iter().map(|c| c.as_str()).collect();
-                self.publish_transfer(share.as_str(), staging_name.as_str(), &dest)
+                self.publish_transfer(
+                    share.as_str(),
+                    staging_name.as_str(),
+                    &dest,
+                    *expected_bytes,
+                )
             }
 
             Request::PublishSambaConfig { shares } => {
@@ -740,7 +820,7 @@ mod tests {
         )
         .expect("stage");
 
-        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"done.part","destination":["report.txt"]}"#;
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"done.part","destination":["report.txt"],"expected_bytes":14}"#;
         match h
             .agent(&r, &s)
             .handle(raw, peer(API_UID), "c-pub", "publish")
@@ -766,7 +846,7 @@ mod tests {
             b"different",
         )
         .expect("stage again");
-        let raw2 = r#"{"op":"publish_transfer","share":"alice","staging_name":"again.part","destination":["report.txt"]}"#;
+        let raw2 = r#"{"op":"publish_transfer","share":"alice","staging_name":"again.part","destination":["report.txt"],"expected_bytes":9}"#;
         match h
             .agent(&r, &s)
             .handle(raw2, peer(API_UID), "c-pub2", "publish")
@@ -778,6 +858,118 @@ mod tests {
             std::fs::read(h.share_path(&["alice", "report.txt"])).expect("read"),
             b"final contents",
             "the original must be untouched"
+        );
+    }
+
+    #[test]
+    fn a_second_transfer_on_one_staging_file_is_refused() {
+        // The interlock, through the dispatcher. Both would sit at the same offset and their data
+        // connections would overwrite each other with no error at any layer.
+        let h = Harness::with_share("alice");
+        assert!(matches!(
+            open_transfer(&h, "alice", "u.part"),
+            Response::Transfer { .. }
+        ));
+        match open_transfer(&h, "alice", "u.part") {
+            Response::Refused { reason } => assert!(reason.contains("already has a transfer")),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publishing_is_refused_while_the_file_is_still_open() {
+        // A PublishTransfer arriving mid-upload would renameat2 a half-written file into the user's
+        // tree — exactly what atomic publish exists to prevent. The agent answers from state it
+        // holds itself rather than trusting the API's belief that the upload finished.
+        let h = Harness::with_share("alice");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        std::fs::write(
+            h.share_path(&["alice", ".depsis", "staging", "live.part"]),
+            b"partial",
+        )
+        .expect("stage");
+        assert!(matches!(
+            open_transfer(&h, "alice", "live.part"),
+            Response::Transfer { .. }
+        ));
+
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"live.part","destination":["out.txt"],"expected_bytes":7}"#;
+        match h
+            .agent(&r, &s)
+            .handle(raw, peer(API_UID), "c-busy", "publish")
+        {
+            Response::Refused { reason } => assert!(reason.contains("still open")),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(
+            !h.share_path(&["alice", "out.txt"]).exists(),
+            "nothing may have been moved"
+        );
+    }
+
+    #[test]
+    fn publishing_refuses_a_size_the_caller_did_not_expect() {
+        // A client that died at 90%, plus an API that believes it finished. Without this the short
+        // file takes the user's chosen name — and RENAME_NOREPLACE then makes that name permanently
+        // unavailable to the good copy.
+        let h = Harness::with_share("alice");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        std::fs::write(
+            h.share_path(&["alice", ".depsis", "staging", "short.part"]),
+            b"only nine",
+        )
+        .expect("stage");
+
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"short.part","destination":["full.txt"],"expected_bytes":9999}"#;
+        match h
+            .agent(&r, &s)
+            .handle(raw, peer(API_UID), "c-short", "publish")
+        {
+            Response::Refused { reason } => assert!(reason.contains("expected 9999")),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(!h.share_path(&["alice", "full.txt"]).exists());
+    }
+
+    #[test]
+    fn the_number_of_open_transfers_has_a_ceiling() {
+        // Every open transfer is a descriptor held by a root daemon. Without a cap a burst of opens
+        // exhausts RLIMIT_NOFILE and takes the control socket down with it.
+        let h = Harness::with_share("alice");
+        for i in 0..MAX_PENDING_TRANSFERS {
+            assert!(
+                matches!(
+                    open_transfer(&h, "alice", &format!("f{i}.part")),
+                    Response::Transfer { .. }
+                ),
+                "open {i} should be within the cap"
+            );
+        }
+        match open_transfer(&h, "alice", "one-too-many.part") {
+            Response::Refused { reason } => assert!(reason.contains("too many transfers")),
+            other => panic!("expected a refusal at the cap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_transfer_records_who_opened_it_and_why() {
+        // The data connection needs both: the uid to check that the redeemer is the opener, and the
+        // correlation id so its audit entry ties back to the HTTP request. Taken from the control
+        // envelope, never from the data wire.
+        let h = Harness::with_share("alice");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let raw = r#"{"op":"open_transfer","share":"alice","staging_name":"traced.part"}"#;
+        h.agent(&r, &s)
+            .handle(raw, peer(API_UID), "corr-77", "upload for job 9");
+
+        let registry = h.transfers.lock().expect("lock");
+        assert_eq!(registry.pending_count(), 1);
+        assert!(
+            registry.is_busy("alice", "traced.part"),
+            "the name must be reserved from the moment it is opened"
         );
     }
 

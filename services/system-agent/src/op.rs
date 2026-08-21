@@ -266,6 +266,13 @@ pub enum Request {
         staging_name: SafeComponent,
         /// Where it lands, relative to the share root. Components are validated individually.
         destination: Vec<SafeComponent>,
+        /// How many bytes the caller believes are staged.
+        ///
+        /// Checked, not trusted. The agent must not rest on the API's belief that an upload
+        /// finished (ADR-0006): a client that dies at 90% plus a buggy API would otherwise rename a
+        /// short file to the user's chosen name, and RENAME_NOREPLACE then makes that name
+        /// permanently unavailable to the good copy.
+        expected_bytes: u64,
     },
 }
 
