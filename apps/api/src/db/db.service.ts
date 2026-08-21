@@ -48,7 +48,13 @@ export type UntenantedJustification =
   // question is about the WHOLE estate — "is any secret still stored in the clear" — and asking it
   // per tenant would answer a different, less useful question at startup, before any tenant is
   // known.
-  | 'mfa-key-inventory';
+  | 'mfa-key-inventory'
+  // The worker's side of the queue: claim, heartbeat, finish, and the advisory locks that guard
+  // destructive administrative work. A worker is NOT a tenant — it runs on behalf of the system and
+  // must be able to take a job from any organization, including the system jobs that belong to
+  // none (ADR-0003). The widening lives in named SECURITY DEFINER functions with fixed shapes
+  // rather than in a role that could be pointed at anything.
+  | 'job-queue-worker';
 
 const SET_TENANT_SQL = `SELECT set_config('depsis.organization_id', $1, true) AS applied,
                                public.current_organization_id()::text  AS observed`;
