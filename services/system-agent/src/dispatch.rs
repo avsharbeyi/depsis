@@ -94,24 +94,30 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             .map_err(|e| SeamError::Io(format!("seek staging file: {e}")))?;
 
         let token = self.tokens.token();
-        match self.transfers.lock() {
-            Ok(mut registry) => registry.insert(
-                token.clone(),
-                PendingTransfer {
-                    file,
-                    share: share.to_string(),
-                    staging_name: staging_name.to_string(),
-                    opened_at: std::time::Instant::now(),
-                },
-            ),
-            Err(_) => {
-                // A poisoned mutex means another thread panicked while holding it. Refusing is
-                // the honest answer: the registry's contents can no longer be reasoned about.
-                return Ok(Response::Failed {
-                    reason: "the transfer registry is unavailable".to_string(),
-                });
-            }
-        }
+
+        // Poison is RECOVERED, not treated as fatal. Refusing on a poisoned mutex means refusing
+        // forever, for every tenant, while the process stays alive — so `Restart=on-failure` never
+        // fires, `ping` still answers and telemetry stays green. That is neither recovering nor
+        // dying, which is the worst of the three.
+        //
+        // It is safe here because of what the registry is: a HashMap with no invariant spanning
+        // entries, in a crate that carries `forbid(unsafe_code)`. A panic cannot leave it torn —
+        // it can only leave it missing an insert, which is indistinguishable from the insert not
+        // having happened yet.
+        let mut registry = self
+            .transfers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry.insert(
+            token.clone(),
+            PendingTransfer {
+                file,
+                share: share.to_string(),
+                staging_name: staging_name.to_string(),
+                opened_at: std::time::Instant::now(),
+            },
+        );
+        drop(registry);
 
         Ok(Response::Transfer { token, offset })
     }
@@ -139,11 +145,22 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         };
 
         let staged = [share, STAGING_DIR[0], STAGING_DIR[1], staging_name];
-        let size = paths
-            .open(&staged, OpenIntent::Read)?
+        let file = paths.open(&staged, OpenIntent::Read)?;
+        let size = file
             .metadata()
             .map_err(|e| SeamError::Io(format!("stat staging file: {e}")))?
             .len();
+
+        // ADR-0008 step 2, done HERE rather than assumed.
+        //
+        // `SafePath::publish` bundles step 5 (the destination-directory fsync) so a call site
+        // cannot skip it. Step 2 — the file's own data — had no such home: it was left to whoever
+        // wrote the bytes, on the far side of a process boundary and a possible agent restart, with
+        // nothing recording that it ever ran. Doing it again on the descriptor being published
+        // costs one syscall on already-clean pages and removes the assumption. fsync on an
+        // O_RDONLY descriptor is permitted on Linux.
+        file.sync_all()
+            .map_err(|e| SeamError::Io(format!("fsync staging file before publish: {e}")))?;
 
         let mut dest_dir: Vec<&str> = vec![share];
         dest_dir.extend_from_slice(dirs);

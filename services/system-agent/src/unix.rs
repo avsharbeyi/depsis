@@ -109,13 +109,34 @@ impl SafePath for Openat2SafePath {
             // both win, and the loser finds out rather than silently sharing a file.
             OpenIntent::CreateNew => (
                 rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL,
-                // 0600 while it is being written. The agent runs as root and the data belongs to a
-                // user, so ownership is fixed up at publish; what must never happen is a staging
-                // file readable by everyone on the box in the meantime.
+                // 0600 while it is being written: a staging file readable by everyone on the box
+                // is a cross-tenant read of data that has not even landed yet.
+                //
+                // KNOWN GAP, stated here because an earlier version of this comment claimed the
+                // opposite. It said ownership "is fixed up at publish" — nothing does that. There
+                // is no chown or fchown anywhere in this crate, so a published file stays root:root
+                // 0600 and its owner cannot read it over SMB or through the API. That presents as
+                // "uploads are broken", and the fastest-looking repair is to widen the mode, which
+                // is precisely the cross-tenant read the threat model exists to prevent. The fix is
+                // ownership operands on OpenTransfer and an fchown of the held descriptor before
+                // publish — on the fd, not a path, so it stays the object openat2 confined. Until
+                // that lands, publishing is incomplete and this comment says so rather than
+                // asserting a step that is missing.
                 rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
             ),
+            // APPEND, and the flag is load-bearing. Without it the write position comes only from
+            // the one `seek(End(0))` the caller does at open time — a number captured then and
+            // trusted up to TRANSFER_TTL later, which is exactly the "a number kept beside the data
+            // can disagree with it" failure the caller's own comment claims to avoid. With O_APPEND
+            // the kernel resolves the position at every write, so a writer that slips past the
+            // registry's interlock degrades to interleaving rather than to silent mutual overwrite.
+            //
+            // The variant was named `Append` and did not append. A name that promises semantics the
+            // implementation does not have is worse than a wrong name.
             OpenIntent::Append => (
-                rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE,
+                rustix::fs::OFlags::WRONLY
+                    | rustix::fs::OFlags::CREATE
+                    | rustix::fs::OFlags::APPEND,
                 rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
             ),
         };
@@ -192,6 +213,19 @@ impl TokenSource for KernelTokens {
         }
         out
     }
+}
+
+/// Is this an "out of file descriptors" error rather than a real fault?
+///
+/// EMFILE (this process's limit) and ENFILE (the system's). Neither has a `std::io::ErrorKind`, so
+/// they can only be told apart by errno — and without telling them apart an accept loop treats a
+/// momentary shortage the same as a broken socket and exits.
+fn is_descriptor_shortage(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(n) if n == rustix::io::Errno::MFILE.raw_os_error()
+                || n == rustix::io::Errno::NFILE.raw_os_error()
+    )
 }
 
 /// Peer credentials straight from the kernel.
@@ -349,6 +383,17 @@ pub fn serve_loop<R: CommandRunner, S: Sink, P: SafePath>(
                 ) =>
             {
                 continue
+            }
+            // EMFILE/ENFILE is a TRANSIENT shortage, not a reason to exit. There is no
+            // `std::io::ErrorKind` for either, so without this arm they fall through to the fatal
+            // one and the process dies — and StartLimitBurst=5/StartLimitIntervalSec=60, which
+            // P1-D moved into [Unit] and therefore actually put in effect, turns five of those into
+            // a permanently failed unit needing `systemctl reset-failed` at the console. An accept
+            // loop that exits on a transient errno is a crash primitive, not a safety measure.
+            Err(e) if is_descriptor_shortage(&e) => {
+                eprintln!("depsis-agent: out of descriptors on accept ({e}); retrying");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
             }
             Err(e) => return Err(SeamError::Io(format!("accept: {e}"))),
         };
@@ -856,6 +901,46 @@ mod tests {
             sp.open(&["upload.part"], OpenIntent::Read).is_err(),
             "the swapped-in symlink must be refused on the next open"
         );
+    }
+
+    #[test]
+    fn two_appenders_do_not_overwrite_each_other() {
+        // What O_APPEND buys, made observable. Without it each descriptor writes at its OWN cached
+        // position, so the second writer lands on top of the first and the file ends up the length
+        // of one write instead of two — silently, with no error at any layer. With it the kernel
+        // resolves the position at every write and the worst case degrades to interleaving.
+        //
+        // A flag nothing tests is a flag that gets removed in a cleanup.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+
+        let mut first = sp
+            .open(&["shared.part"], OpenIntent::Append)
+            .expect("open a");
+        let mut second = sp
+            .open(&["shared.part"], OpenIntent::Append)
+            .expect("open b");
+
+        use std::io::Write as _;
+        first.write_all(b"AAAA").expect("write a");
+        second.write_all(b"BBBB").expect("write b");
+        first.write_all(b"CCCC").expect("write a again");
+
+        let got = std::fs::read(tmp.path().join("shared.part")).expect("read");
+        assert_eq!(
+            got.len(),
+            12,
+            "every write must land at the end; got {:?}",
+            String::from_utf8_lossy(&got)
+        );
+        // Order between the two writers is not guaranteed, but no byte may be lost.
+        for needle in [&b"AAAA"[..], &b"BBBB"[..], &b"CCCC"[..]] {
+            assert!(
+                got.windows(4).any(|w| w == needle),
+                "{:?} was overwritten",
+                String::from_utf8_lossy(needle)
+            );
+        }
     }
 
     #[test]
