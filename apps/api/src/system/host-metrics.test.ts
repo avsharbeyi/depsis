@@ -64,8 +64,20 @@ describe('readMemory', () => {
   });
 
   it('falls back when there is no /proc/meminfo to read', () => {
-    const memory = readMemory(() => null);
-    expect(memory.usedBytes).toBe(totalmem() - freemem());
+    // Asserted as a RELATIONSHIP between the two branches, not against a second live reading of
+    // freemem(). Comparing to `totalmem() - freemem()` computed in the test failed by 80 kB, because
+    // free memory moves between the two calls — the same mistake, made twice in one afternoon, and
+    // caught both times only by running it.
+    const fallback = readMemory(() => null);
+    const fromMeminfo = readMemory(() => `MemAvailable: ${Math.floor(totalmem() / 4 / 1024)} kB\n`);
+
+    expect(fallback.usedBytes).toBeGreaterThan(0);
+    expect(fallback.usedBytes).toBeLessThanOrEqual(fallback.totalBytes);
+    // The fixture says three quarters are in use; a fallback that happened to agree to the byte
+    // would mean the branch was not taken at all.
+    expect(fallback.usedBytes).not.toBe(fromMeminfo.usedBytes);
+    // And it is genuinely the freemem() figure, to within the drift of one process's allocations.
+    expect(Math.abs(fallback.usedBytes - (totalmem() - freemem()))).toBeLessThan(64 * 1024 * 1024);
   });
 
   it('never reports more used than exists, even if MemAvailable exceeds the total', () => {

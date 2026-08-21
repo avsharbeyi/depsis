@@ -158,6 +158,29 @@ Kritik ayrıntılar:
 | Audit satırı enjekte edilemiyor (`reason`'da kontrol karakteri reddi) | ✅ ölçüldü                                     |
 | Bilinmeyen alan **sessizce yutulmuyor** (`deny_unknown_fields`)       | ✅ ölçüldü — bu ADR'nin öngörmediği bir açıktı |
 
+### P1-C'nin ölçtükleri — iki yarım, ilk kez birlikte (2026-08-21, Debian 13 / WSL2)
+
+P0-E ajanın tarafını ölçtü; `apps/api`'nin birim testleri istemcinin tarafını yerel bir akış
+soketine karşı ölçtü. İkisi de bu ADR'nin asıl iddiasını sınamıyordu: **iki yarının birbirini
+anlayıp anlamadığını.** `tools/poc/p1-c-api-agent.sh` onu koşuyor — ajan `systemd-socket-activate`
+ile root olarak, API ayrı ve yetkisiz bir uid'de, zincir HTTP'den ayrıcalıklı çağrıya kadar.
+
+| İddia                                                                                | Sonuç                                                  |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------ |
+| TypeScript istemcinin yazdığı zarfı Rust ikilisi ayrıştırıyor ve tersi               | ✅ ölçüldü — `{"status":"ok","schema_version":1}`      |
+| Sürüm el sıkışması açılışta tamamlanıyor (`agent reachable … schema v1`)             | ✅ ölçüldü, gerçek soket üzerinden                     |
+| İstemcinin sıralaması gerçek ajana karşı da tutuyor (5 eşzamanlı çağrı)              | ✅ ölçüldü                                             |
+| `refused`/`failed` istemciye eksik alan değil, ret olarak ulaşıyor                   | ✅ ölçüldü (`expectStatus` → `AgentRefusedError`)      |
+| HTTP → oturum koruması → PostgreSQL → soket → root ajan zinciri uçtan uca            | ✅ ölçüldü (kurulum → giriş → `/system/telemetry` 200) |
+| Yönetici olmayan 403, oturumsuz 401                                                  | ✅ ölçüldü                                             |
+| Havuz okunamayınca 503 — boş `pools` DEĞİL                                           | ✅ ölçüldü                                             |
+| Ayrıcalıklı çağrı, onu doğuran HTTP isteğinin `correlation_id`'siyle audit'e düşüyor | ✅ ölçüldü (§16)                                       |
+| Audit izinde parola veya kurulum belirteci **yok**                                   | ✅ ölçüldü (§16)                                       |
+
+**Ölçmediği:** burada ZFS yok, `pool_status` `spawn` aşamasında düşüyor. Bu kasıtlı ve yararlı —
+başarısızlık yolunu uçtan uca sınıyor — ama yeşil bir koşu ZFS davranışı hakkında hiçbir şey
+söylemez; o P0-A/P0-G'de, Debian VM'de kalıyor.
+
 **Sonradan bulunan dördüncü şey — bağlantı başına son tarih.**
 
 Faz 1'in temel gözden geçirmesi, `set_read_timeout`'un `SO_RCVTIMEO`'yu kurduğunu ve onun **tek bir

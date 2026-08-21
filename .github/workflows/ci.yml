@@ -242,7 +242,13 @@ jobs:
           # but it broke a local full-pipeline run and would break any step added after this one.
           report="${RUNNER_TEMP:-/tmp}/vitest-report.json"
           rm -f "$report"
+          # agent.integration.test.ts is excluded, not tolerated. It needs a running privileged
+          # agent on a Unix socket, which this job has no way to provide, so it would skip here for
+          # a legitimate reason — and "zero skipped" has to stay an absolute rule to be worth
+          # anything. Excluding it keeps the rule absolute and keeps the omission visible in the
+          # command rather than hidden in a tolerance. That pair is covered by P1-C on the VM.
           pnpm --filter @depsis/api exec vitest run \
+            --exclude '**/agent.integration.test.ts' \
             --reporter=json --outputFile="$report" > /dev/null 2>&1 || true
 
           # Every way of failing to measure is now an error, not a zero.
@@ -282,6 +288,9 @@ jobs:
           echo "in the 'migrations' job above (P1-A's schema assertions, ADR-0013/0014)."
           echo "What still needs the Hyper-V/Debian target: ZFS (P0-A/G), Samba ACLs (P0-B),"
           echo "filesystem events (P0-D) and the privileged agent (P0-E)."
+          echo "Also P1-C (tools/poc/p1-c-api-agent.sh): the API and the agent talking over a real"
+          echo "Unix socket, which needs root and socket activation. apps/api's"
+          echo "agent.integration.test.ts is excluded from the migrations job for that reason."
 
   e2e:
     name: e2e (Playwright — desktop + mobile-360)
