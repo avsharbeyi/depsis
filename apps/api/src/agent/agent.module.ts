@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 
-import { loadConfig } from '../config.js';
+import { APP_CONFIG } from '../config.module.js';
+import type { AppConfig } from '../config.js';
 import { AgentService } from './agent.service.js';
 
 /**
@@ -15,7 +16,8 @@ import { AgentService } from './agent.service.js';
   providers: [
     {
       provide: AgentService,
-      useFactory: () => new AgentService(loadConfig().agentSocket),
+      inject: [APP_CONFIG],
+      useFactory: (config: AppConfig) => new AgentService(config.agentSocket),
     },
   ],
   exports: [AgentService],

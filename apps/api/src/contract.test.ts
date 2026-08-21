@@ -8,7 +8,8 @@ import { parse } from 'yaml';
 import { AppModule } from './app.module.js';
 import { AgentService } from './agent/agent.service.js';
 import { DbService } from './db/db.service.js';
-import { API_PREFIX } from './config.js';
+import { API_PREFIX, type AppConfig } from './config.js';
+import { APP_CONFIG } from './config.module.js';
 
 /**
  * Does the API actually serve what the contract describes?
@@ -90,15 +91,27 @@ describe('the API and its contract describe the same system', () => {
       withoutTenant: () => Promise.resolve([{ done: true }]),
     };
 
-    // Likewise the agent. Overriding it replaces the factory, which would otherwise call
-    // loadConfig() and demand a database URL this test has no use for — and, on a machine that has
-    // one exported, would try to open a Unix socket while comparing route tables.
+    // Likewise the agent: left as itself it would try to open a Unix socket while this test
+    // compares route tables.
     const stubAgent = {
       onModuleInit: () => Promise.resolve(),
       isAvailable: () => false,
     };
 
+    // One override for the whole environment. Every module's factory injects APP_CONFIG rather
+    // than reading process.env itself, so this test does not have to stub a service it has no
+    // interest in merely to stop a factory demanding a database URL it never uses.
+    const stubConfig: AppConfig = {
+      databaseUrl: 'postgresql://unused@127.0.0.1:5432/unused',
+      port: 3000,
+      nodeEnv: 'test',
+      agentSocket: null,
+      zfsPools: [],
+    };
+
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(APP_CONFIG)
+      .useValue(stubConfig)
       .overrideProvider(DbService)
       .useValue(stubDb)
       .overrideProvider(AgentService)
@@ -156,5 +169,8 @@ describe('the API and its contract describe the same system', () => {
     } finally {
       await app.close();
     }
-  });
+    // An explicit timeout, because this test boots the whole application. Measured on a cold module
+    // cache it spent 18s in imports alone and blew the 5s default; the next run took 317ms. A drift
+    // check that fails on a slow runner teaches people to ignore it.
+  }, 30_000);
 });

@@ -543,6 +543,11 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Telemetry' }
         '403': { $ref: '#/components/responses/Problem' }
+        '503':
+          # Havuz verisi yalnızca ayrıcalıklı ajandan gelebilir. Ajan yoksa doğru cevap boş bir
+          # `pools` dizisi DEĞİL: o, "havuz yok" ile "bilmiyoruz"u aynı şeye çevirir ve bir
+          # operatörün görmesi gereken en önemli farkı siler.
+          $ref: '#/components/responses/Problem'
 
   /jobs/{jobId}:
     parameters:
@@ -932,7 +937,18 @@ components:
         name: { type: string }
         health:
           type: string
-          enum: [ONLINE, DEGRADED, FAULTED, OFFLINE, UNAVAIL]
+          # İlk altısı zpoolprops(7)'nin `health` özelliği için saydığı değerler. Enum bunlardan
+          # ikisini (REMOVED, OFFLINE) kaçırıyordu: ajan `zpool list -H -o health` çıktısını ham
+          # geçiriyor, yani diski çekilmiş bir havuz enum dışında bir değer yayar ve üretilmiş her
+          # istemcinin doğrulaması kırılırdı.
+          #
+          # SUSPENDED özellik belgesinde geçmiyor ama pratikte bildiriliyor (bağlantısı kopmuş bir
+          # havuz G/Ç'yi donduğunda). Dışarıda bırakmak, gerçekten ciddi bir durumu UNKNOWN olarak
+          # göstermek olurdu.
+          #
+          # UNKNOWN, API'nin tanımadığı bir değeri ASLA uydurmaması içindir. Bilinmeyen bir
+          # dizgiyi ONLINE'a çevirmek, operatöre yanlış yeşil göstermenin en kısa yolu.
+          enum: [ONLINE, DEGRADED, FAULTED, OFFLINE, REMOVED, UNAVAIL, SUSPENDED, UNKNOWN]
         used: { type: integer, format: int64 }
         available: { type: integer, format: int64 }
         usedBySnapshots: { type: integer, format: int64 }

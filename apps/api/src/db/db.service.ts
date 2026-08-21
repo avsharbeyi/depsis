@@ -37,7 +37,13 @@ export type UntenantedJustification =
   | 'resolve-pending-login'
   // Setup precedes every tenant by definition: the question is whether ANY tenant exists, and the
   // claim that answers it is what creates the first one. ADR-0015 §5d.
-  | 'setup-status';
+  | 'setup-status'
+  // `system_setup` holds the one administrator this box was set up by, and it carries no
+  // organization_id BY CONSTRUCTION — it is the record of the first tenant, so it predates tenancy
+  // and cannot be scoped to it (ADR-0015 §5d, and the table's own COMMENT). Reading it under a
+  // tenant context would return nothing, which would silently deny the administrator rather than
+  // fail. The query is a count against a supplied user id and reads no tenant-scoped table.
+  | 'system-admin-check';
 
 const SET_TENANT_SQL = `SELECT set_config('depsis.organization_id', $1, true) AS applied,
                                public.current_organization_id()::text  AS observed`;

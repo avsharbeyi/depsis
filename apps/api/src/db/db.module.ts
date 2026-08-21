@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 
-import { loadConfig } from '../config.js';
+import { APP_CONFIG } from '../config.module.js';
+import type { AppConfig } from '../config.js';
 import { DbService } from './db.service.js';
 
 /**
@@ -14,7 +15,8 @@ import { DbService } from './db.service.js';
   providers: [
     {
       provide: DbService,
-      useFactory: () => new DbService(loadConfig().databaseUrl),
+      inject: [APP_CONFIG],
+      useFactory: (config: AppConfig) => new DbService(config.databaseUrl),
     },
   ],
   exports: [DbService],

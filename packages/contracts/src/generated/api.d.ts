@@ -1032,6 +1032,7 @@ export interface paths {
                     };
                 };
                 403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
             };
         };
         put?: never;
@@ -1308,7 +1309,7 @@ export interface components {
         PoolStatus: {
             name: string;
             /** @enum {string} */
-            health: "ONLINE" | "DEGRADED" | "FAULTED" | "OFFLINE" | "UNAVAIL";
+            health: "ONLINE" | "DEGRADED" | "FAULTED" | "OFFLINE" | "REMOVED" | "UNAVAIL" | "SUSPENDED" | "UNKNOWN";
             /** Format: int64 */
             used: number;
             /** Format: int64 */

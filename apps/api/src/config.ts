@@ -34,6 +34,23 @@ const schema = z.object({
     .trim()
     .optional()
     .transform((value) => (value === undefined || value === '' ? null : value)),
+
+  // Which ZFS pools /system/telemetry reports on, comma-separated.
+  //
+  // Configuration rather than discovery: the agent's operation set is closed and has no "list
+  // pools", and adding one is a change to the Rust-side contract (ADR-0006) rather than something
+  // the API decides. Empty means the endpoint reports no pools, which is correct on a machine that
+  // has none — a wrong NAME is the visible failure, because the agent refuses and the refusal is
+  // reported rather than swallowed.
+  DEPSIS_ZFS_POOLS: z
+    .string()
+    .optional()
+    .transform((value) =>
+      (value ?? '')
+        .split(',')
+        .map((name) => name.trim())
+        .filter((name) => name !== ''),
+    ),
 });
 
 export interface AppConfig {
@@ -41,6 +58,7 @@ export interface AppConfig {
   port: number;
   nodeEnv: 'development' | 'test' | 'production';
   agentSocket: string | null;
+  zfsPools: readonly string[];
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -54,5 +72,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     port: parsed.data.DEPSIS_API_PORT,
     nodeEnv: parsed.data.NODE_ENV,
     agentSocket: parsed.data.DEPSIS_AGENT_SOCKET,
+    zfsPools: parsed.data.DEPSIS_ZFS_POOLS,
   };
 }
