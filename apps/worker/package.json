@@ -1,14 +1,8 @@
 {
-  "name": "@depsis/api",
+  "name": "@depsis/worker",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": {
-    "./worker-surface": {
-      "types": "./dist/worker-surface.d.ts",
-      "default": "./dist/worker-surface.js"
-    }
-  },
   "scripts": {
     "build": "tsc -b tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
@@ -18,23 +12,15 @@
   },
   "dependencies": {
     "@depsis/agent-protocol": "workspace:*",
-    "@depsis/contracts": "workspace:*",
+    "@depsis/api": "workspace:*",
     "@nestjs/common": "11.2.1",
     "@nestjs/core": "11.2.1",
-    "@nestjs/platform-express": "11.2.1",
-    "@node-rs/argon2": "2.1.0",
-    "pg": "8.23.0",
     "reflect-metadata": "0.2.2",
-    "rxjs": "7.8.2",
-    "zod": "4.4.3"
+    "rxjs": "7.8.2"
   },
   "devDependencies": {
-    "@nestjs/testing": "11.2.1",
-    "@types/express": "5.0.6",
     "@types/node": "26.2.0",
-    "@types/pg": "8.23.1",
     "typescript": "6.0.3",
-    "vitest": "4.1.10",
-    "yaml": "2.9.0"
+    "vitest": "4.1.10"
   }
 }

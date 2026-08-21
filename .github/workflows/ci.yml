@@ -241,13 +241,18 @@ jobs:
           # `pnpm format:check` then reports as unformatted — harmless across CI's separate jobs,
           # but it broke a local full-pipeline run and would break any step added after this one.
           report="${RUNNER_TEMP:-/tmp}/vitest-report.json"
-          rm -f "$report"
           # agent.integration.test.ts is excluded, not tolerated. It needs a running privileged
           # agent on a Unix socket, which this job has no way to provide, so it would skip here for
           # a legitimate reason — and "zero skipped" has to stay an absolute rule to be worth
           # anything. Excluding it keeps the rule absolute and keeps the omission visible in the
           # command rather than hidden in a tolerance. That pair is covered by P1-C on the VM.
-          pnpm --filter @depsis/api exec vitest run \
+          # Both packages. The worker's suite is gated on the same variables and lives elsewhere,
+          # so checking only @depsis/api meant nine tests that exercise the queue under concurrency
+          # were never looked at here — a guard with a blind spot the size of a whole package.
+          for package in @depsis/api @depsis/worker; do
+          echo "── $package"
+          rm -f "$report"
+          pnpm --filter "$package" exec vitest run \
             --exclude '**/agent.integration.test.ts' \
             --reporter=json --outputFile="$report" > /dev/null 2>&1 || true
 
@@ -274,6 +279,7 @@ jobs:
               process.exit(1);
             }
           ' "$report"
+          done
 
   # ── Declared but not yet implemented ────────────────────────────────────────
   # These exist so their absence is visible in every CI run. Each is enabled by the

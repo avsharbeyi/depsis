@@ -1,0 +1,88 @@
+# The DEPSIS worker.
+#
+# Consumes the job queue (ADR-0003). Separate from the API on purpose: a background loop inside the
+# HTTP process competes for the same event loop and the same connection pool, and a job that pins
+# the CPU becomes request latency with no obvious cause. Separating them also means this unit can be
+# restarted, scaled and hardened on its own — and it is hardened further than the API's, because it
+# listens on nothing at all.
+
+[Unit]
+Description=DEPSIS job worker
+Documentation=file:///usr/share/doc/depsis/adr/0003-job-queue.md
+
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+After=network-online.target postgresql.service depsis-agent.socket
+Wants=network-online.target depsis-agent.socket
+
+[Service]
+Type=exec
+User=depsis-api
+Group=depsis-api
+WorkingDirectory=/usr/local/lib/depsis/worker
+ExecStart=/usr/bin/node /usr/local/lib/depsis/worker/dist/main.js
+
+# SIGTERM, and systemd waits. The worker finishes the job in hand rather than abandoning it to its
+# lease: abandoning works — the lease expires and another worker picks it up — but it throws away
+# whatever was already done and delays the result by a full lease. The timeout is generous enough
+# for a real job and finite, so a wedged handler cannot block a shutdown forever.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+Restart=always
+RestartSec=5s
+
+# ─── secrets, as credentials ──────────────────────────────────────────────────
+#
+# The same two the API gets, for the same reason (ADR-0016), and no others. The worker needs the
+# database; it does not need the TOTP key, and does not get it.
+LoadCredential=db-url:/etc/depsis/db-url
+Environment=DEPSIS_DATABASE_URL_FILE=%d/db-url
+EnvironmentFile=/etc/depsis/worker.env
+
+# ─── hardening ────────────────────────────────────────────────────────────────
+#
+# Everything the API's unit enables, plus one thing it cannot: the worker never accepts a
+# connection, so it needs no listening socket and no inbound address family beyond what PostgreSQL
+# and the agent require.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Explicitly NO, and not omitted, for the same reason as the API's unit: V8 compiles to machine code
+# at runtime and needs writable-then-executable pages. Turning this on stops Node from starting.
+MemoryDenyWriteExecute=no
+
+# AF_UNIX for the agent, AF_INET/AF_INET6 for PostgreSQL. Nothing else — a worker that suddenly
+# needs to reach the internet is a change somebody should have to justify here.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressAllow=localhost
+IPAddressDeny=any
+
+# No state on disk: the queue is in PostgreSQL and the logs go to the journal.
+ReadWritePaths=
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+MemoryMax=1G
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target
