@@ -181,6 +181,23 @@ ile root olarak, API ayrı ve yetkisiz bir uid'de, zincir HTTP'den ayrıcalıkl�
 başarısızlık yolunu uçtan uca sınıyor — ama yeşil bir koşu ZFS davranışı hakkında hiçbir şey
 söylemez; o P0-A/P0-G'de, Debian VM'de kalıyor.
 
+### P1-D — birim dosyaları da ilk kez koşuldu (2026-08-21, systemd 257)
+
+P0-E ajanı elle başlatarak, P1-C `systemd-socket-activate` ile ölçtü. İkisi de **birim dosyalarını**
+sınamadı. `tools/poc/p1-d-systemd-deployment.sh` onları gerçek systemd'ye yüklüyor.
+
+| İddia                                                                   | Sonuç                                               |
+| ----------------------------------------------------------------------- | --------------------------------------------------- |
+| `SocketMode=0660`, `SocketUser=root`, `SocketGroup=depsis-api` tutuyor  | ✅ ölçüldü — soketin izinleri birimden geliyor      |
+| `Accept=no` + soket etkinleştirme: ajan ilk bağlantıya kadar **kapalı** | ✅ `is-active` = inactive, sonra bağlantıyla active |
+
+**Ve bir hata:** `StartLimitBurst=` ile `StartLimitIntervalSec=` `[Service]` bölümündeydi. systemd
+bunları `[Unit]`'te bekliyor; yanlış bölümde _"Unknown key … ignoring"_ deyip birimi yine de
+başlatıyor. Yani bu dosyanın belgelediği çökme-döngüsü sınırlaması **hiç yürürlükte değildi**.
+`systemd-analyze verify` bunu yakalamıyor — üç birim de doğrulamayı geçiyordu. Tek işaret journal'da
+ve PoC artık orayı da kontrol ediyor: yanlış yazılmış bir sertleştirme direktifi, olmayan bir
+korumadır.
+
 **Sonradan bulunan dördüncü şey — bağlantı başına son tarih.**
 
 Faz 1'in temel gözden geçirmesi, `set_read_timeout`'un `SO_RCVTIMEO`'yu kurduğunu ve onun **tek bir

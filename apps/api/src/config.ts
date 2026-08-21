@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { z } from 'zod';
 
 /**
@@ -20,7 +22,19 @@ const schema = z.object({
   // Deliberately NOT accepting DEPSIS_MIGRATION_DATABASE_URL as a fallback. ADR-0014 keeps the two
   // in separate variables so that the application cannot end up connected as the migration owner,
   // which bypasses row level security; accepting a fallback here would hand that back.
-  DEPSIS_DATABASE_URL: z.string().min(1, 'DEPSIS_DATABASE_URL is required'),
+  //
+  // Optional HERE only because exactly one of it and DEPSIS_DATABASE_URL_FILE must be set, which is
+  // checked below — zod cannot express "one of these two" inside a field.
+  DEPSIS_DATABASE_URL: z.string().min(1).optional(),
+
+  // The same connection string, in a file, for the same reason DEPSIS_SECRET_KEY_FILE is a file.
+  //
+  // A connection string contains a password, so leaving it only as an environment variable would
+  // have made ADR-0016 argue against a form this project was still using one line away: readable
+  // through /proc/<pid>/environ by anything running as the same user, inherited by every child
+  // process, and present in crash reports. On a systemd deployment both secrets now arrive the same
+  // way, through LoadCredential=, and neither is in the environment.
+  DEPSIS_DATABASE_URL_FILE: z.string().trim().min(1).optional(),
   DEPSIS_API_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
@@ -85,11 +99,63 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(`invalid environment: ${detail}`);
   }
   return {
-    databaseUrl: parsed.data.DEPSIS_DATABASE_URL,
+    databaseUrl: resolveDatabaseUrl(parsed.data),
     port: parsed.data.DEPSIS_API_PORT,
     nodeEnv: parsed.data.NODE_ENV,
     agentSocket: parsed.data.DEPSIS_AGENT_SOCKET,
     secretKeyFile: parsed.data.DEPSIS_SECRET_KEY_FILE,
     zfsPools: parsed.data.DEPSIS_ZFS_POOLS,
   };
+}
+
+/**
+ * Exactly one of DEPSIS_DATABASE_URL and DEPSIS_DATABASE_URL_FILE.
+ *
+ * Not "the file wins if both are set", and not "fall back to the other". A deployment that sets
+ * both has two answers to one question and no way to know which one is live — and on the day they
+ * disagree, the API connects somewhere nobody expected, which is precisely the failure ADR-0014's
+ * two-variable split exists to prevent. Refusing is cheap and happens at startup.
+ */
+function resolveDatabaseUrl(data: {
+  // `| undefined` written out, because `exactOptionalPropertyTypes` makes "may be absent" and "may
+  // be undefined" different types, and zod's output is the second.
+  DEPSIS_DATABASE_URL?: string | undefined;
+  DEPSIS_DATABASE_URL_FILE?: string | undefined;
+}): string {
+  const inline = data.DEPSIS_DATABASE_URL;
+  const path = data.DEPSIS_DATABASE_URL_FILE;
+
+  if (inline !== undefined && path !== undefined) {
+    throw new Error(
+      'invalid environment: DEPSIS_DATABASE_URL and DEPSIS_DATABASE_URL_FILE are both set; ' +
+        'set exactly one so there is no question which connection is live',
+    );
+  }
+  if (inline !== undefined) return inline;
+  if (path === undefined) {
+    throw new Error(
+      'invalid environment: one of DEPSIS_DATABASE_URL or DEPSIS_DATABASE_URL_FILE is required',
+    );
+  }
+
+  let contents: string;
+  try {
+    contents = readFileSync(path, 'utf8');
+  } catch (error) {
+    throw new Error(
+      `invalid environment: cannot read DEPSIS_DATABASE_URL_FILE at ${path}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      // The original carries the errno and the resolved path, which is what tells an operator
+      // whether the credential did not mount or the unit named the wrong file.
+      { cause: error },
+    );
+  }
+  // Trimmed, because a credential file written by an installer almost always ends in a newline and
+  // a connection string with a trailing newline fails in a way that names neither the file nor the
+  // newline.
+  const url = contents.trim();
+  if (url === '') {
+    throw new Error(`invalid environment: DEPSIS_DATABASE_URL_FILE at ${path} is empty`);
+  }
+  return url;
 }

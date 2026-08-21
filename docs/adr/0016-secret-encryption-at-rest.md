@@ -142,12 +142,32 @@ okuyamadığı değerleri sessizce kabul eden bir şemadan iyidir.
 
 **Ölçülmemiş / kapsam dışı:**
 
-| İddia                                              | Durum                                                             |
-| -------------------------------------------------- | ----------------------------------------------------------------- |
-| `LoadCredential=` ile gerçek bir systemd dağıtımı  | **unverified** — `deploy/systemd` birimi henüz anahtarı taşımıyor |
-| Anahtar döndürme                                   | **uygulanmadı** — şema hazır, mekanizma yok                       |
-| Ana makine ele geçirilmesine karşı koruma          | **yok, ve olmayacak** — bu ADR bunu iddia etmiyor                 |
-| Oturum belirteçleri ve bekleyen giriş belirteçleri | Zaten hash'li; bu ADR'nin kapsamında değil                        |
+| İddia                                              | Durum                                                      |
+| -------------------------------------------------- | ---------------------------------------------------------- |
+| `LoadCredential=` ile gerçek bir systemd dağıtımı  | **verified** — P1-D, systemd 257 altında (aşağıya bakınız) |
+| Anahtar döndürme                                   | **uygulanmadı** — şema hazır, mekanizma yok                |
+| Ana makine ele geçirilmesine karşı koruma          | **yok, ve olmayacak** — bu ADR bunu iddia etmiyor          |
+| Oturum belirteçleri ve bekleyen giriş belirteçleri | Zaten hash'li; bu ADR'nin kapsamında değil                 |
+
+### P1-D'nin ölçtükleri — anahtarın gerçekten nasıl teslim edildiği (2026-08-21, systemd 257)
+
+`deploy/systemd/depsis-api.service` yazıldı ve `tools/poc/p1-d-systemd-deployment.sh` onu gerçek
+systemd altında kurup çalıştırıyor. Bu ADR'nin anahtar teslimi hakkındaki iddiaları artık ölçüm:
+
+| İddia                                                                        | Sonuç                                                      |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Anahtar `LoadCredential=` ile ulaşıyor ve API onu yüklüyor                   | ✅ journal: "TOTP secrets are sealed with the key at …"    |
+| Bağlantı dizesi de aynı yoldan geliyor                                       | ✅ journal: "connected as 'depsis_app'"                    |
+| Ortamda **hiçbir sır yok** — yalnız `/run/credentials/` altında bir yol      | ✅ `/proc/<pid>/environ` tarandı; ne anahtar ne parola var |
+| Servis kullanıcısı kaynak dosyayı doğrudan **okuyamıyor**                    | ✅ `/etc/depsis/secret.key` 0400 root:root                 |
+| Kimlik bilgisini servis kullanıcısı okuyor, ilgisiz bir kullanıcı okuyamıyor | ✅ ölçüldü, iki yönlü                                      |
+| Teslim edilen anahtar **kullanılabilir**                                     | ✅ MFA kaydı systemd altında 200 döndü                     |
+
+**Erişimin mekanizması sahiplik değil, ACL.** Dosya 0440 root:root, dizin 0550 root:root — moda
+bakan biri servis kullanıcısının okuyamayacağı sonucuna varırdı. `ls` mod dizisine `+` ekliyor
+(`-r--r-----+`) ve okuma gerçekten çalışıyor. Bu yüzden PoC modu değil **kimin okuyabildiğini**
+doğruluyor: moda dayanan bir assertion doğru bir sistemi düşürürdü, ve systemd mekanizmayı her
+değiştirdiğinde yeniden düşürürdü. İlk yazdığım assertion tam olarak buydu ve düştü.
 
 ## Sonuçlar
 

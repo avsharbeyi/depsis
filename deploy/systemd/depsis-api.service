@@ -1,0 +1,114 @@
+# The DEPSIS API.
+#
+# The unprivileged half of threat-model boundary TB4. Everything the agent's unit cannot enable —
+# because ZFS mounts have to propagate out of the service's namespace — this unit CAN, and does:
+# the API mounts nothing, spawns nothing, and reaches the outside world through exactly two
+# descriptors it did not open itself.
+#
+# Two secrets, both delivered as credentials and neither in the environment. ADR-0016 argues that
+# an environment variable is readable through /proc/<pid>/environ by anything running as the same
+# user, is inherited by every child process, and turns up in crash reports; that argument applies to
+# a database connection string, which carries a password, exactly as much as to an encryption key.
+
+[Unit]
+Description=DEPSIS API
+Documentation=file:///usr/share/doc/depsis/adr/0016-secret-encryption-at-rest.md
+
+# In [Unit], not [Service]. systemd logs "Unknown key ... ignoring" for these in
+# [Service] and starts the unit anyway, so the rate limiting they describe is simply absent
+# — measured: both units carried them in the wrong section and neither was in effect.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+After=network-online.target postgresql.service depsis-agent.socket
+Wants=network-online.target
+
+# Wants, not Requires. The API is useful without the agent — it authenticates, it serves the web
+# interface — and the endpoints that need storage answer 503 and say why. Requires= would turn a
+# storage problem into a total outage, including the login page an operator needs to diagnose it.
+Wants=depsis-agent.socket
+
+[Service]
+Type=exec
+User=depsis-api
+Group=depsis-api
+# The layout `pnpm --filter @depsis/api deploy --prod --legacy` produces: a self-contained
+# directory with a flat node_modules and the build under dist/. Copying the workspace instead does
+# not work — pnpm's per-package node_modules is a tree of symlinks relative to the repository root,
+# so a partial copy resolves nothing and a full copy ships the sources.
+WorkingDirectory=/usr/local/lib/depsis/api
+ExecStart=/usr/bin/node /usr/local/lib/depsis/api/dist/main.js
+
+Restart=on-failure
+RestartSec=2s
+
+# ─── secrets, as credentials ──────────────────────────────────────────────────
+#
+# systemd copies each of these into $CREDENTIALS_DIRECTORY as mode 0400 owned by User=, in a
+# tmpfs that is unmounted when the service stops. The source files can stay root-owned 0400: the
+# service never reads them directly and does not need permission to.
+LoadCredential=db-url:/etc/depsis/db-url
+LoadCredential=secret-key:/etc/depsis/secret.key
+
+# %d expands to $CREDENTIALS_DIRECTORY. What reaches the environment is a PATH, not a secret.
+Environment=DEPSIS_DATABASE_URL_FILE=%d/db-url
+Environment=DEPSIS_SECRET_KEY_FILE=%d/secret-key
+
+# Everything that is genuinely configuration rather than secret.
+EnvironmentFile=/etc/depsis/api.env
+
+# ─── hardening ────────────────────────────────────────────────────────────────
+#
+# The agent's unit documents at length why it cannot enable most of these: they create a private
+# mount namespace, and `zfs create` inside one mounts the dataset where nothing else can see it.
+# None of that applies here. The API never mounts anything, so the namespace costs nothing and the
+# protection is real.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# MemoryDenyWriteExecute is explicitly NO rather than omitted, so nobody enables it in a later
+# hardening pass without measuring. V8 compiles JavaScript to machine code at runtime and needs
+# writable-then-executable pages; turning this on stops Node from starting at all.
+
+# The API is a client, never a listener on anything but its own HTTP port, and it must not be able
+# to reach the wider network — a compromised API should not be able to exfiltrate over a socket it
+# opens itself. AF_UNIX for the agent, AF_INET/AF_INET6 for its own listener and for PostgreSQL.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Read-only everywhere, with no writable path at all. The API keeps no state on disk: uploads go
+# through the agent, sessions and secrets go to PostgreSQL, and logs go to the journal. A service
+# that needs nowhere to write should say so, because the day it does need somewhere is the day
+# somebody should have to think about it.
+ReadWritePaths=
+
+# Not a capability the API has any use for, and it starts as a normal user, so this is belt and
+# braces against a future ExecStart that runs something setuid.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# ─── resource bounds ──────────────────────────────────────────────────────────
+#
+# A runaway API should be restarted, not allowed to take the box down with the database and the
+# agent on it. These are generous enough not to bite in normal use and low enough to matter.
+MemoryMax=1G
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

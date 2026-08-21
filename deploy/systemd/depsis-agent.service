@@ -14,6 +14,12 @@
 [Unit]
 Description=DEPSIS system agent
 Documentation=file:///usr/share/doc/depsis/adr/0006-system-agent.md
+
+# In [Unit], not [Service]. systemd logs "Unknown key ... ignoring" for these in
+# [Service] and starts the unit anyway, so the rate limiting they describe is simply absent
+# — measured: both units carried them in the wrong section and neither was in effect.
+StartLimitBurst=5
+StartLimitIntervalSec=60
 Requires=depsis-agent.socket
 After=depsis-agent.socket zfs.target
 
@@ -34,8 +40,6 @@ EnvironmentFile=/etc/depsis/agent.env
 # daemon that shells out to zfs should stop and be noticed, not retry forever.
 Restart=on-failure
 RestartSec=2s
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 # ─── hardening that is free here ──────────────────────────────────────────────
 # "Free" means measured, not assumed. P0-E timed every directive below against
