@@ -1,0 +1,36 @@
+name: smoke
+
+# A deliberately trivial workflow, added to answer one question that cannot be answered locally.
+#
+# `ci.yml` is being rejected by GitHub with a startup failure, and every check available here says
+# it is valid: actionlint 1.7.7 clean, a strict YAML parse with duplicate-key detection clean, no
+# CR bytes, no BOM, no non-breaking spaces, no tabs, `name:` present, and it is the only file in
+# this directory. So the failure cannot be reproduced locally, and changing ci.yml on a guess is
+# how a real cause gets buried under three speculative edits.
+#
+# This file splits the possibilities in one push:
+#
+#   * smoke runs, ci.yml does not  → the problem is ci.yml's own content, and the difference
+#     between this file and that one is the search space.
+#   * neither runs                 → the problem is at the repository level (Actions disabled,
+#     a permissions setting, or a quota), and no edit to ci.yml would ever have fixed it.
+#
+# Delete this file once the question is answered. It exists to be a control, not a fixture.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: does anything run at all
+    runs-on: ubuntu-latest
+    steps:
+      - name: say so
+        run: |
+          echo "Actions can start a job in this repository."
+          echo "runner: $RUNNER_OS  ref: $GITHUB_REF  sha: $GITHUB_SHA"
