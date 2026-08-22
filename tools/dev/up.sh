@@ -98,41 +98,40 @@ curl -fsS "http://127.0.0.1:$API_PORT/api/v1/health" >/dev/null || {
 # same-site. Pointing the browser at two origins would work locally and diverge exactly where it
 # matters — SameSite=Lax is what the cookie is issued with.
 cat > /tmp/depsis-dev-web.mjs <<JS
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
+
 const ROOT = '$REPO/apps/web/dist';
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css',
   '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json', '.json': 'application/json' };
-createServer(async (req, res) => {
-  try {
-    if (req.url.startsWith('/api/')) {
-      // The body is BUFFERED rather than streamed, and that is a deliberate limitation of this
-      // development proxy. Streaming needs \`duplex: 'half'\`, and a client that sends
-      // \`Expect: 100-continue\` — PowerShell's Invoke-WebRequest does — then fails the fetch
-      // outright: measured as a 502 on every POST from Windows while the same request from inside
-      // the VM succeeded. Nothing here moves bulk data anyway; uploads need the privileged agent,
-      // which this setup does not run.
-      const chunks = [];
-      if (!['GET', 'HEAD'].includes(req.method)) {
-        for await (const chunk of req) chunks.push(chunk);
-      }
-      const forwarded = { ...req.headers };
-      delete forwarded['expect'];
-      delete forwarded['content-length'];
-      const upstream = await fetch('http://127.0.0.1:$API_PORT' + req.url, {
-        method: req.method,
-        headers: forwarded,
-        body: chunks.length > 0 ? Buffer.concat(chunks) : undefined,
-        redirect: 'manual',
-      });
-      const headers = Object.fromEntries(upstream.headers);
-      delete headers['content-encoding'];
-      delete headers['content-length'];
-      res.writeHead(upstream.status, headers);
-      res.end(Buffer.from(await upstream.arrayBuffer()));
-      return;
-    }
+
+createServer((req, res) => {
+  if (req.url.startsWith('/api/')) {
+    // node:http, NOT fetch. fetch rewrites the Host header from the URL and there is no way to
+    // stop it, so the API saw \`Host: 127.0.0.1:$API_PORT\` while the browser had sent
+    // \`Origin: http://<vm-ip>:$WEB_PORT\` — and the CSRF check, which compares the two, refused
+    // every state change with a 403 that never reached the database. Measured: the browser could
+    // not sign in while PowerShell could, because PowerShell sends no Origin header at all.
+    //
+    // Passing the headers through verbatim also removes the Expect: 100-continue problem that
+    // forced the body to be buffered, so this streams again.
+    const upstream = httpRequest(
+      { host: '127.0.0.1', port: $API_PORT, path: req.url, method: req.method, headers: req.headers },
+      (answer) => {
+        res.writeHead(answer.statusCode ?? 502, answer.headers);
+        answer.pipe(res);
+      },
+    );
+    upstream.on('error', (error) => {
+      res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end(String(error));
+    });
+    req.pipe(upstream);
+    return;
+  }
+
+  void (async () => {
     const path = normalize(req.url.split('?')[0]);
     const file = path === '/' ? '/index.html' : path;
     try {
@@ -140,15 +139,17 @@ createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': TYPES[extname(file)] ?? 'application/octet-stream' });
       res.end(body);
     } catch {
-      // Any unknown path is the single-page app's problem, not a 404. The hash router means this
-      // is rare, but a reload of a deep link must not show the browser's own error page.
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end(await readFile(join(ROOT, 'index.html')));
+      // Any unknown path is the single-page app's problem, not a 404. The hash router makes this
+      // rare, but a reload of a deep link must not show the browser's own error page.
+      try {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(await readFile(join(ROOT, 'index.html')));
+      } catch (error) {
+        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end(String(error));
+      }
     }
-  } catch (error) {
-    res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end(String(error));
-  }
+  })();
 }).listen($WEB_PORT, '0.0.0.0', () => console.log('web on $WEB_PORT'));
 JS
 
