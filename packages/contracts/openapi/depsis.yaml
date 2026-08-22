@@ -8,7 +8,7 @@ info:
     Bu belge tek doğruluk kaynağıdır. `apps/web` istemcisi buradan üretilir
     (`openapi-typescript`, ADR-0002); elle yazılmış istemci tipi bulunamaz.
 
-    Kapsam: yalnızca Faz 1 uçları. Görevler, yedekleme, ZeroTier ve uygulama kataloğu
+    Kapsam: Faz 1 uçları. Konsol, uygulama kataloğu ve uzak erişim de burada — sırasıyla ADR-0018, ADR-0019 ve ADR-0020. Üçü de cihazın DIŞINDAKİ bir şeyi yönetiyor (bir kabuk, podman, zerotier-one); DEPSIS hiçbirini paketlemez, kuruluysa yönetir ve kurulu değilse 503 döner. Konsol ayrıcalıklı ajanda ÇALIŞMAZ: §2.2'nin serbest komut yasağı duruyor.
     Faz 2-3'e aittir ve kasıtlı olarak yoktur — tanımlanmamış bir uç, "yakında" diye
     duran boş bir uçtan iyidir.
 
@@ -365,6 +365,13 @@ paths:
           in: query
           description: Yoksa kullanıcının kökleri döner.
           schema: { type: string, format: uuid }
+        - name: trashed
+          in: query
+          description: |
+            Doğruysa çöp kutusu listelenir ve `parentId` yok sayılır. Çöp bir klasör değil bir
+            sütun (0008: `trashed_at`), yani ağaçta gezilecek bir yeri yok; ayrı bir uç nokta
+            yerine bir süzgeç olması da bu yüzden.
+          schema: { type: boolean, default: false }
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
         - name: sort
@@ -421,7 +428,7 @@ paths:
       tags: [files]
       summary: Yeniden adlandır
       description: |
-        Taşıma burada değil, /file-operations üzerinden yapılır — taşımada hem kaynak
+        Taşıma da burada: `parentId` alanı aynı satırın diğer kolonu ve dosya sistemi tarafında da tek bir rename(2). PAYLAŞIMLAR ARASI taşıma burada değil — dataset sınırını geçen bir rename EXDEV veriyor (ADR-0008) ve kopyala+sil işine dönüşmesi gerek; o /file-operations — taşımada hem kaynak
         hem hedef yetkisi gerekir (§6.2).
       parameters:
         - $ref: '#/components/parameters/IfMatch'
@@ -429,15 +436,27 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/RenameRequest' }
+            schema: { $ref: '#/components/schemas/UpdateFileRequest' }
       responses:
         '200':
           description: Güncellendi
           content:
             application/json:
               schema: { $ref: '#/components/schemas/FileEntry' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
         '412': { $ref: '#/components/responses/Problem' }
+        '501':
+          # `parentId` ile taşıma HENÜZ YAZILMADI ve bunun sebebi ajanın işlem kümesi: içinde
+          # bir dosyayı başka bir klasöre taşıyacak işlem yok. Yalnızca veritabanı satırını
+          # taşımak, veritabanı ile diskin ayrışması demek olurdu — bir dosyanın listede bir
+          # yerde, diskte başka bir yerde durması, bu üründe kabul edilemez.
+          #
+          # 501 burada yayımlanıyor çünkü üretilmiş istemcinin bunu "taşıma yok" diye
+          # gösterebilmesi gerekiyor; belgelenmemiş bir durum kodu, istemci için taşıma
+          # hatasıyla ayırt edilemez.
+          $ref: '#/components/responses/Problem'
     delete:
       tags: [files]
       summary: Çöp kutusuna taşı
@@ -664,6 +683,577 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Job' }
         '404': { $ref: '#/components/responses/Problem' }
+
+  /notes:
+    get:
+      tags: [desk]
+      summary: Kendi notlarını listele
+      description: |
+        Notlar yazarına özeldir. Bu, paylaşımlı bir not tahtasının daha kullanışlı olmadığı için
+        değil — kimin kimin notunu okuyabileceği bir ACL sorusudur ve §6.2 Faz 2'dedir. İki
+        seçenek arasından kimseyi şaşırtamayacak olan seçildi.
+
+        Sayfalama yok: bir kişinin not sayısı, bir klasörün dosya sayısı gibi büyümüyor.
+      responses:
+        '200':
+          description: Notlar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotePage' }
+    post:
+      tags: [desk]
+      summary: Not oluştur
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateNoteRequest' }
+      responses:
+        '201':
+          description: Oluşturuldu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Note' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /notes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [desk]
+      summary: Notu düzenle
+      description: |
+        Yalnız yazarı. Başkasının notu 404 döner, 403 değil: 403 o notun var olduğunu söyler ve
+        bir kiracının içinde bile "hangi notlar var" bir sızıntıdır.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateNoteRequest' }
+      responses:
+        '200':
+          description: Güncellendi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Note' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [desk]
+      summary: Notu sil
+      description: Kalıcı. Bir notun çöp kutusu yok; metni saklamaya değecek bir bayt değil.
+      responses:
+        '204': { description: Silindi }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /tasks:
+    get:
+      tags: [desk]
+      summary: İş panosu
+      description: |
+        Notların aksine PAYLAŞIMLI, ve bu tutarsızlık değil: bir iş birine atanır, ve göremediği
+        bir iş atanmış sayılmaz. Pano organizasyondaki herkese açıktır.
+
+        Tamamlananlar da döner — `doneAt` ile ayırt edilir. Filtreleme istemcinin işi, çünkü
+        "bugün neyi bitirdik" panonun cevaplaması gereken sorulardan biri.
+      responses:
+        '200':
+          description: İşler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskPage' }
+    post:
+      tags: [desk]
+      summary: İş ekle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTaskRequest' }
+      responses:
+        '201':
+          description: Oluşturuldu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /tasks/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [desk]
+      summary: İşi güncelle — metin, atanan, tamamlanma, sıra
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateTaskRequest' }
+      responses:
+        '200':
+          description: Güncellendi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [desk]
+      summary: İşi sil
+      responses:
+        '204': { description: Silindi }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /me/preferences:
+    get:
+      tags: [me]
+      summary: Arayüz tercihleri
+      description: |
+        Arka plan seçimi, ses, ve ana ekrandaki kısayolların yerleşimi. Sunucuda tutulur çünkü
+        localStorage bir tarayıcıya aittir: telefondan giren aynı kişi kendi masasını bulmalı.
+
+        Hiç yazılmamışsa boş bir belge döner, 404 değil — "tercih yok" bir hata değil, varsayılan.
+      responses:
+        '200':
+          description: Tercihler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Preferences' }
+    put:
+      tags: [me]
+      summary: Arayüz tercihlerini yaz
+      description: |
+        Tamamını değiştirir, birleştirmez. Kısmi birleştirme, iki sekmenin birbirinin kısayol
+        yerleşimini yarım yazması demek olurdu.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Preferences' }
+      responses:
+        '200':
+          description: Yazıldı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Preferences' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /transfers:
+    get:
+      tags: [uploads]
+      summary: Süren ve yakın zamanda biten aktarımlar
+      description: |
+        `upload_sessions` tablosundan okunur; ayrı bir kayıt tutulmaz. Bu, listenin
+        SUNUCUNUN bildiği aktarımları gösterdiği anlamına gelir — başka bir sekmede başlayan bir
+        yükleme de burada görünür, ki bir aktarım listesinin varlık sebebi tam olarak budur.
+
+        İndirmeler burada YOK: indirme tek bir HTTP isteği ve sunucu tarafında durumu yok.
+      responses:
+        '200':
+          description: Aktarımlar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransferPage' }
+
+  /backups:
+    get:
+      tags: [system]
+      summary: DEPSIS'in aldığı anlık görüntüler
+      description: |
+        Havuzdaki anlık görüntülerin listesi DEĞİL, ve bu fark önemli. Ajanın işlem kümesi kapalı
+        (ADR-0006) ve içinde `CreateSnapshot` ile `DiffSnapshots` var ama "listele" yok. Biri
+        Rust tarafına o işlemi ekleyene kadar dürüstçe gösterilebilecek şey, DEPSIS'in kendi
+        aldıklarının kaydıdır. Kabuktan alınmış bir anlık görüntü burada görünmez ve arayüz bunu
+        söylemek zorundadır.
+      responses:
+        '200':
+          description: Anlık görüntüler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SnapshotPage' }
+        '403': { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [system]
+      summary: Anlık görüntü al
+      description: |
+        Yalnız yöneticiler. Ajanın `CreateSnapshot` işlemi çağrılır; ajan doğrularsa satır yazılır.
+        Sıra bu yönde: önce satır yazıp sonra ajanı çağırmak, ajan reddettiğinde var olmayan bir
+        yedeği listeleyen bir kayıt bırakırdı.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSnapshotRequest' }
+      responses:
+        '201':
+          description: Alındı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Snapshot' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
+  /files/{id}/restore:
+    parameters:
+      - $ref: '#/components/parameters/FileId'
+    post:
+      tags: [files]
+      summary: Çöp kutusundan geri al
+      description: |
+        Geri alma, adın hâlâ boş olmasını gerektirir: çöpe atılmış bir dosya adını rehin tutmaz
+        (0008'deki kısmi benzersizlik indeksleri), yani aynı adla yenisi oluşturulmuş olabilir.
+        Böyle bir durumda 409 döner ve kullanıcıdan yeniden adlandırması beklenir — sessizce
+        "(1)" eklemek, iki dosyadan hangisinin hangisi olduğunu kimsenin bilemeyeceği yerdir.
+      responses:
+        '200':
+          description: Geri alındı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileEntry' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /console:
+    post:
+      tags: [console]
+      summary: Yönetici konsolu oturumu aç
+      description: |
+        ADR-0018. Üç kapı: yönetici rolü, mevcut parola, ve süre sınırı.
+
+        Parola oturum zaten varken de isteniyor. Bir oturum, birinin açık bıraktığı bilgisayarı
+        ödünç alanın sahip olduğu şeydir; bir kabuk ise cihazın tamamıdır. Parola değişikliğinde
+        aynı gerekçeyle aynı şey yapılıyor.
+
+        Konsol AYRICALIKLI AJANDA ÇALIŞMAZ. Kendi systemd birimi olan ayrı bir servis, varsayılan
+        olarak ayrıcalıksız bir kullanıcıyla. §2.2'nin "aracı serbest komut kabul etmemeli"
+        kuralı bozulmadı; aracı bu işin hiçbir yerinde yok.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OpenConsoleRequest' }
+      responses:
+        '201':
+          description: Oturum açıldı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsoleSession' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503':
+          # Konsol servisi kapatılabilir bir birim — `systemctl disable depsis-console` özelliği
+          # tamamen kapatır. Kapalıyken 500 değil 503 dönmek, "bozuk" ile "kapalı" arasındaki
+          # farkı koruyor.
+          $ref: '#/components/responses/Problem'
+    get:
+      tags: [console]
+      summary: Açık konsol oturumları
+      description: Yalnız yöneticiler. Bir yöneticinin "şu an kimin kabuğu açık" sorusu.
+      responses:
+        '200':
+          description: Oturumlar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsoleSessionPage' }
+        '403': { $ref: '#/components/responses/Problem' }
+
+  /console/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [console]
+      summary: Oturumu kapat
+      responses:
+        '204': { description: Kapatıldı }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /console/{id}/input:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [console]
+      summary: Konsola tuş gönder
+      description: |
+        Gövde ham metindir, satır değil: bir terminal karakter karakter çalışır ve Ctrl-C,
+        sekme tamamlama, ok tuşları hep bayt dizileridir. Satır bazlı bir uç, terminal olmazdı.
+
+        Denetim için satırlar ayrıca toplanır (`console_commands`), ama bu uç noktanın işi değil —
+        konsol servisi tam bir satır gördüğünde yazar.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsoleInput' }
+      responses:
+        '204': { description: İletildi }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '410':
+          description: Oturum kapanmış — boşta kalma süresi ya da üst sınır.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  /console/{id}/resize:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [console]
+      summary: Pencere boyutunu bildir
+      description: |
+        Pty'nin satır/sütun sayısı. Bildirilmezse `top` ve `vim` yanlış boyutta çizer ve satır
+        kaydırma bozulur — bir terminalin gerçekten terminal olup olmadığı buradan anlaşılır.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsoleResize' }
+      responses:
+        '204': { description: Bildirildi }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /console/{id}/stream:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [console]
+      summary: Konsol çıktısı (Server-Sent Events)
+      description: |
+        WebSocket değil. Nest'te SSE çerçevede zaten var, WS ise bir gateway ve ek bağımlılık
+        istiyor; bir terminalin gecikme bütçesi insan yazma hızı ve SSE bunun için fazlasıyla
+        yeterli. Tek yönlü olması eksiklik değil — giriş zaten ayrı ve küçük bir istek.
+
+        Her olay bir `data:` satırı; içerik base64, çünkü terminal çıktısı UTF-8 sınırlarını
+        ortadan bölebilen ham bayttır ve SSE metin taşır.
+      responses:
+        '200':
+          description: Olay akışı
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /apps:
+    get:
+      tags: [apps]
+      summary: Uygulama kataloğu ve kurulu olanlar
+      description: |
+        ADR-0019. Katalog küratörlüdür: kullanıcı imaj adı yazamaz. Serbest imaj adı, kullanıcının
+        internetten indirilen keyfi kodu çalıştırabilmesi demektir.
+
+        Her satırın durumu podman'dan OKUNUR, veritabanından değil. Bir kolona yazılsaydı cihaz
+        yeniden başladığında yalan söylerdi.
+
+        GET /apps HER ZAMAN 200 döner — podman kurulu olmasa bile. Katalog veritabanında duruyor
+        ve onu listelemek için çalışma zamanı gerekmiyor; kurulu uygulamaların durumu ise
+        `unknown` olur ve `runtime.available` false gelir.
+
+        Önceki hâlinde burada bir 503 yayımlanmıştı ve o dal artık ulaşılamaz. Ulaşılamaz bir
+        durum kodunu belgede bırakmak, belgelenmemiş bir koddan daha kötü: istemci onun için bir
+        dal yazar ve o dal hiç çalışmaz. Aynı karar `GET /remote` için de verildi, aynı gerekçeyle.
+
+        Değiştiren uçlar (kur/başlat/durdur/kaldır) 503 döndürmeye devam eder: orada yapılamayan
+        gerçek bir iş var.
+      responses:
+        '200':
+          description: |
+            Uygulamalar. `runtime.available` false ise konteyner çalışma zamanı yok ve kurulu
+            uygulamaların durumu `unknown`'dır.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppPage' }
+
+  /apps/{slug}:
+    parameters:
+      - name: slug
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$' }
+    post:
+      tags: [apps]
+      summary: Uygulamayı kur
+      description: |
+        Yalnız yöneticiler. İmaj indirilir ve konteyner oluşturulur; bağlama noktaları KATALOGDAN
+        gelir, istekten değil. İstek yalnızca hangi paylaşımın hangi hedefe bağlanacağını seçer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InstallAppRequest' }
+      responses:
+        '201':
+          description: Kuruldu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/App' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [apps]
+      summary: Başlat veya durdur
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AppStateRequest' }
+      responses:
+        '200':
+          description: Uygulandı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/App' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [apps]
+      summary: Uygulamayı kaldır
+      description: |
+        Konteyner silinir. BAĞLANAN PAYLAŞIMLARA VE İÇERİKLERİNE DOKUNULMAZ — bir uygulamayı
+        kaldırmanın kullanıcının fotoğraflarını silmesi, bu üründe olabilecek en kötü şeylerden
+        biri. Podman'a `v=false` geçilir, yani hiçbir volume kaldırılmaz.
+
+        HİÇBİR VERİ SİLİNMEZ, uygulamanın kendi ayarları dahil: katalogdaki `/config` ve `/data`
+        gibi hedefler volume değil, kullanıcının seçtiği paylaşıma bind mount. Belgenin önceki
+        hâli ayar biriminin silindiğini söylüyordu ve bu doğru değildi — silinmiş bir şeyi
+        söylemekten daha kötü olan tek şey, silinmediği hâlde silindiğini söylemek.
+
+        Yanıt gövdesizdir (204), yani "ne silindi" diye anlatacağı bir yer de yok.
+      responses:
+        '204': { description: Kaldırıldı }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
+  /apps/{slug}/logs:
+    parameters:
+      - name: slug
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$' }
+    get:
+      tags: [apps]
+      summary: Uygulamanın son günlük satırları
+      description: |
+        "Neden çalışmıyor" sorusunun tek dürüst cevabı çoğu zaman burada. Günlük olmadan bir
+        uygulama kataloğu, çalışmadığında yapılacak hiçbir şey bırakmaz.
+      parameters:
+        - name: lines
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+      responses:
+        '200':
+          description: Günlük
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppLogs' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
+  /remote:
+    get:
+      tags: [remote]
+      summary: Uzak erişim durumu
+      description: |
+        ADR-0020. Düğüm kimliği ve katılınan ağlar. Her kullanıcı görebilir — kendi cihazının
+        kimliğini bilmek bir sır değil.
+
+        Bir ağın `authorized` alanı false ise cihaz o ağa KATILMIŞ ama ONAYLANMAMIŞTIR ve hiçbir
+        trafik akmaz. Arayüz bunu "bağlanıyor" diye göstermemeli: kullanıcının ZeroTier Central'da
+        bir kutu işaretlemesi gerekiyor ve bunu bilmezse ürünü bozuk sanar.
+
+        Bu uç HER ZAMAN 200 döner — daemon kurulu değilse de. Belgenin önceki hâli hem 503 hem de
+        `available` bayrağı tarif ediyordu ve ikisi aynı anda doğru olamaz; uygulayan ajan da bunu
+        bir çelişki olarak bildirdi.
+
+        200 seçildi çünkü ZeroTier'in KURULU OLMAMASI bir arıza değil, bir durum: cihazın
+        çoğunluğu onsuz çalışıyor ve DEPSIS onu paketlemiyor. Bir arayüz kartının "uzak erişim
+        kurulu değil, şöyle kurulur" yazabilmesi için okunabilir bir cevap gerekiyor, hata değil.
+        Bunun `/system/telemetry`'nin 503'üyle çeliştiği doğru ama sebebi var: depolama ajanının
+        yokluğu GERÇEKTEN bir arıza — havuzsuz bir NAS çalışmıyor demektir.
+
+        Değiştiren uçlar (katıl/ayrıl) 503 döndürmeye devam eder: orada yapılamayan gerçek bir iş var.
+      responses:
+        '200':
+          description: |
+            Durum. `available: false` ise zerotier-one kurulu değil ya da çalışmıyor ve diğer
+            alanlar boştur.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RemoteStatus' }
+
+  /remote/networks:
+    post:
+      tags: [remote]
+      summary: Ağa katıl
+      description: |
+        Yalnız yöneticiler: bir ağa katılmak cihazı o ağdaki herkese görünür kılar ve bu bir
+        yönetim kararı.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JoinNetworkRequest' }
+      responses:
+        '201':
+          description: Katılındı — onay bekleniyor olabilir
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RemoteNetwork' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
+  /remote/networks/{networkId}:
+    parameters:
+      - name: networkId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9a-f]{16}$' }
+    delete:
+      tags: [remote]
+      summary: Ağdan ayrıl
+      responses:
+        '204': { description: Ayrılındı }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
 
 components:
   securitySchemes:
@@ -1057,7 +1647,27 @@ components:
         parentId: { type: string, format: uuid }
         name: { $ref: '#/components/schemas/FileName' }
 
+    UpdateFileRequest:
+      type: object
+      minProperties: 1
+      description: |
+        Yeniden adlandırma ve taşıma tek uçta, çünkü ikisi de aynı satırın aynı iki kolonu:
+        `name` ve `parent_id`. Dosya sistemi tarafında da tek bir rename(2) çağrısı.
+
+        Taşıma AYNI PAYLAŞIM içinde. Paylaşımlar arası taşıma bir rename DEĞİL — ölçüldüğü üzere
+        dataset'ler arası rename(2) EXDEV veriyor (ADR-0008) — ve kopyala+sil işine dönüşmesi
+        gerekir; o iş /file-operations'ın konusu ve henüz yazılmadı. Başka bir paylaşımın
+        klasörüne taşıma isteği 409 döner, sessizce yanlış yere koymaz.
+      properties:
+        name: { $ref: '#/components/schemas/FileName' }
+        parentId:
+          type: [string, 'null']
+          format: uuid
+          description: null, paylaşımın köküne taşır.
+
     RenameRequest:
+      deprecated: true
+      description: UpdateFileRequest ile değiştirildi. Üretilmiş istemcilerin kırılmaması için duruyor.
       type: object
       required: [name]
       properties:
@@ -1122,6 +1732,13 @@ components:
           properties:
             totalBytes: { type: integer, format: int64 }
             usedBytes: { type: integer, format: int64 }
+        disks:
+          type: array
+          description: |
+            Ajanın `ReadSmartSummary` işleminden. Hangi disklerin sorulacağı yapılandırmadan
+            gelir, keşiften değil — havuz adlarıyla aynı gerekçe: ajanın işlem kümesi kapalı ve
+            içinde "diskleri listele" yok, eklemek Rust tarafındaki sözleşmeyi değiştirmek demek.
+          items: { $ref: '#/components/schemas/DiskStatus' }
 
     PoolStatus:
       type: object
@@ -1146,3 +1763,388 @@ components:
         available: { type: integer, format: int64 }
         usedBySnapshots: { type: integer, format: int64 }
         scrubState: { type: string }
+
+    Note:
+      type: object
+      required: [id, title, body, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string, maxLength: 200 }
+        body: { type: string, maxLength: 65536 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    NotePage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Note' }
+
+    CreateNoteRequest:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        body: { type: string, maxLength: 65536 }
+
+    UpdateNoteRequest:
+      type: object
+      minProperties: 1
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        body: { type: string, maxLength: 65536 }
+
+    Task:
+      type: object
+      required: [id, body, assigneeId, doneAt, position, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        body: { type: string, maxLength: 2000 }
+        # Atanmamış bir iş gerçek bir durum: "birinin yapması lazım". Oluştururken bir isim
+        # dayatmak, paylaşımlı listelerin kullanılmaz hâle gelme biçimidir.
+        assigneeId: { type: [string, 'null'], format: uuid }
+        assigneeUsername: { type: [string, 'null'] }
+        # Boolean değil zaman damgası. "Bitti" ile "dün 14:02'de bitti" aynı yeri kaplıyor ve
+        # ikincisi birincisinin cevaplayamadığı soruları cevaplıyor.
+        doneAt: { type: [string, 'null'], format: date-time }
+        position: { type: number }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    TaskPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Task' }
+
+    CreateTaskRequest:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 2000 }
+        assigneeId: { type: [string, 'null'], format: uuid }
+
+    UpdateTaskRequest:
+      type: object
+      minProperties: 1
+      properties:
+        body: { type: string, minLength: 1, maxLength: 2000 }
+        assigneeId: { type: [string, 'null'], format: uuid }
+        done: { type: boolean }
+        position: { type: number }
+
+    Preferences:
+      type: object
+      description: |
+        Arayüz tercihleri. Şema BİLEREK dar: sunucu bu belgeyi doğruluyor ve tanımadığı bir alan
+        reddediliyor. Doğrulanmayan bir jsonb kolonu, biri okuyana kadar bozuk durumun biriktiği
+        yerdir; arayüz her değiştiğinde bir migration yazmamak için jsonb seçildi, sınırsız çöp
+        kabul etmek için değil.
+      properties:
+        background:
+          type: object
+          required: [kind]
+          additionalProperties: false
+          description: |
+            `kind` ne olduğunu, diğer iki alan hangisi olduğunu söyler ve BOŞ BIRAKILAMAZLAR:
+            `solid` ise `preset`, `file` ise `fileId` zorunlu. Şema bunu tek başına ifade
+            edemiyor (oneOf ile edilebilirdi ama üretilmiş istemciyi okunmaz hâle getirirdi),
+            o yüzden burada yazılı: eksik bırakan istek 422 alır.
+
+            `fileId` çöpteki bir kayda ya da bir klasöre işaret edemez — arayüzün her açılışta
+            404 veren bir arka plan istemesi, sessizce bozuk bir tercihtir.
+          properties:
+            kind:
+              type: string
+              # `sky` çizilen galaksi; `solid` düz bir gradyan; `file` kullanıcının kendi
+              # yüklediği görsel — bir dosya kimliği, bir URL değil, çünkü baytlar zaten
+              # /files/{id}/content üzerinden ve aynı yetkiyle geliyor.
+              enum: [sky, solid, file]
+            preset: { type: string, maxLength: 32 }
+            fileId: { type: string, format: uuid }
+        sound: { type: boolean }
+        shortcuts:
+          type: array
+          maxItems: 60
+          items:
+            type: object
+            required: [id, cell]
+            additionalProperties: false
+            properties:
+              id: { type: string, maxLength: 128 }
+              label: { type: string, maxLength: 64 }
+              cell: { type: integer, minimum: 0, maximum: 999 }
+      additionalProperties: false
+
+    Transfer:
+      type: object
+      required: [id, filename, lengthBytes, offsetBytes, state, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        filename: { type: string }
+        lengthBytes: { type: integer, format: int64 }
+        offsetBytes: { type: integer, format: int64 }
+        state:
+          type: string
+          enum: [active, stalled, completed]
+          description: |
+            `stalled`, sunucunun bir yargısı: son yazmadan bu yana bir dakikadan fazla geçmiş bir
+            yükleme. Tarayıcı sekmesi kapandığında yükleme "bitmiş" görünmesin diye var — bir
+            aktarım listesinin en çok işe yaradığı an, bir aktarımın durduğu andır.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    TransferPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Transfer' }
+
+    Snapshot:
+      type: object
+      required: [id, dataset, name, fullName, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        dataset: { type: string }
+        name: { type: string }
+        fullName: { type: string }
+        createdBy: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+
+    SnapshotPage:
+      type: object
+      required: [items, complete]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Snapshot' }
+        complete:
+          type: boolean
+          description: |
+            Her zaman false. Ajanda "anlık görüntüleri listele" işlemi yok, yani bu liste havuzun
+            envanteri değil DEPSIS'in kendi kaydı. Alan bir yer tutucu değil: istemcinin bunu
+            kullanıcıya söylemesi gerekiyor ve söylemesi gerektiğini sözleşmeden öğrenmeli.
+
+    CreateSnapshotRequest:
+      type: object
+      required: [dataset]
+      properties:
+        dataset: { type: string, minLength: 1, maxLength: 255 }
+        name:
+          type: string
+          maxLength: 63
+          pattern: '^[A-Za-z0-9_][A-Za-z0-9._-]{0,62}$'
+          description: Yoksa sunucu zaman damgasından üretir.
+
+    DiskStatus:
+      type: object
+      required: [id, healthy]
+      properties:
+        id:
+          type: string
+          description: |
+            /dev/disk/by-id altındaki kararlı ad. `/dev/sdX` DEĞİL — ajan onu yapı gereği
+            reddediyor, çünkü sdX yeniden başlatmada başka bir diski gösterebilir (risk R1).
+        healthy: { type: boolean }
+        temperatureCelsius: { type: integer }
+
+    OpenConsoleRequest:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+          maxLength: 1024
+          description: Mevcut parola. Oturum varken de isteniyor (ADR-0018).
+        cols: { type: integer, minimum: 20, maximum: 500, default: 80 }
+        rows: { type: integer, minimum: 5, maximum: 200, default: 24 }
+
+    ConsoleSession:
+      type: object
+      required: [id, username, privileged, openedAt, idleTimeoutSeconds, maxAgeSeconds]
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        privileged:
+          type: boolean
+          description: |
+            Konsolun root olarak çalışıp çalışmadığı. Varsayılan false ve açmak birim dosyasını
+            elle düzenlemeyi gerektirir — bir onay kutusuyla açılabilen root kabuk, kaza ile
+            açılabilen root kabuktur.
+        openedAt: { type: string, format: date-time }
+        idleTimeoutSeconds: { type: integer }
+        maxAgeSeconds: { type: integer }
+
+    ConsoleSessionPage:
+      type: object
+      required: [items, available]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ConsoleSession' }
+        available:
+          type: boolean
+          description: Konsol servisi çalışıyor mu. Kapalıysa liste boş döner ve bu bir hata değil.
+
+    ConsoleInput:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: string
+          maxLength: 8192
+          description: base64. Terminal girdisi ham bayttır ve UTF-8 sınırlarını bölebilir.
+
+    ConsoleResize:
+      type: object
+      required: [cols, rows]
+      properties:
+        cols: { type: integer, minimum: 20, maximum: 500 }
+        rows: { type: integer, minimum: 5, maximum: 200 }
+
+    AppCatalogueEntry:
+      type: object
+      required: [slug, name, summary, icon, image, tag, containerPort, mounts]
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        summary: { type: string }
+        icon: { type: string }
+        image: { type: string }
+        tag:
+          type: string
+          description: |
+            Sabitlenmiş sürüm. `latest` veritabanı kısıtıyla reddediliyor — bir gün çalışan bir
+            uygulamanın ertesi gün sessizce başka bir sürüme geçmesi, bir NAS'ta veri kaybının
+            ucuz yollarından biri.
+        containerPort: { type: integer }
+        mounts:
+          type: array
+          items:
+            type: object
+            required: [target, mode, purpose]
+            properties:
+              target: { type: string }
+              mode: { type: string, enum: [ro, rw] }
+              purpose: { type: string }
+
+    App:
+      type: object
+      required: [catalogue, installed]
+      properties:
+        catalogue: { $ref: '#/components/schemas/AppCatalogueEntry' }
+        installed: { type: boolean }
+        state:
+          type: string
+          enum: [running, stopped, starting, error, unknown]
+          description: |
+            Podman'dan okunur, veritabanından değil. Bir kolona yazılsaydı cihaz yeniden
+            başladığında yalan söylerdi.
+        url:
+          type: [string, 'null']
+          description: 127.0.0.1 üzerindeki adres. Konteynerler LAN'a doğrudan açılmaz.
+        hostPort: { type: [integer, 'null'] }
+        installedAt: { type: [string, 'null'], format: date-time }
+
+    AppPage:
+      type: object
+      required: [items, runtime]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/App' }
+        runtime:
+          type: object
+          required: [available]
+          properties:
+            available: { type: boolean }
+            version: { type: string }
+            rootless:
+              type: boolean
+              description: |
+                Köksüz çalışıp çalışmadığı. false ise kurulum ADR-0019'un ayrıcalık kararından
+                sapmış demektir ve arayüz bunu uyarı olarak göstermeli.
+
+    InstallAppRequest:
+      type: object
+      required: [mounts]
+      properties:
+        mounts:
+          type: array
+          description: |
+            Katalogdaki her `target` için bir paylaşım. Host tarafı bir PAYLAŞIM KİMLİĞİ, bir yol
+            değil — kullanıcının verdiği bir yol, kullanıcının seçtiği bir yolu bağlamak olurdu.
+          items:
+            type: object
+            required: [target, shareId]
+            properties:
+              target: { type: string }
+              shareId: { type: string, format: uuid }
+
+    AppStateRequest:
+      type: object
+      required: [state]
+      properties:
+        state: { type: string, enum: [running, stopped] }
+
+    AppLogs:
+      type: object
+      required: [lines]
+      properties:
+        lines:
+          type: array
+          items: { type: string }
+
+    RemoteStatus:
+      type: object
+      required: [available, networks]
+      properties:
+        available:
+          type: boolean
+          description: zerotier-one kurulu ve çalışıyor mu. DEPSIS onu paketlemiyor.
+        nodeId: { type: [string, 'null'] }
+        online: { type: boolean }
+        version: { type: [string, 'null'] }
+        networks:
+          type: array
+          items: { $ref: '#/components/schemas/RemoteNetwork' }
+
+    RemoteNetwork:
+      type: object
+      required: [networkId, status, authorized, addresses]
+      properties:
+        networkId: { type: string }
+        name: { type: [string, 'null'] }
+        label: { type: [string, 'null'] }
+        status:
+          type: string
+          enum: [OK, ACCESS_DENIED, NOT_FOUND, REQUESTING_CONFIGURATION, PORT_ERROR, AUTHENTICATION_REQUIRED, UNKNOWN]
+        authorized:
+          type: boolean
+          description: |
+            false ise cihaz ağa KATILMIŞ ama ONAYLANMAMIŞTIR ve hiçbir trafik akmaz. Arayüz bunu
+            "bağlanıyor" diye göstermemeli — kullanıcının ZeroTier Central'da bir kutu
+            işaretlemesi gerekiyor.
+        addresses:
+          type: array
+          items: { type: string }
+        joinedAt: { type: [string, 'null'], format: date-time }
+
+    JoinNetworkRequest:
+      type: object
+      required: [networkId]
+      properties:
+        networkId:
+          type: string
+          pattern: '^[0-9a-f]{16}$'
+          description: |
+            Tam 16 onaltılık hane. Ajan tarafında da kendi tipiyle doğrulanıyor; bir yol parçası
+            olarak birleştirilecek bir değerin iki yerde doğrulanması, bir yerde unutulmasından
+            ucuz.
+        label: { type: string, maxLength: 64 }

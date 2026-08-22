@@ -21,11 +21,16 @@ export class SystemController {
   /**
    * GET /system/telemetry — hardware and storage status.
    *
-   * Administrator only. The contract says the response narrows by role; there is no role model to
-   * narrow by yet, so this implements the half that can be implemented honestly — a non-administrator
-   * is refused outright rather than shown a payload trimmed by rules nobody has written down.
-   * Widening this to a narrowed view for ordinary users is a change to make WITH a role model, not
-   * one to improvise here.
+   * Administrator only. The contract says the response narrows by role; nothing here narrows a
+   * payload, so this implements the half that can be implemented honestly — a non-administrator is
+   * refused outright rather than shown a payload trimmed by rules nobody has written down. Showing
+   * ordinary users a narrowed view is a change to make with those rules written down, not one to
+   * improvise here.
+   *
+   * Which administrator: the ONE account in `system_setup`, not everyone with `role = 'admin'`.
+   * That is deliberately noted rather than assumed, because `POST /backups` next door uses
+   * `AdminGuard` and therefore admits a wider set for a more privileged operation. See the note on
+   * `SystemService.isSystemAdministrator` — the two want reconciling as one decision.
    */
   @Get('telemetry')
   async telemetry(@Req() request: AuthenticatedRequest): Promise<Telemetry> {

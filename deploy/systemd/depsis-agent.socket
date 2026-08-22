@@ -39,8 +39,17 @@ SocketMode=0660
 Accept=no
 
 # /run is a tmpfs, so the directory has to be recreated on every boot.
+#
+# RuntimeDirectoryPreserve=yes because depsis-console.socket declares the SAME directory, and
+# systemd does not reference-count runtime directories across units: whichever unit stops first
+# removes /run/depsis and unlinks the other's socket file. The console unit already carries this
+# key; without it here the protection was one-sided, and `systemctl restart depsis-agent.socket`
+# would leave depsis-console.socket reporting itself as listening on a path that no longer exists.
+# The API would then get ENOENT and answer a permanent 503 for a console that is running — the
+# "broken versus switched off" confusion §3 exists to prevent. Both declarers have to agree.
 RuntimeDirectory=depsis
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 
 # Leave nothing behind that a later, differently-configured agent might inherit.
 RemoveOnStop=yes

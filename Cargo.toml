@@ -1,8 +1,10 @@
-# Workspace root. CI runs cargo from here (see .github/workflows/ci.yml), so the manifest has
-# to exist even while system-agent is the only member.
+# Workspace root. CI runs cargo from here (see .github/workflows/ci.yml).
 [workspace]
 resolver = "2"
-members = ["services/system-agent"]
+# Two members, and they are deliberately separate binaries. ADR-0018: the administrator console
+# is its own service so that the privileged agent's operation set can stay closed — §2.2 forbids
+# free-form shell commands there, and a console added to the agent would delete that property.
+members = ["services/system-agent", "services/console"]
 
 [workspace.package]
 edition = "2021"

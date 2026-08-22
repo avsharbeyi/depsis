@@ -13,6 +13,26 @@ import { z } from 'zod';
 export const API_PREFIX = 'api/v1';
 
 /**
+ * Where podman listens when nothing says otherwise.
+ *
+ * The root socket, which is what a distribution package installs and what the development box has.
+ * ADR-0019 wants the rootless one in production (`/run/user/<uid>/podman/podman.sock`) and the
+ * deployment sets `DEPSIS_PODMAN_SOCKET` to it; `GET /apps` reports `runtime.rootless` so that a
+ * box still on this default is visible rather than silently off-ADR.
+ */
+export const PODMAN_SOCKET_DEFAULT = '/run/podman/podman.sock';
+
+/**
+ * Where the administrator console service listens when nothing says otherwise (ADR-0018).
+ *
+ * The socket is created by `depsis-console.socket`, not by either process, and its path is that
+ * unit's `ListenStream=`. The two have to agree, and a constant in the API plus a line in a unit
+ * file is exactly the sort of pair that drifts — which is why this is a default rather than a
+ * hard-coded path, and why the deployment sets `DEPSIS_CONSOLE_SOCKET` when it moves.
+ */
+export const CONSOLE_SOCKET_DEFAULT = '/run/depsis/console.sock';
+
+/**
  * ADR-0001 makes runtime validation mandatory at every boundary, and process.env is a boundary:
  * TypeScript will happily type `process.env.X` as `string | undefined` and then let a `!` silence
  * it. A missing DEPSIS_DATABASE_URL should stop the process at startup with a sentence someone can
@@ -77,6 +97,62 @@ const schema = z.object({
     .optional()
     .transform((value) => (value === undefined || value === '' ? null : value)),
 
+  // The podman socket the application catalogue talks to (ADR-0019).
+  //
+  // A path from configuration rather than a constant, because the path is where the privilege
+  // decision shows up. ADR-0019 puts containers under a rootless `depsis-apps` user, whose socket
+  // is `/run/user/<uid>/podman/podman.sock`; the development box has only the root socket at the
+  // default below. Code that hard-coded either one would make the deployment that got the other a
+  // code change.
+  //
+  // Not optional and not nullable, unlike the agent sockets: an absent socket is indistinguishable
+  // from a podman that is not installed, and both are the same answer — 503 from the endpoints
+  // that need it. A null here would add a second way to say the same thing.
+  DEPSIS_PODMAN_SOCKET: z.string().trim().min(1).default(PODMAN_SOCKET_DEFAULT),
+
+  // Permission to create and start containers through a ROOTFUL podman socket.
+  //
+  // The default above is the root socket, because that is what a distribution package installs —
+  // and ADR-0019's whole privilege argument is that a catalogue container runs as an unprivileged
+  // user. On a rootful socket a container runs as real uid 0 on the host with a user share bound
+  // in rw, so a compromised upstream image is host root. Left as it was, a deployment that simply
+  // never set `DEPSIS_PODMAN_SOCKET` was off-ADR BY OMISSION.
+  //
+  // So the unsafe direction is the one that has to be written down. Absent or anything other than
+  // `1` means no: `/apps` still lists and still stops and removes on a rootful socket, and it
+  // refuses to install or start. Deliberately not `z.coerce.boolean()`, which treats every
+  // non-empty string as true — including `0` and `false`.
+  DEPSIS_PODMAN_ALLOW_ROOTFUL: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => value === '1'),
+
+  // Where the console service listens (ADR-0018).
+  //
+  // Not optional and not nullable, for the reason the podman socket is neither: an absent socket
+  // and a console service that is not running are the same condition and have the same answer, a
+  // 503 from the console endpoints. A null here would be a second way to say "switched off", and
+  // the endpoints would then have two paths to get that answer right.
+  DEPSIS_CONSOLE_SOCKET: z.string().trim().min(1).default(CONSOLE_SOCKET_DEFAULT),
+
+  // Where the share tree is mounted — the same directory the agent opens as its resolution root
+  // (`DEPSIS_SHARES_ROOT` in services/system-agent/src/main.rs).
+  //
+  // The application catalogue needs it because a bind mount into a container is a HOST PATH, and
+  // ADR-0019 will not let that path come from the request. `shares` records a dataset and a name;
+  // the path a container is given is this root joined with the share's name, which is exactly the
+  // path the agent would resolve for the same share. Deriving it any other way would mean two
+  // components disagreeing about where a share lives.
+  //
+  // Optional, because a box before setup has no share tree — installing an app then answers 503
+  // rather than binding a path nobody configured.
+  DEPSIS_SHARES_ROOT: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => (value === undefined || value === '' ? null : value)),
+
   // Which ZFS pools /system/telemetry reports on, comma-separated.
   //
   // Configuration rather than discovery: the agent's operation set is closed and has no "list
@@ -93,6 +169,28 @@ const schema = z.object({
         .map((name) => name.trim())
         .filter((name) => name !== ''),
     ),
+
+  // Which disks /system/telemetry asks the agent for a SMART summary about, comma-separated.
+  //
+  // Configuration for the same reason as DEPSIS_ZFS_POOLS, and not a weaker one: the agent's
+  // operation set is closed and contains `ReadSmartSummary` but no "list disks", so there is
+  // nothing to discover from. Adding a listing operation is a change to the Rust-side contract
+  // (ADR-0006).
+  //
+  // The values are `/dev/disk/by-id` names, NOT `/dev/sdX`. The agent types the operand as a
+  // SafeComponent under that directory and rejects a path outright, which is what closes risk R1:
+  // `sdb` can name a different physical disk after a reboot, so a temperature graphed against it
+  // would silently change subject. Empty means the endpoint reports no disks, which is correct on
+  // a machine nobody has configured them for.
+  DEPSIS_SMART_DISKS: z
+    .string()
+    .optional()
+    .transform((value) =>
+      (value ?? '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter((id) => id !== ''),
+    ),
 });
 
 export interface AppConfig {
@@ -102,7 +200,21 @@ export interface AppConfig {
   agentSocket: string | null;
   agentDataSocket: string | null;
   secretKeyFile: string | null;
+  // The two settings the application catalogue needs. OPTIONAL in the interface although
+  // `loadConfig` always fills them, because both have a usable answer when absent — the podman
+  // socket has a default and an unset share root is a box with no share tree — and because a test
+  // that builds an `AppConfig` literal to exercise something else should not have to name every
+  // setting the appliance has grown. See `PODMAN_SOCKET_DEFAULT`.
+  podmanSocket?: string;
+  /** See `DEPSIS_PODMAN_ALLOW_ROOTFUL`. Absent reads as false, which is the safe direction. */
+  podmanAllowRootful?: boolean;
+  sharesRoot?: string | null;
+  // Optional in the interface for the same reason as the two above: it has a usable answer when
+  // absent, and a test building an `AppConfig` literal for something else should not have to name
+  // every socket the appliance has grown. See `CONSOLE_SOCKET_DEFAULT`.
+  consoleSocket?: string;
   zfsPools: readonly string[];
+  smartDisks: readonly string[];
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -118,7 +230,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     agentSocket: parsed.data.DEPSIS_AGENT_SOCKET,
     agentDataSocket: parsed.data.DEPSIS_AGENT_DATA_SOCKET,
     secretKeyFile: parsed.data.DEPSIS_SECRET_KEY_FILE,
+    podmanSocket: parsed.data.DEPSIS_PODMAN_SOCKET,
+    podmanAllowRootful: parsed.data.DEPSIS_PODMAN_ALLOW_ROOTFUL,
+    consoleSocket: parsed.data.DEPSIS_CONSOLE_SOCKET,
+    sharesRoot: parsed.data.DEPSIS_SHARES_ROOT,
     zfsPools: parsed.data.DEPSIS_ZFS_POOLS,
+    smartDisks: parsed.data.DEPSIS_SMART_DISKS,
   };
 }
 

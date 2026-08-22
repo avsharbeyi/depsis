@@ -273,6 +273,69 @@
         "share",
         "staging_name"
       ]
+    },
+    {
+      "description": "The local node's own identity and reachability: node id, online, daemon version.\n\nReadable by any signed-in user (ADR-0020): a device knowing its own id is not a secret.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "zerotier_status"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "The networks this node has joined, with the authorization status of each.\n\n`ACCESS_DENIED` is the interesting one and it is not an error: it means the device has\njoined and the network's administrator has not ticked the box yet. Reporting that as\n\"connecting\" is how a user concludes the product is broken.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "zerotier_networks"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "Join a network. Admin-only at the API (ADR-0020): joining makes the device visible to\neveryone on that network.",
+      "type": "object",
+      "properties": {
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "op": {
+          "type": "string",
+          "const": "zerotier_join"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "network_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "op": {
+          "type": "string",
+          "const": "zerotier_leave"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "network_id"
+      ]
     }
   ],
   "$defs": {
@@ -288,6 +351,10 @@
     },
     "DatasetName": {
       "description": "A ZFS dataset name, e.g. `tank/depsis/users/1001`.\n\nThe leading-dash check is not paranoia: P0-E's whole point is that `zfs`, `zpool`,\n`smbcacls` and `smartctl` parse their own argv, so an operand that begins with `-` becomes a\nflag even when it arrives as a separate argument. Inserting `--` helps but is not sufficient\nbecause these tools do not all honour it consistently, so the value is rejected outright.",
+      "type": "string"
+    },
+    "NetworkId": {
+      "description": "A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.\n\nIts own type, next to `SafeComponent`, for the same reason and one more. The value is\nCONCATENATED INTO A REQUEST PATH (`/network/<id>`) and into an HTTP request line, so a\n`String` here would have to be remembered at every call site — and the site that forgot\nwould be the one that let `../` reach the local API's router, or a `\\r\\n` split one request\ninto two. A type is a validation nobody can skip.\n\nUppercase is REFUSED rather than folded to lowercase. ZeroTier prints ids in lowercase and\nthe same value is a key in `public.remote_networks`, so accepting two spellings for one\nnetwork means the audit trail and the table can end up holding both, and \"is this the\nnetwork we joined?\" stops being a string comparison.",
       "type": "string"
     },
     "SafeComponent": {
@@ -543,6 +610,100 @@
       ]
     },
     {
+      "description": "The local node. `node_id` is ZeroTier's own address for this machine.",
+      "type": "object",
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "const": "zerotier_status"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "node_id",
+        "online",
+        "version"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "networks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ZeroTierNetwork"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "zerotier_networks"
+        }
+      },
+      "required": [
+        "status",
+        "networks"
+      ]
+    },
+    {
+      "description": "Joined. The network comes back with it because the state right after a join is the one\nthe user most needs to see: usually `REQUESTING_CONFIGURATION`, then `ACCESS_DENIED`\nuntil somebody authorizes the device.",
+      "type": "object",
+      "properties": {
+        "network": {
+          "$ref": "#/$defs/ZeroTierNetwork"
+        },
+        "status": {
+          "type": "string",
+          "const": "zerotier_joined"
+        }
+      },
+      "required": [
+        "status",
+        "network"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "network_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "zerotier_left"
+        }
+      },
+      "required": [
+        "status",
+        "network_id"
+      ]
+    },
+    {
+      "description": "zerotier-one is not installed here, or is not running.\n\nIts own variant rather than `Failed`, and the distinction is the whole point of the\noperation set: DEPSIS does not package ZeroTier (ADR-0020), so \"absent\" is an ordinary\nconfiguration state the UI must be able to name — and the API turns this into 503, not\n500. A fault the operator caused and a fault the operator must fix look nothing alike.",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "zerotier_unavailable"
+        }
+      },
+      "required": [
+        "status",
+        "reason"
+      ]
+    },
+    {
       "type": "object",
       "properties": {
         "reason": {
@@ -574,5 +735,62 @@
         "reason"
       ]
     }
-  ]
+  ],
+  "$defs": {
+    "ZeroTierNetwork": {
+      "description": "One joined network, as the agent reports it.\n\nA typed projection, not the daemon's JSON. Passing the raw object through would make every\nfield ZeroTier ever adds part of the DEPSIS contract, and would put the agent in the position\nof forwarding something it has not read.",
+      "type": "object",
+      "properties": {
+        "addresses": {
+          "description": "The addresses this network assigned to the node, in CIDR form. Empty until the network\nauthorizes the device, which is what makes an empty list here meaningful rather than a\nmissing value.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network_id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ZeroTierNetworkStatus"
+        }
+      },
+      "required": [
+        "network_id",
+        "status",
+        "addresses"
+      ]
+    },
+    "ZeroTierNetworkStatus": {
+      "description": "A joined network's membership state, as ZeroTier reports it.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "OK",
+            "NOT_FOUND",
+            "REQUESTING_CONFIGURATION",
+            "PORT_ERROR",
+            "AUTHENTICATION_REQUIRED"
+          ]
+        },
+        {
+          "description": "Joined, NOT authorized. No traffic flows. The user has to tick a box in ZeroTier\nCentral; until then this is the honest state and it is not a failure.",
+          "type": "string",
+          "const": "ACCESS_DENIED"
+        },
+        {
+          "description": "A status this build does not know. Present so that a newer daemon cannot be mapped onto\n`Ok` — showing an operator a false green is the shortest route to a device that is\nreported connected and is not.",
+          "type": "string",
+          "const": "UNKNOWN"
+        }
+      ]
+    }
+  }
 }}

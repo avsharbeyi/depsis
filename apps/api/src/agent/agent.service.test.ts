@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { unlink } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { EXPECTED_SCHEMA_VERSION } from '@depsis/agent-protocol';
+
 import {
   AgentRefusedError,
   AgentService,
@@ -172,7 +174,7 @@ describe('AgentService, speaking to a real socket', () => {
 
   it('sanitises the envelope before it reaches the agent', async () => {
     const fake = await fakeAgent((_line, _socket, reply) =>
-      reply({ status: 'ok', schema_version: 1 }),
+      reply({ status: 'ok', schema_version: EXPECTED_SCHEMA_VERSION }),
     );
     const agent = new AgentService(fake.path, 2_000);
 
@@ -187,7 +189,7 @@ describe('AgentService, speaking to a real socket', () => {
 
   it('rejects a correlation id that cannot identify anything, without opening a connection', async () => {
     const fake = await fakeAgent((_line, _socket, reply) =>
-      reply({ status: 'ok', schema_version: 1 }),
+      reply({ status: 'ok', schema_version: EXPECTED_SCHEMA_VERSION }),
     );
     const agent = new AgentService(fake.path, 2_000);
 
@@ -199,7 +201,7 @@ describe('AgentService, speaking to a real socket', () => {
   it('makes one call at a time even when callers do not', async () => {
     const fake = await fakeAgent((_line, _socket, reply) => {
       // Answer slowly, so an overlapping request would be visible if one happened.
-      setTimeout(() => reply({ status: 'ok', schema_version: 1 }), 40);
+      setTimeout(() => reply({ status: 'ok', schema_version: EXPECTED_SCHEMA_VERSION }), 40);
     });
     const agent = new AgentService(fake.path, 5_000);
 
@@ -226,7 +228,7 @@ describe('AgentService, speaking to a real socket', () => {
   it('gives up on a silent agent and stays usable afterwards', async () => {
     let answerThis = false;
     const fake = await fakeAgent((_line, _socket, reply) => {
-      if (answerThis) reply({ status: 'ok', schema_version: 1 });
+      if (answerThis) reply({ status: 'ok', schema_version: EXPECTED_SCHEMA_VERSION });
       // Otherwise: accept the line and say nothing at all.
     });
     const agent = new AgentService(fake.path, 150);
@@ -253,7 +255,7 @@ describe('AgentService, speaking to a real socket', () => {
     // No trailing newline. The bytes parse as valid JSON, so a client that simply parsed whatever
     // arrived on 'end' would accept a half-delivered response as a complete one.
     const truncated = await fakeAgent((_line, socket) => {
-      socket.write('{"status":"ok","schema_version":1}');
+      socket.write(`{"status":"ok","schema_version":${EXPECTED_SCHEMA_VERSION}}`);
       setTimeout(() => socket.end(), 25);
     });
     await expect(
@@ -295,7 +297,9 @@ describe('AgentService, speaking to a real socket', () => {
 
 describe('the startup handshake', () => {
   it('marks the agent available only when the versions agree', async () => {
-    const matching = await fakeAgent((_l, _s, reply) => reply({ status: 'ok', schema_version: 1 }));
+    const matching = await fakeAgent((_l, _s, reply) =>
+      reply({ status: 'ok', schema_version: EXPECTED_SCHEMA_VERSION }),
+    );
     const good = new AgentService(matching.path, 2_000);
     expect(good.isAvailable()).toBe(false);
     await good.onModuleInit();
@@ -303,7 +307,11 @@ describe('the startup handshake', () => {
 
     // A stale agent paired with a fresh API parses requests successfully and means something else
     // by them. That has to be caught while somebody is watching a deployment.
-    const stale = await fakeAgent((_l, _s, reply) => reply({ status: 'ok', schema_version: 2 }));
+    // Any number that is not the expected one. Written as an arithmetic offset rather than a
+    // literal so that bumping the protocol cannot silently turn this case into the matching one.
+    const stale = await fakeAgent((_l, _s, reply) =>
+      reply({ status: 'ok', schema_version: EXPECTED_SCHEMA_VERSION - 1 }),
+    );
     const bad = new AgentService(stale.path, 2_000);
     await bad.onModuleInit();
     expect(bad.isAvailable()).toBe(false);
@@ -336,7 +344,7 @@ describe('expectStatus', () => {
   });
 
   it('distinguishes the wrong answer from a refusal', () => {
-    const wrong: AgentResponse = { status: 'ok', schema_version: 1 };
+    const wrong: AgentResponse = { status: 'ok', schema_version: EXPECTED_SCHEMA_VERSION };
     expect(() => expectStatus(wrong, 'created')).toThrow(AgentUnavailableError);
   });
 

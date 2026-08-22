@@ -15,6 +15,7 @@ use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError,
 use crate::transfer::{
     Abandoned, Direction, InsertError, PendingTransfer, TransferRegistry, MAX_PENDING_TRANSFERS,
 };
+use crate::zerotier::{self, ZeroTierError};
 use std::io::Seek;
 use std::sync::Mutex;
 
@@ -39,6 +40,23 @@ pub const STAGING_DIR: [&str; 2] = [".depsis", "staging"];
 
 fn depsis_agent_max_pending() -> usize {
     MAX_PENDING_TRANSFERS
+}
+
+/// Turn a ZeroTier client error into the answer the API needs.
+///
+/// The split IS ADR-0020's third rule. "Not installed" and "not running" are ordinary states of a
+/// box — DEPSIS packages neither ZeroTier nor podman — and the API turns them into 503 with a
+/// card that explains itself. Everything else is a fault: it goes back as an error so that
+/// `handle` audits it as one, because a misconfigured daemon that reports itself as merely absent
+/// is a bug nobody goes looking for.
+fn zerotier_error(e: ZeroTierError) -> Result<Response, SeamError> {
+    if e.is_unavailable() {
+        Ok(Response::ZeroTierUnavailable {
+            reason: e.to_string(),
+        })
+    } else {
+        Err(SeamError::Io(e.to_string()))
+    }
 }
 
 pub struct Agent<'a, R: CommandRunner, S: Sink, P: SafePath> {
@@ -617,6 +635,38 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     shares: shares.len(),
                 })
             }
+
+            // ── ZeroTier (ADR-0020) ──
+            //
+            // No `CommandRunner` and no `zerotier-cli`. The CLI is a thin wrapper over the same
+            // local API, and going through it would mean a fork, an argv, and a text format to
+            // parse — three things the closed operation set exists to avoid — in exchange for
+            // nothing the HTTP call does not already give.
+            Request::ZeroTierStatus {} => match zerotier::status() {
+                Ok(node) => Ok(Response::ZeroTierStatus {
+                    node_id: node.node_id,
+                    online: node.online,
+                    version: node.version,
+                }),
+                Err(e) => zerotier_error(e),
+            },
+
+            Request::ZeroTierNetworks {} => match zerotier::networks() {
+                Ok(networks) => Ok(Response::ZeroTierNetworks { networks }),
+                Err(e) => zerotier_error(e),
+            },
+
+            Request::ZeroTierJoin { network_id } => match zerotier::join(network_id) {
+                Ok(network) => Ok(Response::ZeroTierJoined { network }),
+                Err(e) => zerotier_error(e),
+            },
+
+            Request::ZeroTierLeave { network_id } => match zerotier::leave(network_id) {
+                Ok(()) => Ok(Response::ZeroTierLeft {
+                    network_id: network_id.as_str().to_string(),
+                }),
+                Err(e) => zerotier_error(e),
+            },
         }
     }
 }
@@ -1322,5 +1372,120 @@ mod tests {
             entries.iter().any(|e| e.reason == "upload for job 7"),
             "and carry the caller's reason"
         );
+    }
+
+    // ── ZeroTier ──
+    //
+    // These go through `handle`, so they cover parsing, authorization and audit as well as the
+    // handler. They do NOT require zerotier-one: on a box without it the answer is
+    // `ZeroTierUnavailable`, which is the behaviour worth asserting either way.
+
+    #[test]
+    fn a_malformed_network_id_never_reaches_the_handler() {
+        // The point of `NetworkId`: these are refused at parse time, before authorization, before
+        // audit, and long before anything could be concatenated into a request path.
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        for raw in [
+            r#"{"op":"zerotier_join","network_id":"../../../etc/pas"}"#,
+            r#"{"op":"zerotier_join","network_id":"8056C2E21C000001"}"#,
+            r#"{"op":"zerotier_leave","network_id":"8056c2e21c00000"}"#,
+            r#"{"op":"zerotier_leave","network_id":"0123456789ab\r\ncd"}"#,
+        ] {
+            let resp = h.agent(&r, &s).handle(raw, peer(API_UID), "c-zt", "join");
+            assert!(
+                matches!(resp, Response::Refused { .. }),
+                "{raw} must be refused, got {resp:?}"
+            );
+        }
+        assert!(r.calls.borrow().is_empty(), "nothing may be executed");
+        assert!(
+            s.entries().is_empty(),
+            "an unparseable request has no operation name to audit"
+        );
+    }
+
+    #[test]
+    fn a_status_request_answers_either_the_node_or_that_zerotier_is_absent() {
+        // Never `Failed`. "Switched off" and "broken" are the distinction the operator needs
+        // most (ADR-0020), and this is the assertion that keeps them apart.
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = h.agent(&r, &s).handle(
+            r#"{"op":"zerotier_status"}"#,
+            peer(API_UID),
+            "c-zt-status",
+            "remote access card",
+        );
+        match &resp {
+            Response::ZeroTierStatus { node_id, .. } => assert_eq!(node_id.len(), 10),
+            Response::ZeroTierUnavailable { reason } => assert!(!reason.is_empty()),
+            other => panic!("unexpected answer: {other:?}"),
+        }
+        assert!(
+            s.entries().iter().any(|e| e.operation == "zerotier_status"),
+            "the call must be audited under its own name"
+        );
+        assert!(
+            r.calls.borrow().is_empty(),
+            "the local API is spoken to directly; no process is spawned"
+        );
+    }
+
+    #[test]
+    fn a_networks_request_answers_either_a_list_or_that_zerotier_is_absent() {
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = h.agent(&r, &s).handle(
+            r#"{"op":"zerotier_networks"}"#,
+            peer(API_UID),
+            "c-zt-nets",
+            "remote access card",
+        );
+        assert!(
+            matches!(
+                resp,
+                Response::ZeroTierNetworks { .. } | Response::ZeroTierUnavailable { .. }
+            ),
+            "unexpected answer: {resp:?}"
+        );
+    }
+
+    #[test]
+    fn zerotier_operations_still_require_the_api_uid() {
+        // The agent holds the local API token because it grants network control. A caller that
+        // is not the API must not be able to spend it, and the check is the same one every other
+        // operation gets — which is the reason there is only one.
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        for raw in [
+            r#"{"op":"zerotier_status"}"#,
+            r#"{"op":"zerotier_join","network_id":"8056c2e21c000001"}"#,
+        ] {
+            let resp = h
+                .agent(&r, &s)
+                .handle(raw, peer(1000), "c-zt-deny", "probe");
+            assert!(matches!(resp, Response::Refused { .. }));
+        }
+    }
+
+    #[test]
+    fn a_zerotier_status_request_takes_no_arguments() {
+        // `deny_unknown_fields` on an empty struct variant, and the braces in `ZeroTierStatus {}`
+        // are what make it bite. A unit variant would have accepted the smuggled field.
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = h.agent(&r, &s).handle(
+            r#"{"op":"zerotier_status","path":"/controller/network"}"#,
+            peer(API_UID),
+            "c-zt-smuggle",
+            "attack",
+        );
+        assert!(matches!(resp, Response::Refused { .. }));
     }
 }

@@ -6,7 +6,9 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
   NotFoundException,
+  NotImplementedException,
   Param,
   Patch,
   Post,
@@ -25,12 +27,12 @@ import { z } from 'zod';
 import { AgentDataService } from '../agent/agent-data.service.js';
 import { AgentRefusedError } from '../agent/agent.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
-import { DbService } from '../db/db.service.js';
 import {
   EntryNotFoundError,
   FilesService,
   InvalidNameError,
   NameTakenError,
+  TrashedParentError,
   type FileEntryRow,
 } from './files.service.js';
 
@@ -43,7 +45,22 @@ const createFolderSchema = z.object({
   parentId: z.string().uuid().nullish(),
   name: z.string().min(1).max(255),
 });
-const renameSchema = z.object({ name: z.string().min(1).max(255) });
+
+/**
+ * `UpdateFileRequest`: a rename, a move, or both, with `minProperties: 1`.
+ *
+ * `parentId` is `.nullable().optional()` rather than `.nullish()` because the two absent-looking
+ * values mean opposite things here. Missing means "leave the parent alone"; an explicit `null`
+ * means "move to the share root". Collapsing them would make every rename silently a move.
+ */
+const updateFileSchema = z
+  .object({
+    name: z.string().min(1).max(255).optional(),
+    parentId: z.string().uuid().nullable().optional(),
+  })
+  .refine((body) => body.name !== undefined || body.parentId !== undefined, {
+    message: 'give a name, a parentId, or both',
+  });
 
 /**
  * The file tree.
@@ -58,40 +75,53 @@ const renameSchema = z.object({ name: z.string().min(1).max(255) });
 export class FilesController {
   constructor(
     private readonly files: FilesService,
-    private readonly db: DbService,
     private readonly data: AgentDataService,
   ) {}
 
+  /**
+   * A folder's contents, or the trash.
+   *
+   * The trash is a filter on this route rather than a route of its own, and the contract says why:
+   * `trashed_at` is a column, so the bin has no id and no place in the tree to navigate to. When
+   * it is asked for, `parentId` is ignored rather than combined — a trashed folder's children keep
+   * pointing at it, so "the trash under folder X" would list rows whose own parent is not in the
+   * trash at all, which is not a set any user asked about.
+   */
   @Get()
   async list(
     @Req() request: AuthenticatedRequest,
     @Query('parentId') parentId?: string,
     @Query('cursor') cursor?: string,
     @Query('limit') limit?: string,
+    @Query('trashed') trashed?: string,
   ): Promise<Schemas['FileEntryPage']> {
     const session = requireSession(request);
+    const after = cleanCursor(cursor);
     const share = await this.share(request);
+
+    if (isTrue(trashed)) {
+      return toPage(
+        await this.files.listTrash(session.organizationId, share.id, after, clampLimit(limit)),
+      );
+    }
 
     // A parent from another share, or a trashed one, must read as absent rather than empty: an
     // empty page would tell the caller the folder exists.
     if (parentId !== undefined) {
+      requireUuid(parentId);
       const parent = await this.load(session.organizationId, parentId);
       if (parent.share_id !== share.id || parent.trashed_at !== null) throw new NotFoundException();
     }
 
-    const page = await this.files.list(
-      session.organizationId,
-      share.id,
-      parentId ?? null,
-      cursor ?? null,
-      clampLimit(limit),
+    return toPage(
+      await this.files.list(
+        session.organizationId,
+        share.id,
+        parentId ?? null,
+        after,
+        clampLimit(limit),
+      ),
     );
-
-    return {
-      items: page.items.map(toEntry),
-      ...(page.nextCursor === null ? {} : { nextCursor: page.nextCursor }),
-      hasMore: page.hasMore,
-    };
   }
 
   @Post('folders')
@@ -123,22 +153,100 @@ export class FilesController {
     @Param('id') id: string,
   ): Promise<Schemas['FileEntryDetail']> {
     const session = requireSession(request);
+    requireUuid(id);
     const row = await this.load(session.organizationId, id);
     return { ...toEntry(row), createdAt: row.created_at.toISOString() };
   }
 
+  /**
+   * Rename, and — one day — move.
+   *
+   * The move half is answered 501, and that is a measurement rather than a shortcut. A move has to
+   * change two stores: the row's `parent_id` (plus the derived `path` of the whole subtree) and the
+   * bytes' location inside the share. The second one is the agent's, and the agent's operation set
+   * is closed by ADR-0006 — `services/system-agent/src/op.rs` has `PublishTransfer`, `OpenDownload`
+   * and `DiscardTransfer`, and nothing that renames or relinks an already-published file. There is
+   * no call this controller could make.
+   *
+   * Doing the database half alone would leave the row saying `/a/b/x.txt` while the file sits at
+   * `/c/x.txt`, and `componentsOf` — which walks `parent_id` to build the path the agent resolves —
+   * would then hand `open_download` a path that does not exist. Every download of every moved file
+   * would 404, and an SMB client would still see it in the old folder. That is the "two realities"
+   * split this project refuses, and a 501 the client can show as "not yet" is strictly better than
+   * a 200 that breaks the file.
+   *
+   * What unblocks it: a `MoveEntry { share, from: Vec<SafeComponent>, to: Vec<SafeComponent> }`
+   * operation in the agent, using `renameat2` with `RENAME_NOREPLACE` so it cannot overwrite, and
+   * refusing across shares because ADR-0008 measured `rename(2)` returning `EXDEV` between
+   * datasets.
+   *
+   * UNDOCUMENTED STATUSES, and the contract is the half that is wrong. `depsis.yaml` publishes
+   * 200, 409 and 412 for this operation; this handler can also answer 501 (below), 400 (a body no
+   * schema branch accepts) and 404 (a malformed id, or an entry outside the tenant). Worse, the
+   * document contradicts itself about whether the move exists at all: the path description says
+   * "Taşıma burada değil, /file-operations üzerinden yapılır" while `UpdateFileRequest` describes
+   * `parentId: null` as a move to the share root and promises a 409 for a cross-share target. A
+   * generated client reads one half or the other and cannot be right either way. Editing the
+   * contract is not this file's decision — the owner picks: drop `parentId` from
+   * `UpdateFileRequest` until the agent has `MoveEntry`, or publish 501/400/404 here and align the
+   * description with the schema.
+   *
+   * With `MoveEntry` in place the checks this route still owes are: same share, target is a
+   * folder, target not trashed, target's ancestor chain does not contain the source (a folder moved
+   * under itself makes a cycle that turns a recursive listing into an infinite loop), name free in
+   * the destination, and a recursive `UPDATE` of `path` across the whole subtree in the same
+   * transaction as the `parent_id` change.
+   */
   @Patch(':id')
-  async rename(
+  async update(
     @Req() request: AuthenticatedRequest,
     @Param('id') id: string,
     @Body() body: unknown,
   ): Promise<Schemas['FileEntry']> {
     const session = requireSession(request);
-    const parsed = renameSchema.safeParse(body);
-    if (!parsed.success) throw new BadRequestException('name is required');
+    requireUuid(id);
+    const parsed = updateFileSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new BadRequestException('give a name, a parentId (uuid or null), or both');
+    }
+
+    if (parsed.data.parentId !== undefined) {
+      throw new NotImplementedException(
+        'moving an entry is not available yet: the system agent has no operation that relocates ' +
+          'published bytes, and changing only the database would leave the file unreadable',
+      );
+    }
+
+    // The schema's `minProperties: 1` refinement already guarantees this, but zod expresses that
+    // as a runtime check and not in the inferred type, so `name` is still `string | undefined`
+    // here. Narrowed rather than asserted, because `no-non-null-assertion` is on and — more to the
+    // point — an assertion here would become a lie the day the refinement is edited.
+    const name = parsed.data.name;
+    if (name === undefined) throw new BadRequestException('name is required');
 
     try {
-      return toEntry(await this.files.rename(session.organizationId, id, parsed.data.name));
+      return toEntry(await this.files.rename(session.organizationId, id, name));
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  /**
+   * Take an entry back out of the trash.
+   *
+   * 200 rather than 201: nothing is created, an existing row's `trashed_at` is cleared and the id
+   * the caller already holds keeps working. Nest defaults `@Post` to 201, hence the explicit code.
+   */
+  @Post(':id/restore')
+  @HttpCode(200)
+  async restore(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+  ): Promise<Schemas['FileEntry']> {
+    const session = requireSession(request);
+    requireUuid(id);
+    try {
+      return toEntry(await this.files.restore(session.organizationId, id));
     } catch (error) {
       throw translate(error);
     }
@@ -158,6 +266,7 @@ export class FilesController {
     @Param('id') id: string,
   ): Promise<Schemas['FileEntry']> {
     const session = requireSession(request);
+    requireUuid(id);
     try {
       return toEntry(await this.files.trash(session.organizationId, id, session.userId));
     } catch (error) {
@@ -184,6 +293,7 @@ export class FilesController {
     @Headers('if-range') ifRange?: string,
   ): Promise<void> {
     const session = requireSession(request);
+    requireUuid(id);
     const entry = await this.load(session.organizationId, id);
     if (entry.kind !== 'file' || entry.trashed_at !== null) throw new NotFoundException();
     if (!this.data.isAvailable()) {
@@ -258,14 +368,11 @@ export class FilesController {
   /** The tenant's share. One for now; see `FilesService.defaultShare`. */
   private async share(request: AuthenticatedRequest): Promise<{ id: string; name: string }> {
     const session = requireSession(request);
-    const rows = await this.db.withTenant(session.organizationId, (db) =>
-      db.query<{ slug: string }>(`SELECT slug FROM public.organizations WHERE id = $1`, [
-        session.organizationId,
-      ]),
-    );
-    const slug = rows[0]?.slug;
-    if (slug === undefined) throw new NotFoundException();
-    return this.files.defaultShare(session.organizationId, slug);
+    try {
+      return await this.files.shareOf(session.organizationId);
+    } catch (error) {
+      throw translate(error);
+    }
   }
 }
 
@@ -318,6 +425,63 @@ function parseRange(
   return { start, end };
 }
 
+/**
+ * A service page as the contract's `FileEntryPage`.
+ *
+ * `nextCursor` is omitted rather than sent as null when there is no next page. `exactOptionalPropertyTypes`
+ * forbids assigning `undefined` to an optional property, and the schema does not make the field
+ * nullable — so a client that checks `'nextCursor' in page` gets the right answer.
+ */
+export function toPage(source: {
+  items: FileEntryRow[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}): Schemas['FileEntryPage'] {
+  return {
+    items: source.items.map(toEntry),
+    ...(source.nextCursor === null ? {} : { nextCursor: source.nextCursor }),
+    hasMore: source.hasMore,
+  };
+}
+
+/**
+ * An id that is not a UUID is "no such entry", not a fault.
+ *
+ * Every id in this controller reaches PostgreSQL as a `uuid`, so a mistyped one comes back as
+ * SQLSTATE 22P02 and — with nothing mapping it — surfaces as a 500. That is an error page for a bad
+ * link, and it also distinguishes a malformed id from a well-formed one naming another tenant's
+ * row, which is precisely the distinction RLS exists to erase.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function requireUuid(id: string): void {
+  if (!UUID.test(id)) throw new NotFoundException();
+}
+
+/**
+ * A cursor, checked before it reaches a `::uuid` cast.
+ *
+ * 400 and not 404, unlike an id: the contract says a client never constructs a cursor, only echoes
+ * one the server gave it, so a malformed one is a broken client rather than a missing resource and
+ * saying so is what makes it findable.
+ */
+export function cleanCursor(raw: string | undefined): string | null {
+  if (raw === undefined || raw === '') return null;
+  if (!UUID.test(raw)) throw new BadRequestException('cursor is not one this server issued');
+  return raw;
+}
+
+/**
+ * A query-string boolean.
+ *
+ * Only the two spellings a URL actually carries a `true` as. Anything else — including `1`, `yes`
+ * and an empty `?trashed` — is false, because guessing at a caller's intent here decides whether
+ * they are shown their files or their bin.
+ */
+export function isTrue(raw: string | undefined): boolean {
+  return raw === 'true' || raw === 'TRUE';
+}
+
 function clampLimit(raw: string | undefined): number {
   if (raw === undefined) return DEFAULT_LIMIT;
   const parsed = Number.parseInt(raw, 10);
@@ -359,7 +523,12 @@ export function requireSession(request: AuthenticatedRequest): {
  */
 export function translate(error: unknown): Error {
   if (error instanceof EntryNotFoundError) return new NotFoundException();
-  if (error instanceof NameTakenError) return new ConflictException(error.message);
+  if (error instanceof NameTakenError) {
+    // The message is the whole value of this answer. A bare 409 tells a user their restore failed;
+    // this one tells them the name is taken and that renaming the other file is the way out.
+    return new ConflictException(`${error.message}; rename one of them and try again`);
+  }
+  if (error instanceof TrashedParentError) return new ConflictException(error.message);
   if (error instanceof InvalidNameError) return new BadRequestException(error.message);
   return error instanceof Error ? error : new Error(String(error));
 }

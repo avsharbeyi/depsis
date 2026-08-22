@@ -22,9 +22,16 @@ Documentation=file:///usr/share/doc/depsis/adr/0017-bulk-data-channel.md
 # Bound to the control socket, and both directions of that matter.
 #
 # Requires= + After=: this socket's path lives in /run/depsis, and that directory is created by
-# RuntimeDirectory= in depsis-agent.socket — declared there and ONLY there. Two units declaring
-# the same RuntimeDirectory= is the hazard being avoided: systemd removes it when the unit stops,
-# so whichever stopped first would pull the directory out from under the other.
+# RuntimeDirectory= in depsis-agent.socket — not here. Two units declaring the same
+# RuntimeDirectory= is the hazard: systemd removes it when the unit stops and does not
+# reference-count across units, so whichever stopped first would pull the directory out from under
+# the other. This unit therefore declares none.
+#
+# It is no longer the only declarer on the box: depsis-console.socket declares /run/depsis too,
+# which it has to, because it is not part of this unit's dependency tree and must work when the
+# agent is not installed. Both of those units carry RuntimeDirectoryPreserve=yes so that stopping
+# either one leaves the directory — and the other unit's socket — alone. If a third unit ever
+# declares it, it needs the same key.
 #
 # PartOf=: stopping or restarting the control socket propagates here. Without it an administrator
 # who stops depsis-agent.socket leaves a listening root socket behind whose directory has just

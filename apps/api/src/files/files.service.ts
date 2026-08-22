@@ -55,6 +55,62 @@ export class NameTakenError extends Error {
 }
 
 /**
+ * A restore that would produce an entry nothing can reach.
+ *
+ * The trash is a column, not a folder (0008), so restoring a child clears only that child's
+ * `trashed_at`. Its parent stays trashed, and every listing filters on the PARENT's id — so the
+ * restored row appears in no folder listing and in no trash listing either. It exists, it is
+ * reachable by id, and no screen in the product can show it. Refusing beats manufacturing that.
+ */
+export class TrashedParentError extends Error {
+  constructor(readonly parentName: string) {
+    super(`'${parentName}' is still in the trash; restore it first`);
+    this.name = 'TrashedParentError';
+  }
+}
+
+/** A page of file entries, ordered by whatever the query that produced it decided. */
+export interface FileEntryPage {
+  items: FileEntryRow[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+/**
+ * The columns every list query selects, as one string.
+ *
+ * Written once because the four listing queries have to agree: a column that appears in one and
+ * not another produces a `FileEntryRow` with an undefined field, which TypeScript cannot catch
+ * because the row type is asserted rather than inferred from the database.
+ */
+const ENTRY_COLUMNS = `id, share_id, parent_id, kind, name, path, size_bytes, content_type,
+                       trashed_at, created_at, updated_at`;
+
+/**
+ * Below this many characters a query is matched as a PREFIX rather than as a substring.
+ *
+ * pg_trgm indexes trigrams, so a one- or two-character pattern has no trigram to look up and
+ * `LIKE '%ab%'` degrades to a sequential scan of every name in the share. 0008 anticipated this
+ * and shipped a second index — `file_entries_name_norm_prefix`, a B-tree with `text_pattern_ops` —
+ * for exactly this branch, and `LIKE 'ab%'` is the shape that can use it.
+ */
+const TRIGRAM_MIN_LENGTH = 3;
+
+/**
+ * Turn "limit + 1 rows" into a page.
+ *
+ * Every paged query here asks for one row more than the caller wanted, and that spare row is the
+ * whole answer to `hasMore` — the contract has no total count, because an unfiltered total beside
+ * a filtered list leaks the existence of rows the tenant may not see. The cursor is the last
+ * RETURNED row's id, never the spare one's.
+ */
+function page(rows: FileEntryRow[], limit: number): FileEntryPage {
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+  return { items, nextCursor: hasMore ? (items[items.length - 1]?.id ?? null) : null, hasMore };
+}
+
+/**
  * The same component rules the agent enforces in `op::SafeComponent`.
  *
  * Checked here as well as there, and not because the agent might forget: a name the database would
@@ -133,6 +189,26 @@ export class FilesService {
     });
   }
 
+  /**
+   * The share this caller's tenant works in, resolved from the session's organisation alone.
+   *
+   * Lives here rather than in a controller because two controllers now need it — the tree and
+   * search — and a second copy of "which share am I in" is the kind of duplication that survives
+   * long enough to disagree with itself once share administration lands.
+   */
+  async shareOf(organizationId: string): Promise<ShareRow> {
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ slug: string }>(`SELECT slug FROM public.organizations WHERE id = $1`, [
+        organizationId,
+      ]),
+    );
+    const slug = rows[0]?.slug;
+    // An organisation the session names and RLS cannot see is not a fault to report in detail:
+    // the same 404 the rest of this file gives for a row belonging to somebody else.
+    if (slug === undefined) throw new EntryNotFoundError();
+    return this.defaultShare(organizationId, slug);
+  }
+
   /** One page of a folder's contents. Cursor pagination, because offset silently skips rows. */
   async list(
     organizationId: string,
@@ -140,14 +216,10 @@ export class FilesService {
     parentId: string | null,
     cursor: string | null,
     limit: number,
-  ): Promise<{ items: FileEntryRow[]; nextCursor: string | null; hasMore: boolean }> {
-    // One row more than asked for. That extra row is what answers `hasMore` without a COUNT — and
-    // a COUNT is exactly what the contract forbids, because an unfiltered total beside a filtered
-    // list leaks the existence of rows the tenant may not see.
+  ): Promise<FileEntryPage> {
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<FileEntryRow>(
-        `SELECT id, share_id, parent_id, kind, name, path, size_bytes, content_type,
-                trashed_at, created_at, updated_at
+        `SELECT ${ENTRY_COLUMNS}
            FROM public.file_entries
           WHERE organization_id = $1
             AND share_id = $2
@@ -162,16 +234,13 @@ export class FilesService {
       ),
     );
 
-    const hasMore = rows.length > limit;
-    const items = hasMore ? rows.slice(0, limit) : rows;
-    return { items, nextCursor: hasMore ? (items[items.length - 1]?.id ?? null) : null, hasMore };
+    return page(rows, limit);
   }
 
   async find(organizationId: string, id: string): Promise<FileEntryRow> {
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<FileEntryRow>(
-        `SELECT id, share_id, parent_id, kind, name, path, size_bytes, content_type,
-                trashed_at, created_at, updated_at
+        `SELECT ${ENTRY_COLUMNS}
            FROM public.file_entries
           WHERE organization_id = $1 AND id = $2`,
         [organizationId, id],
@@ -216,8 +285,7 @@ export class FilesService {
           `INSERT INTO public.file_entries
              (organization_id, share_id, parent_id, kind, name, path)
            VALUES ($1, $2, $3, 'folder', $4, $5)
-           RETURNING id, share_id, parent_id, kind, name, path, size_bytes, content_type,
-                     trashed_at, created_at, updated_at`,
+           RETURNING ${ENTRY_COLUMNS}`,
           [organizationId, shareId, parentId, name, `${parentPath}/${name}`],
         ),
       );
@@ -245,8 +313,7 @@ export class FilesService {
           `INSERT INTO public.file_entries
              (organization_id, share_id, parent_id, kind, name, path, size_bytes, content_type)
            VALUES ($1, $2, $3, 'file', $4, $5, $6, $7)
-           RETURNING id, share_id, parent_id, kind, name, path, size_bytes, content_type,
-                     trashed_at, created_at, updated_at`,
+           RETURNING ${ENTRY_COLUMNS}`,
           [
             organizationId,
             shareId,
@@ -278,8 +345,7 @@ export class FilesService {
           `UPDATE public.file_entries
               SET name = $3, path = $4
             WHERE organization_id = $1 AND id = $2
-            RETURNING id, share_id, parent_id, kind, name, path, size_bytes, content_type,
-                      trashed_at, created_at, updated_at`,
+            RETURNING ${ENTRY_COLUMNS}`,
           [organizationId, id, name, `${parentPath}/${name}`],
         ),
       );
@@ -322,18 +388,29 @@ export class FilesService {
    * index deliberately excludes trashed rows so the name is free again the moment something is
    * deleted. If somebody has since taken it, restoring silently under a suffixed name would hide
    * which file is which.
+   *
+   * Restoring something already out of the trash is a no-op rather than an error, so a client that
+   * retries a request whose response it never saw gets the same answer the first attempt gave.
    */
   async restore(organizationId: string, id: string): Promise<FileEntryRow> {
     const entry = await this.find(organizationId, id);
     if (entry.trashed_at === null) return entry;
+
+    // The parent has to be out of the trash first — see `TrashedParentError`. Checked before the
+    // UPDATE and not after, because the alternative is restoring the row and then rolling back a
+    // change the caller may already have been told about.
+    if (entry.parent_id !== null) {
+      const parent = await this.find(organizationId, entry.parent_id);
+      if (parent.trashed_at !== null) throw new TrashedParentError(parent.name);
+    }
+
     try {
       const rows = await this.db.withTenant(organizationId, (db) =>
         db.query<FileEntryRow>(
           `UPDATE public.file_entries
               SET trashed_at = NULL, trashed_by = NULL
             WHERE organization_id = $1 AND id = $2
-            RETURNING id, share_id, parent_id, kind, name, path, size_bytes, content_type,
-                      trashed_at, created_at, updated_at`,
+            RETURNING ${ENTRY_COLUMNS}`,
           [organizationId, id],
         ),
       );
@@ -345,19 +422,121 @@ export class FilesService {
     }
   }
 
-  /** Everything in the trash, newest first. */
-  async listTrash(organizationId: string, limit: number): Promise<FileEntryRow[]> {
-    return this.db.withTenant(organizationId, (db) =>
+  /**
+   * The trash, most recently discarded first, one page at a time.
+   *
+   * Flat and not a tree, because the trash is a column rather than a folder: trashing a directory
+   * sets the flag on that one row and leaves its children pointing at a parent that is no longer
+   * in any listing. Nesting the view would therefore show the children twice or not at all
+   * depending on which row the user happened to delete, so it shows every trashed row at one level.
+   *
+   * The keyset is `(trashed_at, id)` and not `trashed_at` alone. Emptying a folder trashes many
+   * rows inside one statement, and `now()` is fixed for a whole transaction — so a page boundary
+   * that lands in the middle of such a batch would, with a `trashed_at`-only cursor, either repeat
+   * the whole batch or skip the rest of it. The id breaks the tie and is unique by definition.
+   */
+  async listTrash(
+    organizationId: string,
+    shareId: string,
+    cursor: string | null,
+    limit: number,
+  ): Promise<FileEntryPage> {
+    const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<FileEntryRow>(
-        `SELECT id, share_id, parent_id, kind, name, path, size_bytes, content_type,
-                trashed_at, created_at, updated_at
+        `SELECT ${ENTRY_COLUMNS}
            FROM public.file_entries
-          WHERE organization_id = $1 AND trashed_at IS NOT NULL
-          ORDER BY trashed_at DESC
-          LIMIT $2`,
-        [organizationId, limit],
+          WHERE organization_id = $1
+            AND share_id = $2
+            AND trashed_at IS NOT NULL
+            AND ($3::uuid IS NULL
+                 OR (trashed_at, id) < (SELECT trashed_at, id
+                                          FROM public.file_entries
+                                         WHERE id = $3::uuid))
+          ORDER BY trashed_at DESC, id DESC
+          LIMIT $4`,
+        [organizationId, shareId, cursor, limit + 1],
       ),
     );
+
+    return page(rows, limit);
+  }
+
+  /**
+   * Name search across the caller's share.
+   *
+   * Both sides go through `depsis_norm`. Normalising only the stored side is the bug ADR-0010 was
+   * written against: `name_norm` holds `istanbul` for a file called `İstanbul`, so a user who types
+   * the file's own name back gets nothing. The function is the same one the generated column uses,
+   * which is what makes the two comparable at all.
+   *
+   * Ordering is prefix-first and similarity-second, and the pair is deliberate. Trigram similarity
+   * alone ranks a short name containing the query above a long name STARTING with it, so typing
+   * `rapor` puts `x-rapor-y.txt` above `Rapor 2026 Q1.pdf` — the opposite of what someone who is
+   * navigating rather than exploring wants. Prefix is the strong signal; similarity only breaks
+   * the ties inside each of the two groups.
+   *
+   * Matching itself is a plain substring, not the `%` similarity operator. `%` is governed by
+   * `pg_trgm.similarity_threshold`, a session GUC nothing in this codebase sets, so the set of
+   * results would depend on a value an operator can change out from under the API. A substring the
+   * user typed is a result the user can explain.
+   */
+  async search(
+    organizationId: string,
+    shareId: string,
+    scopeId: string | null,
+    query: string,
+    cursor: string | null,
+    limit: number,
+  ): Promise<FileEntryPage> {
+    // `%` and `_` are LIKE wildcards, and a user typing either into a search box means the
+    // character, not "match anything". Escaped here rather than stripped, so searching for a file
+    // whose name genuinely contains one still finds it. The backslash is LIKE's default escape.
+    const escaped = query.replace(/[\\%_]/g, (char) => `\\${char}`);
+    const pattern =
+      query.length < TRIGRAM_MIN_LENGTH
+        ? `public.depsis_norm($7::text) || '%'`
+        : `'%' || public.depsis_norm($7::text) || '%'`;
+
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<FileEntryRow>(
+        // The ranking keys are stored NEGATED — `NOT is_prefix`, `-similarity` — so that all four
+        // sort ascending. That is what lets the cursor be a single row-value comparison; with
+        // mixed directions the keyset predicate has to be expanded into nested ORs, which is the
+        // form that quietly drops or repeats rows when somebody edits it later.
+        `WITH RECURSIVE scope_tree AS (
+           SELECT id
+             FROM public.file_entries
+            WHERE organization_id = $1 AND parent_id = $4::uuid
+           UNION ALL
+           SELECT child.id
+             FROM public.file_entries child
+             JOIN scope_tree ON child.parent_id = scope_tree.id
+            WHERE child.organization_id = $1
+         ),
+         matched AS (
+           SELECT ${ENTRY_COLUMNS}, name_fold,
+                  NOT (name_norm LIKE public.depsis_norm($7::text) || '%') AS rank_prefix,
+                  -public.similarity(name_norm, public.depsis_norm($3::text)) AS rank_score
+             FROM public.file_entries
+            WHERE organization_id = $1
+              AND share_id = $2
+              AND trashed_at IS NULL
+              AND ($4::uuid IS NULL OR id IN (SELECT id FROM scope_tree))
+              AND name_norm LIKE ${pattern}
+         )
+         SELECT ${ENTRY_COLUMNS}
+           FROM matched
+          WHERE ($5::uuid IS NULL
+                 OR (rank_prefix, rank_score, name_fold, id)
+                    > (SELECT rank_prefix, rank_score, name_fold, id
+                         FROM matched WHERE id = $5::uuid))
+          ORDER BY rank_prefix, rank_score, name_fold, id
+          LIMIT $6`,
+        [organizationId, shareId, query, scopeId, cursor, limit + 1, escaped],
+      ),
+    );
+
+    return page(rows, limit);
   }
 
   /**

@@ -156,6 +156,88 @@ impl From<SafeComponent> for String {
     }
 }
 
+/// Why a network id was rejected.
+///
+/// Its own enum rather than a reuse of `ValidationError`, because the two describe different
+/// kinds of value. A dataset name is a name with forbidden characters; a network id is a
+/// fixed-width number. Folding them together would make a fifteen-digit id report "character is
+/// not allowed here", which points the operator at the wrong half of their input.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NetworkIdError {
+    #[error("empty value")]
+    Empty,
+    #[error("a network id is exactly {expected} hex digits; this one is {len} bytes")]
+    WrongLength { len: usize, expected: usize },
+    #[error("uppercase hex digit {ch:?} at byte {at}; a network id is written in lowercase")]
+    Uppercase { at: usize, ch: char },
+    #[error("byte {at} is {ch:?}, which is not a hex digit")]
+    NotHex { at: usize, ch: char },
+}
+
+/// A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.
+///
+/// Its own type, next to `SafeComponent`, for the same reason and one more. The value is
+/// CONCATENATED INTO A REQUEST PATH (`/network/<id>`) and into an HTTP request line, so a
+/// `String` here would have to be remembered at every call site — and the site that forgot
+/// would be the one that let `../` reach the local API's router, or a `\r\n` split one request
+/// into two. A type is a validation nobody can skip.
+///
+/// Uppercase is REFUSED rather than folded to lowercase. ZeroTier prints ids in lowercase and
+/// the same value is a key in `public.remote_networks`, so accepting two spellings for one
+/// network means the audit trail and the table can end up holding both, and "is this the
+/// network we joined?" stops being a string comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct NetworkId(String);
+
+impl NetworkId {
+    /// A ZeroTier network id is a 64-bit number written as 16 hex digits. Not a maximum — the
+    /// exact width, which is why the check is `!=` rather than `>`.
+    pub const LEN: usize = 16;
+
+    pub fn parse(raw: impl Into<String>) -> Result<Self, NetworkIdError> {
+        let s: String = raw.into();
+        if s.is_empty() {
+            return Err(NetworkIdError::Empty);
+        }
+        // Bytes, deliberately. A multi-byte string that happens to be 16 bytes long passes this
+        // check and is then caught digit by digit below, so nothing gets in on a technicality.
+        if s.len() != Self::LEN {
+            return Err(NetworkIdError::WrongLength {
+                len: s.len(),
+                expected: Self::LEN,
+            });
+        }
+        for (at, ch) in s.char_indices() {
+            if matches!(ch, '0'..='9' | 'a'..='f') {
+                continue;
+            }
+            if matches!(ch, 'A'..='F') {
+                return Err(NetworkIdError::Uppercase { at, ch });
+            }
+            return Err(NetworkIdError::NotHex { at, ch });
+        }
+        Ok(Self(s))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for NetworkId {
+    type Error = NetworkIdError;
+    fn try_from(v: String) -> Result<Self, Self::Error> {
+        Self::parse(v)
+    }
+}
+
+impl From<NetworkId> for String {
+    fn from(v: NetworkId) -> Self {
+        v.0
+    }
+}
+
 /// The ACL type a dataset may be created with.
 ///
 /// `Nfsv4` is deliberately ABSENT and unrepresentable. P0-B measured what happens on
@@ -320,6 +402,39 @@ pub enum Request {
         share: SafeComponent,
         staging_name: SafeComponent,
     },
+
+    // ── ZeroTier (ADR-0020) ──
+    //
+    // Four operations, and the set is closed for the same reason the enum as a whole is. A
+    // `ZeroTierRequest { method, path, body }` pass-through would be one variant instead of
+    // four and would cover every future endpoint — which is exactly the argument §2.2 rejects
+    // for shell commands. The agent holds the local API token precisely because that token
+    // grants network control; handing the caller a general way to spend it puts the API back in
+    // charge of what the privileged side does.
+    //
+    // The explicit `rename`s exist because serde's snake_case of `ZeroTierStatus` is
+    // `zero_tier_status`, which reads as a typo in every consumer that has to type it.
+    /// The local node's own identity and reachability: node id, online, daemon version.
+    ///
+    /// Readable by any signed-in user (ADR-0020): a device knowing its own id is not a secret.
+    #[serde(rename = "zerotier_status")]
+    ZeroTierStatus {},
+
+    /// The networks this node has joined, with the authorization status of each.
+    ///
+    /// `ACCESS_DENIED` is the interesting one and it is not an error: it means the device has
+    /// joined and the network's administrator has not ticked the box yet. Reporting that as
+    /// "connecting" is how a user concludes the product is broken.
+    #[serde(rename = "zerotier_networks")]
+    ZeroTierNetworks {},
+
+    /// Join a network. Admin-only at the API (ADR-0020): joining makes the device visible to
+    /// everyone on that network.
+    #[serde(rename = "zerotier_join")]
+    ZeroTierJoin { network_id: NetworkId },
+
+    #[serde(rename = "zerotier_leave")]
+    ZeroTierLeave { network_id: NetworkId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -380,6 +495,38 @@ pub enum Response {
     Discarded {
         existed: bool,
     },
+    /// The local node. `node_id` is ZeroTier's own address for this machine.
+    #[serde(rename = "zerotier_status")]
+    ZeroTierStatus {
+        node_id: String,
+        online: bool,
+        version: String,
+    },
+    #[serde(rename = "zerotier_networks")]
+    ZeroTierNetworks {
+        networks: Vec<ZeroTierNetwork>,
+    },
+    /// Joined. The network comes back with it because the state right after a join is the one
+    /// the user most needs to see: usually `REQUESTING_CONFIGURATION`, then `ACCESS_DENIED`
+    /// until somebody authorizes the device.
+    #[serde(rename = "zerotier_joined")]
+    ZeroTierJoined {
+        network: ZeroTierNetwork,
+    },
+    #[serde(rename = "zerotier_left")]
+    ZeroTierLeft {
+        network_id: String,
+    },
+    /// zerotier-one is not installed here, or is not running.
+    ///
+    /// Its own variant rather than `Failed`, and the distinction is the whole point of the
+    /// operation set: DEPSIS does not package ZeroTier (ADR-0020), so "absent" is an ordinary
+    /// configuration state the UI must be able to name — and the API turns this into 503, not
+    /// 500. A fault the operator caused and a fault the operator must fix look nothing alike.
+    #[serde(rename = "zerotier_unavailable")]
+    ZeroTierUnavailable {
+        reason: String,
+    },
     Refused {
         reason: String,
     },
@@ -388,8 +535,49 @@ pub enum Response {
     },
 }
 
+/// One joined network, as the agent reports it.
+///
+/// A typed projection, not the daemon's JSON. Passing the raw object through would make every
+/// field ZeroTier ever adds part of the DEPSIS contract, and would put the agent in the position
+/// of forwarding something it has not read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ZeroTierNetwork {
+    pub network_id: String,
+    pub name: Option<String>,
+    pub status: ZeroTierNetworkStatus,
+    /// The addresses this network assigned to the node, in CIDR form. Empty until the network
+    /// authorizes the device, which is what makes an empty list here meaningful rather than a
+    /// missing value.
+    pub addresses: Vec<String>,
+}
+
+/// A joined network's membership state, as ZeroTier reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ZeroTierNetworkStatus {
+    Ok,
+    /// Joined, NOT authorized. No traffic flows. The user has to tick a box in ZeroTier
+    /// Central; until then this is the honest state and it is not a failure.
+    AccessDenied,
+    NotFound,
+    RequestingConfiguration,
+    PortError,
+    AuthenticationRequired,
+    /// A status this build does not know. Present so that a newer daemon cannot be mapped onto
+    /// `Ok` — showing an operator a false green is the shortest route to a device that is
+    /// reported connected and is not.
+    Unknown,
+}
+
 /// Bumped whenever `Request` or `Response` changes shape. The API checks it on connect.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// 2 as of the ZeroTier work: `Request` gained four variants and `Response` five, and the point of
+/// the check is that a NEW API against an OLD agent fails at the handshake, while someone is
+/// watching a deployment. Without the bump the pair shakes hands cleanly and the mismatch surfaces
+/// on the first `ZeroTierJoin` as a generic refusal — a message from which nobody concludes "the
+/// agent binary is stale". `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it;
+/// they are one number in two languages.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[cfg(test)]
 mod deny_unknown_tests {
@@ -483,6 +671,131 @@ mod tests {
         assert_eq!(
             SafeComponent::parse(".."),
             Err(ValidationError::ContainsDotDot)
+        );
+    }
+
+    // ── NetworkId ──
+    //
+    // Every rejection below has its own case, because this value is concatenated into a request
+    // path and an HTTP request line. A single "invalid" test would pass just as happily with a
+    // parser that only checked the length.
+
+    #[test]
+    fn network_id_accepts_a_real_id() {
+        let id = NetworkId::parse("8056c2e21c000001").expect("a real ZeroTier network id");
+        assert_eq!(id.as_str(), "8056c2e21c000001");
+        assert!(NetworkId::parse("ffffffffffffffff").is_ok());
+        assert!(NetworkId::parse("0000000000000000").is_ok());
+    }
+
+    #[test]
+    fn network_id_rejects_empty() {
+        assert_eq!(NetworkId::parse(""), Err(NetworkIdError::Empty));
+    }
+
+    #[test]
+    fn network_id_rejects_fifteen_and_seventeen_digits() {
+        assert_eq!(
+            NetworkId::parse("8056c2e21c00000"),
+            Err(NetworkIdError::WrongLength {
+                len: 15,
+                expected: 16
+            })
+        );
+        assert_eq!(
+            NetworkId::parse("8056c2e21c0000011"),
+            Err(NetworkIdError::WrongLength {
+                len: 17,
+                expected: 16
+            })
+        );
+    }
+
+    #[test]
+    fn network_id_rejects_uppercase_rather_than_folding_it() {
+        // Not a style rule. Two spellings of one id mean two rows in `remote_networks` and an
+        // audit trail where "did we join this?" is no longer a string comparison.
+        assert_eq!(
+            NetworkId::parse("8056C2E21C000001"),
+            Err(NetworkIdError::Uppercase { at: 4, ch: 'C' })
+        );
+    }
+
+    #[test]
+    fn network_id_rejects_non_hex_digits() {
+        assert_eq!(
+            NetworkId::parse("8056c2e21c00000g"),
+            Err(NetworkIdError::NotHex { at: 15, ch: 'g' })
+        );
+        // Sixteen bytes of multi-byte text: the length check passes and the digit check is what
+        // catches it, which is the case a `len() == 16` parser gets wrong.
+        assert!(matches!(
+            NetworkId::parse("ααααααββββββγγγγ".get(..16).unwrap_or_default()),
+            Err(NetworkIdError::NotHex { .. })
+        ));
+    }
+
+    #[test]
+    fn network_id_rejects_a_path_fragment_and_a_nul() {
+        // Both are exactly sixteen bytes, so only the digit check stands between them and a
+        // request path. `../` in an id would address a different endpoint of the local API;
+        // a NUL would be truncated by whatever C string it eventually reached.
+        assert_eq!(
+            NetworkId::parse("../../../etc/pas"),
+            Err(NetworkIdError::NotHex { at: 0, ch: '.' })
+        );
+        assert_eq!(
+            NetworkId::parse("0123456789abcd\0f"),
+            Err(NetworkIdError::NotHex { at: 14, ch: '\0' })
+        );
+        // And a header split, which is what a request line concatenation is really exposed to.
+        assert!(NetworkId::parse("0123456789ab\r\ncd").is_err());
+        assert!(NetworkId::parse("0123456789abc de").is_err());
+    }
+
+    #[test]
+    fn a_request_carrying_a_bad_network_id_does_not_deserialize() {
+        for json in [
+            r#"{"op":"zerotier_join","network_id":"../../../etc/pas"}"#,
+            r#"{"op":"zerotier_join","network_id":"8056C2E21C000001"}"#,
+            r#"{"op":"zerotier_join","network_id":""}"#,
+            r#"{"op":"zerotier_leave","network_id":"8056c2e21c00000"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Request>(json).is_err(),
+                "{json} must not deserialize"
+            );
+        }
+        assert!(serde_json::from_str::<Request>(
+            r#"{"op":"zerotier_join","network_id":"8056c2e21c000001"}"#
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn there_is_no_general_zerotier_proxy_variant() {
+        // The network-shaped version of `there_is_no_raw_command_variant`. If somebody adds a
+        // pass-through to the local API, one of these starts parsing and this test fails.
+        for json in [
+            r#"{"op":"zerotier_request","path":"/controller/network"}"#,
+            r#"{"op":"zerotier","method":"POST","path":"/moon","body":"{}"}"#,
+            r#"{"op":"zerotier_status","path":"/status"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Request>(json).is_err(),
+                "{json} must not deserialize"
+            );
+        }
+        assert!(serde_json::from_str::<Request>(r#"{"op":"zerotier_status"}"#).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_network_status_stays_unknown_on_the_wire() {
+        let json = serde_json::to_string(&ZeroTierNetworkStatus::AccessDenied).expect("serialize");
+        assert_eq!(json, r#""ACCESS_DENIED""#);
+        assert_eq!(
+            serde_json::to_string(&ZeroTierNetworkStatus::Ok).expect("serialize"),
+            r#""OK""#
         );
     }
 

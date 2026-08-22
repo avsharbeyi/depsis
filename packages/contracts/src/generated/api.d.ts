@@ -691,6 +691,12 @@ export interface paths {
                 query?: {
                     /** @description Yoksa kullanıcının kökleri döner. */
                     parentId?: string;
+                    /**
+                     * @description Doğruysa çöp kutusu listelenir ve `parentId` yok sayılır. Çöp bir klasör değil bir
+                     *     sütun (0008: `trashed_at`), yani ağaçta gezilecek bir yeri yok; ayrı bir uç nokta
+                     *     yerine bir süzgeç olması da bu yüzden.
+                     */
+                    trashed?: boolean;
                     /** @description Opak. İstemci bunu üretmez ve ayrıştırmaz; kodlaması sunucuya aittir. */
                     cursor?: components["parameters"]["Cursor"];
                     limit?: components["parameters"]["Limit"];
@@ -847,7 +853,7 @@ export interface paths {
         head?: never;
         /**
          * Yeniden adlandır
-         * @description Taşıma burada değil, /file-operations üzerinden yapılır — taşımada hem kaynak
+         * @description Taşıma da burada: `parentId` alanı aynı satırın diğer kolonu ve dosya sistemi tarafında da tek bir rename(2). PAYLAŞIMLAR ARASI taşıma burada değil — dataset sınırını geçen bir rename EXDEV veriyor (ADR-0008) ve kopyala+sil işine dönüşmesi gerek; o /file-operations — taşımada hem kaynak
          *     hem hedef yetkisi gerekir (§6.2).
          */
         patch: {
@@ -865,7 +871,7 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["RenameRequest"];
+                    "application/json": components["schemas"]["UpdateFileRequest"];
                 };
             };
             responses: {
@@ -878,8 +884,11 @@ export interface paths {
                         "application/json": components["schemas"]["FileEntry"];
                     };
                 };
+                400: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
                 409: components["responses"]["Problem"];
                 412: components["responses"]["Problem"];
+                501: components["responses"]["Problem"];
             };
         };
         trace?: never;
@@ -1270,6 +1279,1184 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Kendi notlarını listele
+         * @description Notlar yazarına özeldir. Bu, paylaşımlı bir not tahtasının daha kullanışlı olmadığı için
+         *     değil — kimin kimin notunu okuyabileceği bir ACL sorusudur ve §6.2 Faz 2'dedir. İki
+         *     seçenek arasından kimseyi şaşırtamayacak olan seçildi.
+         *
+         *     Sayfalama yok: bir kişinin not sayısı, bir klasörün dosya sayısı gibi büyümüyor.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Notlar */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["NotePage"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /** Not oluştur */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateNoteRequest"];
+                };
+            };
+            responses: {
+                /** @description Oluşturuldu */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Note"];
+                    };
+                };
+                422: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Notu sil
+         * @description Kalıcı. Bir notun çöp kutusu yok; metni saklamaya değecek bir bayt değil.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Silindi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Notu düzenle
+         * @description Yalnız yazarı. Başkasının notu 404 döner, 403 değil: 403 o notun var olduğunu söyler ve
+         *     bir kiracının içinde bile "hangi notlar var" bir sızıntıdır.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateNoteRequest"];
+                };
+            };
+            responses: {
+                /** @description Güncellendi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Note"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        trace?: never;
+    };
+    "/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * İş panosu
+         * @description Notların aksine PAYLAŞIMLI, ve bu tutarsızlık değil: bir iş birine atanır, ve göremediği
+         *     bir iş atanmış sayılmaz. Pano organizasyondaki herkese açıktır.
+         *
+         *     Tamamlananlar da döner — `doneAt` ile ayırt edilir. Filtreleme istemcinin işi, çünkü
+         *     "bugün neyi bitirdik" panonun cevaplaması gereken sorulardan biri.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description İşler */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskPage"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /** İş ekle */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateTaskRequest"];
+                };
+            };
+            responses: {
+                /** @description Oluşturuldu */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Task"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** İşi sil */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Silindi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** İşi güncelle — metin, atanan, tamamlanma, sıra */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateTaskRequest"];
+                };
+            };
+            responses: {
+                /** @description Güncellendi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Task"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        trace?: never;
+    };
+    "/me/preferences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Arayüz tercihleri
+         * @description Arka plan seçimi, ses, ve ana ekrandaki kısayolların yerleşimi. Sunucuda tutulur çünkü
+         *     localStorage bir tarayıcıya aittir: telefondan giren aynı kişi kendi masasını bulmalı.
+         *
+         *     Hiç yazılmamışsa boş bir belge döner, 404 değil — "tercih yok" bir hata değil, varsayılan.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Tercihler */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Preferences"];
+                    };
+                };
+            };
+        };
+        /**
+         * Arayüz tercihlerini yaz
+         * @description Tamamını değiştirir, birleştirmez. Kısmi birleştirme, iki sekmenin birbirinin kısayol
+         *     yerleşimini yarım yazması demek olurdu.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["Preferences"];
+                };
+            };
+            responses: {
+                /** @description Yazıldı */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Preferences"];
+                    };
+                };
+                422: components["responses"]["Problem"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transfers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Süren ve yakın zamanda biten aktarımlar
+         * @description `upload_sessions` tablosundan okunur; ayrı bir kayıt tutulmaz. Bu, listenin
+         *     SUNUCUNUN bildiği aktarımları gösterdiği anlamına gelir — başka bir sekmede başlayan bir
+         *     yükleme de burada görünür, ki bir aktarım listesinin varlık sebebi tam olarak budur.
+         *
+         *     İndirmeler burada YOK: indirme tek bir HTTP isteği ve sunucu tarafında durumu yok.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Aktarımlar */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TransferPage"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * DEPSIS'in aldığı anlık görüntüler
+         * @description Havuzdaki anlık görüntülerin listesi DEĞİL, ve bu fark önemli. Ajanın işlem kümesi kapalı
+         *     (ADR-0006) ve içinde `CreateSnapshot` ile `DiffSnapshots` var ama "listele" yok. Biri
+         *     Rust tarafına o işlemi ekleyene kadar dürüstçe gösterilebilecek şey, DEPSIS'in kendi
+         *     aldıklarının kaydıdır. Kabuktan alınmış bir anlık görüntü burada görünmez ve arayüz bunu
+         *     söylemek zorundadır.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Anlık görüntüler */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SnapshotPage"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        /**
+         * Anlık görüntü al
+         * @description Yalnız yöneticiler. Ajanın `CreateSnapshot` işlemi çağrılır; ajan doğrularsa satır yazılır.
+         *     Sıra bu yönde: önce satır yazıp sonra ajanı çağırmak, ajan reddettiğinde var olmayan bir
+         *     yedeği listeleyen bir kayıt bırakırdı.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /**
+                     * @description Kullanıcı ve uç kapsamında benzersiz. Aynı anahtar farklı bir istek parmak iziyle
+                     *     gelirse 409 döner. RFC yoktur — IETF taslağı Expired and archived durumundadır — bu
+                     *     yüzden semantik burada tanımlanır (ADR-0008).
+                     */
+                    "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateSnapshotRequest"];
+                };
+            };
+            responses: {
+                /** @description Alındı */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Snapshot"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Kararlı dosya kimliği. Yol asla kimlik olarak kullanılmaz (ADR-0005). */
+                id: components["parameters"]["FileId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Çöp kutusundan geri al
+         * @description Geri alma, adın hâlâ boş olmasını gerektirir: çöpe atılmış bir dosya adını rehin tutmaz
+         *     (0008'deki kısmi benzersizlik indeksleri), yani aynı adla yenisi oluşturulmuş olabilir.
+         *     Böyle bir durumda 409 döner ve kullanıcıdan yeniden adlandırması beklenir — sessizce
+         *     "(1)" eklemek, iki dosyadan hangisinin hangisi olduğunu kimsenin bilemeyeceği yerdir.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Kararlı dosya kimliği. Yol asla kimlik olarak kullanılmaz (ADR-0005). */
+                    id: components["parameters"]["FileId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Geri alındı */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["FileEntry"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/console": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Açık konsol oturumları
+         * @description Yalnız yöneticiler. Bir yöneticinin "şu an kimin kabuğu açık" sorusu.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Oturumlar */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ConsoleSessionPage"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        /**
+         * Yönetici konsolu oturumu aç
+         * @description ADR-0018. Üç kapı: yönetici rolü, mevcut parola, ve süre sınırı.
+         *
+         *     Parola oturum zaten varken de isteniyor. Bir oturum, birinin açık bıraktığı bilgisayarı
+         *     ödünç alanın sahip olduğu şeydir; bir kabuk ise cihazın tamamıdır. Parola değişikliğinde
+         *     aynı gerekçeyle aynı şey yapılıyor.
+         *
+         *     Konsol AYRICALIKLI AJANDA ÇALIŞMAZ. Kendi systemd birimi olan ayrı bir servis, varsayılan
+         *     olarak ayrıcalıksız bir kullanıcıyla. §2.2'nin "aracı serbest komut kabul etmemeli"
+         *     kuralı bozulmadı; aracı bu işin hiçbir yerinde yok.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["OpenConsoleRequest"];
+                };
+            };
+            responses: {
+                /** @description Oturum açıldı */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ConsoleSession"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                401: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/console/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Oturumu kapat */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Kapatıldı */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/console/{id}/input": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Konsola tuş gönder
+         * @description Gövde ham metindir, satır değil: bir terminal karakter karakter çalışır ve Ctrl-C,
+         *     sekme tamamlama, ok tuşları hep bayt dizileridir. Satır bazlı bir uç, terminal olmazdı.
+         *
+         *     Denetim için satırlar ayrıca toplanır (`console_commands`), ama bu uç noktanın işi değil —
+         *     konsol servisi tam bir satır gördüğünde yazar.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ConsoleInput"];
+                };
+            };
+            responses: {
+                /** @description İletildi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                /** @description Oturum kapanmış — boşta kalma süresi ya da üst sınır. */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProblemDetails"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/console/{id}/resize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pencere boyutunu bildir
+         * @description Pty'nin satır/sütun sayısı. Bildirilmezse `top` ve `vim` yanlış boyutta çizer ve satır
+         *     kaydırma bozulur — bir terminalin gerçekten terminal olup olmadığı buradan anlaşılır.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ConsoleResize"];
+                };
+            };
+            responses: {
+                /** @description Bildirildi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/console/{id}/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Konsol çıktısı (Server-Sent Events)
+         * @description WebSocket değil. Nest'te SSE çerçevede zaten var, WS ise bir gateway ve ek bağımlılık
+         *     istiyor; bir terminalin gecikme bütçesi insan yazma hızı ve SSE bunun için fazlasıyla
+         *     yeterli. Tek yönlü olması eksiklik değil — giriş zaten ayrı ve küçük bir istek.
+         *
+         *     Her olay bir `data:` satırı; içerik base64, çünkü terminal çıktısı UTF-8 sınırlarını
+         *     ortadan bölebilen ham bayttır ve SSE metin taşır.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Olay akışı */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/event-stream": string;
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Uygulama kataloğu ve kurulu olanlar
+         * @description ADR-0019. Katalog küratörlüdür: kullanıcı imaj adı yazamaz. Serbest imaj adı, kullanıcının
+         *     internetten indirilen keyfi kodu çalıştırabilmesi demektir.
+         *
+         *     Her satırın durumu podman'dan OKUNUR, veritabanından değil. Bir kolona yazılsaydı cihaz
+         *     yeniden başladığında yalan söylerdi.
+         *
+         *     GET /apps HER ZAMAN 200 döner — podman kurulu olmasa bile. Katalog veritabanında duruyor
+         *     ve onu listelemek için çalışma zamanı gerekmiyor; kurulu uygulamaların durumu ise
+         *     `unknown` olur ve `runtime.available` false gelir.
+         *
+         *     Önceki hâlinde burada bir 503 yayımlanmıştı ve o dal artık ulaşılamaz. Ulaşılamaz bir
+         *     durum kodunu belgede bırakmak, belgelenmemiş bir koddan daha kötü: istemci onun için bir
+         *     dal yazar ve o dal hiç çalışmaz. Aynı karar `GET /remote` için de verildi, aynı gerekçeyle.
+         *
+         *     Değiştiren uçlar (kur/başlat/durdur/kaldır) 503 döndürmeye devam eder: orada yapılamayan
+         *     gerçek bir iş var.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /**
+                 * @description Uygulamalar. `runtime.available` false ise konteyner çalışma zamanı yok ve kurulu
+                 *     uygulamaların durumu `unknown`'dır.
+                 */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AppPage"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/{slug}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Uygulamayı kur
+         * @description Yalnız yöneticiler. İmaj indirilir ve konteyner oluşturulur; bağlama noktaları KATALOGDAN
+         *     gelir, istekten değil. İstek yalnızca hangi paylaşımın hangi hedefe bağlanacağını seçer.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["InstallAppRequest"];
+                };
+            };
+            responses: {
+                /** @description Kuruldu */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["App"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        /**
+         * Uygulamayı kaldır
+         * @description Konteyner silinir. BAĞLANAN PAYLAŞIMLARA VE İÇERİKLERİNE DOKUNULMAZ — bir uygulamayı
+         *     kaldırmanın kullanıcının fotoğraflarını silmesi, bu üründe olabilecek en kötü şeylerden
+         *     biri. Podman'a `v=false` geçilir, yani hiçbir volume kaldırılmaz.
+         *
+         *     HİÇBİR VERİ SİLİNMEZ, uygulamanın kendi ayarları dahil: katalogdaki `/config` ve `/data`
+         *     gibi hedefler volume değil, kullanıcının seçtiği paylaşıma bind mount. Belgenin önceki
+         *     hâli ayar biriminin silindiğini söylüyordu ve bu doğru değildi — silinmiş bir şeyi
+         *     söylemekten daha kötü olan tek şey, silinmediği hâlde silindiğini söylemek.
+         *
+         *     Yanıt gövdesizdir (204), yani "ne silindi" diye anlatacağı bir yer de yok.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Kaldırıldı */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Başlat veya durdur */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AppStateRequest"];
+                };
+            };
+            responses: {
+                /** @description Uygulandı */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["App"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        trace?: never;
+    };
+    "/apps/{slug}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Uygulamanın son günlük satırları
+         * @description "Neden çalışmıyor" sorusunun tek dürüst cevabı çoğu zaman burada. Günlük olmadan bir
+         *     uygulama kataloğu, çalışmadığında yapılacak hiçbir şey bırakmaz.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    lines?: number;
+                };
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Günlük */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AppLogs"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Uzak erişim durumu
+         * @description ADR-0020. Düğüm kimliği ve katılınan ağlar. Her kullanıcı görebilir — kendi cihazının
+         *     kimliğini bilmek bir sır değil.
+         *
+         *     Bir ağın `authorized` alanı false ise cihaz o ağa KATILMIŞ ama ONAYLANMAMIŞTIR ve hiçbir
+         *     trafik akmaz. Arayüz bunu "bağlanıyor" diye göstermemeli: kullanıcının ZeroTier Central'da
+         *     bir kutu işaretlemesi gerekiyor ve bunu bilmezse ürünü bozuk sanar.
+         *
+         *     Bu uç HER ZAMAN 200 döner — daemon kurulu değilse de. Belgenin önceki hâli hem 503 hem de
+         *     `available` bayrağı tarif ediyordu ve ikisi aynı anda doğru olamaz; uygulayan ajan da bunu
+         *     bir çelişki olarak bildirdi.
+         *
+         *     200 seçildi çünkü ZeroTier'in KURULU OLMAMASI bir arıza değil, bir durum: cihazın
+         *     çoğunluğu onsuz çalışıyor ve DEPSIS onu paketlemiyor. Bir arayüz kartının "uzak erişim
+         *     kurulu değil, şöyle kurulur" yazabilmesi için okunabilir bir cevap gerekiyor, hata değil.
+         *     Bunun `/system/telemetry`'nin 503'üyle çeliştiği doğru ama sebebi var: depolama ajanının
+         *     yokluğu GERÇEKTEN bir arıza — havuzsuz bir NAS çalışmıyor demektir.
+         *
+         *     Değiştiren uçlar (katıl/ayrıl) 503 döndürmeye devam eder: orada yapılamayan gerçek bir iş var.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /**
+                 * @description Durum. `available: false` ise zerotier-one kurulu değil ya da çalışmıyor ve diğer
+                 *     alanlar boştur.
+                 */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RemoteStatus"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/networks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ağa katıl
+         * @description Yalnız yöneticiler: bir ağa katılmak cihazı o ağdaki herkese görünür kılar ve bu bir
+         *     yönetim kararı.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["JoinNetworkRequest"];
+                };
+            };
+            responses: {
+                /** @description Katılındı — onay bekleniyor olabilir */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RemoteNetwork"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/networks/{networkId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                networkId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Ağdan ayrıl */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    networkId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ayrılındı */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1514,6 +2701,27 @@ export interface components {
             parentId?: string;
             name: components["schemas"]["FileName"];
         };
+        /**
+         * @description Yeniden adlandırma ve taşıma tek uçta, çünkü ikisi de aynı satırın aynı iki kolonu:
+         *     `name` ve `parent_id`. Dosya sistemi tarafında da tek bir rename(2) çağrısı.
+         *
+         *     Taşıma AYNI PAYLAŞIM içinde. Paylaşımlar arası taşıma bir rename DEĞİL — ölçüldüğü üzere
+         *     dataset'ler arası rename(2) EXDEV veriyor (ADR-0008) — ve kopyala+sil işine dönüşmesi
+         *     gerekir; o iş /file-operations'ın konusu ve henüz yazılmadı. Başka bir paylaşımın
+         *     klasörüne taşıma isteği 409 döner, sessizce yanlış yere koymaz.
+         */
+        UpdateFileRequest: {
+            name?: components["schemas"]["FileName"];
+            /**
+             * Format: uuid
+             * @description null, paylaşımın köküne taşır.
+             */
+            parentId?: string | null;
+        };
+        /**
+         * @deprecated
+         * @description UpdateFileRequest ile değiştirildi. Üretilmiş istemcilerin kırılmaması için duruyor.
+         */
         RenameRequest: {
             name: components["schemas"]["FileName"];
         };
@@ -1560,6 +2768,12 @@ export interface components {
                 /** Format: int64 */
                 usedBytes?: number;
             };
+            /**
+             * @description Ajanın `ReadSmartSummary` işleminden. Hangi disklerin sorulacağı yapılandırmadan
+             *     gelir, keşiften değil — havuz adlarıyla aynı gerekçe: ajanın işlem kümesi kapalı ve
+             *     içinde "diskleri listele" yok, eklemek Rust tarafındaki sözleşmeyi değiştirmek demek.
+             */
+            disks?: components["schemas"]["DiskStatus"][];
         };
         PoolStatus: {
             name: string;
@@ -1572,6 +2786,277 @@ export interface components {
             /** Format: int64 */
             usedBySnapshots?: number;
             scrubState?: string;
+        };
+        Note: {
+            /** Format: uuid */
+            id: string;
+            title: string;
+            body: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        NotePage: {
+            items: components["schemas"]["Note"][];
+        };
+        CreateNoteRequest: {
+            title: string;
+            body?: string;
+        };
+        UpdateNoteRequest: {
+            title?: string;
+            body?: string;
+        };
+        Task: {
+            /** Format: uuid */
+            id: string;
+            body: string;
+            /** Format: uuid */
+            assigneeId: string | null;
+            assigneeUsername?: string | null;
+            /** Format: date-time */
+            doneAt: string | null;
+            position: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        TaskPage: {
+            items: components["schemas"]["Task"][];
+        };
+        CreateTaskRequest: {
+            body: string;
+            /** Format: uuid */
+            assigneeId?: string | null;
+        };
+        UpdateTaskRequest: {
+            body?: string;
+            /** Format: uuid */
+            assigneeId?: string | null;
+            done?: boolean;
+            position?: number;
+        };
+        /**
+         * @description Arayüz tercihleri. Şema BİLEREK dar: sunucu bu belgeyi doğruluyor ve tanımadığı bir alan
+         *     reddediliyor. Doğrulanmayan bir jsonb kolonu, biri okuyana kadar bozuk durumun biriktiği
+         *     yerdir; arayüz her değiştiğinde bir migration yazmamak için jsonb seçildi, sınırsız çöp
+         *     kabul etmek için değil.
+         */
+        Preferences: {
+            /**
+             * @description `kind` ne olduğunu, diğer iki alan hangisi olduğunu söyler ve BOŞ BIRAKILAMAZLAR:
+             *     `solid` ise `preset`, `file` ise `fileId` zorunlu. Şema bunu tek başına ifade
+             *     edemiyor (oneOf ile edilebilirdi ama üretilmiş istemciyi okunmaz hâle getirirdi),
+             *     o yüzden burada yazılı: eksik bırakan istek 422 alır.
+             *
+             *     `fileId` çöpteki bir kayda ya da bir klasöre işaret edemez — arayüzün her açılışta
+             *     404 veren bir arka plan istemesi, sessizce bozuk bir tercihtir.
+             */
+            background?: {
+                /** @enum {string} */
+                kind: "sky" | "solid" | "file";
+                preset?: string;
+                /** Format: uuid */
+                fileId?: string;
+            };
+            sound?: boolean;
+            shortcuts?: {
+                id: string;
+                label?: string;
+                cell: number;
+            }[];
+        };
+        Transfer: {
+            /** Format: uuid */
+            id: string;
+            filename: string;
+            /** Format: int64 */
+            lengthBytes: number;
+            /** Format: int64 */
+            offsetBytes: number;
+            /**
+             * @description `stalled`, sunucunun bir yargısı: son yazmadan bu yana bir dakikadan fazla geçmiş bir
+             *     yükleme. Tarayıcı sekmesi kapandığında yükleme "bitmiş" görünmesin diye var — bir
+             *     aktarım listesinin en çok işe yaradığı an, bir aktarımın durduğu andır.
+             * @enum {string}
+             */
+            state: "active" | "stalled" | "completed";
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        TransferPage: {
+            items: components["schemas"]["Transfer"][];
+        };
+        Snapshot: {
+            /** Format: uuid */
+            id: string;
+            dataset: string;
+            name: string;
+            fullName: string;
+            createdBy?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        SnapshotPage: {
+            items: components["schemas"]["Snapshot"][];
+            /**
+             * @description Her zaman false. Ajanda "anlık görüntüleri listele" işlemi yok, yani bu liste havuzun
+             *     envanteri değil DEPSIS'in kendi kaydı. Alan bir yer tutucu değil: istemcinin bunu
+             *     kullanıcıya söylemesi gerekiyor ve söylemesi gerektiğini sözleşmeden öğrenmeli.
+             */
+            complete: boolean;
+        };
+        CreateSnapshotRequest: {
+            dataset: string;
+            /** @description Yoksa sunucu zaman damgasından üretir. */
+            name?: string;
+        };
+        DiskStatus: {
+            /**
+             * @description /dev/disk/by-id altındaki kararlı ad. `/dev/sdX` DEĞİL — ajan onu yapı gereği
+             *     reddediyor, çünkü sdX yeniden başlatmada başka bir diski gösterebilir (risk R1).
+             */
+            id: string;
+            healthy: boolean;
+            temperatureCelsius?: number;
+        };
+        OpenConsoleRequest: {
+            /** @description Mevcut parola. Oturum varken de isteniyor (ADR-0018). */
+            password: string;
+            /** @default 80 */
+            cols: number;
+            /** @default 24 */
+            rows: number;
+        };
+        ConsoleSession: {
+            /** Format: uuid */
+            id: string;
+            username: string;
+            /**
+             * @description Konsolun root olarak çalışıp çalışmadığı. Varsayılan false ve açmak birim dosyasını
+             *     elle düzenlemeyi gerektirir — bir onay kutusuyla açılabilen root kabuk, kaza ile
+             *     açılabilen root kabuktur.
+             */
+            privileged: boolean;
+            /** Format: date-time */
+            openedAt: string;
+            idleTimeoutSeconds: number;
+            maxAgeSeconds: number;
+        };
+        ConsoleSessionPage: {
+            items: components["schemas"]["ConsoleSession"][];
+            /** @description Konsol servisi çalışıyor mu. Kapalıysa liste boş döner ve bu bir hata değil. */
+            available: boolean;
+        };
+        ConsoleInput: {
+            /** @description base64. Terminal girdisi ham bayttır ve UTF-8 sınırlarını bölebilir. */
+            data: string;
+        };
+        ConsoleResize: {
+            cols: number;
+            rows: number;
+        };
+        AppCatalogueEntry: {
+            slug: string;
+            name: string;
+            summary: string;
+            icon: string;
+            image: string;
+            /**
+             * @description Sabitlenmiş sürüm. `latest` veritabanı kısıtıyla reddediliyor — bir gün çalışan bir
+             *     uygulamanın ertesi gün sessizce başka bir sürüme geçmesi, bir NAS'ta veri kaybının
+             *     ucuz yollarından biri.
+             */
+            tag: string;
+            containerPort: number;
+            mounts: {
+                target: string;
+                /** @enum {string} */
+                mode: "ro" | "rw";
+                purpose: string;
+            }[];
+        };
+        App: {
+            catalogue: components["schemas"]["AppCatalogueEntry"];
+            installed: boolean;
+            /**
+             * @description Podman'dan okunur, veritabanından değil. Bir kolona yazılsaydı cihaz yeniden
+             *     başladığında yalan söylerdi.
+             * @enum {string}
+             */
+            state?: "running" | "stopped" | "starting" | "error" | "unknown";
+            /** @description 127.0.0.1 üzerindeki adres. Konteynerler LAN'a doğrudan açılmaz. */
+            url?: string | null;
+            hostPort?: number | null;
+            /** Format: date-time */
+            installedAt?: string | null;
+        };
+        AppPage: {
+            items: components["schemas"]["App"][];
+            runtime: {
+                available: boolean;
+                version?: string;
+                /**
+                 * @description Köksüz çalışıp çalışmadığı. false ise kurulum ADR-0019'un ayrıcalık kararından
+                 *     sapmış demektir ve arayüz bunu uyarı olarak göstermeli.
+                 */
+                rootless?: boolean;
+            };
+        };
+        InstallAppRequest: {
+            /**
+             * @description Katalogdaki her `target` için bir paylaşım. Host tarafı bir PAYLAŞIM KİMLİĞİ, bir yol
+             *     değil — kullanıcının verdiği bir yol, kullanıcının seçtiği bir yolu bağlamak olurdu.
+             */
+            mounts: {
+                target: string;
+                /** Format: uuid */
+                shareId: string;
+            }[];
+        };
+        AppStateRequest: {
+            /** @enum {string} */
+            state: "running" | "stopped";
+        };
+        AppLogs: {
+            lines: string[];
+        };
+        RemoteStatus: {
+            /** @description zerotier-one kurulu ve çalışıyor mu. DEPSIS onu paketlemiyor. */
+            available: boolean;
+            nodeId?: string | null;
+            online?: boolean;
+            version?: string | null;
+            networks: components["schemas"]["RemoteNetwork"][];
+        };
+        RemoteNetwork: {
+            networkId: string;
+            name?: string | null;
+            label?: string | null;
+            /** @enum {string} */
+            status: "OK" | "ACCESS_DENIED" | "NOT_FOUND" | "REQUESTING_CONFIGURATION" | "PORT_ERROR" | "AUTHENTICATION_REQUIRED" | "UNKNOWN";
+            /**
+             * @description false ise cihaz ağa KATILMIŞ ama ONAYLANMAMIŞTIR ve hiçbir trafik akmaz. Arayüz bunu
+             *     "bağlanıyor" diye göstermemeli — kullanıcının ZeroTier Central'da bir kutu
+             *     işaretlemesi gerekiyor.
+             */
+            authorized: boolean;
+            addresses: string[];
+            /** Format: date-time */
+            joinedAt?: string | null;
+        };
+        JoinNetworkRequest: {
+            /**
+             * @description Tam 16 onaltılık hane. Ajan tarafında da kendi tipiyle doğrulanıyor; bir yol parçası
+             *     olarak birleştirilecek bir değerin iki yerde doğrulanması, bir yerde unutulmasından
+             *     ucuz.
+             */
+            networkId: string;
+            label?: string;
         };
     };
     responses: {

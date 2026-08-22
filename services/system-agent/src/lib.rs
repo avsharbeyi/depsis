@@ -43,6 +43,7 @@ pub mod op;
 pub mod seams;
 pub mod sweep;
 pub mod transfer;
+pub mod zerotier;
 
 /// Emit the JSON Schema for the request/response contract.
 ///

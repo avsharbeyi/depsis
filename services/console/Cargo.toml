@@ -1,0 +1,39 @@
+[package]
+name = "depsis-console"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+description = "DEPSIS administrator console — pseudo-terminal sessions behind a Unix socket, deliberately not part of the privileged agent"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[target.'cfg(unix)'.dependencies]
+# No new crate enters the workspace for this service. `pty` and `termios` are FEATURES of a
+# dependency the agent already carries, and both are pure syscall wrappers with no transitive
+# tree of their own (`pty` pulls in `fs`, which is already on).
+#
+# `net` is here for `SO_PEERCRED` and `process` for `kill_process_group` — the two things this
+# service needs from the kernel that `std` does not expose.
+rustix = { version = "1", features = ["fs", "net", "process", "pty", "termios"] }
+
+[lints.rust]
+# `deny`, not `forbid`, for the same reason as the agent: `forbid` cannot be lifted locally and
+# exactly one place in this binary needs `unsafe` — adopting the listening descriptor systemd
+# passes over, which no safe API can express. That site carries its SAFETY argument.
+#
+# The library half (`lib.rs`) keeps `#![forbid(unsafe_code)]` with no exceptions, and that is
+# where the pty lives: opening a terminal, spawning a shell in it and resizing it is done
+# entirely through safe `rustix` and `std` APIs.
+unsafe_code = "deny"
+
+[lints.clippy]
+# This service hands a human a shell. A panic in it drops that shell mid-keystroke and, worse,
+# takes every other open session with it — the accept loop and the sessions share a process.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"

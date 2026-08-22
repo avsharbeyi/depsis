@@ -122,6 +122,20 @@ export type AgentRequest =
       op: 'discard_transfer';
       share: SafeComponent;
       staging_name: SafeComponent;
+    }
+  | {
+      op: 'zerotier_status';
+    }
+  | {
+      op: 'zerotier_networks';
+    }
+  | {
+      network_id: NetworkId;
+      op: 'zerotier_join';
+    }
+  | {
+      network_id: NetworkId;
+      op: 'zerotier_leave';
     };
 /**
  * A ZFS dataset name, e.g. `tank/depsis/users/1001`.
@@ -140,6 +154,21 @@ export type DatasetName = string;
  * `/` or `..` through, so this type refuses them rather than sanitising.
  */
 export type SafeComponent = string;
+/**
+ * A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.
+ *
+ * Its own type, next to `SafeComponent`, for the same reason and one more. The value is
+ * CONCATENATED INTO A REQUEST PATH (`/network/<id>`) and into an HTTP request line, so a
+ * `String` here would have to be remembered at every call site — and the site that forgot
+ * would be the one that let `../` reach the local API's router, or a `\r\n` split one request
+ * into two. A type is a validation nobody can skip.
+ *
+ * Uppercase is REFUSED rather than folded to lowercase. ZeroTier prints ids in lowercase and
+ * the same value is a key in `public.remote_networks`, so accepting two spellings for one
+ * network means the audit trail and the table can end up holding both, and "is this the
+ * network we joined?" stops being a string comparison.
+ */
+export type NetworkId = string;
 
 export interface ShareSpec {
   dataset: DatasetName;
@@ -199,6 +228,28 @@ export type AgentResponse =
       status: 'discarded';
     }
   | {
+      node_id: string;
+      online: boolean;
+      status: 'zerotier_status';
+      version: string;
+    }
+  | {
+      networks: ZeroTierNetwork[];
+      status: 'zerotier_networks';
+    }
+  | {
+      network: ZeroTierNetwork;
+      status: 'zerotier_joined';
+    }
+  | {
+      network_id: string;
+      status: 'zerotier_left';
+    }
+  | {
+      reason: string;
+      status: 'zerotier_unavailable';
+    }
+  | {
       reason: string;
       status: 'refused';
     }
@@ -206,3 +257,29 @@ export type AgentResponse =
       reason: string;
       status: 'failed';
     };
+/**
+ * A joined network's membership state, as ZeroTier reports it.
+ */
+export type ZeroTierNetworkStatus =
+  | ('OK' | 'NOT_FOUND' | 'REQUESTING_CONFIGURATION' | 'PORT_ERROR' | 'AUTHENTICATION_REQUIRED')
+  | 'ACCESS_DENIED'
+  | 'UNKNOWN';
+
+/**
+ * One joined network, as the agent reports it.
+ *
+ * A typed projection, not the daemon's JSON. Passing the raw object through would make every
+ * field ZeroTier ever adds part of the DEPSIS contract, and would put the agent in the position
+ * of forwarding something it has not read.
+ */
+export interface ZeroTierNetwork {
+  /**
+   * The addresses this network assigned to the node, in CIDR form. Empty until the network
+   * authorizes the device, which is what makes an empty list here meaningful rather than a
+   * missing value.
+   */
+  addresses: string[];
+  name?: string | null;
+  network_id: string;
+  status: ZeroTierNetworkStatus;
+}

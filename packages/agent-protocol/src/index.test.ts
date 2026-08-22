@@ -63,6 +63,16 @@ describe('the emitted agent schema', () => {
       'publish_samba_config',
       'publish_transfer',
       'read_smart_summary',
+      // ADR-0020's four, and the shape of them is the point. A general `ZeroTierRequest { path }`
+      // proxy would have been the network form of the free-form command §2.2 forbids: one variant
+      // through which every other endpoint of zerotier-one's local API becomes reachable. Instead
+      // the join takes a typed network id, the leave takes the same, and the two reads take
+      // nothing. Adding a fifth means writing a fifth variant, which is the friction that keeps
+      // the set closed.
+      'zerotier_join',
+      'zerotier_leave',
+      'zerotier_networks',
+      'zerotier_status',
     ]);
 
     // Property NAMES, not a text search. The words appear in prose inside the descriptions, and
@@ -121,6 +131,9 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    expect(EXPECTED_SCHEMA_VERSION).toBe(1);
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 2 since the ZeroTier
+    // variants; the pair is what makes a new API against a stale agent fail at the handshake
+    // instead of on the first privileged call.
+    expect(EXPECTED_SCHEMA_VERSION).toBe(2);
   });
 });

@@ -58,20 +58,53 @@ oku, indir, adını değiştir, çöpe at.
 sudo PGHOST=127.0.0.1 PGUSER=postgres PGPASSWORD=... bash tools/poc/p1-d-systemd-deployment.sh
 ```
 
+## Cihazın dışındaki üç şey
+
+Konsol, uygulamalar ve uzak erişim; üçü de DEPSIS'in **paketlemediği** bir şeyi yönetiyor.
+Kuruluysa yönetir, değilse arayüz "kurulu değil" der. Hiçbiri sessizce bozulmaz: eksik bir arka uç
+503 döner ya da `available: false` ile 200 — asla 500.
+
+Geliştirme kutusuna üçünü de kuran betik:
+
+```bash
+sudo bash tools/dev/provision-vm.sh
+```
+
+- **Konsol** (ADR-0018) — yalnız yönetici, üstelik oturum açıkken bile parola sorar. Ayrıcalıklı
+  ajanda ÇALIŞMAZ: `services/console` kendi systemd birimi, varsayılan olarak ayrıcalıksız bir
+  kullanıcıda. `systemctl disable depsis-console` özelliği tamamen kapatır. Girilen her satır
+  denetime yazılır, çıktı yazılmaz. Root kabuk isteyen kurulum birim dosyasını elle düzenler.
+- **Uygulamalar** (ADR-0019) — Podman. Katalog küratörlü: kullanıcı imaj adı yazamaz, çünkü
+  serbest imaj adı "internetten indirilen keyfi kodu çalıştır" demektir. Kaldırma konteyneri
+  siler, **bağlanan paylaşımlara dokunmaz**.
+- **Uzak erişim** (ADR-0020) — ZeroTier. Jeton root okunabilir olduğu için ajanın arkasından,
+  dört tiplenmiş işlemle. Bir ağa katılmak, ağ yöneticisi cihazı onaylayana kadar bağlantı
+  sağlamaz; arayüz bunu "onay bekliyor" diye gösterir, "bağlanıyor" diye değil.
+
+DEPSIS hiçbirini indirmez ve `curl | bash` çalıştırmaz — `provision-vm.sh` ZeroTier'i kendi
+imzalı apt deposundan kurar.
+
 ## Faz 1'de henüz olmayanlar
 
 Ürünün hangi kısmının bittiğini iddia etmek yerine ölçüyoruz. Bugün itibarıyla eksik olanlar:
 
-- Arama (`/search`) ve taşıma/kopyalama (`/file-operations`) — sözleşmede tanımlı, uygulanmadı.
+- Taşıma. `PATCH /files/{id}` `parentId` alıyor ama **501** dönüyor: ajanın işlem kümesinde bir
+  dosyayı taşıyacak işlem yok, ve yalnızca veritabanı satırını taşımak veritabanıyla diskin
+  ayrışması demek olurdu. Aynı sebeple çöp kutusu kalıcı boşaltılamıyor.
+- Ekip (`teams`) ve klasör bazlı ACL (§6.2). Şu an yalnız organizasyon düzeyinde admin/member var.
 - Dosya sistemi olaylarından metadata'yı besleyen endeksleyici. Bu olmadan yalnız DEPSIS
   üzerinden yüklenen dosyalar listede görünür; SMB'den yazılanlar görünmez.
-- ZFS havuzu yaratma. Ajan dataset yaratabiliyor, havuz yaratamıyor — mirror sihirbazı bu yüzden
-  yok.
-- Samba paylaşımı gerçekten yazılmıyor: `publish_samba_config` yalnız `testparm` koşuyor.
+- ZFS havuzu yaratma. Ajan dataset ve anlık görüntü yaratabiliyor, havuz yaratamıyor — mirror
+  sihirbazı bu yüzden yok.
+- Samba paylaşımı gerçekten yazılmıyor: `publish_samba_config` ajanda duruyor ama API onu bir kez
+  bile çağırmıyor.
 - Kullanıcı → POSIX uid eşlemesi (ADR-0004). Yayımlanan dosyalar şimdilik API'nin servis hesabına
   ait.
-- ZeroTier / uzaktan bağlantı. Faz 3 (§20); bu depoda hiçbir parçası yok.
+- Arayüz `docs/arayuz-v5-taslak.html` referansına henüz taşınmadı: stil sayfası taşındı, ekranlar
+  taşınmadı.
 - Tarayıcı (e2e) testleri. CI'da `echo` yapan bir iş olarak duruyor.
+- Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`
+  yalnız DEPSIS'in kendi aldıklarını gösterir ve yanıtta `complete: false` ile bunu söyler.
 
 ## Depo düzeni
 
@@ -83,6 +116,7 @@ packages/db     SQL migration'ları
 packages/contracts   OpenAPI ve ondan üretilen istemci tipleri
 packages/agent-protocol  ajanın şeması, Rust'tan üretilir
 services/system-agent    ayrıcalıklı ajan (Rust, root)
+services/console         yönetici konsolu (Rust, ayrı birim — ajan DEĞİL)
 deploy/systemd  birim dosyaları
 docs/adr        mimari kararlar
 tools/poc       ölçüm betikleri

@@ -1,0 +1,76 @@
+# The socket for the DEPSIS administrator console.
+#
+# systemd creates and owns it; the service never creates one. That is the point: the socket
+# file's ownership and mode are the FIRST authorization gate, enforced by the kernel before the
+# console service has read a byte, and declared here where they can be reviewed without reading
+# any Rust. The second gate is SO_PEERCRED inside the service. Two gates, because DAC alone
+# cannot tell root apart from the API, and SO_PEERCRED alone would mean every local user can at
+# least reach the parser of a process that spawns shells.
+#
+# Same shape as depsis-agent.socket, and deliberately so — a second pattern for the same problem
+# is a second thing to review.
+
+[Unit]
+Description=DEPSIS administrator console socket
+Documentation=file:///usr/share/doc/depsis/adr/0018-admin-console.md
+
+[Socket]
+# The path the API connects to. It is configuration, and this is where it is configured — the
+# service reads no path of its own, it accepts the descriptor systemd hands it.
+ListenStream=/run/depsis/console.sock
+
+# The name is the contract. The service looks the socket up by FileDescriptorName= and refuses
+# to start if it is missing or named something else; without this key systemd would name the
+# descriptor after the unit file and the service would refuse rather than guess.
+FileDescriptorName=console
+
+# 0660 root:depsis-api. Deliberately NOT owned by the API user: the API may connect, but must
+# not be able to unlink the socket and stand a fake console up in its place — a fake console is
+# a fake `ready` message saying `privileged: false` over a root shell.
+SocketUser=root
+SocketGroup=depsis-api
+SocketMode=0660
+
+# One long-lived service handling connections itself, NOT one process per connection. With
+# Accept=yes systemd would fork a process per inbound connection and the service's own session
+# ceiling would mean nothing.
+Accept=no
+
+# /run is a tmpfs, so the directory has to be recreated on every boot.
+#
+# RuntimeDirectoryPreserve=yes because depsis-agent.socket declares the SAME directory. Without
+# it, stopping either socket unit removes /run/depsis and takes the other one's socket file with
+# it — `systemctl stop depsis-console.socket` would break the agent, which is not a connection
+# anybody would make while debugging.
+RuntimeDirectory=depsis
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+# Leave no stale socket behind for a differently-configured console to inherit.
+RemoveOnStop=yes
+
+# The API opens one connection per session and the service caps sessions at eight. A backlog of
+# 0 would turn a burst into connection refusals the API cannot tell from a crash.
+Backlog=16
+
+# ─── what the API sees when the console is off, measured ──────────────────────
+#
+# Three states, and they do NOT all look alike from a client:
+#
+#   socket stopped, service stopped   connect() fails immediately, ENOENT (RemoveOnStop above).
+#   socket running, service stopped   connect() succeeds, systemd starts the service, normal.
+#   socket running, service FAILING   connect() succeeds and then NOTHING arrives. The kernel
+#                                     queued the connection on the listening socket; systemd
+#                                     tried the service, it exited non-zero, and the queued
+#                                     connection simply sits there.
+#
+# The third case is the one that matters, because it is what a misconfigured unit looks like —
+# measured here with DEPSIS_CONSOLE_PRIVILEGED=1 against User=depsis-console, where the service
+# refuses to start on purpose. There is no socket-unit setting that turns it into a refusal, so
+# the API must not treat "the connect succeeded" as "the console is up": it needs its own
+# deadline on the `ready` message and must map the timeout to 503, the same 503 as ENOENT. The
+# console service allows the API ten seconds to send `open`; the API's own wait for `ready`
+# should be a good deal shorter than that.
+
+[Install]
+WantedBy=sockets.target

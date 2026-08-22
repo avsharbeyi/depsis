@@ -1,0 +1,171 @@
+# The DEPSIS administrator console.
+#
+# ADR-0018: this is a SEPARATE service from depsis-agent, and separating it is the whole design.
+# §2.2 forbids the privileged agent from accepting free-form shell commands; a console added to
+# the agent would have made that sentence decorative. Here, the blast radius of the console is
+# one shell running as this unit's User= — not ZFS, Samba and the data channel.
+#
+# This unit is also the OFF SWITCH the ADR promises: `systemctl disable --now depsis-console.socket`
+# leaves the API answering 503 on every console endpoint, and the rest of the device untouched.
+#
+# Every hardening directive below was measured on this repository's development image
+# (systemd 257) rather than read from the documentation. The block at the end lists what was
+# left OUT and what each one broke — a hardening directive that is never tested against the real
+# workload is a directive that gets removed in a panic at 3am.
+
+[Unit]
+Description=DEPSIS administrator console
+Documentation=file:///usr/share/doc/depsis/adr/0018-admin-console.md
+
+# In [Unit], not [Service]. systemd logs "Unknown key ... ignoring" for these in [Service] and
+# starts the unit anyway, so the rate limiting they describe is simply absent — measured in this
+# repository once already, on the agent's units.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+Requires=depsis-console.socket
+After=depsis-console.socket
+
+[Service]
+# Type=exec, not simple: systemd then considers the unit started only once execve has actually
+# succeeded, so a missing binary fails the start job instead of being reported as a success
+# followed by a mysterious exit.
+Type=exec
+ExecStart=/usr/local/lib/depsis/depsis-console --serve
+
+# ─── who the shell runs as ────────────────────────────────────────────────────
+#
+# Its own account, in no interesting group. Its access to the shares is exactly the shares' own
+# POSIX permissions, and nothing here grants it more.
+#
+# TO GIVE ADMINISTRATORS A ROOT CONSOLE, two lines change together: set `User=root` below and
+# `DEPSIS_CONSOLE_PRIVILEGED=1` in the Environment= line. Both, or the service refuses to start
+# — a console that runs as root while telling the API `privileged: false` would put the wrong
+# label above a root prompt in the browser, and a flag flipped without changing User= would
+# advertise a root shell that is not one. ADR-0018 wants this to be a deliberate file edit and
+# not a checkbox: a root shell that can be switched on from a web page is a root shell that gets
+# switched on by accident.
+User=depsis-console
+Group=depsis-console
+Environment=DEPSIS_CONSOLE_PRIVILEGED=0
+
+# DEPSIS_API_UID — the uid the API runs as, written by the installer. The service refuses to
+# start without it and refuses uid 0. Read from the environment, never inferred: looking a
+# username up at runtime would mean a rename or a uid reuse silently changed who may open a
+# shell on this box.
+#
+# Note that EnvironmentFile= overrides Environment= regardless of the order they appear in, so
+# an operator who prefers to keep DEPSIS_CONSOLE_PRIVILEGED in this file can — the User= half of
+# the pair still has to change here, and the service still refuses to start on a mismatch.
+#
+# Optional here as well: DEPSIS_CONSOLE_IDLE_TIMEOUT_SECS (default 900) and
+# DEPSIS_CONSOLE_MAX_AGE_SECS (default 14400). ADR-0018's numbers; both refuse anything under
+# ten seconds, which is a console nobody can type into.
+EnvironmentFile=/etc/depsis/console.env
+
+Restart=on-failure
+RestartSec=2s
+
+# Stopping the unit must end every shell, including whatever an administrator left running.
+# KillMode=control-group is the default and is the reason this works; it is written out because
+# it is load-bearing rather than incidental.
+KillMode=control-group
+TimeoutStopSec=10s
+
+# ─── the ceilings the code assumes ────────────────────────────────────────────
+#
+# The service caps itself at eight concurrent sessions. These are the system-side halves of
+# that number.
+
+# Eight pty pairs, eight connections, the listener, plus whatever the administrators have open
+# in their shells. Interactive work opens far more descriptors than a daemon does, so this is
+# roomier than the agent's 1024 while still being a bound; the inherited default is 524288,
+# which is not a bound so much as the absence of one.
+LimitNOFILE=4096
+
+# Eight shells and their children. A build or a `find /` started from the console is a real
+# thing an administrator does, so this cannot be tight — but without any ceiling a fork bomb
+# typed into the console takes the whole appliance down, including the API that would let
+# somebody stop it.
+TasksMax=512
+
+# ─── hardening that is free here ──────────────────────────────────────────────
+#
+# "Free" means measured. Each directive below was run on systemd 257 and confirmed to leave the
+# service in pid 1's mount namespace (see the block after this one for why that matters).
+
+# The most important line in the file for the DEFAULT deployment. The console user must never
+# gain privileges it did not start with, which means setuid binaries do not work through this
+# service.
+#
+# What that costs, stated plainly because an administrator WILL meet it: `sudo`, `su`, `passwd`,
+# `mount`, and unprivileged `ping` do not work in an unprivileged console. That is not a bug to
+# be worked around — it is ADR-0018's "unprivileged by default" made real. Without this line,
+# putting depsis-console into sudoers by accident would turn the console into a root console
+# with no file edit at all.
+NoNewPrivileges=yes
+
+# Free: no namespace, nothing an administrator's shell needs.
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+# The console writes one line per audit and per lifecycle event to stderr; systemd routes it to
+# the journal. The typed lines themselves go to the API over the socket, not here — this
+# journal is operational, not the audit trail.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=depsis-console
+
+# ─── hardening deliberately NOT enabled, with measurements ────────────────────
+#
+# ProtectSystem=, ProtectHome=, PrivateTmp=, ProtectKernelTunables=
+#   Every one of these puts the service in a private mount namespace — measured one directive at
+#   a time on systemd 257; the other ten directives considered here do not. systemd sets that
+#   namespace's propagation to slave, so mounts made on the host AFTER this service starts do
+#   not appear inside it. Measured directly: with ProtectSystem=strict the service was in
+#   mnt:[4026532222] while pid 1 was in mnt:[4026532218], and a tmpfs mounted on the host was
+#   invisible from inside.
+#
+#   On a NAS that is not a theoretical loss. `zfs create` through the agent mounts a new dataset
+#   on the host; a console started before that would show the mount point empty, with no error
+#   at any layer, and the administrator's first move would be to conclude the dataset was not
+#   created. The same trap is documented at length in depsis-agent.service, where it silently
+#   broke dataset creation.
+#
+#   ProtectSystem=strict additionally makes the ENTIRE filesystem read-only, shares included. An
+#   administrator console that cannot write a file is not an administrator console; it is a
+#   viewer with a prompt.
+#
+# RestrictSUIDSGID=yes
+#   Blocks openat2(2) outright. systemd implements the directive with a seccomp filter on the
+#   mode argument of every file-creating syscall, and for openat2 the mode lives inside a
+#   `struct open_how` in userspace memory that seccomp cannot dereference, so it denies the call.
+#   Measured here: the same probe program printed "openat2 OK" without the directive and
+#   "openat2 FAILED errno=38 (Function not implemented)" with it.
+#
+#   In the agent that broke every upload. In an interactive console it is worse in a different
+#   way: it breaks whichever of the administrator's tools happens to use openat2, with an
+#   ENOSYS that reads as "your kernel is too old". NoNewPrivileges=yes above already stops any
+#   setuid binary being USED to gain privilege through this service; what is given up is the
+#   console user's inability to CREATE a setuid file, which is a real residual risk and is
+#   recorded here rather than traded for silent breakage.
+#
+# RestrictNamespaces=yes
+#   ADR-0019 puts rootless podman on this box, and rootless podman IS user namespaces. The
+#   console is where an operator debugs a container that will not start; a console that cannot
+#   run `podman` is a console that sends them to SSH — that is, to a session nothing audits.
+#
+# RestrictAddressFamilies=
+#   The agent can be held to AF_UNIX because it reaches no network. A console is the opposite:
+#   `ping`, `curl`, `ssh`, `dig` are why an administrator opens one.
+#
+# CapabilityBoundingSet=
+#   In the default deployment there is nothing to bound — User=depsis-console holds no
+#   capabilities. In the privileged deployment the operator edited two lines of this file to ask
+#   for root on purpose, and a bounding set that quietly subtracted from it would make the
+#   console lie about what it is. ADR-0018 accepts that risk by name.
+
+[Install]
+# Deliberately absent: WantedBy=multi-user.target. The unit is started by its socket, on demand.
+# Enabling it directly would start a shell server at boot whether or not anybody wants one.

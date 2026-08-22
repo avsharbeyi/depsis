@@ -21,12 +21,21 @@ import { APP_CONFIG } from './config.module.js';
  * existed it was happening: three endpoints had been built and never written down, and the second
  * factor had been given a different path in each place.
  *
- * Two different findings, treated differently on purpose:
+ * THE COMPARISON IS METHOD+PATH, not path. An earlier version compared bare paths, which let a
+ * route written with the wrong verb pass: `PUT /files/{id}` where the document says `PATCH` is a
+ * route no generated client will ever call, and the path-level check saw `/files/{id}` on both
+ * sides and reported agreement. The pair is the unit a client actually binds to, so it is the unit
+ * compared here.
  *
- *   * A route with no spec entry FAILS. It is drift that already happened.
- *   * A spec path with no route is REPORTED, not failed. The spec deliberately describes more than
- *     Phase 1 has built, and turning that into a failure would mean deleting the plan to make the
- *     tests pass.
+ * Both directions FAIL, and each has a different meaning:
+ *
+ *   * Served but not described — drift that already happened. Nothing can call it.
+ *   * Described but not served — a client generated today has a method for an operation that
+ *     answers 404. This half used to be reported to the console instead of failed, on the grounds
+ *     that the document deliberately ran ahead of the build. It no longer does: the operations the
+ *     build has not caught up with are enumerated in `DESCRIBED_BUT_NOT_SERVED` below with a reason
+ *     each, so "not built yet" is a decision somebody wrote down rather than a number that drifts
+ *     upward unnoticed.
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -41,6 +50,32 @@ interface Route {
   method: string;
   path: string;
 }
+
+/**
+ * The keys of a path item that describe an operation.
+ *
+ * A path item also holds `parameters`, `summary`, `description`, `servers` and `$ref`, none of
+ * which is something a client can call. Listing the verbs rather than excluding the others is what
+ * keeps a future OpenAPI keyword from being mistaken for an eighth method.
+ */
+const HTTP_METHODS = ['get', 'put', 'post', 'delete', 'patch', 'head', 'options', 'trace'] as const;
+
+/**
+ * Operations the document describes on purpose and the API does not serve.
+ *
+ * Every entry needs a reason, and the reason has to be a decision rather than an oversight —
+ * "nobody got to it" belongs in a task, not here, because an entry in this list stops the check
+ * from ever mentioning it again.
+ */
+const DESCRIBED_BUT_NOT_SERVED: ReadonlyMap<string, string> = new Map([
+  [
+    'POST /file-operations',
+    // Copy and move of a whole subtree. The agent protocol has no operation behind it — §2.2 keeps
+    // the privileged agent's surface closed and typed, so this endpoint cannot exist before an
+    // operation is added there. Described so the shape is settled before the agent side is built.
+    'copy/move; the privileged agent has no matching typed operation yet',
+  ],
+]);
 
 /**
  * Ask Express what it is actually serving.
@@ -109,6 +144,7 @@ describe('the API and its contract describe the same system', () => {
       agentDataSocket: null,
       secretKeyFile: null,
       zfsPools: [],
+      smartDisks: [],
     };
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
@@ -137,37 +173,57 @@ describe('the API and its contract describe the same system', () => {
       expect(declaredServer, 'the spec must declare a server').toBeDefined();
       expect(`/${API_PREFIX}`, 'the API prefix must match the spec server').toBe(declaredServer);
 
-      const prefix = `/${API_PREFIX}`;
-      const served = routesOf(app).map((r) => ({
-        ...r,
-        openapi: toOpenApiPath(r.path.startsWith(prefix) ? r.path.slice(prefix.length) : r.path),
-      }));
-      expect(served.length, 'the app must serve some routes').toBeGreaterThan(0);
+      // What the document describes, as the method+path pairs a generated client binds to.
+      const described = new Set<string>();
+      for (const [path, item] of Object.entries(spec.paths ?? {})) {
+        for (const method of HTTP_METHODS) {
+          if (item[method] !== undefined) described.add(`${method.toUpperCase()} ${path}`);
+        }
+      }
+      expect(described.size, 'the spec must describe some operations').toBeGreaterThan(0);
 
-      // Direction 1 — drift that already happened, and therefore a failure.
-      const undocumented = served
-        .filter((r) => !specPaths.has(r.openapi))
-        .map((r) => `${r.method} ${r.openapi}`);
+      const prefix = `/${API_PREFIX}`;
+      // HEAD is NOT filtered out here, and an early version of this check did filter it: Express
+      // only lists `head` in a route's methods when a handler was registered for it explicitly, so
+      // dropping the verb hid the one place the product uses it — tus resumption, `HEAD
+      // /uploads/{uploadId}`, which the document describes and the API serves. What Express answers
+      // implicitly (HEAD from a GET handler, OPTIONS from the router) never reaches this list.
+      const served = new Set(
+        routesOf(app).map(
+          (r) =>
+            `${r.method} ${toOpenApiPath(
+              r.path.startsWith(prefix) ? r.path.slice(prefix.length) : r.path,
+            )}`,
+        ),
+      );
+      expect(served.size, 'the app must serve some routes').toBeGreaterThan(0);
+
+      // Direction 1 — drift that already happened. Nothing generated can call these.
+      const undocumented = [...served].filter((r) => !described.has(r)).sort();
       expect(
         undocumented,
         'served but not described in openapi/depsis.yaml, so a generated client cannot call them',
       ).toEqual([]);
 
-      // Direction 2 — the plan running ahead of the build, which is not a failure.
+      // Direction 2 — a client that has a method for an operation the API answers 404 for.
       //
-      // The set of built paths is DERIVED from the router, not written down here. An earlier
-      // version hard-coded it while claiming in a comment to derive it, which meant the list could
-      // fall out of date without anything noticing — the same class of second-description problem
-      // this whole file exists to catch, reproduced inside the catcher.
-      const builtPaths = new Set(served.map((r) => r.openapi));
-      const notYet = [...specPaths].filter((p) => !builtPaths.has(p)).sort();
+      // The two sides are DERIVED, from the router and from the document; only the exception list
+      // is written down. An earlier version of this file hard-coded the built set while claiming in
+      // a comment to derive it, which is the same second-description problem the file exists to
+      // catch, reproduced inside the catcher.
+      const missing = [...described].filter((r) => !served.has(r)).sort();
+      expect(
+        missing,
+        'described in openapi/depsis.yaml but not served; add the route, or add it to ' +
+          'DESCRIBED_BUT_NOT_SERVED with the reason it is deliberate',
+      ).toEqual([...DESCRIBED_BUT_NOT_SERVED.keys()].sort());
 
-      // The report is the point of this half: the gap between plan and build stays visible.
-      console.info(
-        `contract: ${builtPaths.size} path(s) built, ${notYet.length} described but not yet ` +
-          `implemented — ${notYet.join(', ')}`,
+      // A stale exception is drift too, in the direction nothing else looks: an entry left behind
+      // after the route was finally built would silently exempt it from direction 2 forever.
+      const stale = [...DESCRIBED_BUT_NOT_SERVED.keys()].filter((r) => served.has(r));
+      expect(stale, 'these are served now, so remove them from DESCRIBED_BUT_NOT_SERVED').toEqual(
+        [],
       );
-      expect(specPaths.size).toBeGreaterThanOrEqual(builtPaths.size);
     } finally {
       await app.close();
     }

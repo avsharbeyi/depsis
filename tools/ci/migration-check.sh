@@ -83,11 +83,34 @@ else
 fi
 
 # These ALTER ROLE statements change the password CLUSTER-WIDE, not per database — roles are
-# cluster objects. On a CI runner the cluster is disposable so that costs nothing, but on a shared
-# development cluster it will break any other database whose connection strings use these roles.
-# Said out loud because it cost one confusing "password authentication failed" already.
-OWNER_PW="ci-owner-$RANDOM$RANDOM"
-APP_PW="ci-app-$RANDOM$RANDOM"
+# cluster objects, so they reach every other database on the same server.
+#
+# That has now broken a developer's run TWICE. The second time it took down seventeen API test
+# files with "password authentication failed for user depsis_app" while this script was doing
+# nothing wrong, and the half hour that cost was spent looking for a defect in the tests. Warning
+# about it in a comment was not enough, so the behaviour changed:
+#
+#   * On a CI runner (CI=true, or DEPSIS_CI_RANDOM_PW=1) the passwords are still randomised. The
+#     cluster there is disposable and a fixed password in a public log is worth avoiding.
+#   * Everywhere else the script uses the SAME documented development passwords as
+#     tools/dev/up.sh and tools/dev/test-db.sh, so running it can no longer invalidate anybody
+#     else's connection string.
+#
+# Either way an EXIT trap puts the development passwords back, because this script also sets
+# BYPASSRLS and drops databases: leaving the cluster in a state its other users cannot log into
+# is not an acceptable way to finish, including after a failure or a Ctrl-C.
+if [ "${CI:-}" = 'true' ] || [ "${DEPSIS_CI_RANDOM_PW:-0}" = '1' ]; then
+  OWNER_PW="ci-owner-$RANDOM$RANDOM"
+  APP_PW="ci-app-$RANDOM$RANDOM"
+else
+  OWNER_PW='ci-owner'
+  APP_PW='ci-app'
+fi
+restore_dev_passwords() {
+  admin -c "ALTER ROLE depsis_owner PASSWORD 'ci-owner'" >/dev/null 2>&1 || true
+  admin -c "ALTER ROLE depsis_app   PASSWORD 'ci-app'"   >/dev/null 2>&1 || true
+}
+trap restore_dev_passwords EXIT
 admin -c "ALTER ROLE depsis_owner PASSWORD '$OWNER_PW'" >/dev/null
 admin -c "ALTER ROLE depsis_app   PASSWORD '$APP_PW'"   >/dev/null
 
@@ -415,9 +438,13 @@ BAD=$(db -c "
      -- A single-column key on a uuid is not an existence oracle, and that is the actual reason
      -- rather than a naming convention: provoking a collision means presenting a value that already
      -- exists, and a uuid cannot be guessed. Expressed against the COLUMN TYPE, because an earlier
-     -- version keyed on the column being called `id` and would have wrongly exempted a
-     -- `UNIQUE (external_id)` on a caller-chosen string while wrongly flagging a legitimate
-     -- `PRIMARY KEY (user_id)`.
+     -- version keyed on the column being called \`id\` and would have wrongly exempted a
+     -- \`UNIQUE (external_id)\` on a caller-chosen string while wrongly flagging a legitimate
+     -- \`PRIMARY KEY (user_id)\`.
+     --
+     -- The backslashes are load-bearing. This heredoc-less query is a double-quoted argument, so an
+     -- unescaped backtick opens a command substitution: bash was running \`id\` and splicing the
+     -- output into the SQL, and reporting a syntax error on the two parenthesised examples.
      AND NOT (
        x.indnatts = 1
        AND EXISTS (
@@ -435,6 +462,27 @@ BAD=$(db -c "
                            -- complete, which the unauthenticated status endpoint answers anyway.
                            -- Argued in full in migration 0005.
                            'system_setup_pkey',
+                           -- Ürün verisi, kiracı verisi değil (ADR-0019). Uygulama kataloğu her
+                           -- kiracıda aynıdır ve satırlarını yalnızca migration yazar; buradaki
+                           -- bir 23505 bir kiracıya diğeri hakkında hiçbir şey söylemez, aynı
+                           -- uygulamayı iki kez eklemeye çalışan migration'a hata verir.
+                           'app_catalogue_slug_unique',
+                           -- Cihazın donanım kaynağı, bir kimlik değil (migration 0014). Host'un
+                           -- port uzayı cihaz genelinde tek, yani bu indeksin kiracı taşıması
+                           -- veritabanının izin verip podman'ın reddettiği bir duruma yol açardı.
+                           -- Buradaki bir 23505, bir kiracıya diğerinin varlığını değil, portun
+                           -- dolu olduğunu söyler — ve söylemek zorunda.
+                           'app_instances_port_unique',
+                           -- Aynı gerekçe: podman'ın isim alanı cihaz genelinde tek. Ad zaten
+                           -- kiracı ekini taşıyor, bu indeks onu veritabanında da garanti ediyor.
+                           'app_instances_container_unique',
+                           -- Denetim kaydının kimlik kolonu: bigint GENERATED ALWAYS AS IDENTITY
+                           -- (migration 0013). Buradaki muafiyet uuid muafiyetiyle aynı gerekçeye
+                           -- dayanır ve onun daha güçlü hâlidir: çakışma yaratmak var olan bir
+                           -- değeri SUNMAYI gerektirir, GENERATED ALWAYS ise sunulan değeri
+                           -- Postgres düzeyinde reddeder. Değeri dizi üretir, kiracı değil; API
+                           -- bu tabloya yalnızca INSERT eder ve id'yi hiç okumaz.
+                           'console_commands_pkey',
                            'depsis_migrations_pkey')
 ")
 [ -z "$BAD" ] && ok 'every unique/exclusion index carries organization_id or is allow-listed' \

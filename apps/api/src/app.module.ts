@@ -2,15 +2,19 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 
 import { AgentModule } from './agent/agent.module.js';
+import { AppsModule } from './apps/apps.module.js';
 import { ConfigModule } from './config.module.js';
+import { ConsoleModule } from './console/console.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { SameOriginGuard } from './auth/same-origin.guard.js';
 import { DbModule } from './db/db.module.js';
+import { DeskModule } from './desk/desk.module.js';
 import { FilesModule } from './files/files.module.js';
 import { HealthModule } from './health/health.module.js';
 import { JobsModule } from './jobs/jobs.module.js';
 import { MeModule } from './me/me.module.js';
 import { OrganizationsModule } from './organizations/organizations.module.js';
+import { RemoteModule } from './remote/remote.module.js';
 import { SetupModule } from './setup/setup.module.js';
 import { SystemModule } from './system/system.module.js';
 import { UsersModule } from './users/users.module.js';
@@ -18,14 +22,18 @@ import { UsersModule } from './users/users.module.js';
 @Module({
   imports: [
     ConfigModule,
+    ConsoleModule,
     DbModule,
+    DeskModule,
     FilesModule,
     AgentModule,
+    AppsModule,
     AuthModule,
     HealthModule,
     JobsModule,
     MeModule,
     OrganizationsModule,
+    RemoteModule,
     SetupModule,
     SystemModule,
     UsersModule,
