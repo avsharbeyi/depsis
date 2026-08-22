@@ -11,7 +11,7 @@ import { MfaService } from './mfa.service.js';
 import { PasswordService } from './password.service.js';
 import { PendingLoginService } from './pending-login.service.js';
 import { readKeyFile, SecretBox } from './secret-box.js';
-import { SessionGuard } from './session.guard.js';
+import { AdminGuard, SessionGuard } from './session.guard.js';
 import { SessionService } from './session.service.js';
 
 /**
@@ -60,10 +60,15 @@ function loadSecretBox(config: AppConfig): SecretBox | null {
     },
     PendingLoginService,
     SessionGuard,
+    AdminGuard,
   ],
   // SessionService and the guard are exported because every other feature module will need them;
   // AuthService is not, because the login flow has exactly one caller and widening that would make
   // it possible to authenticate from somewhere that skips the controller's origin check.
-  exports: [SessionService, SessionGuard, MfaService],
+  // `AdminGuard` and `PasswordService` are exported for the same reason the other three are: a
+  // module that needs to decide who may call it, or to hash a password, must use THESE instances.
+  // A second `PasswordService` would be a second set of Argon2 parameters, and a locally-declared
+  // guard is a guard nobody updates when the rule changes.
+  exports: [SessionService, SessionGuard, AdminGuard, MfaService, PasswordService],
 })
 export class AuthModule {}

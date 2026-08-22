@@ -3,6 +3,7 @@ import {
   type ExecutionContext,
   Injectable,
   UnauthorizedException,
+  ForbiddenException,
 } from '@nestjs/common';
 import type { Request } from 'express';
 
@@ -43,6 +44,32 @@ export class SessionGuard implements CanActivate {
     }
 
     request.depsis = session;
+    return true;
+  }
+}
+
+/**
+ * The organisation's administrators, and nobody else.
+ *
+ * Stacked AFTER `SessionGuard` — it reads the session that guard established rather than resolving
+ * one itself, so there is exactly one place a cookie becomes an identity.
+ *
+ * 403 rather than 404, and the distinction is deliberate here where it is refused elsewhere: these
+ * endpoints leak nothing by admitting they exist. `GET /users` is not a secret; who may call it is.
+ * The endpoints that DO leak by existing — a file belonging to another tenant — answer 404, and
+ * that difference is a decision rather than an inconsistency.
+ */
+@Injectable()
+export class AdminGuard implements CanActivate {
+  canActivate(context: ExecutionContext): boolean {
+    const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
+    const session = request.depsis;
+    // Not merely "not an admin": an absent session here means this guard was mounted without
+    // `SessionGuard` in front of it, which would otherwise fail OPEN on every request.
+    if (session === undefined) throw new UnauthorizedException();
+    if (session.role !== 'admin') {
+      throw new ForbiddenException('this endpoint is for administrators');
+    }
     return true;
   }
 }

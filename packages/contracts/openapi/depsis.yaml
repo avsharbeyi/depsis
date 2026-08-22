@@ -257,6 +257,99 @@ paths:
         '401': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
 
+  /users:
+    get:
+      tags: [users]
+      summary: Organizasyonun hesaplarını listele
+      description: |
+        Yalnız yöneticiler. 403 döner, 404 değil — bu uç noktanın varlığı sır değil, kimin
+        çağırabileceği sır. Başka kiracının nesnesi olan uç noktalar 404 döner ve bu fark
+        tutarsızlık değil, karar.
+      responses:
+        '200':
+          description: Hesaplar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserPage' }
+        '403': { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [users]
+      summary: Hesap oluştur
+      description: |
+        Parola sunucuda Argon2id ile özetlenir; düz metin hiçbir yerde saklanmaz.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUserRequest' }
+      responses:
+        '201':
+          description: Oluşturuldu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [users]
+      summary: Görünen ad, rol veya devre dışı durumunu değiştir
+      description: |
+        Parola ve e-posta BURADA DEĞİL. Yöneticinin belirlediği bir parola, yöneticinin bildiği
+        bir paroladır — her hesabı denetimde ayırt edilemeyecek şekilde taklit edilebilir kılar.
+        E-posta değişikliği ise parola sıfırlamanın nereye gideceğini sessizce taşır.
+
+        Bir organizasyon en az bir etkin yönetici tutmak zorunda; bunu veritabanı trigger'ı
+        uygular, çünkü iki yöneticinin birbirini eşzamanlı düşürmesi uygulama seviyesinde
+        sayılamaz. Son yöneticiyi düşürmek 409 döner.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateUserRequest' }
+      responses:
+        '200':
+          description: Güncellendi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /me/password:
+    post:
+      tags: [me]
+      summary: Kendi parolasını değiştir
+      description: |
+        Mevcut parola, oturum zaten varken bile isteniyor: bir oturum, birinin açık bırakılmış
+        dizüstünü ödünç aldığında sahip olduğu şeydir, ve bu adım olmadan hesabın sahibini kalıcı
+        olarak dışarıda bırakmak için gereken tek şeydir.
+
+        Diğer BÜTÜN oturumlar iptal edilir. Parola değişikliği insanın kimlik bilgilerinin
+        başkasında olduğunu düşündüğünde yaptığı şeydir; o birini oturumda bırakmak değişikliği
+        anlamsız kılar. Mevcut oturum ayakta kalır.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChangePasswordRequest' }
+      responses:
+        '200':
+          description: Değiştirildi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PasswordChanged' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+
   /files:
     get:
       tags: [files]
@@ -818,6 +911,68 @@ components:
         - manage_acl
         - view_versions
         - view_audit
+
+    User:
+      type: object
+      required: [id, email, displayName, role, disabled, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        displayName: { type: string }
+        role:
+          type: string
+          enum: [admin, member]
+        disabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    UserPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/User' }
+
+    CreateUserRequest:
+      type: object
+      required: [email, displayName, password]
+      properties:
+        email: { type: string }
+        displayName: { type: string }
+        role:
+          type: string
+          enum: [admin, member]
+          default: member
+        password:
+          type: string
+          minLength: 12
+          description: |
+            Uzunluk tabanı, kompozisyon kuralı değil. "Bir rakam, bir sembol" kuralı insanları
+            ölçülebilir biçimde `Passw0rd!`e itiyor ve dört karakter daha uzunluktan az kazandırıyor.
+
+    UpdateUserRequest:
+      type: object
+      minProperties: 1
+      properties:
+        displayName: { type: string }
+        role:
+          type: string
+          enum: [admin, member]
+        disabled: { type: boolean }
+
+    ChangePasswordRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword: { type: string }
+        newPassword: { type: string, minLength: 12 }
+
+    PasswordChanged:
+      type: object
+      required: [status, otherSessionsRevoked]
+      properties:
+        status: { type: string, enum: [ok] }
+        otherSessionsRevoked: { type: integer }
 
     FileEntry:
       type: object

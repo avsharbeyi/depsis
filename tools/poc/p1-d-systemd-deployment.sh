@@ -581,6 +581,111 @@ check 'the agent was started by the connection, not by the boot order' \
 ENROL=$(curl -sS -b "$JAR" -o "$WORK/enrol.json" -w '%{http_code}' -X POST "$BASE/me/mfa/enrolment")
 check 'MFA enrolment succeeds, so the delivered key is usable' "$ENROL" '200'
 
+head1 'ACCESS CONTROL — a second account, and what it may not do'
+# §20 forbids starting Phase 2 until the previous phase's access-control acceptance tests pass.
+# Until migration 0009 that sentence could not even be written: an appliance had exactly one
+# account and no way to make another, so there was no unauthorised user to refuse. This section is
+# that gate, and every assertion in it is about a REQUEST being refused rather than about a row.
+USERS="$BASE/users"
+MEMBER_PW='member-correct-horse-battery-42'
+MEMBER_JAR="$WORK/member.jar"
+
+MADE=$(curl -sS -b "$JAR" -c "$JAR" -X POST "$USERS" \
+  -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
+  -d "{\"email\":\"uye@p1d.test\",\"displayName\":\"Üye\",\"password\":\"$MEMBER_PW\"}" 2>&1)
+MEMBER_ID=$(printf '%s' "$MADE" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+[ -n "$MEMBER_ID" ] && ok 'an administrator created a second account' || bad "create failed: $MADE"
+case "$MADE" in
+  *'"role":"member"'*) ok 'and it defaults to member, not to administrator' ;;
+  *) bad "the new account is not a member: $MADE" ;;
+esac
+
+curl -sS -c "$MEMBER_JAR" -X POST "$BASE/auth/login" -H 'content-type: application/json' \
+  -d "{\"organizationSlug\":\"p1d\",\"email\":\"uye@p1d.test\",\"password\":\"$MEMBER_PW\"}" \
+  | grep -q '"status":"ok"' && ok 'the second account can sign in' || bad 'the member could not sign in'
+
+# THE GATE. A signed-in member is authenticated and NOT authorised for administration.
+check 'a member is refused the user list (403, not 401 and not 200)' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" "$USERS")" '403'
+check 'a member cannot create an account' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" -X POST "$USERS" \
+     -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
+     -d '{"email":"x@p1d.test","displayName":"X","password":"aaaaaaaaaaaa"}')" '403'
+check 'a member cannot promote themselves' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" -X PATCH "$USERS/$MEMBER_ID" \
+     -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
+     -d '{"role":"admin"}')" '403'
+# And the negative control: the same member IS allowed the things a member may do. Without this the
+# three refusals above would also pass against an API that refused everything.
+check 'but a member may still list files' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" "$BASE/files")" '200'
+check 'and read their own account' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" "$BASE/me")" '200'
+
+# CSRF. The cookie is SameSite=Lax, and this is the server-side half — measured on a route that
+# had none until the check was moved out of auth.controller.ts.
+check 'a cross-origin state change is refused' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" -X POST "$USERS" \
+     -H 'content-type: application/json' -H 'origin: http://evil.example' \
+     -d '{"email":"csrf@p1d.test","displayName":"C","password":"aaaaaaaaaaaa"}')" '403'
+check 'and so is one against the MFA route, which used to have no check at all' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" -X DELETE "$BASE/me/mfa" \
+     -H 'content-type: application/json' -H 'origin: http://evil.example' -d '{"password":"x"}')" '403'
+
+head1 'ACCESS CONTROL — the box cannot be locked out of itself'
+# Once an organisation has no usable administrator, nothing inside DEPSIS can restore one: creating
+# accounts needs an administrator and the claim runs exactly once. The rule is a database trigger
+# because two administrators demoting each other concurrently both read "there are two of us".
+LAST=$(curl -sS -b "$JAR" -X PATCH "$USERS/$(curl -sS -b "$JAR" "$USERS" | sed -n 's/.*"id":"\([^"]*\)","email":"admin@p1d.test".*/\1/p')" \
+  -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" -d '{"role":"member"}' 2>&1)
+case "$LAST" in
+  *'at least one enabled administrator'*) ok 'the last administrator cannot be demoted' ;;
+  *) bad "demoting the last administrator was allowed: $LAST" ;;
+esac
+
+ADMIN_ID=$(curl -sS -b "$JAR" "$USERS" | sed -n 's/.*"id":"\([^"]*\)","email":"admin@p1d.test".*/\1/p')
+SELF=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" -X PATCH "$USERS/$ADMIN_ID" \
+  -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" -d '{"disabled":true}')
+check 'an administrator cannot disable their own account' "$SELF" '403'
+
+head1 'ACCESS CONTROL — a password change, and what it revokes'
+# A second cookie jar for the SAME member, so "other sessions are revoked" is observed rather than
+# asserted from a count the server reported about itself.
+SECOND_JAR="$WORK/member2.jar"
+curl -sS -c "$SECOND_JAR" -X POST "$BASE/auth/login" -H 'content-type: application/json' \
+  -d "{\"organizationSlug\":\"p1d\",\"email\":\"uye@p1d.test\",\"password\":\"$MEMBER_PW\"}" >/dev/null
+check 'the member holds two live sessions' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$SECOND_JAR" "$BASE/me")" '200'
+
+check 'a password change with the wrong current password is refused' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" -X POST "$BASE/me/password" \
+     -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
+     -d '{"currentPassword":"wrong","newPassword":"new-correct-horse-42"}')" '401'
+
+CHANGED=$(curl -sS -b "$MEMBER_JAR" -X POST "$BASE/me/password" \
+  -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
+  -d "{\"currentPassword\":\"$MEMBER_PW\",\"newPassword\":\"new-correct-horse-42\"}" 2>&1)
+case "$CHANGED" in
+  *'"status":"ok"'*) ok 'the member changed their own password' ;;
+  *) bad "password change failed: $CHANGED" ;;
+esac
+check 'the OTHER session is dead afterwards' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$SECOND_JAR" "$BASE/me")" '401'
+check 'and the session that made the change still works' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" "$BASE/me")" '200'
+check 'the old password no longer signs in' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" -H 'content-type: application/json' \
+     -d "{\"organizationSlug\":\"p1d\",\"email\":\"uye@p1d.test\",\"password\":\"$MEMBER_PW\"}")" '401'
+
+head1 'ACCESS CONTROL — disabling an account ends it now, not at expiry'
+curl -sS -b "$JAR" -X PATCH "$USERS/$MEMBER_ID" -H 'content-type: application/json' \
+  -H "origin: http://127.0.0.1:$PORT" -d '{"disabled":true}' >/dev/null 2>&1
+check 'a disabled account\'"'"'s live session stops working immediately' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" "$BASE/me")" '401'
+check 'and it cannot sign in again' \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" -H 'content-type: application/json' \
+     -d '{"organizationSlug":"p1d","email":"uye@p1d.test","password":"new-correct-horse-42"}')" '401'
+
 head1 'a file goes in through HTTP and comes back in a listing'
 # The API names its default share after the organisation slug. The directory has to exist before
 # the agent can resolve into it — there is no mkdir operation in the agent's closed op set yet, so

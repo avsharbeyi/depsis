@@ -1,7 +1,6 @@
 import {
   Body,
   Controller,
-  ForbiddenException,
   HttpCode,
   HttpException,
   HttpStatus,
@@ -14,6 +13,8 @@ import {
 import type { OpenApi } from '@depsis/contracts';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
+
+import { headerString, isSecure, requireSameOrigin } from './origin.js';
 
 /**
  * Response bodies typed against the generated view of `openapi/depsis.yaml`.
@@ -196,53 +197,6 @@ export class AuthController {
     response.setHeader('Set-Cookie', serializeClearedSessionCookie(isSecure(request)));
     return { status: 'ok' };
   }
-}
-
-/**
- * The second half of the CSRF defence.
- *
- * `SameSite=Lax` stops the cookie riding along on a cross-site POST in browsers that honour it, and
- * this refuses the request outright when the declared origin is not ours. Both are needed:
- * SameSite is a browser behaviour and this is a server decision, and ADR-0009 asks for an explicit
- * origin check precisely because the session is cookie-based.
- *
- * A request with NO Origin and no Referer is allowed: that is what a non-browser client sends, and
- * a non-browser client is not subject to CSRF — nobody can make curl send somebody else's cookie.
- */
-function requireSameOrigin(request: Request): void {
-  const origin = headerString(request, 'origin');
-  const referer = headerString(request, 'referer');
-  const declared = origin ?? (referer === null ? null : originOf(referer));
-  if (declared === null) return;
-
-  const host = headerString(request, 'host');
-  if (host === null) throw new ForbiddenException('missing host');
-
-  const expected = `${isSecure(request) ? 'https' : 'http'}://${host}`;
-  if (declared !== expected) {
-    throw new ForbiddenException('cross-origin request refused');
-  }
-}
-
-function originOf(url: string): string | null {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return null;
-  }
-}
-
-function headerString(request: Request, name: string): string | null {
-  const value = request.headers[name];
-  if (typeof value === 'string' && value !== '') return value;
-  return null;
-}
-
-function isSecure(request: Request): boolean {
-  // `req.secure` already accounts for X-Forwarded-Proto when Express is told to trust the proxy.
-  // If it is not told, this reports the direct connection — which is the safe direction to be
-  // wrong in, since it only ever omits the `Secure` attribute rather than adding it wrongly.
-  return request.secure;
 }
 
 /**

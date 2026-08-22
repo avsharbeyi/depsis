@@ -11,6 +11,7 @@ import { MeModule } from './me/me.module.js';
 import { OrganizationsModule } from './organizations/organizations.module.js';
 import { SetupModule } from './setup/setup.module.js';
 import { SystemModule } from './system/system.module.js';
+import { UsersModule } from './users/users.module.js';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { SystemModule } from './system/system.module.js';
     OrganizationsModule,
     SetupModule,
     SystemModule,
+    UsersModule,
   ],
 })
 export class AppModule {}

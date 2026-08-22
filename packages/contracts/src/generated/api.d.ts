@@ -492,6 +492,185 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Organizasyonun hesaplarını listele
+         * @description Yalnız yöneticiler. 403 döner, 404 değil — bu uç noktanın varlığı sır değil, kimin
+         *     çağırabileceği sır. Başka kiracının nesnesi olan uç noktalar 404 döner ve bu fark
+         *     tutarsızlık değil, karar.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Hesaplar */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["UserPage"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        /**
+         * Hesap oluştur
+         * @description Parola sunucuda Argon2id ile özetlenir; düz metin hiçbir yerde saklanmaz.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateUserRequest"];
+                };
+            };
+            responses: {
+                /** @description Oluşturuldu */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["User"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Görünen ad, rol veya devre dışı durumunu değiştir
+         * @description Parola ve e-posta BURADA DEĞİL. Yöneticinin belirlediği bir parola, yöneticinin bildiği
+         *     bir paroladır — her hesabı denetimde ayırt edilemeyecek şekilde taklit edilebilir kılar.
+         *     E-posta değişikliği ise parola sıfırlamanın nereye gideceğini sessizce taşır.
+         *
+         *     Bir organizasyon en az bir etkin yönetici tutmak zorunda; bunu veritabanı trigger'ı
+         *     uygular, çünkü iki yöneticinin birbirini eşzamanlı düşürmesi uygulama seviyesinde
+         *     sayılamaz. Son yöneticiyi düşürmek 409 döner.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateUserRequest"];
+                };
+            };
+            responses: {
+                /** @description Güncellendi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["User"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+            };
+        };
+        trace?: never;
+    };
+    "/me/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Kendi parolasını değiştir
+         * @description Mevcut parola, oturum zaten varken bile isteniyor: bir oturum, birinin açık bırakılmış
+         *     dizüstünü ödünç aldığında sahip olduğu şeydir, ve bu adım olmadan hesabın sahibini kalıcı
+         *     olarak dışarıda bırakmak için gereken tek şeydir.
+         *
+         *     Diğer BÜTÜN oturumlar iptal edilir. Parola değişikliği insanın kimlik bilgilerinin
+         *     başkasında olduğunu düşündüğünde yaptığı şeydir; o birini oturumda bırakmak değişikliği
+         *     anlamsız kılar. Mevcut oturum ayakta kalır.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ChangePasswordRequest"];
+                };
+            };
+            responses: {
+                /** @description Değiştirildi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PasswordChanged"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                401: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/files": {
         parameters: {
             query?: never;
@@ -632,7 +811,13 @@ export interface paths {
         };
         put?: never;
         post?: never;
-        /** Çöp kutusuna taşı */
+        /**
+         * Çöp kutusuna taşı
+         * @description Bu bir JOB DEĞİL. Önceki hâli 202 + JobRef diyordu, çünkü büyük bir alt ağacı silmek
+         *     uzun iş gibi görünüyordu; çöpe atmak tek satırda tek bayrak çıktı. Bayt silinmiyor —
+         *     çöpü boşaltmak ajandan `unlink` isteyen ayrı bir karar. Var olmayan bir işe referans
+         *     döndürmek, istemcinin sorgulayamayacağı bir kuyruk girdisi uydurmak olurdu.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -645,16 +830,17 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description İş kuyruğa alındı */
-                202: {
+                /** @description Çöp kutusuna taşındı */
+                200: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["JobRef"];
+                        "application/json": components["schemas"]["FileEntry"];
                     };
                 };
                 403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
             };
         };
         options?: never;
@@ -1222,6 +1408,49 @@ export interface components {
          * @enum {string}
          */
         Permission: "list" | "read" | "download" | "create" | "modify" | "move" | "delete" | "share" | "manage_acl" | "view_versions" | "view_audit";
+        User: {
+            /** Format: uuid */
+            id: string;
+            email: string;
+            displayName: string;
+            /** @enum {string} */
+            role: "admin" | "member";
+            disabled: boolean;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        UserPage: {
+            items: components["schemas"]["User"][];
+        };
+        CreateUserRequest: {
+            email: string;
+            displayName: string;
+            /**
+             * @default member
+             * @enum {string}
+             */
+            role: "admin" | "member";
+            /**
+             * @description Uzunluk tabanı, kompozisyon kuralı değil. "Bir rakam, bir sembol" kuralı insanları
+             *     ölçülebilir biçimde `Passw0rd!`e itiyor ve dört karakter daha uzunluktan az kazandırıyor.
+             */
+            password: string;
+        };
+        UpdateUserRequest: {
+            displayName?: string;
+            /** @enum {string} */
+            role?: "admin" | "member";
+            disabled?: boolean;
+        };
+        ChangePasswordRequest: {
+            currentPassword: string;
+            newPassword: string;
+        };
+        PasswordChanged: {
+            /** @enum {string} */
+            status: "ok";
+            otherSessionsRevoked: number;
+        };
         FileEntry: {
             /** Format: uuid */
             id: string;

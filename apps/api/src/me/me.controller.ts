@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   ConflictException,
   Controller,
@@ -13,6 +14,7 @@ import {
 import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
+import { requireSameOrigin } from '../auth/origin.js';
 import { MfaService } from '../auth/mfa.service.js';
 import { PasswordService } from '../auth/password.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
@@ -23,6 +25,18 @@ type Schemas = OpenApi.components['schemas'];
 
 const confirmSchema = z.object({ code: z.string().regex(/^\d{6}$/) });
 const passwordSchema = z.object({ password: z.string().min(1).max(1024) });
+
+/**
+ * A length floor and nothing else.
+ *
+ * A composition rule ("one digit, one symbol") measurably pushes people towards `Passw0rd!` and
+ * buys less than four more characters would.
+ */
+const MIN_PASSWORD = 12;
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(1024),
+  newPassword: z.string().min(MIN_PASSWORD).max(1024),
+});
 
 interface UserRow {
   id: string;
@@ -49,6 +63,55 @@ export class MeController {
     private readonly sessions: SessionService,
   ) {}
 
+  /**
+   * Change one's own password.
+   *
+   * The current password is required even though the caller already holds a session, and that is
+   * not ceremony: a session is what an attacker has when they borrow an unlocked laptop, and
+   * without this step it is all they need to lock the owner out of their own account permanently.
+   *
+   * Every OTHER session is revoked afterwards. A password change is the thing a person does when
+   * they believe someone else has their credentials, and leaving that someone signed in makes the
+   * change worthless. The current session survives, because signing the user out of the tab they
+   * just used teaches them to avoid the feature.
+   */
+  @Post('password')
+  @HttpCode(200)
+  async changePassword(
+    @Req() request: AuthenticatedRequest,
+    @Body() body: unknown,
+  ): Promise<{ status: 'ok'; otherSessionsRevoked: number }> {
+    requireSameOrigin(request);
+    const session = requireSession(request);
+    const parsed = changePasswordSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new BadRequestException(
+        `currentPassword and a newPassword of at least ${MIN_PASSWORD} characters are required`,
+      );
+    }
+
+    const user = await this.load(session.organizationId, session.userId);
+    if (!(await this.passwords.verify(user.password_hash, parsed.data.currentPassword))) {
+      throw new UnauthorizedException('the current password is wrong');
+    }
+
+    const hash = await this.passwords.hash(parsed.data.newPassword);
+    await this.db.withTenant(session.organizationId, (db) =>
+      db.query(
+        `UPDATE public.users SET password_hash = $3 WHERE organization_id = $1 AND id = $2`,
+        [session.organizationId, session.userId, hash],
+      ),
+    );
+
+    const revoked = await this.sessions.revokeAllForUser(session.organizationId, session.userId);
+    // `revokeAllForUser` takes this one too, so it is reissued rather than left dead — the caller
+    // asked to change a password, not to be signed out.
+    await this.db.withTenant(session.organizationId, (db) =>
+      db.query(`UPDATE sessions SET revoked_at = NULL WHERE id = $1`, [session.sessionId]),
+    );
+    return { status: 'ok', otherSessionsRevoked: Math.max(0, revoked - 1) };
+  }
+
   @Get()
   async me(@Req() request: AuthenticatedRequest): Promise<Schemas['CurrentUser']> {
     const session = requireSession(request);
@@ -70,6 +133,7 @@ export class MeController {
   @Post('mfa/enrolment')
   @HttpCode(200)
   async beginEnrolment(@Req() request: AuthenticatedRequest): Promise<Schemas['MfaEnrolment']> {
+    requireSameOrigin(request);
     const session = requireSession(request);
 
     // Refused rather than silently replaced. Overwriting a confirmed secret would let a session
@@ -89,6 +153,7 @@ export class MeController {
     @Req() request: AuthenticatedRequest,
     @Body() body: unknown,
   ): Promise<Schemas['RecoveryCodes']> {
+    requireSameOrigin(request);
     const session = requireSession(request);
     const parsed = confirmSchema.safeParse(body);
     if (!parsed.success) throw new UnauthorizedException();
@@ -105,6 +170,7 @@ export class MeController {
   @Delete('mfa')
   @HttpCode(204)
   async removeMfa(@Req() request: AuthenticatedRequest, @Body() body: unknown): Promise<void> {
+    requireSameOrigin(request);
     const session = await this.reauthenticate(request, body);
 
     await this.db.withTenant(session.organizationId, async (q) => {
@@ -126,6 +192,7 @@ export class MeController {
     @Req() request: AuthenticatedRequest,
     @Body() body: unknown,
   ): Promise<Schemas['RecoveryCodes']> {
+    requireSameOrigin(request);
     const session = await this.reauthenticate(request, body);
 
     if (!(await this.mfa.isEnrolled(session.organizationId, session.userId))) {
@@ -174,10 +241,16 @@ export class MeController {
   }
 }
 
-function requireSession(request: AuthenticatedRequest): { organizationId: string; userId: string } {
+function requireSession(request: AuthenticatedRequest): {
+  organizationId: string;
+  userId: string;
+  sessionId: string;
+} {
   const session = request.depsis;
-  // The guard sets this on every route in this controller. If it is missing the guard was removed,
-  // and failing closed is the only safe reading of that.
   if (session === undefined) throw new UnauthorizedException();
-  return { organizationId: session.organizationId, userId: session.userId };
+  return {
+    organizationId: session.organizationId,
+    userId: session.userId,
+    sessionId: session.sessionId,
+  };
 }

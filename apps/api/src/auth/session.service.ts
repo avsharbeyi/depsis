@@ -3,10 +3,20 @@ import { Injectable } from '@nestjs/common';
 import { DbService } from '../db/db.service.js';
 import { generateToken, hashToken } from './token.js';
 
+/** The organisation-level role, distinct from the per-node ACL (ADR-0004, migration 0009). */
+export type UserRole = 'admin' | 'member';
+
 export interface ResolvedSession {
   sessionId: string;
   organizationId: string;
   userId: string;
+  /**
+   * Read in the SAME statement that resolved the session, not fetched afterwards.
+   *
+   * A second query is a second moment in time: an administrator demoted between the two would
+   * still be treated as one for the request already in flight.
+   */
+  role: UserRole;
   expiresAt: Date;
 }
 
@@ -21,6 +31,7 @@ interface ResolveRow {
   session_id: string;
   organization_id: string;
   user_id: string;
+  role: string;
   expires_at: Date;
 }
 
@@ -88,6 +99,7 @@ export class SessionService {
         `SELECT session_id::text AS session_id,
                 organization_id::text AS organization_id,
                 user_id::text AS user_id,
+                role,
                 expires_at
            FROM public.resolve_session($1)`,
         [hashToken(token)],
@@ -100,6 +112,10 @@ export class SessionService {
       sessionId: row.session_id,
       organizationId: row.organization_id,
       userId: row.user_id,
+      // Anything the database does not vouch for is a member. The CHECK constraint makes the third
+      // value unreachable, so this is not a fallback anybody expects to see — it is the direction
+      // an impossible value has to fail in.
+      role: row.role === 'admin' ? 'admin' : 'member',
       expiresAt: row.expires_at,
     };
   }
