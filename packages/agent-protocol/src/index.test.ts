@@ -39,7 +39,22 @@ describe('the emitted agent schema', () => {
       (v) => (v.properties?.['op'] as { const?: string } | undefined)?.const,
     );
     expect(ops.filter(Boolean).sort()).toEqual([
+      // The kernel half of ADR-0004's access-control model. `folder_grants` in the database says
+      // who may reach a folder; until this runs the kernel has never been told, and SMB — which
+      // does not go through the API at all — enforces the mode bits and nothing else. The entry
+      // list is COMPLETE rather than a delta, because "here is who may reach this folder" is a
+      // statement the caller can make correctly and "here is what changed" is one it would have to
+      // reconstruct from a disk it cannot read.
+      'apply_folder_acl',
       'create_dataset',
+      // ONE directory, never `mkdir -p`. Its absence was a hole under the product rather than a
+      // gap in the set: `FilesService.createFolder` could write a row and nothing else, so a
+      // folder existed in Postgres and did not exist on disk — which made every move through it
+      // fail, every upload into it fail, and every SMB client see no folders at all. An implicit
+      // mkdir is refused for the same reason `move_entry` will not create its destination parent:
+      // it turns a typo into a directory the user never asked for, and it breaks the one-row
+      // one-directory correspondence that keeps the two stores in step.
+      'create_directory',
       'create_snapshot',
       'diff_snapshots',
       // The reclaim half, and the reason the set has one at all: `.depsis/staging` counts against
@@ -143,7 +158,7 @@ describe('envelope sanitising', () => {
     // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 3 since `MoveEntry` and
     // `RemoveEntry`; the pair is what makes a new API against a stale agent fail at the handshake
     // instead of on the first privileged call.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(3);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(4);
   });
 
   it('agrees with the number the agent actually reports', () => {

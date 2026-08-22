@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { AgentService, expectStatus } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
+import { PosixIdentityService } from '../identity/posix.service.js';
 
 /**
  * A row in `file_entries`, as the database returns it.
@@ -116,22 +117,107 @@ export class EntryMissingOnDiskError extends Error {
 }
 
 /**
- * The move needs a directory that DEPSIS has never created.
+ * The operation needs a directory that is not on disk, and creating it did not work either.
  *
- * Not a corruption and not the caller's mistake. `createFolder` writes a row and stops, because
- * the agent's operation set has no `mkdir` and §2.2 keeps that set closed to anything the API can
- * decide on its own. So folders are records, files live flat at the share root, and the three
- * moves that touch a folder — a file in, a file out, a folder anywhere — all fail inside the
- * agent's `open_dir`. Reported as its own state so the 409 can say what is actually missing
- * instead of accusing the database of being wrong about a file it is right about.
+ * The population this names has shrunk to one group and it is worth being precise about which.
+ * Folders created before `CreateDirectory` existed are rows with no directory behind them, and
+ * every operation that runs through one — a file moved in, a file moved out, the folder itself
+ * moved or renamed, a file published into it — fails inside the agent's `open_dir`. Those are now
+ * MATERIALISED on first use (see `ensureDirectories`), so the ordinary outcome is that the
+ * directory appears and the operation proceeds.
+ *
+ * What is left is the case where materialising failed too: a read-only dataset, a share whose root
+ * is gone, a name that exists on disk as a FILE. Still its own state rather than
+ * `EntryMissingOnDiskError`, because the database is not the thing that is wrong.
  */
 export class FolderNotOnDiskError extends Error {
   constructor(readonly agentReason: string) {
     super(
-      'this folder exists as a record but not yet as a directory on disk, so an entry cannot be ' +
+      'this folder has no directory on disk and one could not be created, so an entry cannot be ' +
         'moved into or out of it',
     );
     this.name = 'FolderNotOnDiskError';
+  }
+}
+
+/**
+ * The name is free in the database and taken on disk.
+ *
+ * Worth its own sentence rather than folding into `NameTakenError`, because the two send a user to
+ * different places. A name taken in the database is visible in the listing the user is looking at;
+ * a name taken only on disk is not, and the likeliest reason is that somebody created the folder
+ * over SMB — where DEPSIS is not consulted and writes no row. Telling them "there is already
+ * something with this name on disk" is what turns an inexplicable 409 into an explicable one, and
+ * it is also the honest description of the state: the API cannot see what is there, only that the
+ * kernel refused to make another.
+ */
+export class NameTakenOnDiskError extends Error {
+  constructor(
+    readonly takenName: string,
+    readonly agentReason: string,
+  ) {
+    super(
+      `'${takenName}' cannot be created: something with that name is already on disk, most ` +
+        'likely made over SMB, and DEPSIS has no record of it',
+    );
+    this.name = 'NameTakenOnDiskError';
+  }
+}
+
+/**
+ * The name is free in the listing, taken on disk, and the thing holding it is in the BIN.
+ *
+ * Split out of `NameTakenOnDiskError` because that error's sentence — "most likely made over SMB,
+ * and DEPSIS has no record of it" — is flatly untrue here: DEPSIS has a record, the user put it
+ * there, and it is one click away in the trash. Sending them to look for a phantom SMB client for
+ * something they deleted five seconds ago is the worst kind of wrong message.
+ *
+ * The state is reachable because trashing is a FLAG and nothing else. `trash()` writes
+ * `trashed_at` and never touches the directory, while both unique indexes in
+ * `0008_file_entries.sql` and `requireNameFree` below filter on `trashed_at IS NULL` — so the
+ * database frees the name the moment something is binned and the disk does not. Create 'Belgeler',
+ * bin it, create 'Belgeler' again: the database says yes and `mkdirat` says EEXIST.
+ *
+ * It is a regression, and worth naming as one so nobody "simplifies" it back. The old
+ * `createFolder` wrote a row and never called the agent, so the flow worked precisely because the
+ * folder was not on disk at all — which was the hole `CreateDirectory` was added to close.
+ *
+ * The remedy the message names is a real one the user can act on: empty the bin or restore. The
+ * alternative fix — moving the directory aside under `.depsis/trash/<id>` when it is binned, so
+ * the two name arbiters are freed together — is the better long-term shape, and it is a change to
+ * trash, restore and empty-trash all three rather than to this error.
+ */
+/**
+ * KNOWN GAP — "storage is not set up" is answered 409, not 503.
+ *
+ * `agentAvailable()` asks whether the SOCKET is configured, never whether a share root is
+ * (`agent.service.ts`), and the agent starts deliberately without `DEPSIS_SHARES_ROOT`
+ * (`main.rs`), answering `create_directory` with `refused: no share root is configured; storage is
+ * not set up`. That lands in `createDirectory`'s default arm, becomes `AgentRefusedError` and is
+ * translated to a 409 — so an appliance with no storage yet tells the user the same status class
+ * as a name collision, and `createFolder`'s controller comment claims 503 covers it.
+ *
+ * Not fixed here, and the reason is worth recording because the obvious fix is the wrong one.
+ * `refused` is not one condition: `create_directory` also answers it for `.depsis/` and for an
+ * empty path, and `publish_transfer` for several more. Separating them means matching on the
+ * agent's prose, which is the contract-nobody-declared this codebase refuses everywhere else —
+ * `SeamError::NotFound` and `AlreadyExists` exist as typed variants for exactly that reason. The
+ * honest fix is a distinct agent RESPONSE for "this daemon has no storage configured", which is a
+ * protocol change rather than a mapping change, and it belongs with the yaml update that adds
+ * 401/503 to `POST /files/folders`.
+ */
+
+export class NameTakenByTrashedEntryError extends Error {
+  constructor(
+    readonly takenName: string,
+    readonly trashedEntryId: string,
+    readonly agentReason: string,
+  ) {
+    super(
+      `'${takenName}' is still taken on disk by a folder in the bin. Emptying the bin or ` +
+        'restoring it frees the name; deleting it from the listing only hid it',
+    );
+    this.name = 'NameTakenByTrashedEntryError';
   }
 }
 
@@ -205,6 +291,15 @@ export interface ShareRef {
  * for exactly this branch, and `LIKE 'ab%'` is the shape that can use it.
  */
 const TRIGRAM_MIN_LENGTH = 3;
+
+/**
+ * "Exclude no row" for `requireNameFree`, which exists to answer "is this name free APART FROM the
+ * entry I am about to move". A creation excludes nothing, and the all-zero UUID is a value no
+ * `uuidv7` can produce — so the `id <> $5` clause is satisfied by every row rather than by all but
+ * one, and the parameter stays a uuid the database can compare instead of a NULL that would make
+ * the whole predicate NULL and silently match nothing.
+ */
+const NO_ENTRY = '00000000-0000-0000-0000-000000000000';
 
 /**
  * Turn "limit + 1 rows" into a page.
@@ -302,6 +397,7 @@ export class FilesService {
   constructor(
     private readonly db: DbService,
     private readonly agent: AgentService,
+    private readonly posix: PosixIdentityService,
   ) {}
 
   /**
@@ -401,32 +497,73 @@ export class FilesService {
   }
 
   /**
-   * Create a folder — in the database and on disk, in that order.
+   * Create a folder — ON DISK FIRST, in the database SECOND.
    *
-   * The database first, because its unique index is the only thing that can arbitrate two
-   * simultaneous requests for the same name; the filesystem's own `mkdir` would let both proceed
-   * with one silently winning. If the agent then refuses, the row is removed rather than left
-   * behind: a folder that appears in a listing and does not exist is worse than a failed request.
+   * The order is the project's rule and it was inverted here for as long as the agent had no
+   * `mkdir`: the row was written and nothing else, so a folder existed in Postgres and did not
+   * exist on the filesystem. Everything downstream inherited it. A move through such a folder
+   * could only ever fail, an upload into one had no destination directory, and anybody browsing
+   * the share over SMB — the entire reason a NAS exists — saw no folders at all.
    *
-   * The agent has no `mkdir` operation yet, so the second half is not done and the row is created
-   * alone. That is recorded here rather than in a comment claiming otherwise — see `MISSING` below.
+   * With `CreateDirectory` in the operation set the order goes the right way round, and the trade
+   * that used to justify the other one is worth naming rather than hiding. The database's unique
+   * index arbitrates a name collision case-INSENSITIVELY (`name_fold`, Turkish-i aware); the
+   * kernel's `mkdirat` arbitrates it byte-wise. So the sibling check below runs BEFORE the agent
+   * to catch the case-folded collision the filesystem cannot see, and the `INSERT` afterwards is
+   * still the authority — if it loses a race, the directory the agent just made is removed again.
+   * A directory with no row is invisible to every listing and unreachable by every id, which is
+   * the same orphan the old ordering produced with the stores swapped.
+   *
+   * The owner is the CREATOR's POSIX uid. The gid is the same number, deliberately: migration 0015
+   * allocates user uids and team gids from ONE counter, so a uid can be used as a group id with no
+   * risk of naming a team's group by accident — the user's own private group, in the ordinary Unix
+   * sense. It is not the team's gid because a folder is created before anyone has said which team
+   * may see it, and guessing would put a directory under a group the creator never chose. ADR-0004
+   * gives access to groups through the POSIX ACL (`ApplyFolderAcl`), not through the owning gid, so
+   * nothing is lost: the owning group is a placeholder that the ACL then makes irrelevant.
    */
   async createFolder(
     organizationId: string,
-    shareId: string,
+    share: ShareRef,
     parentId: string | null,
     name: string,
+    actorId: string,
+    correlationId: string,
+    reason: string,
   ): Promise<FileEntryRow> {
     assertValidName(name);
     let parentPath = '';
+    let parentComponents: string[] = [];
     if (parentId !== null) {
       const parent = await this.find(organizationId, parentId);
       if (parent.kind !== 'folder') throw new InvalidNameError('the parent is not a folder');
       // A trashed folder reads as absent rather than as a rejected parent: telling the caller the
       // folder exists but is in the bin is a distinction it cannot act on and did not earn.
       if (parent.trashed_at !== null) throw new EntryNotFoundError();
+      if (parent.share_id !== share.id) throw new EntryNotFoundError();
       parentPath = parent.path;
+      parentComponents = await this.componentsOf(organizationId, parentId);
     }
+
+    // Before the agent, and before a uid is spent. The `INSERT` below would catch this too, but
+    // only after a directory had been created on disk and had to be taken off again — and the
+    // common case for this branch is a user clicking "new folder" twice, not a race.
+    await this.requireNameFree(organizationId, share.id, parentId, name, NO_ENTRY);
+
+    const ownerUid = await this.posix.posixUidFor(organizationId, actorId);
+    const path = [...parentComponents, name];
+    // The disk-conflict answer is refined here rather than inside `createDirectory`, because this
+    // is the only caller that has the (share, parent) the name is scoped to. See
+    // `NameTakenByTrashedEntryError`: the name can be free in the database and held on disk by
+    // something the USER binned, and the generic message blames a phantom SMB client for it.
+    await this.createDirectory(share.name, path, ownerUid, name, correlationId, reason).catch(
+      async (error: unknown) => {
+        if (!(error instanceof NameTakenOnDiskError)) throw error;
+        const trashed = await this.trashedEntryHolding(organizationId, share.id, parentId, name);
+        if (trashed === undefined) throw error;
+        throw new NameTakenByTrashedEntryError(name, trashed, error.agentReason);
+      },
+    );
 
     try {
       const rows = await this.db.withTenant(organizationId, (db) =>
@@ -435,15 +572,175 @@ export class FilesService {
              (organization_id, share_id, parent_id, kind, name, path)
            VALUES ($1, $2, $3, 'folder', $4, $5)
            RETURNING ${ENTRY_COLUMNS}`,
-          [organizationId, shareId, parentId, name, `${parentPath}/${name}`],
+          [organizationId, share.id, parentId, name, `${parentPath}/${name}`],
         ),
       );
       const row = rows[0];
       if (!row) throw new Error('the folder row was not returned');
       return row;
     } catch (error) {
+      // The directory is there and the row is not — the one window in which that can still be
+      // closed from here, and the mirror of the compensating move in `move` below. Removed rather
+      // than left: an empty directory nothing in the database names is not merely untidy, it is a
+      // name the user cannot take again through DEPSIS and cannot see in order to understand why.
+      const response = await this.agent
+        .call(
+          { op: 'remove_entry', share: share.name, path, directory: true },
+          `undo: ${reason}`,
+          correlationId,
+        )
+        .catch((undoError: unknown) => {
+          this.logger.error(
+            `created the directory ${share.name}/${path.join('/')}, then failed to record it, ` +
+              `and could not remove it again: ${messageOf(undoError)}. An empty directory is on ` +
+              'disk with no row naming it.',
+          );
+          return null;
+        });
+      if (response !== null && response.status !== 'removed' && response.status !== 'not_found') {
+        this.logger.error(
+          `created the directory ${share.name}/${path.join('/')}, then failed to record it, and ` +
+            `the agent answered '${response.status}' to the removal. An empty directory is on ` +
+            'disk with no row naming it.',
+        );
+      }
       throw this.asNameConflict(error, name);
     }
+  }
+
+  /**
+   * Ask the agent for ONE directory, and turn its answer into this file's errors.
+   *
+   * `directory_created`, `conflict` and `not_found` are all ordinary answers on this wire, so each
+   * is mapped here rather than left to `expectStatus` — which would collapse the last two into one
+   * refusal that says neither "the name is taken" nor "the parent is missing".
+   *
+   * A missing parent is retried ONCE, after materialising the ancestor chain: a folder created
+   * before this operation existed is a row with no directory, and its child's `mkdirat` is exactly
+   * where that shows up. Once, not in a loop — `ensureDirectories` creates every component it was
+   * given, so a second failure is a condition repeating the call cannot fix.
+   */
+  private async createDirectory(
+    shareName: string,
+    path: string[],
+    ownerUid: number,
+    name: string,
+    correlationId: string,
+    reason: string,
+  ): Promise<void> {
+    const ancestors = path.slice(0, -1);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await this.agent.call(
+        {
+          op: 'create_directory',
+          share: shareName,
+          path,
+          owner_uid: ownerUid,
+          // See `createFolder`: one counter allocates uids and gids, so the creator's own id is a
+          // group nothing else can be holding.
+          owner_gid: ownerUid,
+        },
+        reason,
+        correlationId,
+      );
+      switch (response.status) {
+        case 'directory_created':
+          return;
+        case 'conflict':
+          throw new NameTakenOnDiskError(name, response.reason);
+        case 'not_found': {
+          if (attempt > 0 || ancestors.length === 0) {
+            throw new FolderNotOnDiskError(response.reason);
+          }
+          const materialised = await this.ensureDirectories(
+            shareName,
+            [ancestors],
+            ownerUid,
+            correlationId,
+            `${reason} (materialising an older folder)`,
+          );
+          if (!materialised) throw new FolderNotOnDiskError(response.reason);
+          break;
+        }
+        default:
+          expectStatus(response, 'directory_created');
+      }
+    }
+  }
+
+  /**
+   * Give every named chain a real directory, creating whatever is missing along it.
+   *
+   * The answer to "what happens to folders that were created before the agent could make one".
+   * They are NOT backfilled by a migration and they are not refused: a migration would have to
+   * reach the filesystem from the database, which nothing in this product can do, and a refusal
+   * would tell a user their folder is unusable and offer them no way to fix it. Instead the
+   * directory appears the first time something actually needs it — a move through the folder, an
+   * upload into it, a subfolder created under it.
+   *
+   * `conflict` counts as success and is the expected answer for every component but the last few:
+   * the chain is walked from the share root down, so the parts that already exist say so. That
+   * also makes this safe to call concurrently — two uploads into the same old folder race to
+   * create the same directory and exactly one of them loses harmlessly.
+   *
+   * What `conflict` actually means is "SOMETHING holds that name", not "a directory does".
+   * `mkdirat` returns EEXIST without distinguishing the two and the agent's own answer says so
+   * outright — by this user's earlier folder, by a FILE, or by a directory made over SMB. So if a
+   * component in the middle of a chain is a file, this reports the chain materialised and the
+   * retried move or publish then fails further along with a less explanatory error. Treated as
+   * success anyway, because the alternative is an extra probe on the common path to improve a
+   * message on a path that is already an error; the cost is written down here so the next person
+   * debugging "my upload fails and the folder looks fine" knows where to look.
+   *
+   * OWNERSHIP: a directory materialised here belongs to whoever first touched it, which is not
+   * necessarily whoever created the row. The owner is `posixUidFor(organizationId, actorId)` — the
+   * person MOVING through the folder or UPLOADING into it — because `file_entries` has no
+   * `created_by` column (0008 gives it only `trashed_by`), so the real creator is not recoverable.
+   * Combined with 0750 and the owner's private group, the consequence is concrete: when
+   * administrator B moves user A's pre-`CreateDirectory` folder, the directory becomes B's and A
+   * can no longer enter it over SMB. The permanent answer is the POSIX ACL (`ApplyFolderAcl`),
+   * which grants by group and makes the owning uid largely irrelevant; until an API caller writes
+   * those grants, this paragraph is the only place the two realities are reconciled.
+   *
+   * Returns whether the whole chain is now there. FALSE rather than throwing, because the caller
+   * arrived here holding an error it was about to report and this is an attempt to avoid reporting
+   * it — a failure means "carry on with the error you had", not "replace it with mine".
+   */
+  private async ensureDirectories(
+    shareName: string,
+    chains: readonly string[][],
+    ownerUid: number,
+    correlationId: string,
+    reason: string,
+  ): Promise<boolean> {
+    let attempted = false;
+    for (const chain of chains) {
+      for (let depth = 1; depth <= chain.length; depth += 1) {
+        attempted = true;
+        const response = await this.agent.call(
+          {
+            op: 'create_directory',
+            share: shareName,
+            path: chain.slice(0, depth),
+            owner_uid: ownerUid,
+            owner_gid: ownerUid,
+          },
+          reason,
+          correlationId,
+        );
+        // `conflict` is the component that was already there. Anything else — refused, failed,
+        // not_found on a path whose parent this loop has just made — is a condition this cannot
+        // work around, and the caller's original error is the better thing to report.
+        if (response.status !== 'directory_created' && response.status !== 'conflict') {
+          this.logger.warn(
+            `could not materialise ${shareName}/${chain.slice(0, depth).join('/')}: the agent ` +
+              `answered '${response.status}'`,
+          );
+          return false;
+        }
+      }
+    }
+    return attempted;
   }
 
   /** Record a file the agent has already published. */
@@ -485,26 +782,26 @@ export class FilesService {
   /**
    * Change an entry's name, keeping the bytes and the row in step.
    *
-   * A FILE's rename is delegated to `move` — same parent, new name — and that is not tidiness, it
-   * is the fix for a divergence this method used to create on its own. It changed `name` and
-   * `path` and never told the agent, so the row said `b.txt` while the disk still held `a.txt`.
-   * Nothing noticed until the file was permanently deleted: `purge` asked the agent to remove
-   * `b.txt`, the agent answered `not_found`, the row went, and `a.txt` stayed on disk — readable
-   * over SMB, counting against the dataset's refquota, and unreachable through DEPSIS forever.
-   * The user had been told it was permanently deleted. One rename through the agent and one
-   * rename around it must not both be spellings of the same request.
+   * Delegated to `move` — same parent, new name — for FILES and FOLDERS alike, and that is not
+   * tidiness. It is the fix for a divergence this method used to create on its own: it changed
+   * `name` and `path` and never told the agent, so the row said `b.txt` while the disk still held
+   * `a.txt`. Nothing noticed until the file was permanently deleted, when `purge` asked the agent
+   * to remove `b.txt`, the agent answered `not_found`, the row went, and `a.txt` stayed on disk —
+   * readable over SMB, counting against the dataset's refquota, unreachable through DEPSIS forever.
+   * The user had been told it was permanently deleted.
    *
-   * A FOLDER keeps the database-only rename, because a folder has no directory on disk to move:
-   * `createFolder` cannot make one, the agent has no `mkdir`, and asking it to rename something
-   * that was never created would fail every folder rename in the product. This is folders-only
-   * for exactly as long as that is true, and the day a directory-creating operation lands, this
-   * branch goes with it.
+   * The FOLDER half of that exception is gone with this change. It was justified by a folder having
+   * no directory to rename, which stopped being true the moment `CreateDirectory` landed: a folder
+   * created from now on has one, and an older folder gets one materialised on the way through. A
+   * folder rename that skipped the agent would leave the directory under its old name — the same
+   * split as above, and a worse one, because everything inside the folder inherits it.
    */
   async rename(
     organizationId: string,
     id: string,
     name: string,
     share: ShareRef,
+    actorId: string,
     correlationId: string,
     reason: string,
   ): Promise<FileEntryRow> {
@@ -512,39 +809,15 @@ export class FilesService {
     const entry = await this.find(organizationId, id);
     if (entry.trashed_at !== null) throw new EntryNotFoundError();
 
-    if (entry.kind === 'file') {
-      return this.move(
-        organizationId,
-        id,
-        share,
-        { parentId: entry.parent_id, name },
-        correlationId,
-        reason,
-      );
-    }
-
-    const parentPath = entry.path.slice(0, entry.path.lastIndexOf('/'));
-    try {
-      return await this.db.withTenant(organizationId, async (db) => {
-        const rows = await db.query<FileEntryRow>(
-          `UPDATE public.file_entries
-              SET name = $3, path = $4
-            WHERE organization_id = $1 AND id = $2
-            RETURNING ${ENTRY_COLUMNS}`,
-          [organizationId, id, name, `${parentPath}/${name}`],
-        );
-        const row = rows[0];
-        if (!row) throw new EntryNotFoundError();
-        // The same rebuild `move` does, in the same transaction as the row it follows from. Left
-        // out, a renamed folder's children kept a `path` naming the old folder — harmless only
-        // because ADR-0005 makes nothing authorise on `path`, and harmless is not a property to
-        // rest a cache on when the two routes to a rename would then disagree about it.
-        await rebuildSubtreePaths(db, organizationId, id);
-        return row;
-      });
-    } catch (error) {
-      throw this.asNameConflict(error, name);
-    }
+    return this.move(
+      organizationId,
+      id,
+      share,
+      { parentId: entry.parent_id, name },
+      actorId,
+      correlationId,
+      reason,
+    );
   }
 
   /**
@@ -567,6 +840,7 @@ export class FilesService {
     id: string,
     share: ShareRef,
     target: { parentId: string | null; name?: string | undefined },
+    actorId: string,
     correlationId: string,
     reason: string,
   ): Promise<FileEntryRow> {
@@ -598,11 +872,27 @@ export class FilesService {
     if (entry.parent_id === target.parentId && name === entry.name) return entry;
 
     // Asked of the database BEFORE the agent, even though the agent's `RENAME_NOREPLACE` refuses a
-    // taken destination anyway. Two reasons: a folder has no directory on disk yet (see
-    // `createFolder`), so the kernel's refusal cannot see a folder collision at all; and a row
-    // whose bytes are missing would let the rename succeed and the `UPDATE` then fail on the
+    // taken destination anyway. Two reasons: the database folds case and the Turkish i and the
+    // kernel does not, so a collision the index will refuse can be invisible to `renameat2`; and a
+    // row whose bytes are missing would let the rename succeed and the `UPDATE` then fail on the
     // unique index — the one ordering that leaves the file moved and the row behind.
     await this.requireNameFree(organizationId, entry.share_id, target.parentId, name, id);
+
+    // Same upgrade `createFolder` performs, and reachable by the same route: a rename onto the name
+    // of a BINNED sibling passes `requireNameFree` and is then refused by `renameat2`, because
+    // trashing never took the directory off the disk. Without this the user is told to "rename one
+    // of them" about something the listing does not show.
+    const upgradeTrashedConflict = async (error: unknown): Promise<never> => {
+      if (!(error instanceof NameTakenError)) throw error;
+      const trashed = await this.trashedEntryHolding(
+        organizationId,
+        entry.share_id,
+        target.parentId,
+        name,
+      );
+      if (trashed === undefined) throw error;
+      throw new NameTakenByTrashedEntryError(name, trashed, error.message);
+    };
 
     const from = await this.componentsOf(organizationId, id);
     const to =
@@ -611,23 +901,52 @@ export class FilesService {
         : [...(await this.componentsOf(organizationId, target.parentId)), name];
 
     await this.moveOnDisk(share.name, from, to, name, correlationId, reason).catch(
-      (error: unknown) => {
-        // `EntryMissingOnDiskError` says "the two stores disagree", which is the right thing to say
-        // when they do and a slander on the database when they do not. A folder is a row with no
-        // directory behind it (see `createFolder`), so the moment either end of this move runs
-        // through one, `open_dir` inside the agent's `publish` fails with ENOENT and the answer
-        // comes back `not_found` — not because anything is corrupt, but because the destination
-        // was never created. Whoever reads the first message goes looking for a broken database;
-        // whoever reads this one learns the feature is waiting on an agent operation.
+      async (error: unknown) => {
+        if (error instanceof NameTakenError) return upgradeTrashedConflict(error);
+        if (!(error instanceof EntryMissingOnDiskError)) throw error;
+
+        // `EntryMissingOnDiskError` says "the two stores disagree", which is the right thing to
+        // say when they do and a slander on the database when they do not. Before saying it, try
+        // the one benign explanation there is: a folder somewhere in this move predates
+        // `CreateDirectory`, so it is a row with no directory and the agent's `open_dir` hit
+        // ENOENT on a path that is otherwise perfectly correct.
         //
-        // Three ways a folder gets into it: the entry being moved is one (nothing to rename), the
-        // source sits inside one, or the destination is one. The last two are what the component
-        // counts test — a path of length 1 is at the share root, where files actually live.
-        const touchesAFolder = entry.kind === 'folder' || from.length > 1 || to.length > 1;
-        if (error instanceof EntryMissingOnDiskError && touchesAFolder) {
-          throw new FolderNotOnDiskError(error.agentReason);
-        }
-        throw error;
+        // Three ways a folder gets into it: the entry being moved IS one (there is nothing to
+        // rename), the source sits inside one, or the destination is one. The last two are what
+        // the component counts test — a path of length 1 is at the share root. A file moved from
+        // one root name to another touches no folder at all, and for it the original error stands.
+        const chains: string[][] = [];
+        if (from.length > 1) chains.push(from.slice(0, -1));
+        if (to.length > 1) chains.push(to.slice(0, -1));
+        // The folder itself, at its OLD location. Created empty and then renamed, which is exactly
+        // what the move was asking for: its children are rows that will materialise on their own
+        // first use, and there is nothing on disk under the old name to lose.
+        if (entry.kind === 'folder') chains.push(from);
+        if (chains.length === 0) throw error;
+
+        const ownerUid = await this.posix.posixUidFor(organizationId, actorId);
+        const materialised = await this.ensureDirectories(
+          share.name,
+          chains,
+          ownerUid,
+          correlationId,
+          `${reason} (materialising an older folder)`,
+        );
+        if (!materialised) throw new FolderNotOnDiskError(error.agentReason);
+
+        // Once, not in a loop. Everything the first attempt could have been missing has now been
+        // created, so a second `not_found` is a state a third call cannot change.
+        await this.moveOnDisk(share.name, from, to, name, correlationId, reason).catch(
+          async (retryError: unknown) => {
+            if (retryError instanceof EntryMissingOnDiskError) {
+              throw new FolderNotOnDiskError(retryError.agentReason);
+            }
+            if (retryError instanceof NameTakenError) {
+              return upgradeTrashedConflict(retryError);
+            }
+            throw retryError;
+          },
+        );
       },
     );
 
@@ -741,8 +1060,10 @@ export class FilesService {
       }
       if (response.status === 'not_found' && node.kind === 'file') {
         // The one direction this endpoint can be wrong in that nobody would ever find out about.
-        // A folder has no directory on disk (see `createFolder`), so `not_found` for one is the
-        // expected answer; a FILE the agent cannot find means either a retry after a crash — the
+        // A folder may have no directory on disk — every folder created before `CreateDirectory`
+        // existed is a row alone, and one that was never used has never been materialised — so
+        // `not_found` for one is unremarkable; a FILE the agent cannot find means either a retry
+        // after a crash — the
         // case the acceptance above exists for — or bytes sitting somewhere the database does not
         // name, which this call is about to make unreachable by deleting the only row that knew
         // about them. They stay readable over SMB and keep counting against the dataset's
@@ -817,6 +1138,13 @@ export class FilesService {
         throw new EntryMissingOnDiskError(response.reason);
       // `RENAME_NOREPLACE` refused: something is already at the destination and the source has not
       // moved. The name is what the user has to change, which is what `NameTakenError` says.
+      //
+      // `requireNameFree` has already passed at this point, so the thing holding the destination is
+      // NOT a visible sibling — it is on disk only. Most often that is an SMB-made entry, but the
+      // routine case is a folder the user binned: trashing writes `trashed_at` and leaves the
+      // directory, while the unique index and `requireNameFree` both exclude trashed rows, so the
+      // database frees the name and the disk does not. `move` upgrades this error when it can
+      // identify that row; see `NameTakenByTrashedEntryError`.
       case 'conflict':
         throw new NameTakenError(name);
       default:
@@ -879,6 +1207,39 @@ export class FilesService {
       ),
     );
     if (rows.length > 0) throw new NameTakenError(name);
+  }
+
+  /**
+   * The id of the TRASHED entry holding `name` here, if there is one.
+   *
+   * The exact inverse of `requireNameFree`: same scope, same folding, `trashed_at IS NOT NULL`
+   * instead of `IS NULL`. Called only after the agent has already refused the name on disk, so it
+   * runs on a path that has failed rather than on every create.
+   *
+   * `name_fold` for the same reason `requireNameFree` uses it — uniqueness is case- and
+   * Turkish-i-folded, so a raw-name comparison would miss the 'İSTANBUL'/'istanbul' pair that the
+   * index treats as one name and that the disk, which is byte-exact, may or may not.
+   */
+  private async trashedEntryHolding(
+    organizationId: string,
+    shareId: string,
+    parentId: string | null,
+    name: string,
+  ): Promise<string | undefined> {
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ id: string }>(
+        `SELECT id FROM public.file_entries
+          WHERE organization_id = $1
+            AND share_id = $2
+            AND parent_id IS NOT DISTINCT FROM $3
+            AND name_fold = public.fold_identity($4)
+            AND trashed_at IS NOT NULL
+          ORDER BY trashed_at DESC
+          LIMIT 1`,
+        [organizationId, shareId, parentId, name],
+      ),
+    );
+    return rows[0]?.id;
   }
 
   /**
@@ -1131,7 +1492,21 @@ export class FilesService {
     return { token: opened.token, size: opened.size };
   }
 
-  /** Ask the agent to publish a staged file into the tree. */
+  /**
+   * Ask the agent to publish a staged file into the tree.
+   *
+   * `ownerUid` and `ownerGid` are the UPLOADER's, resolved by the caller from
+   * `PosixIdentityService`. The agent refuses 0 for both, and its own comment explains why that
+   * refusal is deliberate rather than defensive: a publish that skipped the mapping produces a
+   * file inside a tenant's share that the tenant does not own, which is not visible as a fault
+   * until they try to change it over SMB.
+   *
+   * A `not_found` on the way in is retried ONCE after materialising the destination's parent
+   * chain. Uploading into a folder created before `CreateDirectory` existed is the whole of that
+   * case: the staged bytes are fine, the row is fine, and the only thing missing is the directory
+   * the file is meant to land in. Refusing there would make every pre-existing folder permanently
+   * unusable as an upload target.
+   */
   async publish(
     share: string,
     stagingName: string,
@@ -1142,20 +1517,33 @@ export class FilesService {
     correlationId: string,
     reason: string,
   ): Promise<number> {
-    const response = await this.agent.call(
-      {
-        op: 'publish_transfer',
-        share,
-        staging_name: stagingName,
-        destination,
-        expected_bytes: expectedBytes,
-        owner_uid: ownerUid,
-        owner_gid: ownerGid,
-      },
-      reason,
+    const request = {
+      op: 'publish_transfer',
+      share,
+      staging_name: stagingName,
+      destination,
+      expected_bytes: expectedBytes,
+      owner_uid: ownerUid,
+      owner_gid: ownerGid,
+    } as const;
+
+    const response = await this.agent.call(request, reason, correlationId);
+    if (response.status !== 'not_found' || destination.length < 2) {
+      return expectStatus(response, 'publish').bytes;
+    }
+
+    const materialised = await this.ensureDirectories(
+      share,
+      [destination.slice(0, -1)],
+      ownerUid,
       correlationId,
+      `${reason} (materialising an older folder)`,
     );
-    return expectStatus(response, 'publish').bytes;
+    if (!materialised) throw new FolderNotOnDiskError(response.reason);
+
+    const retried = await this.agent.call(request, reason, correlationId);
+    if (retried.status === 'not_found') throw new FolderNotOnDiskError(retried.reason);
+    return expectStatus(retried, 'publish').bytes;
   }
 }
 

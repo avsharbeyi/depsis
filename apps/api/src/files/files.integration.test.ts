@@ -8,6 +8,7 @@ import {
   type AgentService,
 } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
+import { PosixIdentityService } from '../identity/posix.service.js';
 import {
   EntryMissingOnDiskError,
   EntryNotFoundError,
@@ -15,9 +16,12 @@ import {
   FolderNotOnDiskError,
   InvalidNameError,
   MoveIntoDescendantError,
+  NameTakenByTrashedEntryError,
   NameTakenError,
+  NameTakenOnDiskError,
   NotTrashedError,
   TrashedParentError,
+  type FileEntryRow,
   type ShareRef,
 } from './files.service.js';
 
@@ -40,10 +44,34 @@ const runnable =
   APP_URL !== undefined && APP_URL !== '' && OWNER_URL !== undefined && OWNER_URL !== '';
 const describeDb = runnable ? describe : describe.skip;
 
-/** Most tests here are metadata only, and reaching the agent from one of them is a bug. */
-const noAgent = {
-  isAvailable: () => false,
-  call: () => Promise.reject(new Error('no test here should call the agent')),
+/**
+ * The agent the FIXTURE service talks to.
+ *
+ * There used to be one here that refused everything, on the grounds that a metadata test reaching
+ * the agent was a bug. That stopped being possible when folder creation became a filesystem
+ * operation: almost every test below needs a folder to exist before it can assert anything, and
+ * making one now asks the agent first and writes the row only if it agrees.
+ *
+ * So this answers exactly the two operations a FIXTURE needs — make a directory, rename one — and
+ * rejects everything else, which keeps the original guarantee for every other operation. Nothing
+ * that asserts about which call was made, or in what order, uses this: those build their own
+ * service with `withAgent`, and this one deliberately records nothing so it cannot be asserted on
+ * by accident.
+ */
+const fixtureAgent = {
+  isAvailable: () => true,
+  call: (request: Record<string, unknown>) => {
+    switch (request['op']) {
+      case 'create_directory':
+        return Promise.resolve({ status: 'directory_created' });
+      case 'move_entry':
+        return Promise.resolve({ status: 'moved' });
+      default:
+        return Promise.reject(
+          new Error(`no fixture answers '${String(request['op'])}'; build one with withAgent`),
+        );
+    }
+  },
 } as unknown as AgentService;
 
 /**
@@ -70,7 +98,7 @@ function withAgent(answer: (request: Record<string, unknown>) => Record<string, 
       });
     },
   } as unknown as AgentService;
-  return { files: new FilesService(db, agent), calls };
+  return { files: new FilesService(db, agent, new PosixIdentityService(db)), calls };
 }
 
 // Declared out here because `withAgent` above builds a second `FilesService` on the same pool.
@@ -129,10 +157,37 @@ describeDb('the file tree, against a real PostgreSQL', () => {
       userB = await seedUser(orgB, 'bfiles');
     });
 
-    files = new FilesService(db, noAgent);
+    files = new FilesService(db, fixtureAgent, new PosixIdentityService(db));
     shareA = (await files.defaultShare(orgA, 'files-a')).id;
     shareB = (await files.defaultShare(orgB, 'files-b')).id;
   });
+
+  /** The two shares, as the agent's callers name them. Assigned in `beforeAll`, so read lazily. */
+  const shareRefA = (): ShareRef => ({ id: shareA, name: 'files-a' });
+  const shareRefB = (): ShareRef => ({ id: shareB, name: 'files-b' });
+
+  /**
+   * A folder, made the way the product makes one: the agent first, the row second.
+   *
+   * A helper rather than 80 call sites, because `createFolder` now needs a share the agent can
+   * name, an acting user whose uid stamps the directory, a correlation id and a reason — and none
+   * of that is what the tests below are about. Everything that IS about it says so explicitly.
+   */
+  const mkdir = (
+    organizationId: string,
+    shareId: string,
+    parentId: string | null,
+    name: string,
+  ): Promise<FileEntryRow> =>
+    files.createFolder(
+      organizationId,
+      shareId === shareA ? shareRefA() : shareRefB(),
+      parentId,
+      name,
+      organizationId === orgA ? userA : userB,
+      'cid-fixture',
+      'fixture',
+    );
 
   afterAll(async () => {
     // Children before parents, and rows before organizations: every reference is ON DELETE
@@ -158,7 +213,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   });
 
   it('creates a folder and lists it', async () => {
-    const folder = await files.createFolder(orgA, shareA, null, 'Belgeler');
+    const folder = await mkdir(orgA, shareA, null, 'Belgeler');
     expect(folder.kind).toBe('folder');
 
     const page = await files.list(orgA, shareA, null, null, 50);
@@ -166,16 +221,298 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     expect(page.hasMore).toBe(false);
   });
 
+  // ─── folder creation reaches the disk ───────────────────────────────────────
+  //
+  // The hole these close: `createFolder` used to write a row and nothing else, so a folder existed
+  // in Postgres and did not exist on the filesystem. A move through it could only fail, an upload
+  // into it had no destination directory, and SMB — the entire reason a NAS exists — showed no
+  // folders at all. Every test here is about the ORDER, and about the row NOT existing when the
+  // filesystem half did not happen.
+
+  it('asks the agent for a real directory BEFORE it writes the row', async () => {
+    const making = withAgent(() => ({ status: 'directory_created' }));
+    const parent = await mkdir(orgA, shareA, null, 'disk-ust');
+
+    const folder = await making.files.createFolder(
+      orgA,
+      shareRefA(),
+      parent.id,
+      'disk-alt',
+      userA,
+      'cid-mkdir',
+      'test',
+    );
+
+    expect(folder.name).toBe('disk-alt');
+    expect(making.calls).toHaveLength(1);
+    // The path is the parent's components then the name — never the `path` string spliced up, and
+    // never just the name, which is the bug that put every upload at the share root.
+    expect(making.calls[0]).toMatchObject({
+      op: 'create_directory',
+      share: 'files-a',
+      path: ['disk-ust', 'disk-alt'],
+    });
+    // The owner is the CREATOR, not the service account. The agent refuses 0 for exactly this.
+    const call = making.calls[0] as { owner_uid: number; owner_gid: number };
+    expect(call.owner_uid).toBeGreaterThanOrEqual(300000);
+    expect(call.owner_uid).toBeLessThanOrEqual(399999);
+    // The gid is the same number: one counter allocates uids and team gids, so a creator's own id
+    // is a private group nothing else can be holding.
+    expect(call.owner_gid).toBe(call.owner_uid);
+  });
+
+  it('names the BIN when a trashed folder still holds the name on disk', async () => {
+    // The regression, and it is a regression rather than a gap. Trashing writes `trashed_at` and
+    // touches nothing on disk, while both unique indexes in 0008 and `requireNameFree` filter on
+    // `trashed_at IS NULL` — so the database frees the name the moment something is binned and the
+    // directory keeps it. Create, bin, create again: the database says yes and `mkdirat` says
+    // EEXIST. The old `createFolder` wrote a row and never called the agent, so the flow worked
+    // precisely because the folder was not on disk at all.
+    //
+    // What must not come back is the SENTENCE. `NameTakenOnDiskError` says the name was "most
+    // likely made over SMB, and DEPSIS has no record of it", which is false twice over here: the
+    // record exists and the user made it. Sending someone to hunt a phantom SMB client for a
+    // folder they deleted a moment ago is the worst available answer, so the assertion below is on
+    // the words as much as on the type.
+    let created = 0;
+    const binned = withAgent((request) => {
+      if (request['op'] !== 'create_directory') return { status: 'moved' };
+      created += 1;
+      // The second `mkdirat` for the same name is the one the kernel refuses; the fake has to say
+      // so, because a fixture that always answers `directory_created` cannot see this bug at all.
+      return created === 1
+        ? { status: 'directory_created' }
+        : { status: 'conflict', reason: 'files-a/cop-belgeler: something is already there' };
+    });
+
+    const folder = await binned.files.createFolder(
+      orgA,
+      shareRefA(),
+      null,
+      'cop-belgeler',
+      userA,
+      'cid-bin',
+      'test',
+    );
+    await binned.files.trash(orgA, folder.id, userA);
+
+    const failure = await binned.files
+      .createFolder(orgA, shareRefA(), null, 'cop-belgeler', userA, 'cid-bin-2', 'test')
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(failure).toBeInstanceOf(NameTakenByTrashedEntryError);
+    const named = failure as NameTakenByTrashedEntryError;
+    expect(named.trashedEntryId).toBe(folder.id);
+    expect(named.message).toMatch(/bin/i);
+    expect(named.message).not.toMatch(/SMB/i);
+    expect(named.message).not.toMatch(/no record/i);
+
+    // And the honest case must survive: with nothing in the bin holding the name, the SMB sentence
+    // is the right one and must still be what comes out.
+    const smb = withAgent(() => ({
+      status: 'conflict',
+      reason: 'files-a/elle-yapilmis: something is already there',
+    }));
+    await expect(
+      smb.files.createFolder(orgA, shareRefA(), null, 'elle-yapilmis', userA, 'cid-smb', 'test'),
+    ).rejects.toBeInstanceOf(NameTakenOnDiskError);
+  });
+
+  it('names the BIN when a rename collides with a trashed sibling on disk', async () => {
+    // The same root cause through the other door. `rename` is delegated to `move`, so renaming
+    // onto a binned sibling's name passes `requireNameFree` (which excludes trashed rows) and is
+    // then refused by `renameat2(RENAME_NOREPLACE)` — arriving as `NameTakenError`, whose advice is
+    // "rename one of them", about a folder the listing does not show.
+    const renaming = withAgent((request) => {
+      if (request['op'] === 'create_directory') return { status: 'directory_created' };
+      return { status: 'conflict', reason: 'files-a/arsiv: something is already there' };
+    });
+
+    const doomed = await renaming.files.createFolder(
+      orgA,
+      shareRefA(),
+      null,
+      'arsiv',
+      userA,
+      'cid-r1',
+      'test',
+    );
+    await renaming.files.trash(orgA, doomed.id, userA);
+    const other = await renaming.files.createFolder(
+      orgA,
+      shareRefA(),
+      null,
+      'gecici',
+      userA,
+      'cid-r2',
+      'test',
+    );
+
+    const failure = await renaming.files
+      .move(orgA, other.id, shareRefA(), { parentId: null, name: 'arsiv' }, userA, 'cid-r3', 'test')
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(failure).toBeInstanceOf(NameTakenByTrashedEntryError);
+    expect((failure as NameTakenByTrashedEntryError).trashedEntryId).toBe(doomed.id);
+  });
+
+  it('writes NO row when the agent refuses to create the directory', async () => {
+    // The order, stated as a consequence. A row written first and a refusal second is a folder that
+    // appears in every listing, accepts uploads that then fail, and cannot be seen over SMB.
+    const refusing = withAgent(() => ({ status: 'refused', reason: 'the dataset is read-only' }));
+
+    await expect(
+      refusing.files.createFolder(orgA, shareRefA(), null, 'ret-klasor', userA, 'cid', 'test'),
+    ).rejects.toBeInstanceOf(AgentRefusedError);
+
+    const page = await files.list(orgA, shareA, null, null, 500);
+    expect(page.items.map((i) => i.name)).not.toContain('ret-klasor');
+  });
+
+  it('writes NO row when the agent cannot be reached at all', async () => {
+    // Distinct from a refusal and it has to stay distinct: nothing was necessarily done, the box is
+    // not broken, and the caller's remedy is to try later. What must not differ is the row.
+    const unreachable = withAgent(() => {
+      throw new AgentUnavailableError('the socket is not there');
+    });
+
+    await expect(
+      unreachable.files.createFolder(
+        orgA,
+        shareRefA(),
+        null,
+        'ulasilamaz-klasor',
+        userA,
+        'cid',
+        'test',
+      ),
+    ).rejects.toBeInstanceOf(AgentUnavailableError);
+
+    const page = await files.list(orgA, shareA, null, null, 500);
+    expect(page.items.map((i) => i.name)).not.toContain('ulasilamaz-klasor');
+  });
+
+  it('says the name is taken ON DISK when the directory already exists there', async () => {
+    // EEXIST, and the sentence matters more than the status. The database has no row with this
+    // name — the caller can see that in their own listing — so a bare "already exists" reads as a
+    // lie. The likeliest cause is somebody creating the folder over SMB, where DEPSIS is not
+    // consulted and writes nothing, and that is a fact the person clicking the button can act on.
+    const taken = withAgent(() => ({
+      status: 'conflict',
+      reason: 'files-a/smbden: something is already there',
+    }));
+
+    const failure = await taken.files
+      .createFolder(orgA, shareRefA(), null, 'smbden', userA, 'cid', 'test')
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    expect(failure).toBeInstanceOf(NameTakenOnDiskError);
+    expect((failure as NameTakenOnDiskError).message).toContain('on disk');
+    // Still no row, so the name stays available the moment the disk half is sorted out.
+    const page = await files.list(orgA, shareA, null, null, 500);
+    expect(page.items.map((i) => i.name)).not.toContain('smbden');
+  });
+
+  it('creates the missing parent of an OLDER folder rather than refusing outright', async () => {
+    // What happens to folders that predate `CreateDirectory`: they are rows with no directory, and
+    // they are neither backfilled by a migration — nothing in this product can reach the filesystem
+    // from the database — nor declared unusable. The directory appears the first time something
+    // needs it, which here is a subfolder being created under one.
+    //
+    // The agent below refuses the first `create_directory` with `not_found` (its parent is not
+    // there), accepts every path of length 1 (the parent being materialised), and accepts the
+    // retry.
+    const seen: string[][] = [];
+    const materialising = withAgent((request) => {
+      const path = request['path'] as string[];
+      seen.push(path);
+      const first = seen.length === 1;
+      return first
+        ? { status: 'not_found', reason: 'files-a/eski: the parent folder does not exist' }
+        : { status: 'directory_created' };
+    });
+    const older = await mkdir(orgA, shareA, null, 'eski-klasor');
+
+    const child = await materialising.files.createFolder(
+      orgA,
+      shareRefA(),
+      older.id,
+      'yeni-alt',
+      userA,
+      'cid',
+      'test',
+    );
+
+    expect(child.name).toBe('yeni-alt');
+    // First the child (refused), then the parent alone, then the child again.
+    expect(seen).toEqual([
+      ['eski-klasor', 'yeni-alt'],
+      ['eski-klasor'],
+      ['eski-klasor', 'yeni-alt'],
+    ]);
+  });
+
+  it('refuses a name a sibling already holds without asking the agent for anything', async () => {
+    // The database folds case and the Turkish i; `mkdirat` compares bytes. So the collision has to
+    // be caught here, before a directory is made that would then have to be taken off again.
+    const making = withAgent(() => ({ status: 'directory_created' }));
+    await mkdir(orgA, shareA, null, 'Onceden');
+
+    await expect(
+      making.files.createFolder(orgA, shareRefA(), null, 'ONCEDEN', userA, 'cid', 'test'),
+    ).rejects.toBeInstanceOf(NameTakenError);
+
+    expect(making.calls).toEqual([]);
+  });
+
+  it('removes the directory again when the row cannot be written', async () => {
+    // The compensating half, and the mirror of the one in `move`. The sibling pre-check cannot
+    // close every way an INSERT can fail — two requests for one name can both pass it, and a
+    // constraint can refuse for reasons the check never looked at — so without this the loser
+    // leaves a directory nothing in the database names: invisible to every listing, unreachable by
+    // every id, and holding a name the user cannot take again through DEPSIS.
+    //
+    // Driven here by a share id that does not exist, so the agent succeeds and the foreign key
+    // then refuses. Any INSERT failure takes the same path; this is simply the one a test can
+    // produce without a second connection racing the first.
+    const orphaning = withAgent((request) =>
+      request['op'] === 'remove_entry' ? { status: 'removed' } : { status: 'directory_created' },
+    );
+    const ghostShare = { id: randomUUID(), name: 'files-a' };
+
+    await expect(
+      orphaning.files.createFolder(orgA, ghostShare, null, 'oksuz', userA, 'cid', 'test'),
+    ).rejects.toBeTruthy();
+
+    expect(orphaning.calls).toEqual([
+      {
+        op: 'create_directory',
+        share: 'files-a',
+        path: ['oksuz'],
+        owner_uid: expect.any(Number) as unknown as number,
+        owner_gid: expect.any(Number) as unknown as number,
+      },
+      // The undo. Without it the directory stays, and the next attempt at this name gets an EEXIST
+      // it cannot explain.
+      { op: 'remove_entry', share: 'files-a', path: ['oksuz'], directory: true },
+    ]);
+  });
+
   it('refuses a second entry with the same name, case-folded', async () => {
     // Two shares on one box are served over SMB, where clients are case-insensitive: 'Rapor' and
     // 'rapor' side by side are two files a Windows user cannot tell apart or address separately.
-    await files.createFolder(orgA, shareA, null, 'Rapor');
-    await expect(files.createFolder(orgA, shareA, null, 'rapor')).rejects.toBeInstanceOf(
-      NameTakenError,
-    );
-    await expect(files.createFolder(orgA, shareA, null, 'RAPOR')).rejects.toBeInstanceOf(
-      NameTakenError,
-    );
+    await mkdir(orgA, shareA, null, 'Rapor');
+    await expect(mkdir(orgA, shareA, null, 'rapor')).rejects.toBeInstanceOf(NameTakenError);
+    await expect(mkdir(orgA, shareA, null, 'RAPOR')).rejects.toBeInstanceOf(NameTakenError);
   });
 
   it('allows names that differ only by accent, because uniqueness is not search', async () => {
@@ -183,8 +520,8 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // normaliser — which strips accents so a search for 'cagri' finds 'Çağrı' — then creating
     // 'Çağrı.txt' beside an existing 'Cagri.txt' would be refused, and the user would be told two
     // plainly different names are the same name.
-    await files.createFolder(orgA, shareA, null, 'Cagri');
-    const accented = await files.createFolder(orgA, shareA, null, 'Çağrı');
+    await mkdir(orgA, shareA, null, 'Cagri');
+    const accented = await mkdir(orgA, shareA, null, 'Çağrı');
     expect(accented.name).toBe('Çağrı');
   });
 
@@ -192,25 +529,21 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // `UNIQUE (organization_id, parent_id, name_fold)` alone leaves the root unconstrained:
     // parent_id is NULL there and NULL is distinct from NULL, so every top level would accept
     // unlimited duplicates. The schema splits the index on the null for exactly this.
-    const parent = await files.createFolder(orgA, shareA, null, 'Ust');
-    await files.createFolder(orgA, shareA, parent.id, 'ayni');
-    await expect(files.createFolder(orgA, shareA, parent.id, 'AYNI')).rejects.toBeInstanceOf(
-      NameTakenError,
-    );
+    const parent = await mkdir(orgA, shareA, null, 'Ust');
+    await mkdir(orgA, shareA, parent.id, 'ayni');
+    await expect(mkdir(orgA, shareA, parent.id, 'AYNI')).rejects.toBeInstanceOf(NameTakenError);
 
-    await files.createFolder(orgA, shareA, null, 'kokte');
-    await expect(files.createFolder(orgA, shareA, null, 'KOKTE')).rejects.toBeInstanceOf(
-      NameTakenError,
-    );
+    await mkdir(orgA, shareA, null, 'kokte');
+    await expect(mkdir(orgA, shareA, null, 'KOKTE')).rejects.toBeInstanceOf(NameTakenError);
   });
 
   it('frees the name when an entry is trashed, and can refuse a restore that would collide', async () => {
-    const first = await files.createFolder(orgA, shareA, null, 'yeniden');
+    const first = await mkdir(orgA, shareA, null, 'yeniden');
     await files.trash(orgA, first.id, userA);
 
     // The unique indexes are partial on `trashed_at IS NULL` precisely so this works: a user who
     // deleted `rapor.pdf` must be able to upload a new one without emptying the trash first.
-    const second = await files.createFolder(orgA, shareA, null, 'yeniden');
+    const second = await mkdir(orgA, shareA, null, 'yeniden');
     expect(second.id).not.toBe(first.id);
 
     // And the consequence, which is correct rather than unfortunate: restoring the old one now
@@ -219,7 +552,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   });
 
   it('hides a trashed entry from listings but keeps its id', async () => {
-    const folder = await files.createFolder(orgA, shareA, null, 'gidecek');
+    const folder = await mkdir(orgA, shareA, null, 'gidecek');
     await files.trash(orgA, folder.id, userA);
 
     const page = await files.list(orgA, shareA, null, null, 100);
@@ -231,8 +564,8 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   });
 
   it('renames and keeps the derived path in step', async () => {
-    const folder = await files.createFolder(orgA, shareA, null, 'eski');
-    const renamed = await files.rename(orgA, folder.id, 'yeni', shareRefA(), 'cid', 'test');
+    const folder = await mkdir(orgA, shareA, null, 'eski');
+    const renamed = await files.rename(orgA, folder.id, 'yeni', shareRefA(), userA, 'cid', 'test');
     expect(renamed.name).toBe('yeni');
     expect(renamed.path.endsWith('/yeni')).toBe(true);
   });
@@ -241,11 +574,11 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // `move` did this and `rename` did not, so the same user-visible change left the cache in two
     // different states depending on which spelling the client used. Nothing authorises on `path`
     // (ADR-0005), which is the only reason it was survivable rather than a bug with a victim.
-    const folder = await files.createFolder(orgA, shareA, null, 'ad-kok');
-    const child = await files.createFolder(orgA, shareA, folder.id, 'ad-alt');
-    const grandchild = await files.createFolder(orgA, shareA, child.id, 'ad-torun');
+    const folder = await mkdir(orgA, shareA, null, 'ad-kok');
+    const child = await mkdir(orgA, shareA, folder.id, 'ad-alt');
+    const grandchild = await mkdir(orgA, shareA, child.id, 'ad-torun');
 
-    await files.rename(orgA, folder.id, 'ad-yeni', shareRefA(), 'cid', 'test');
+    await files.rename(orgA, folder.id, 'ad-yeni', shareRefA(), userA, 'cid', 'test');
 
     expect((await files.find(orgA, child.id)).path).toBe('/ad-yeni/ad-alt');
     expect((await files.find(orgA, grandchild.id)).path).toBe('/ad-yeni/ad-alt/ad-torun');
@@ -255,14 +588,12 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // A row the database accepts and openat2 rejects is a file that exists in one store and not
     // the other — the "two realities" this project forbids.
     for (const bad of ['..', 'a/b', '-rf', '.depsis', '']) {
-      await expect(files.createFolder(orgA, shareA, null, bad)).rejects.toBeInstanceOf(
-        InvalidNameError,
-      );
+      await expect(mkdir(orgA, shareA, null, bad)).rejects.toBeInstanceOf(InvalidNameError);
     }
   });
 
   it("does not let one tenant see or address another tenant's tree", async () => {
-    const mine = await files.createFolder(orgA, shareA, null, 'gizli');
+    const mine = await mkdir(orgA, shareA, null, 'gizli');
 
     // Same id, other tenant. RLS makes the row invisible to the query, so the service cannot tell
     // "no such row" from "not yours" — and neither can the caller, which is the point: any
@@ -274,9 +605,9 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   });
 
   it('pages with a cursor rather than an offset', async () => {
-    const parent = await files.createFolder(orgA, shareA, null, 'sayfali');
+    const parent = await mkdir(orgA, shareA, null, 'sayfali');
     for (const name of ['a', 'b', 'c', 'd', 'e']) {
-      await files.createFolder(orgA, shareA, parent.id, name);
+      await mkdir(orgA, shareA, parent.id, name);
     }
 
     const first = await files.list(orgA, shareA, parent.id, null, 2);
@@ -293,7 +624,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   });
 
   it('makes a file findable by its search normalisation, accents and Turkish letters folded', async () => {
-    await files.createFolder(orgA, shareA, null, 'Çağrı Işık Raporu');
+    await mkdir(orgA, shareA, null, 'Çağrı Işık Raporu');
     const hits = await db.withTenant(orgA, (q) =>
       q.query<{ name: string }>(
         `SELECT name FROM file_entries
@@ -311,8 +642,8 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   // on which other tests had run, and the suite is required to be order-independent.
 
   it('lists what is in the trash and leaves what is not out of it', async () => {
-    const kept = await files.createFolder(orgB, shareB, null, 'cop-kalan');
-    const thrown = await files.createFolder(orgB, shareB, null, 'cop-atilan');
+    const kept = await mkdir(orgB, shareB, null, 'cop-kalan');
+    const thrown = await mkdir(orgB, shareB, null, 'cop-atilan');
     await files.trash(orgB, thrown.id, userB);
 
     const bin = await files.listTrash(orgB, shareB, null, 100);
@@ -332,7 +663,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // inventing one to test the cursor would be testing the wrong thing.
     const made: string[] = [];
     for (const name of ['toplu-1', 'toplu-2', 'toplu-3', 'toplu-4']) {
-      made.push((await files.createFolder(orgB, shareB, null, name)).id);
+      made.push((await mkdir(orgB, shareB, null, name)).id);
     }
     await owner.withoutTenant('migration-status', async (q) => {
       await q.query(
@@ -357,7 +688,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   });
 
   it("does not show one tenant the other tenant's trash", async () => {
-    const mine = await files.createFolder(orgA, shareA, null, 'cop-gizli');
+    const mine = await mkdir(orgA, shareA, null, 'cop-gizli');
     await files.trash(orgA, mine.id, userA);
 
     const theirs = await files.listTrash(orgB, shareB, null, 200);
@@ -370,7 +701,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   // ─── restore ────────────────────────────────────────────────────────────────
 
   it('restores an entry and puts it back in its folder', async () => {
-    const folder = await files.createFolder(orgA, shareA, null, 'geri-alinacak');
+    const folder = await mkdir(orgA, shareA, null, 'geri-alinacak');
     await files.trash(orgA, folder.id, userA);
     const restored = await files.restore(orgA, folder.id);
 
@@ -383,7 +714,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   });
 
   it('is a no-op when the entry was never in the trash, so a retried restore is safe', async () => {
-    const folder = await files.createFolder(orgA, shareA, null, 'hic-silinmedi');
+    const folder = await mkdir(orgA, shareA, null, 'hic-silinmedi');
     const again = await files.restore(orgA, folder.id);
     expect(again.id).toBe(folder.id);
     expect(again.trashed_at).toBeNull();
@@ -394,8 +725,8 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // trashing the child leaves the parent's alone. Restoring the child by itself would clear a
     // flag on a row whose parent is still filtered out of every listing: the entry would appear in
     // no folder and in no bin, reachable only by an id nothing on screen would ever show.
-    const parent = await files.createFolder(orgA, shareA, null, 'ust-cop');
-    const child = await files.createFolder(orgA, shareA, parent.id, 'alt-cop');
+    const parent = await mkdir(orgA, shareA, null, 'ust-cop');
+    const child = await mkdir(orgA, shareA, parent.id, 'alt-cop');
     await files.trash(orgA, child.id, userA);
     await files.trash(orgA, parent.id, userA);
 
@@ -414,8 +745,8 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   // result set is exactly what the test created no matter what else has run.
 
   it('finds a name however the query is cased or accented, because both sides are normalised', async () => {
-    const scope = await files.createFolder(orgA, shareA, null, 'ara-normal');
-    await files.createFolder(orgA, shareA, scope.id, 'İstanbul Notları');
+    const scope = await mkdir(orgA, shareA, null, 'ara-normal');
+    await mkdir(orgA, shareA, scope.id, 'İstanbul Notları');
 
     for (const query of ['istanbul', 'İSTANBUL', 'Istanbul', 'notlari', 'Notları']) {
       const hits = await files.search(orgA, shareA, scope.id, query, null, 50);
@@ -430,9 +761,9 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // Trigram similarity on its own puts the SHORTER name first, so `x-rapor-y` would beat
     // `Rapor 2026 Q1` for the query `rapor`. Someone typing the beginning of a filename is
     // navigating, not exploring, and the file they are typing has to be the first row.
-    const scope = await files.createFolder(orgA, shareA, null, 'ara-siralama');
-    await files.createFolder(orgA, shareA, scope.id, 'yillik-rapor-ozeti');
-    await files.createFolder(orgA, shareA, scope.id, 'rapor 2026');
+    const scope = await mkdir(orgA, shareA, null, 'ara-siralama');
+    await mkdir(orgA, shareA, scope.id, 'yillik-rapor-ozeti');
+    await mkdir(orgA, shareA, scope.id, 'rapor 2026');
 
     const hits = await files.search(orgA, shareA, scope.id, 'rapor', null, 50);
     expect(hits.items[0]?.name).toBe('rapor 2026');
@@ -440,9 +771,9 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   });
 
   it('never returns something that is in the trash', async () => {
-    const scope = await files.createFolder(orgA, shareA, null, 'ara-cop');
-    const gone = await files.createFolder(orgA, shareA, scope.id, 'silinen-belge');
-    const here = await files.createFolder(orgA, shareA, scope.id, 'duran-belge');
+    const scope = await mkdir(orgA, shareA, null, 'ara-cop');
+    const gone = await mkdir(orgA, shareA, scope.id, 'silinen-belge');
+    const here = await mkdir(orgA, shareA, scope.id, 'duran-belge');
     await files.trash(orgA, gone.id, userA);
 
     const hits = await files.search(orgA, shareA, scope.id, 'belge', null, 50);
@@ -450,13 +781,13 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   });
 
   it('searches only inside the scope it was given, to any depth', async () => {
-    const scope = await files.createFolder(orgA, shareA, null, 'ara-kapsam');
-    const deep = await files.createFolder(orgA, shareA, scope.id, 'ara');
-    const deeper = await files.createFolder(orgA, shareA, deep.id, 'daha');
-    const target = await files.createFolder(orgA, shareA, deeper.id, 'kapsamli-hedef');
+    const scope = await mkdir(orgA, shareA, null, 'ara-kapsam');
+    const deep = await mkdir(orgA, shareA, scope.id, 'ara');
+    const deeper = await mkdir(orgA, shareA, deep.id, 'daha');
+    const target = await mkdir(orgA, shareA, deeper.id, 'kapsamli-hedef');
     // A namesake three folders away and outside the scope. If the scope were a path prefix rather
     // than a walk of `parent_id`, a stale `path` on any ancestor would let this one through.
-    const outside = await files.createFolder(orgA, shareA, null, 'kapsamli-hedef');
+    const outside = await mkdir(orgA, shareA, null, 'kapsamli-hedef');
 
     const scoped = await files.search(orgA, shareA, scope.id, 'kapsamli-hedef', null, 50);
     expect(scoped.items.map((i) => i.id)).toEqual([target.id]);
@@ -470,9 +801,9 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   it('treats % and _ as characters the user typed, not as wildcards', async () => {
     // Unescaped, a query of `a%b` becomes `LIKE '%a%b%'` and matches every name with an a before a
     // b. The user gets results that do not contain what they typed and no way to tell why.
-    const scope = await files.createFolder(orgA, shareA, null, 'ara-joker');
-    await files.createFolder(orgA, shareA, scope.id, 'a%b');
-    await files.createFolder(orgA, shareA, scope.id, 'axb');
+    const scope = await mkdir(orgA, shareA, null, 'ara-joker');
+    await mkdir(orgA, shareA, scope.id, 'a%b');
+    await mkdir(orgA, shareA, scope.id, 'axb');
 
     const hits = await files.search(orgA, shareA, scope.id, 'a%b', null, 50);
     expect(hits.items.map((i) => i.name)).toEqual(['a%b']);
@@ -482,18 +813,18 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // Below three characters there is no trigram to look up, so 0008 ships a `text_pattern_ops`
     // B-tree for the prefix form instead. The branch is a performance decision with a visible
     // consequence, and this is that consequence: a two-letter query anchors at the start.
-    const scope = await files.createFolder(orgA, shareA, null, 'ara-kisa');
-    await files.createFolder(orgA, shareA, scope.id, 'zq-bastan');
-    await files.createFolder(orgA, shareA, scope.id, 'ortada-zq-var');
+    const scope = await mkdir(orgA, shareA, null, 'ara-kisa');
+    await mkdir(orgA, shareA, scope.id, 'zq-bastan');
+    await mkdir(orgA, shareA, scope.id, 'ortada-zq-var');
 
     const hits = await files.search(orgA, shareA, scope.id, 'zq', null, 50);
     expect(hits.items.map((i) => i.name)).toEqual(['zq-bastan']);
   });
 
   it('pages search results with a cursor and repeats nothing', async () => {
-    const scope = await files.createFolder(orgA, shareA, null, 'ara-sayfa');
+    const scope = await mkdir(orgA, shareA, null, 'ara-sayfa');
     const names = ['sayfali-a', 'sayfali-b', 'sayfali-c', 'sayfali-d', 'sayfali-e'];
-    for (const name of names) await files.createFolder(orgA, shareA, scope.id, name);
+    for (const name of names) await mkdir(orgA, shareA, scope.id, name);
 
     const seen: string[] = [];
     let cursor: string | null = null;
@@ -512,7 +843,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   });
 
   it('does not let a search cross into another tenant, even for an exact name', async () => {
-    await files.createFolder(orgA, shareA, null, 'kiracıya-özel-dosya');
+    await mkdir(orgA, shareA, null, 'kiracıya-özel-dosya');
     const theirs = await files.search(orgB, shareB, null, 'kiracıya-özel-dosya', null, 50);
     expect(theirs.items).toHaveLength(0);
   });
@@ -521,21 +852,19 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   // The filesystem first and the database second, always. Every test below is about that order:
   // what the agent was asked, and what the rows look like when it says no.
 
-  /** The share every move and purge below works in. Assigned in `beforeAll`, so read lazily. */
-  const shareRefA = (): ShareRef => ({ id: shareA, name: 'files-a' });
-
   it('moves an entry, and rebuilds the path of everything under it', async () => {
     const moving = withAgent(() => ({ status: 'moved' }));
-    const source = await files.createFolder(orgA, shareA, null, 'tas-kaynak');
-    const middle = await files.createFolder(orgA, shareA, source.id, 'tas-orta');
-    const leaf = await files.createFolder(orgA, shareA, middle.id, 'tas-yaprak');
-    const destination = await files.createFolder(orgA, shareA, null, 'tas-hedef');
+    const source = await mkdir(orgA, shareA, null, 'tas-kaynak');
+    const middle = await mkdir(orgA, shareA, source.id, 'tas-orta');
+    const leaf = await mkdir(orgA, shareA, middle.id, 'tas-yaprak');
+    const destination = await mkdir(orgA, shareA, null, 'tas-hedef');
 
     const moved = await moving.files.move(
       orgA,
       source.id,
       shareRefA(),
       { parentId: destination.id },
+      userA,
       'cid-move',
       'test',
     );
@@ -561,14 +890,15 @@ describeDb('the file tree, against a real PostgreSQL', () => {
 
   it('renames while moving in ONE call, so the entry is never in the new folder under the old name', async () => {
     const moving = withAgent(() => ({ status: 'moved' }));
-    const source = await files.createFolder(orgA, shareA, null, 'tas-iki-isim');
-    const destination = await files.createFolder(orgA, shareA, null, 'tas-iki-hedef');
+    const source = await mkdir(orgA, shareA, null, 'tas-iki-isim');
+    const destination = await mkdir(orgA, shareA, null, 'tas-iki-hedef');
 
     const moved = await moving.files.move(
       orgA,
       source.id,
       shareRefA(),
       { parentId: destination.id, name: 'yeni-isim' },
+      userA,
       'cid-move2',
       'test',
     );
@@ -583,13 +913,13 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // A cycle in `parent_id` makes every recursive walk in this file non-terminating — the path
     // rebuild, the search scope, `componentsOf`. No constraint in the schema can see it.
     const moving = withAgent(() => ({ status: 'moved' }));
-    const outer = await files.createFolder(orgA, shareA, null, 'dongu-ust');
-    const inner = await files.createFolder(orgA, shareA, outer.id, 'dongu-orta');
-    const deepest = await files.createFolder(orgA, shareA, inner.id, 'dongu-alt');
+    const outer = await mkdir(orgA, shareA, null, 'dongu-ust');
+    const inner = await mkdir(orgA, shareA, outer.id, 'dongu-orta');
+    const deepest = await mkdir(orgA, shareA, inner.id, 'dongu-alt');
 
     for (const target of [outer.id, inner.id, deepest.id]) {
       await expect(
-        moving.files.move(orgA, outer.id, shareRefA(), { parentId: target }, 'cid', 'test'),
+        moving.files.move(orgA, outer.id, shareRefA(), { parentId: target }, userA, 'cid', 'test'),
       ).rejects.toBeInstanceOf(MoveIntoDescendantError);
     }
 
@@ -604,12 +934,20 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // The order this suite exists for. If the row moved first, a refusal here would leave it
     // naming a folder the bytes are not in, and every download of that file would 404.
     const moving = withAgent(() => ({ status: 'refused', reason: 'storage is not set up' }));
-    const source = await files.createFolder(orgA, shareA, null, 'ret-kaynak');
-    const child = await files.createFolder(orgA, shareA, source.id, 'ret-alt');
-    const destination = await files.createFolder(orgA, shareA, null, 'ret-hedef');
+    const source = await mkdir(orgA, shareA, null, 'ret-kaynak');
+    const child = await mkdir(orgA, shareA, source.id, 'ret-alt');
+    const destination = await mkdir(orgA, shareA, null, 'ret-hedef');
 
     await expect(
-      moving.files.move(orgA, source.id, shareRefA(), { parentId: destination.id }, 'cid', 'test'),
+      moving.files.move(
+        orgA,
+        source.id,
+        shareRefA(),
+        { parentId: destination.id },
+        userA,
+        'cid',
+        'test',
+      ),
     ).rejects.toBeInstanceOf(AgentRefusedError);
 
     const after = await files.find(orgA, source.id);
@@ -635,6 +973,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
         source.id,
         shareRefA(),
         { parentId: null, name: 'kayip-hedef.txt' },
+        userA,
         'cid',
         'test',
       ),
@@ -645,12 +984,20 @@ describeDb('the file tree, against a real PostgreSQL', () => {
 
   it('refuses a name the destination already has, before anything privileged happens', async () => {
     const moving = withAgent(() => ({ status: 'moved' }));
-    const destination = await files.createFolder(orgA, shareA, null, 'cakisma-hedef');
-    await files.createFolder(orgA, shareA, destination.id, 'ayni-ad');
-    const source = await files.createFolder(orgA, shareA, null, 'ayni-ad');
+    const destination = await mkdir(orgA, shareA, null, 'cakisma-hedef');
+    await mkdir(orgA, shareA, destination.id, 'ayni-ad');
+    const source = await mkdir(orgA, shareA, null, 'ayni-ad');
 
     await expect(
-      moving.files.move(orgA, source.id, shareRefA(), { parentId: destination.id }, 'cid', 'test'),
+      moving.files.move(
+        orgA,
+        source.id,
+        shareRefA(),
+        { parentId: destination.id },
+        userA,
+        'cid',
+        'test',
+      ),
     ).rejects.toBeInstanceOf(NameTakenError);
 
     // Not one call. The agent's RENAME_NOREPLACE would refuse too, but only for a name that
@@ -663,21 +1010,30 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   it('is a no-op when the entry is already where it is being moved to', async () => {
     // A retried request whose answer the client never saw must not be a second rename.
     const moving = withAgent(() => ({ status: 'moved' }));
-    const entry = await files.createFolder(orgA, shareA, null, 'ayni-yer');
-    const same = await moving.files.move(orgA, entry.id, shareRefA(), { parentId: null }, 'c', 't');
+    const entry = await mkdir(orgA, shareA, null, 'ayni-yer');
+    const same = await moving.files.move(
+      orgA,
+      entry.id,
+      shareRefA(),
+      { parentId: null },
+      userA,
+      'c',
+      't',
+    );
     expect(same.id).toBe(entry.id);
     expect(moving.calls).toEqual([]);
   });
 
   it("will not move another tenant's entry", async () => {
     const moving = withAgent(() => ({ status: 'moved' }));
-    const mine = await files.createFolder(orgA, shareA, null, 'tas-gizli');
+    const mine = await mkdir(orgA, shareA, null, 'tas-gizli');
     await expect(
       moving.files.move(
         orgB,
         mine.id,
         { id: shareB, name: 'files-b' },
         { parentId: null },
+        userB,
         'cid',
         'test',
       ),
@@ -695,7 +1051,15 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     const renaming = withAgent(() => ({ status: 'moved' }));
     const file = await files.recordPublishedFile(orgA, shareA, null, 'a.txt', 4, null);
 
-    const renamed = await renaming.files.rename(orgA, file.id, 'b.txt', shareRefA(), 'cid', 'test');
+    const renamed = await renaming.files.rename(
+      orgA,
+      file.id,
+      'b.txt',
+      shareRefA(),
+      userA,
+      'cid',
+      'test',
+    );
 
     expect(renamed.name).toBe('b.txt');
     expect(renaming.calls).toEqual([
@@ -710,7 +1074,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     const file = await files.recordPublishedFile(orgA, shareA, null, 'sabit.txt', 4, null);
 
     await expect(
-      renaming.files.rename(orgA, file.id, 'degisti.txt', shareRefA(), 'cid', 'test'),
+      renaming.files.rename(orgA, file.id, 'degisti.txt', shareRefA(), userA, 'cid', 'test'),
     ).rejects.toBeInstanceOf(AgentRefusedError);
 
     const after = await files.find(orgA, file.id);
@@ -718,37 +1082,51 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     expect(after.path).toBe('/sabit.txt');
   });
 
-  it('renames a FOLDER without the agent, because a folder has no directory to rename', async () => {
-    // The deliberate exception, and the reason it is safe: `createFolder` cannot make a directory
-    // (the agent has no `mkdir`), so there is nothing on disk for a rename to move. Routing this
-    // through the agent would fail every folder rename in the product.
+  it('renames a FOLDER through the agent too, now that a folder has a directory', async () => {
+    // The exception that used to live here, and why it is gone. A folder had no directory on disk,
+    // so a folder rename skipped the agent and changed the row alone. `CreateDirectory` ended that:
+    // a folder made today HAS a directory, and renaming only the row would leave it — and its whole
+    // subtree — sitting under the old name, visible over SMB and unreachable through DEPSIS.
     const renaming = withAgent(() => ({ status: 'moved' }));
-    const folder = await files.createFolder(orgA, shareA, null, 'klasor-eski');
+    const folder = await mkdir(orgA, shareA, null, 'klasor-eski');
 
     const renamed = await renaming.files.rename(
       orgA,
       folder.id,
       'klasor-yeni',
       shareRefA(),
+      userA,
       'cid',
       'test',
     );
 
     expect(renamed.name).toBe('klasor-yeni');
-    expect(renaming.calls).toEqual([]);
+    expect(renaming.calls).toEqual([
+      { op: 'move_entry', share: 'files-a', from: ['klasor-eski'], to: ['klasor-yeni'] },
+    ]);
   });
 
-  it('says the folder is not on disk yet, rather than accusing the database of being wrong', async () => {
-    // A folder is a row with no directory behind it, so `open_dir` inside the agent fails with
-    // ENOENT the moment either end of a move runs through one. The old answer was "the filesystem
-    // does not have this entry where the database says it is", which sends whoever reads it
-    // hunting a corrupted database that is in fact correct.
+  it('says the folder is not on disk, rather than accusing the database of being wrong', async () => {
+    // A folder created before `CreateDirectory` existed is a row with no directory behind it, so
+    // `open_dir` inside the agent fails with ENOENT the moment either end of a move runs through
+    // one. The move tries to materialise it first; this agent refuses that too, which is the case
+    // where the answer really has to be reported. It must not be "the filesystem does not have
+    // this entry where the database says it is" — that sends whoever reads it hunting a corrupted
+    // database that is in fact correct.
     const moving = withAgent(() => ({ status: 'not_found', reason: 'hedef: no such entry' }));
-    const destination = await files.createFolder(orgA, shareA, null, 'disk-yok-hedef');
+    const destination = await mkdir(orgA, shareA, null, 'disk-yok-hedef');
     const file = await files.recordPublishedFile(orgA, shareA, null, 'tasinan.txt', 4, null);
 
     await expect(
-      moving.files.move(orgA, file.id, shareRefA(), { parentId: destination.id }, 'cid', 'test'),
+      moving.files.move(
+        orgA,
+        file.id,
+        shareRefA(),
+        { parentId: destination.id },
+        userA,
+        'cid',
+        'test',
+      ),
     ).rejects.toBeInstanceOf(FolderNotOnDiskError);
 
     // The row did not move. The agent is asked first precisely so that a failure here costs
@@ -758,11 +1136,11 @@ describeDb('the file tree, against a real PostgreSQL', () => {
 
   it('says the same about a folder moved at the share root, where no path names a folder', async () => {
     // The case the component counts alone would miss: `from` and `to` are both one component, so
-    // nothing in the paths betrays a folder — the ENTRY is the folder, and it is the thing that
-    // was never created on disk. Reachable through `PATCH {parentId: null, name}`, which is the
-    // spelling `rename`'s folder branch does not cover.
+    // nothing in the paths betrays a folder — the ENTRY is the folder, and it is the thing with no
+    // directory. The materialisation attempt covers it by pushing `from` itself onto the chain
+    // list; here the agent refuses that too, so the error stands.
     const moving = withAgent(() => ({ status: 'not_found', reason: 'kok: no such entry' }));
-    const folder = await files.createFolder(orgA, shareA, null, 'kok-klasor');
+    const folder = await mkdir(orgA, shareA, null, 'kok-klasor');
 
     await expect(
       moving.files.move(
@@ -770,6 +1148,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
         folder.id,
         shareRefA(),
         { parentId: null, name: 'kok-klasor-yeni' },
+        userA,
         'cid',
         'test',
       ),
@@ -778,11 +1157,83 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     expect((await files.find(orgA, folder.id)).name).toBe('kok-klasor');
   });
 
+  // ─── publishing ─────────────────────────────────────────────────────────────
+
+  it("hands the agent the uploader's own uid, not the service account's", async () => {
+    // Until now every published file was owned by the process that served the request. The agent's
+    // refusal of uid 0 was written for exactly this and could not catch it, because the API's own
+    // uid is not 0: the file landed, looked fine, and belonged to a service account inside a
+    // tenant's share — where the tenant cannot chmod it, cannot delete it over SMB, and cannot be
+    // billed for it against their own quota.
+    const publishing = withAgent(() => ({ status: 'publish', bytes: 7 }));
+    const uid = await new PosixIdentityService(db).posixUidFor(orgA, userA);
+
+    const bytes = await publishing.files.publish(
+      'files-a',
+      'staging-name',
+      ['rapor.pdf'],
+      7,
+      uid,
+      uid,
+      'cid',
+      'test',
+    );
+
+    expect(bytes).toBe(7);
+    expect(publishing.calls).toEqual([
+      {
+        op: 'publish_transfer',
+        share: 'files-a',
+        staging_name: 'staging-name',
+        destination: ['rapor.pdf'],
+        expected_bytes: 7,
+        owner_uid: uid,
+        owner_gid: uid,
+      },
+    ]);
+    // Not 0, which the agent refuses, and inside the range migration 0015 reserved.
+    expect(uid).toBeGreaterThanOrEqual(300000);
+    expect(uid).toBeLessThanOrEqual(399999);
+  });
+
+  it('creates the destination directory of an older folder and publishes on the retry', async () => {
+    // Uploading into a folder that predates `CreateDirectory`. The bytes are staged, the row is
+    // fine, and the only thing missing is the directory the file is meant to land in — refusing
+    // there would make every pre-existing folder permanently unusable as an upload target.
+    const script: Record<string, unknown>[] = [];
+    const publishing = withAgent((request) => {
+      script.push(request);
+      if (request['op'] === 'create_directory') return { status: 'directory_created' };
+      return script.filter((c) => c['op'] === 'publish_transfer').length === 1
+        ? { status: 'not_found', reason: 'files-a/eski: no such directory' }
+        : { status: 'publish', bytes: 3 };
+    });
+
+    const bytes = await publishing.files.publish(
+      'files-a',
+      'staging-2',
+      ['eski', 'not.txt'],
+      3,
+      300001,
+      300001,
+      'cid',
+      'test',
+    );
+
+    expect(bytes).toBe(3);
+    expect(script.map((c) => c['op'])).toEqual([
+      'publish_transfer',
+      'create_directory',
+      'publish_transfer',
+    ]);
+    expect(script[1]).toMatchObject({ path: ['eski'] });
+  });
+
   // ─── permanent deletion ─────────────────────────────────────────────────────
 
   it('refuses to permanently delete something that is not in the trash', async () => {
     const purging = withAgent(() => ({ status: 'removed' }));
-    const entry = await files.createFolder(orgA, shareA, null, 'copte-degil');
+    const entry = await mkdir(orgA, shareA, null, 'copte-degil');
 
     await expect(
       purging.files.purge(orgA, entry.id, shareRefA(), 'cid', 'test'),
@@ -794,10 +1245,10 @@ describeDb('the file tree, against a real PostgreSQL', () => {
 
   it('deletes a folder from the leaves up and leaves no row behind', async () => {
     const purging = withAgent(() => ({ status: 'removed' }));
-    const root = await files.createFolder(orgA, shareA, null, 'kalici-kok');
-    const middle = await files.createFolder(orgA, shareA, root.id, 'kalici-orta');
-    const deep = await files.createFolder(orgA, shareA, middle.id, 'kalici-derin');
-    const sibling = await files.createFolder(orgA, shareA, root.id, 'kalici-kardes');
+    const root = await mkdir(orgA, shareA, null, 'kalici-kok');
+    const middle = await mkdir(orgA, shareA, root.id, 'kalici-orta');
+    const deep = await mkdir(orgA, shareA, middle.id, 'kalici-derin');
+    const sibling = await mkdir(orgA, shareA, root.id, 'kalici-kardes');
     await files.trash(orgA, root.id, userA);
 
     await purging.files.purge(orgA, root.id, shareRefA(), 'cid-purge', 'test');
@@ -826,8 +1277,8 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     const purging = withAgent(() => {
       throw new AgentUnavailableError('socket is gone');
     });
-    const root = await files.createFolder(orgA, shareA, null, 'ulasilamaz-kok');
-    const child = await files.createFolder(orgA, shareA, root.id, 'ulasilamaz-alt');
+    const root = await mkdir(orgA, shareA, null, 'ulasilamaz-kok');
+    const child = await mkdir(orgA, shareA, root.id, 'ulasilamaz-alt');
     await files.trash(orgA, root.id, userA);
 
     await expect(
@@ -843,9 +1294,9 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // and the contract says so. What it promises instead is that the removed stay removed and a
     // second call finishes the job — which only works if `not_found` from the agent counts as
     // success, because that is exactly what a crash between the unlink and the DELETE leaves.
-    const root = await files.createFolder(orgA, shareA, null, 'yarim-kok');
-    const first = await files.createFolder(orgA, shareA, root.id, 'yarim-bir');
-    const second = await files.createFolder(orgA, shareA, root.id, 'yarim-iki');
+    const root = await mkdir(orgA, shareA, null, 'yarim-kok');
+    const first = await mkdir(orgA, shareA, root.id, 'yarim-bir');
+    const second = await mkdir(orgA, shareA, root.id, 'yarim-iki');
     await files.trash(orgA, root.id, userA);
 
     let answered = 0;
@@ -905,7 +1356,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // DELETE with a foreign-key violation — a 500. Retrying replayed it forever: the agent
     // answered `not_found` (accepted as success) and the same constraint fired again. The folder
     // sat in the trash permanently, its contents already gone.
-    const folder = await files.createFolder(orgA, shareA, null, 'yukleme-hedefi');
+    const folder = await mkdir(orgA, shareA, null, 'yukleme-hedefi');
     await seedUploadSession({ parentId: folder.id, fileId: null });
     await files.trash(orgA, folder.id, userA);
 
@@ -943,7 +1394,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
 
   it("will not permanently delete another tenant's entry", async () => {
     const purging = withAgent(() => ({ status: 'removed' }));
-    const mine = await files.createFolder(orgA, shareA, null, 'kalici-gizli');
+    const mine = await mkdir(orgA, shareA, null, 'kalici-gizli');
     await files.trash(orgA, mine.id, userA);
 
     await expect(

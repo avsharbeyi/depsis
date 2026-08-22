@@ -11,6 +11,7 @@ import { DbModule } from './db/db.module.js';
 import { DeskModule } from './desk/desk.module.js';
 import { FilesModule } from './files/files.module.js';
 import { HealthModule } from './health/health.module.js';
+import { PosixIdentityModule } from './identity/posix.module.js';
 import { JobsModule } from './jobs/jobs.module.js';
 import { MeModule } from './me/me.module.js';
 import { OrganizationsModule } from './organizations/organizations.module.js';
@@ -32,6 +33,7 @@ import { UsersModule } from './users/users.module.js';
     AuthModule,
     HealthModule,
     JobsModule,
+    PosixIdentityModule,
     MeModule,
     OrganizationsModule,
     RemoteModule,

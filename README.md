@@ -95,6 +95,7 @@ imzalı apt deposundan kurar.
 
   Bu, listelemenin ve indirmenin bugün çalışmasını engellemiyor (yol her zaman satırlardan
   kuruluyor) ama SMB'den bakan biri klasörleri göremez. Ajana `mkdir` eklemek ayrı bir tur.
+
 - Ekip (`teams`) ve klasör bazlı ACL (§6.2). Şu an yalnız organizasyon düzeyinde admin/member var.
 - Dosya sistemi olaylarından metadata'yı besleyen endeksleyici. Bu olmadan yalnız DEPSIS
   üzerinden yüklenen dosyalar listede görünür; SMB'den yazılanlar görünmez.

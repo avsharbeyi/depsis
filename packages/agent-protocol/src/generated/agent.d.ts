@@ -91,19 +91,27 @@ export type AgentRequest =
        */
       expected_bytes: number;
       op: 'publish_transfer';
-      owner_gid: number;
+      owner_gid: PosixId;
       /**
-       * Who owns the file once it lands.
+       * A numeric POSIX uid or gid, inside the range migration 0015 reserved for DEPSIS.
        *
-       * On PUBLISH rather than on `OpenTransfer`, deliberately. Staging happens inside the share
-       * — `.depsis/staging/` — so a staging file owned by the tenant is a file the tenant can
-       * reach over SMB and rewrite while the agent is still appending to it. Root-owned until
-       * the moment it becomes visible under its real name is the only window that closes.
+       * A type rather than a comparison, for the reason `AclType` is a type: the agent exists not to
+       * trust the API, and a rule the API is asked to follow is not a rule the agent enforces. Before
+       * this, the privileged side refused the value 0 and nothing else — so uid 33 (`www-data`), gid 27
+       * (`sudo`), gid 42 (`shadow`) and the appliance's own service accounts were all accepted operands
+       * of `PublishTransfer`, `CreateDirectory` and `AclEntry`. The 300000-399999 range that 0015
+       * introduced *precisely* so that "sistem gruplarıyla çakışan bir gid, cihazdaki bir servis
+       * hesabına kullanıcının dosyalarını açmaktır" was enforced in exactly two places, both
+       * unprivileged: the `CHECK` constraints and `assertUsable` in `posix.service.ts`.
        *
-       * The agent refuses uid or gid 0. Not because a root-owned file in a share is a privilege
-       * escalation — it is not, the mode is 0600 and nothing is setuid — but because it is
-       * precisely the broken state these two fields exist to fix, and an API that omits the
-       * mapping should fail loudly rather than reproduce the bug.
+       * The agent's own stated reason for refusing 0 — an API that skipped the uid mapping must fail
+       * loudly here — applies with the same force to an API that mapped it to the WRONG number, and
+       * that was the case being waved through. Now a system id cannot be expressed in a request at all,
+       * the same way `nfsv4` cannot be expressed at dataset creation.
+       *
+       * The bounds are duplicated from `0015_teams_and_grants.sql` rather than read from anywhere. That
+       * is deliberate and it is the point: the agent must not depend on the database to know what it
+       * will accept, because the database is on the unprivileged side of the boundary.
        */
       owner_uid: number;
       share: SafeComponent;
@@ -146,6 +154,52 @@ export type AgentRequest =
       share: SafeComponent;
     }
   | {
+      op: 'create_directory';
+      owner_gid: PosixId;
+      /**
+       * A numeric POSIX uid or gid, inside the range migration 0015 reserved for DEPSIS.
+       *
+       * A type rather than a comparison, for the reason `AclType` is a type: the agent exists not to
+       * trust the API, and a rule the API is asked to follow is not a rule the agent enforces. Before
+       * this, the privileged side refused the value 0 and nothing else — so uid 33 (`www-data`), gid 27
+       * (`sudo`), gid 42 (`shadow`) and the appliance's own service accounts were all accepted operands
+       * of `PublishTransfer`, `CreateDirectory` and `AclEntry`. The 300000-399999 range that 0015
+       * introduced *precisely* so that "sistem gruplarıyla çakışan bir gid, cihazdaki bir servis
+       * hesabına kullanıcının dosyalarını açmaktır" was enforced in exactly two places, both
+       * unprivileged: the `CHECK` constraints and `assertUsable` in `posix.service.ts`.
+       *
+       * The agent's own stated reason for refusing 0 — an API that skipped the uid mapping must fail
+       * loudly here — applies with the same force to an API that mapped it to the WRONG number, and
+       * that was the case being waved through. Now a system id cannot be expressed in a request at all,
+       * the same way `nfsv4` cannot be expressed at dataset creation.
+       *
+       * The bounds are duplicated from `0015_teams_and_grants.sql` rather than read from anywhere. That
+       * is deliberate and it is the point: the agent must not depend on the database to know what it
+       * will accept, because the database is on the unprivileged side of the boundary.
+       */
+      owner_uid: number;
+      /**
+       * Relative to the share root; the LAST element is the name of the directory to create.
+       * Every element before it must already exist and be a directory.
+       */
+      path: SafeComponent[];
+      share: SafeComponent;
+    }
+  | {
+      entries: AclEntry[];
+      op: 'apply_folder_acl';
+      /**
+       * Relative to the share root. EMPTY names the share root itself, which is the ordinary
+       * case for a share-wide grant. Unlike `CreateDirectory` — where an empty path would mean
+       * creating the share — there is nothing to lose here: the caller already named the share,
+       * and granting on the root of the tree it named is the point.
+       *
+       * `.depsis/` is refused, like everywhere else a caller-supplied path is accepted.
+       */
+      path: SafeComponent[];
+      share: SafeComponent;
+    }
+  | {
       op: 'zerotier_status';
     }
   | {
@@ -177,6 +231,28 @@ export type DatasetName = string;
  */
 export type SafeComponent = string;
 /**
+ * A numeric POSIX uid or gid, inside the range migration 0015 reserved for DEPSIS.
+ *
+ * A type rather than a comparison, for the reason `AclType` is a type: the agent exists not to
+ * trust the API, and a rule the API is asked to follow is not a rule the agent enforces. Before
+ * this, the privileged side refused the value 0 and nothing else — so uid 33 (`www-data`), gid 27
+ * (`sudo`), gid 42 (`shadow`) and the appliance's own service accounts were all accepted operands
+ * of `PublishTransfer`, `CreateDirectory` and `AclEntry`. The 300000-399999 range that 0015
+ * introduced *precisely* so that "sistem gruplarıyla çakışan bir gid, cihazdaki bir servis
+ * hesabına kullanıcının dosyalarını açmaktır" was enforced in exactly two places, both
+ * unprivileged: the `CHECK` constraints and `assertUsable` in `posix.service.ts`.
+ *
+ * The agent's own stated reason for refusing 0 — an API that skipped the uid mapping must fail
+ * loudly here — applies with the same force to an API that mapped it to the WRONG number, and
+ * that was the case being waved through. Now a system id cannot be expressed in a request at all,
+ * the same way `nfsv4` cannot be expressed at dataset creation.
+ *
+ * The bounds are duplicated from `0015_teams_and_grants.sql` rather than read from anywhere. That
+ * is deliberate and it is the point: the agent must not depend on the database to know what it
+ * will accept, because the database is on the unprivileged side of the boundary.
+ */
+export type PosixId = number;
+/**
  * A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.
  *
  * Its own type, next to `SafeComponent`, for the same reason and one more. The value is
@@ -196,6 +272,52 @@ export interface ShareSpec {
   dataset: DatasetName;
   name: SafeComponent;
   read_only: boolean;
+}
+/**
+ * One POSIX ACL entry: a GROUP and the three permission bits.
+ *
+ * There is no `uid` field and there must not be one. ADR-0004 chose the grant model, and this
+ * struct is where the choice is enforced rather than remembered: POSIX ACLs become unwieldy past
+ * roughly thirty entries and the mask semantics start biting, so a share-role is a POSIX group and
+ * users join groups. A per-user entry is expressible in the syscall and wrong in the design — so
+ * it is not expressible here, the same way `AclType` makes `nfsv4` unrepresentable rather than
+ * checking for it.
+ *
+ * The bits are three booleans rather than a mode number for the same reason every other operand in
+ * this file is typed: `0o755` reaching the wrong field is a silent widening, while a missing
+ * `execute` is a parse error. On a directory `execute` is the bit that permits *entering* it, so a
+ * read-only grant is `r-x` and not `r--`; the API decides that, because the agent does not know
+ * whether the target is a directory and must not guess.
+ */
+export interface AclEntry {
+  /**
+   * On a directory this is the bit that permits entering it, not executing anything.
+   */
+  execute: boolean;
+  /**
+   * A numeric POSIX uid or gid, inside the range migration 0015 reserved for DEPSIS.
+   *
+   * A type rather than a comparison, for the reason `AclType` is a type: the agent exists not to
+   * trust the API, and a rule the API is asked to follow is not a rule the agent enforces. Before
+   * this, the privileged side refused the value 0 and nothing else — so uid 33 (`www-data`), gid 27
+   * (`sudo`), gid 42 (`shadow`) and the appliance's own service accounts were all accepted operands
+   * of `PublishTransfer`, `CreateDirectory` and `AclEntry`. The 300000-399999 range that 0015
+   * introduced *precisely* so that "sistem gruplarıyla çakışan bir gid, cihazdaki bir servis
+   * hesabına kullanıcının dosyalarını açmaktır" was enforced in exactly two places, both
+   * unprivileged: the `CHECK` constraints and `assertUsable` in `posix.service.ts`.
+   *
+   * The agent's own stated reason for refusing 0 — an API that skipped the uid mapping must fail
+   * loudly here — applies with the same force to an API that mapped it to the WRONG number, and
+   * that was the case being waved through. Now a system id cannot be expressed in a request at all,
+   * the same way `nfsv4` cannot be expressed at dataset creation.
+   *
+   * The bounds are duplicated from `0015_teams_and_grants.sql` rather than read from anywhere. That
+   * is deliberate and it is the point: the agent must not depend on the database to know what it
+   * will accept, because the database is on the unprivileged side of the boundary.
+   */
+  gid: number;
+  read: boolean;
+  write: boolean;
 }
 
 export type AgentResponse =
@@ -255,6 +377,17 @@ export type AgentResponse =
     }
   | {
       status: 'removed';
+    }
+  | {
+      status: 'directory_created';
+    }
+  | {
+      entries: number;
+      status: 'acl_applied';
+    }
+  | {
+      reason: string;
+      status: 'acl_unavailable';
     }
   | {
       reason: string;

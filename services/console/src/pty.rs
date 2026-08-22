@@ -374,7 +374,9 @@ mod tests {
                 // The needle is split across two string literals so that the terminal's echo of
                 // the command does not contain it — `read_until` stops at the first match, and
                 // the echo arrives before the answer.
-                master.write_all(b"sleep 300 &\necho \"JO\"\"B=$!\"\n").unwrap();
+                master
+                    .write_all(b"sleep 300 &\necho \"JO\"\"B=$!\"\n")
+                    .unwrap();
                 master.flush().unwrap();
             }
             let seen = read_until(&pty, "JOB=", Duration::from_secs(10));

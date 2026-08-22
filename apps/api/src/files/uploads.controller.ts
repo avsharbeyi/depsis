@@ -21,6 +21,7 @@ import { AgentService, expectStatus } from '../agent/agent.service.js';
 import { AgentDataService, AgentOutOfSpaceError } from '../agent/agent-data.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { DbService } from '../db/db.service.js';
+import { PosixIdentityService } from '../identity/posix.service.js';
 import { assertValidName, FilesService } from './files.service.js';
 import { requireSession, translate } from './files.controller.js';
 
@@ -55,6 +56,7 @@ export class UploadsController {
     private readonly files: FilesService,
     private readonly agent: AgentService,
     private readonly data: AgentDataService,
+    private readonly posix: PosixIdentityService,
   ) {}
 
   @Post()
@@ -228,13 +230,29 @@ export class UploadsController {
             upload.filename,
           ];
 
+    // The uploader's own POSIX identity, not this process's. Until now every published file was
+    // owned by the API's service account, which is the state the agent's refusal of uid 0 was
+    // written to make impossible and the mode bits could not fix: a share is a tenant's, and a
+    // file inside it that the tenant does not own is one they cannot chmod, cannot delete over
+    // SMB, and cannot be given a quota for. `PosixIdentityService` allocates on first need, so an
+    // account created before migration 0015 gets its uid here.
+    //
+    // The gid is the same number. See `FilesService.createFolder`: uids and team gids come from
+    // one counter, so a user's own id is a group nothing else holds, and ADR-0004 gives team
+    // access through the POSIX ACL rather than through the owning group.
+    const uid = await this.posix
+      .posixUidFor(session.organizationId, session.userId)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
     const bytes = await this.files.publish(
       share.name,
       upload.staging_name,
       destination,
       Number(upload.length_bytes),
-      ownerUid(),
-      ownerGid(),
+      uid,
+      uid,
       correlationId,
       `publishing ${upload.filename}`,
     );
@@ -317,35 +335,6 @@ class InsufficientStorageException extends ConflictException {
   override getStatus(): number {
     return 507;
   }
-}
-
-/**
- * Who owns a published file, until user-to-uid mapping exists.
- *
- * The API's own service account, and stated plainly rather than dressed up: ADR-0004's mapping of
- * DEPSIS users onto POSIX identities is not built, so there is no per-user uid to hand the agent.
- * Using the API's uid keeps the file readable by the process that will serve the download, and the
- * agent refuses uid 0 so this cannot silently become root-owned. When the mapping lands, this is
- * the one function that changes.
- */
-function ownerUid(): number {
-  const uid = process.getuid?.();
-  if (uid === undefined || uid === 0) {
-    throw new ServiceUnavailableException(
-      'file ownership cannot be determined on this platform; uploads are unavailable',
-    );
-  }
-  return uid;
-}
-
-function ownerGid(): number {
-  const gid = process.getgid?.();
-  if (gid === undefined || gid === 0) {
-    throw new ServiceUnavailableException(
-      'file ownership cannot be determined on this platform; uploads are unavailable',
-    );
-  }
-  return gid;
 }
 
 /**

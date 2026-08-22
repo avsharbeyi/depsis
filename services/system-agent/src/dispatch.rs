@@ -8,9 +8,10 @@
 //! and an unparseable request never reaches an executor. Auditing intent *before* execution
 //! means a call that hangs or crashes the agent still left a trace of what was attempted.
 
+use crate::acl::{self, AclError};
 use crate::audit::{self, Outcome, Sink};
 use crate::authz::{Decision, Policy};
-use crate::op::{AclType, Request, Response, SCHEMA_VERSION};
+use crate::op::{AclEntry, AclType, PosixId, Request, Response, SCHEMA_VERSION};
 use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource};
 use crate::transfer::{
     Abandoned, Direction, InsertError, PendingTransfer, TransferRegistry, MAX_PENDING_TRANSFERS,
@@ -310,8 +311,8 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         staging_name: &str,
         destination: &[&str],
         expected_bytes: u64,
-        owner_uid: u32,
-        owner_gid: u32,
+        owner_uid: PosixId,
+        owner_gid: PosixId,
     ) -> Result<Response, SeamError> {
         let Some(paths) = self.paths else {
             return Ok(Response::Refused {
@@ -323,16 +324,12 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 reason: "destination is empty".to_string(),
             });
         };
-        // Refused before anything is opened. A published file owned by root at 0600 is unreadable
-        // by the person who uploaded it, which is the exact failure these operands were added to
-        // end — accepting 0 here would let a caller that forgot the mapping reintroduce it, and it
-        // would present as "uploads are broken" rather than as a missing field.
-        if owner_uid == 0 || owner_gid == 0 {
-            return Ok(Response::Refused {
-                reason: "a published file may not be owned by root; supply the user's uid and gid"
-                    .to_string(),
-            });
-        }
+        // There is no owner check here any more and its absence is the fix, not an omission.
+        // `PosixId` refuses 0 and everything outside the reserved range at PARSE time, so a
+        // root-owned or service-account-owned publish never becomes a `Request` at all — it is
+        // answered "unparseable" before authorization, before the registry is consulted and before
+        // anything is opened. The old check compared against 0 and let uid 33 (www-data) and gid 27
+        // (sudo) straight through.
 
         // Publishing a file that is still being written renames a half-written object into the
         // user's tree — the exact outcome atomic publish exists to prevent. The agent holds the
@@ -362,7 +359,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         // durable. Chowning after the fsync would leave a window where a power cut publishes the
         // file under its real name with the old owner still recorded — a file the user can see and
         // cannot read, with nothing left to fix it, because the staging entry is gone.
-        paths.set_owner(&file, owner_uid, owner_gid)?;
+        paths.set_owner(&file, owner_uid.get(), owner_gid.get())?;
 
         // ADR-0008 step 2, done HERE rather than assumed.
         //
@@ -558,6 +555,198 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
 
         Ok(Response::Removed {})
+    }
+
+    /// Create ONE directory inside a share, owned by the user, durably.
+    ///
+    /// The operation that was missing while `FilesService.createFolder` wrote a row and nothing
+    /// else. What it must not become is `mkdir -p`: the API keeps one row per directory, so the
+    /// agent creating intermediate nodes silently would leave directories on disk that nothing in
+    /// the database names — invisible to the UI, unmovable, undeletable. A missing parent is an
+    /// error the API needs to hear about, not one to work around here.
+    fn create_directory(
+        &self,
+        share: &str,
+        path: &[&str],
+        owner_uid: PosixId,
+        owner_gid: PosixId,
+    ) -> Result<Response, SeamError> {
+        let Some(paths) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+        // An empty path names the share root, which already exists and is a dataset rather than a
+        // folder. Reachable only by leaving the list empty, so it is refused explicitly rather
+        // than allowed to arrive at `mkdirat` as an empty name.
+        let Some((name, dirs)) = path.split_last() else {
+            return Ok(Response::Refused {
+                reason: "a directory needs a name; the share root is not one to create".to_string(),
+            });
+        };
+        // The same door `MoveEntry` and `RemoveEntry` close. `.depsis/` lives inside the share, so
+        // a caller-supplied path can name it, and a directory the API believes is the user's
+        // sitting inside the agent's staging tree would be swept, published into, or collided with
+        // by a staging name. The upload path has its own operations and they are the only way in.
+        if Self::touches_agent_state(path) {
+            return Ok(Response::Refused {
+                reason: format!("{}/ is the agent's own tree", STAGING_DIR[0]),
+            });
+        }
+        // No owner check here either, and for the reason `publish_transfer` gives: `PosixId` makes
+        // root and the host's own accounts unrepresentable, so the refusal happens at parse time.
+        // A directory owned by root at 0750 is one the user cannot enter, and the obvious-looking
+        // repair for "my folder will not open" is to widen the mode — which is the cross-tenant
+        // listing the mode is 0750 to prevent.
+
+        let mut parent: Vec<&str> = vec![share];
+        parent.extend_from_slice(dirs);
+
+        // Filesystem FIRST, and the database row afterwards on the caller's side. Reversed, a row
+        // exists for a directory that is not on disk — which is precisely the state this operation
+        // was added to end.
+        match paths.create_dir(&parent, name, owner_uid.get(), owner_gid.get()) {
+            Ok(()) => Ok(Response::DirectoryCreated {}),
+            // 409. The name is taken — by this user's own earlier folder, by a file, or by a
+            // directory created over SMB — and the caller can act on it. Answering "created" would
+            // hand the API a second row for one directory.
+            Err(SeamError::AlreadyExists(what)) => Ok(Response::Conflict {
+                reason: format!("{what}: something is already there"),
+            }),
+            // 404. A component between the share root and the new name does not exist. No implicit
+            // mkdir: see the note on the operation.
+            Err(SeamError::NotFound(_)) => Ok(Response::NotFound {
+                reason: format!("{}: the parent folder does not exist", parent.join("/")),
+            }),
+            // Also 404-shaped, and it used to be a 500. A component of the chain is a FILE, which
+            // `openat2(O_DIRECTORY)` answers with ENOTDIR; before that errno had its own variant it
+            // collapsed into `PathEscape` and fell through to `Err(other)`, so "there is a file in
+            // the way" reached the API as an agent fault. The caller can act on this one — it has
+            // to stop materialising and tell the user — so it must not look like a crash.
+            Err(SeamError::NotADirectory(what)) => Ok(Response::NotFound {
+                reason: format!("{what}: a file is in the way; this component is not a folder"),
+            }),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Rewrite one folder's POSIX ACL — access ACL and default ACL both.
+    ///
+    /// Only the environment lookup lives here; the work is `acl::Applier`, for the same reason the
+    /// Samba arm below is three lines over `samba::publish`. What stays in the dispatcher is the
+    /// mapping onto the answers the API can act on, and here they are four:
+    ///
+    ///   acl_applied      the kernel now enforces the grant, inheritance included
+    ///   acl_unavailable  the `acl` package is not here — a 503, not a fault (ADR-0004, §17)
+    ///   refused          the request could not be written correctly and NOTHING was cleared
+    ///   failed           the dataset has no working ACL layer, or a pass died half-done
+    ///
+    /// The third and fourth are worth separating precisely because the first thing `Applier` does
+    /// is `setfacl -b`. A refusal that never reached the clear has left the folder's existing
+    /// permissions exactly as they were; a failure may not have.
+    fn apply_folder_acl(
+        &self,
+        share: &str,
+        path: &[&str],
+        entries: &[AclEntry],
+    ) -> Result<Response, SeamError> {
+        // The share tree's location is operator configuration, on the same footing as
+        // `samba::config_path`. "Which tree does the privileged daemon rewrite the permissions of"
+        // is not a question an unprivileged caller may answer, so it is read from the environment
+        // and the request enum has no operand for it.
+        let root = match acl::shares_root_from_env() {
+            Ok(root) => root,
+            Err(e) => {
+                return Ok(Response::Refused {
+                    reason: e.to_string(),
+                })
+            }
+        };
+        self.apply_folder_acl_with(&acl::Applier::new(self.runner, root), share, path, entries)
+    }
+
+    /// The half of the arm with no environment in it, so it can be driven from a test.
+    ///
+    /// Split off rather than inlined above because the alternative was to leave the whole mapping
+    /// untested: the applier reaches the real filesystem to decide whether `setfacl` is installed,
+    /// and on a box without the `acl` package — every developer machine on this project, and the
+    /// Windows target CI cross-checks — every path through here would stop at the same early
+    /// return. A test supplies an applier whose probe and runner it controls; production supplies
+    /// one built from the environment.
+    fn apply_folder_acl_with<Q: CommandRunner>(
+        &self,
+        applier: &acl::Applier<'_, Q>,
+        share: &str,
+        path: &[&str],
+        entries: &[AclEntry],
+    ) -> Result<Response, SeamError> {
+        let Some(paths) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+
+        // The same door `MoveEntry`, `RemoveEntry` and `CreateDirectory` close, and this was the
+        // one path-taking operation that left it open. `.depsis/` lives inside the share, so a
+        // caller-supplied path can name it — and an ACL is the worst of the four things to let in
+        // there. A group entry on `staging` overrides the 0600 that keeps a half-uploaded file from
+        // being read by another tenant, and the write bit is sharper still: a group member can
+        // rewrite a `.part` in flight, and `PublishTransfer` checks only the byte count, so
+        // substituted content of equal length publishes as the uploader's own file.
+        if Self::touches_agent_state(path) {
+            return Ok(Response::Refused {
+                reason: format!("{}/ is the agent's own tree", STAGING_DIR[0]),
+            });
+        }
+
+        match applier.apply(paths, share, path, entries) {
+            Ok(written) => Ok(Response::AclApplied { entries: written }),
+
+            // Not a fault. DEPSIS does not package `acl`, so its absence is an ordinary state of
+            // a machine, and 503-with-a-card is what the API SHOULD answer here. It does not yet:
+            // nothing in `apps/api/src` sends `apply_folder_acl` and nothing writes `folder_grants`
+            // (both verified by grep, not assumed), so this response has no consumer at all. Said
+            // in the future tense on purpose — a comment describing a caller that does not exist is
+            // the same "two realities" this project refuses everywhere else.
+            Err(e) if e.is_unavailable() => Ok(Response::AclUnavailable {
+                reason: e.to_string(),
+            }),
+
+            // 404. The folder the caller named is not on disk — which is a real state while the
+            // database and the share tree can disagree, and the caller does something about it.
+            Err(AclError::Path(SeamError::NotFound(what))) => Ok(Response::NotFound {
+                reason: format!("{what}: no such folder"),
+            }),
+
+            // Also 404, and it needs the honest sentence rather than the containment one. A file
+            // where a folder was named is ENOTDIR; while every non-ENOENT errno became
+            // `PathEscape`, this arrived as "path escapes the share root", which reads as a caller
+            // trying to break out. ADR-0017 exists because that misdiagnosis cost a bisection.
+            Err(AclError::Path(SeamError::NotADirectory(what))) => Ok(Response::NotFound {
+                reason: format!("{what}: that name is a file, and only folders carry an ACL"),
+            }),
+
+            // 400-shaped: the request itself could not be written correctly, and `Applier` refuses
+            // all of these BEFORE the clear, so the folder still carries whatever it carried.
+            Err(
+                e @ (AclError::DuplicateGroup { .. }
+                | AclError::TooManyEntries { .. }
+                | AclError::NoSharesRoot
+                | AclError::Escape(_)
+                | AclError::NonUtf8Path
+                | AclError::Path(SeamError::PathEscape(_))),
+            ) => Ok(Response::Refused {
+                reason: e.to_string(),
+            }),
+
+            // Everything else is a fault someone must read, and it goes back as an error rather
+            // than a response so that `handle` records it as one. `AclTypeNotPosix` is the reason
+            // this branch matters: the dataset is not `acltype=posixacl`, so the kernel enforces no
+            // access control there at all (ADR-0004), and that is a page-the-operator event rather
+            // than a bad request. `TimedOut` and `DefaultAclFailed` belong here for the opposite
+            // half of the same argument — both may have left the tree partly rewritten.
+            Err(other) => Err(SeamError::Io(other.to_string())),
+        }
     }
 
     /// Handle one raw request line.
@@ -828,6 +1017,25 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     ));
                 }
                 Ok(response)
+            }
+
+            Request::CreateDirectory {
+                share,
+                path,
+                owner_uid,
+                owner_gid,
+            } => {
+                let parts: Vec<&str> = path.iter().map(|c| c.as_str()).collect();
+                self.create_directory(share.as_str(), &parts, *owner_uid, *owner_gid)
+            }
+
+            Request::ApplyFolderAcl {
+                share,
+                path,
+                entries,
+            } => {
+                let parts: Vec<&str> = path.iter().map(|c| c.as_str()).collect();
+                self.apply_folder_acl(share.as_str(), &parts, entries)
             }
 
             Request::PublishSambaConfig { shares } => {
@@ -1263,7 +1471,7 @@ mod tests {
         )
         .expect("stage");
 
-        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"done.part","destination":["report.txt"],"expected_bytes":14,"owner_uid":1000,"owner_gid":1000}"#;
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"done.part","destination":["report.txt"],"expected_bytes":14,"owner_uid":300100,"owner_gid":300100}"#;
         match h
             .agent(&r, &s)
             .handle(raw, peer(API_UID), "c-pub", "publish")
@@ -1289,7 +1497,7 @@ mod tests {
             b"different",
         )
         .expect("stage again");
-        let raw2 = r#"{"op":"publish_transfer","share":"alice","staging_name":"again.part","destination":["report.txt"],"expected_bytes":9,"owner_uid":1000,"owner_gid":1000}"#;
+        let raw2 = r#"{"op":"publish_transfer","share":"alice","staging_name":"again.part","destination":["report.txt"],"expected_bytes":9,"owner_uid":300100,"owner_gid":300100}"#;
         match h
             .agent(&r, &s)
             .handle(raw2, peer(API_UID), "c-pub2", "publish")
@@ -1438,7 +1646,7 @@ mod tests {
             Response::Transfer { .. }
         ));
 
-        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"live.part","destination":["out.txt"],"expected_bytes":7,"owner_uid":1000,"owner_gid":1000}"#;
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"live.part","destination":["out.txt"],"expected_bytes":7,"owner_uid":300100,"owner_gid":300100}"#;
         match h
             .agent(&r, &s)
             .handle(raw, peer(API_UID), "c-busy", "publish")
@@ -1468,14 +1676,14 @@ mod tests {
         )
         .expect("stage");
 
-        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"owned.part","destination":["mine.txt"],"expected_bytes":12,"owner_uid":1000,"owner_gid":1001}"#;
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"owned.part","destination":["mine.txt"],"expected_bytes":12,"owner_uid":300100,"owner_gid":300101}"#;
         match h.agent(&r, &s).handle(raw, peer(API_UID), "c", "publish") {
             Response::Publish { bytes } => assert_eq!(bytes, 12),
             other => panic!("expected a publish, got {other:?}"),
         }
         assert_eq!(
             h.paths.as_ref().expect("paths").owners(),
-            vec![(1000, 1001)],
+            vec![(300100, 300101)],
             "the uid and gid the caller supplied must reach the filesystem seam unchanged"
         );
     }
@@ -1495,8 +1703,8 @@ mod tests {
         .expect("stage");
 
         for raw in [
-            r#"{"op":"publish_transfer","share":"alice","staging_name":"root.part","destination":["a.txt"],"expected_bytes":1,"owner_uid":0,"owner_gid":1000}"#,
-            r#"{"op":"publish_transfer","share":"alice","staging_name":"root.part","destination":["b.txt"],"expected_bytes":1,"owner_uid":1000,"owner_gid":0}"#,
+            r#"{"op":"publish_transfer","share":"alice","staging_name":"root.part","destination":["a.txt"],"expected_bytes":1,"owner_uid":0,"owner_gid":300100}"#,
+            r#"{"op":"publish_transfer","share":"alice","staging_name":"root.part","destination":["b.txt"],"expected_bytes":1,"owner_uid":300100,"owner_gid":0}"#,
         ] {
             match h.agent(&r, &s).handle(raw, peer(API_UID), "c", "publish") {
                 Response::Refused { reason } => {
@@ -1530,7 +1738,7 @@ mod tests {
         )
         .expect("stage");
 
-        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"short.part","destination":["full.txt"],"expected_bytes":9999,"owner_uid":1000,"owner_gid":1000}"#;
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"short.part","destination":["full.txt"],"expected_bytes":9999,"owner_uid":300100,"owner_gid":300100}"#;
         match h
             .agent(&r, &s)
             .handle(raw, peer(API_UID), "c-short", "publish")
@@ -2059,5 +2267,586 @@ mod tests {
             h.share_path(&["alice", "a.txt"]).exists(),
             "an unauthorized caller changed the filesystem"
         );
+    }
+
+    // ── CreateDirectory ──
+    //
+    // Against `MockSafePath`, which is a REAL filesystem under a tempdir: what these pin is what
+    // the dispatcher decides and what is on disk afterwards. The claims that need a kernel — the
+    // mode really being 0750, `fchown` really changing hands, NO_SYMLINKS really refusing a
+    // symlinked parent — are measured in `unix.rs`, because a mock could report any of them and
+    // prove none (ADR-0007).
+
+    #[test]
+    fn a_directory_is_created_on_disk_and_handed_to_the_named_owner() {
+        // The gap this operation closes: before it, a folder was a database row and nothing else.
+        let h = Harness::with_share("alice");
+        let raw = r#"{"op":"create_directory","share":"alice","path":["docs"],"owner_uid":300101,"owner_gid":302001}"#;
+        assert!(matches!(call(&h, raw), Response::DirectoryCreated {}));
+
+        assert!(
+            h.share_path(&["alice", "docs"]).is_dir(),
+            "the folder exists in the API's mind and not on the disk — the whole bug"
+        );
+        assert_eq!(
+            h.paths.as_ref().expect("share root").owners(),
+            vec![(300101, 302001)],
+            "the directory must be handed to the user, not left to the service account"
+        );
+    }
+
+    #[test]
+    fn a_nested_directory_is_created_one_node_at_a_time() {
+        // One call, one node, one row. The second call proves the first left a real directory
+        // behind: a `mkdir -p` implementation would pass the second assertion without the first
+        // call having happened at all, so the order here is the test.
+        let h = Harness::with_share("alice");
+        let parent = r#"{"op":"create_directory","share":"alice","path":["docs"],"owner_uid":300101,"owner_gid":302001}"#;
+        let child = r#"{"op":"create_directory","share":"alice","path":["docs","2026"],"owner_uid":300101,"owner_gid":302001}"#;
+
+        assert!(matches!(call(&h, parent), Response::DirectoryCreated {}));
+        assert!(matches!(call(&h, child), Response::DirectoryCreated {}));
+        assert!(h.share_path(&["alice", "docs", "2026"]).is_dir());
+    }
+
+    #[test]
+    fn a_name_that_is_already_taken_is_a_conflict_and_not_a_quiet_success() {
+        // `mkdir` looks idempotent; this operation must not be. The API writes one row per call,
+        // so answering "created" for a directory that is already there is how two rows come to
+        // describe one directory on disk — and then one of them can never be deleted.
+        let h = Harness::with_share("alice");
+        let raw = r#"{"op":"create_directory","share":"alice","path":["docs"],"owner_uid":300101,"owner_gid":302001}"#;
+        assert!(matches!(call(&h, raw), Response::DirectoryCreated {}));
+
+        match call(&h, raw) {
+            Response::Conflict { reason } => assert!(reason.contains("docs"), "{reason}"),
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+
+        // A FILE at the name is the same answer. It is a different kind of collision and the
+        // caller does the same thing about it: pick another name.
+        std::fs::write(h.share_path(&["alice", "notes.txt"]), b"mine").expect("write");
+        let onto_file = r#"{"op":"create_directory","share":"alice","path":["notes.txt"],"owner_uid":300101,"owner_gid":302001}"#;
+        assert!(matches!(call(&h, onto_file), Response::Conflict { .. }));
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "notes.txt"])).expect("read"),
+            b"mine",
+            "a refused create must not have touched the file that was in the way"
+        );
+    }
+
+    #[test]
+    fn a_missing_parent_is_a_not_found_rather_than_an_implicit_mkdir_p() {
+        // Distinguishable from the conflict above, because the API answers 404 for one and 409 for
+        // the other. And nothing is created on the way to refusing: an implicit parent would be a
+        // directory on disk that no row names, invisible to the UI and unremovable through it.
+        let h = Harness::with_share("alice");
+        let raw = r#"{"op":"create_directory","share":"alice","path":["nope","deep"],"owner_uid":300101,"owner_gid":302001}"#;
+        match call(&h, raw) {
+            Response::NotFound { reason } => assert!(reason.contains("nope"), "{reason}"),
+            other => panic!("expected a not-found, got {other:?}"),
+        }
+        assert!(
+            !h.share_path(&["alice", "nope"]).exists(),
+            "the missing parent was created for the caller"
+        );
+    }
+
+    #[test]
+    fn a_directory_may_not_be_owned_by_root() {
+        // The same refusal as `PublishTransfer`, and the same reason: an API that skipped the
+        // uid mapping must fail loudly rather than produce a folder the tenant cannot enter. It is
+        // refused BEFORE the filesystem is touched, which is what the second assertion pins — a
+        // check after the mkdir would leave the name taken by a root-owned directory.
+        let h = Harness::with_share("alice");
+        for raw in [
+            r#"{"op":"create_directory","share":"alice","path":["docs"],"owner_uid":0,"owner_gid":302001}"#,
+            r#"{"op":"create_directory","share":"alice","path":["docs"],"owner_uid":300101,"owner_gid":0}"#,
+            r#"{"op":"create_directory","share":"alice","path":["docs"],"owner_uid":0,"owner_gid":0}"#,
+        ] {
+            match call(&h, raw) {
+                Response::Refused { reason } => assert!(reason.contains("root"), "{reason}"),
+                other => panic!("expected a refusal for {raw}, got {other:?}"),
+            }
+            assert!(
+                !h.share_path(&["alice", "docs"]).exists(),
+                "a refused create left a root-owned directory holding the name"
+            );
+        }
+        assert!(
+            h.paths.as_ref().expect("share root").owners().is_empty(),
+            "nothing should have been chowned"
+        );
+    }
+
+    #[test]
+    fn a_create_cannot_reach_the_agents_own_tree_or_name_the_share_root() {
+        let h = Harness::with_share("alice");
+
+        let staging = r#"{"op":"create_directory","share":"alice","path":[".depsis","staging","mine"],"owner_uid":300101,"owner_gid":302001}"#;
+        assert!(matches!(call(&h, staging), Response::Refused { .. }));
+        assert!(!h
+            .share_path(&["alice", ".depsis", "staging", "mine"])
+            .exists());
+
+        let root = r#"{"op":"create_directory","share":"alice","path":[],"owner_uid":300101,"owner_gid":302001}"#;
+        assert!(
+            matches!(call(&h, root), Response::Refused { .. }),
+            "an empty path names the share itself, which is a dataset and already exists"
+        );
+    }
+
+    #[test]
+    fn a_traversing_create_never_reaches_the_filesystem() {
+        // Refused at parse time by `SafeComponent`, before authorization and before any path work.
+        // The dispatcher half of the type test in `op.rs`: `..` has no inhabitant, so the mkdirat
+        // below can never be reached with one.
+        let h = Harness::with_share("alice");
+        let raw = r#"{"op":"create_directory","share":"alice","path":["..","..","tmp","evil"],"owner_uid":300101,"owner_gid":302001}"#;
+        match call(&h, raw) {
+            Response::Refused { reason } => assert!(reason.contains("unparseable"), "{reason}"),
+            other => panic!("expected a parse refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_create_is_refused_before_storage_is_set_up_and_still_requires_the_api_uid() {
+        let raw = r#"{"op":"create_directory","share":"alice","path":["docs"],"owner_uid":300101,"owner_gid":302001}"#;
+
+        let bare = Harness::bare();
+        match call(&bare, raw) {
+            Response::Refused { reason } => assert!(reason.contains("no share root"), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::with_share("alice");
+        assert!(matches!(
+            h.agent(&r, &s).handle(raw, peer(1000), "c-deny", "probe"),
+            Response::Refused { .. }
+        ));
+        assert!(
+            !h.share_path(&["alice", "docs"]).exists(),
+            "an unauthorized caller changed the filesystem"
+        );
+    }
+
+    // ── ApplyFolderAcl ──
+    //
+    // The dispatcher half of `acl.rs`. What is worth pinning HERE, rather than there, is that the
+    // arm reaches the applier at all and that each of its errors becomes the answer the API can act
+    // on — a 503 and a 500 are different pages for an operator.
+    //
+    // The applier is handed in rather than built from the environment, because it decides whether
+    // `setfacl` exists by asking the real filesystem: on a box without the `acl` package — every
+    // developer machine here, and the Windows target CI cross-checks — an arm built the production
+    // way would return `acl_unavailable` in every one of these and assert nothing.
+
+    /// A box where the `acl` package is installed, whatever the box actually is.
+    fn acl_present(_: &str) -> bool {
+        true
+    }
+
+    /// And one where it is not, which is the state the 503 exists for.
+    fn acl_absent(_: &str) -> bool {
+        false
+    }
+
+    /// A plausible `getfacl -c` reply for a directory nobody has touched yet.
+    const PLAIN_ACL: &str = "user::rwx\ngroup::r-x\nother::r-x\n";
+
+    /// The five replies one application consumes: getfacl, -b, -m, -d -m, getfacl.
+    fn acl_replies() -> Vec<String> {
+        vec![
+            PLAIN_ACL.to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            PLAIN_ACL.to_string(),
+        ]
+    }
+
+    fn grant(gid: u32, read: bool, write: bool, execute: bool) -> AclEntry {
+        AclEntry {
+            gid: PosixId::parse(gid).expect("test gids live in the reserved range"),
+            read,
+            write,
+            execute,
+        }
+    }
+
+    #[test]
+    fn the_arm_writes_the_access_acl_and_the_default_acl_for_the_resolved_path() {
+        // The default pass is the whole test. Without it the folder is granted and everything
+        // created inside it afterwards is not — ADR-0004 is explicit that the default ACL is the
+        // only inheritance mechanism Linux has, so a one-pass application is the failure that looks
+        // like it worked.
+        let h = Harness::with_share("alice");
+        std::fs::create_dir(h.share_path(&["alice", "faturalar"])).expect("mkdir");
+
+        let runner = MockCommandRunner::with_responses(acl_replies());
+        let sink = MemorySink::default();
+        let applier =
+            acl::Applier::new(&runner, h.root.path().to_path_buf()).with_probe(acl_present);
+
+        let response = h
+            .agent(&runner, &sink)
+            .apply_folder_acl_with(
+                &applier,
+                "alice",
+                &["faturalar"],
+                &[grant(301200, true, true, true)],
+            )
+            .expect("the application must not fault");
+        assert!(
+            matches!(response, Response::AclApplied { entries: 1 }),
+            "got {response:?}"
+        );
+
+        let target = h
+            .share_path(&["alice", "faturalar"])
+            .to_str()
+            .expect("utf-8 tempdir")
+            .to_string();
+        let calls = runner.calls.borrow().clone();
+        assert_eq!(calls.len(), 5, "getfacl, three setfacl passes, getfacl");
+        assert_eq!(
+            calls[1],
+            vec![acl::SETFACL, "-b", "--", &target],
+            "the clear comes first; a merge would leave a permission the caller just removed in \
+             force"
+        );
+        assert_eq!(
+            calls[2],
+            vec![acl::SETFACL, "-m", "g:301200:rwx", "--", &target],
+            "the access ACL"
+        );
+        assert_eq!(
+            calls[3],
+            vec![acl::SETFACL, "-d", "-m", "g:301200:rwx", "--", &target],
+            "the DEFAULT ACL — without it nothing created in this folder later inherits the grant"
+        );
+    }
+
+    /// The ACL argv must be aimed at the CONFINED DESCRIPTOR, and must never recurse.
+    ///
+    /// The regression this pins is a local privilege escalation, so it is asserted on the argv
+    /// rather than on an outcome. `Applier` used to hand `setfacl` a re-joined absolute path, which
+    /// an ordinary resolution walks a second time — and `setfacl 2.3.2` was measured following a
+    /// symlink given as an argument. Anyone with create rights in the share tree could therefore
+    /// `mv folder folder.bak && ln -s /etc folder` between the agent's `openat2` and the exec and
+    /// have a root process write their own team's gid, rwx, plus a default ACL, onto `/etc`.
+    ///
+    /// `SafePath::command_path` is the fix and `MockSafePath` answers it with a real path under the
+    /// temp root, so what this test can prove portably is the SHAPE: every pass is aimed at
+    /// whatever `command_path` returned for the descriptor `open_dir` opened, and no pass carries
+    /// `-R` or `-P`. That the real implementation answers `/proc/self/fd/N` is asserted against a
+    /// kernel in `unix.rs`.
+    #[test]
+    fn every_acl_pass_is_aimed_at_the_confined_descriptor_and_never_recurses() {
+        let h = Harness::with_share("alice");
+        std::fs::create_dir(h.share_path(&["alice", "faturalar"])).expect("mkdir");
+
+        let runner = MockCommandRunner::with_responses(acl_replies());
+        let sink = MemorySink::default();
+        let applier =
+            acl::Applier::new(&runner, h.root.path().to_path_buf()).with_probe(acl_present);
+
+        h.agent(&runner, &sink)
+            .apply_folder_acl_with(
+                &applier,
+                "alice",
+                &["faturalar"],
+                &[grant(301200, true, false, true)],
+            )
+            .expect("apply");
+
+        let paths = h.paths.as_ref().expect("the harness has a share root");
+
+        // The discriminating assertion. The mock answers `command_path` with the same string a
+        // plain join produces, so comparing the argv alone cannot tell the descriptor form from the
+        // re-joined path — measured: reverting `apply` to the joined path left every argv check
+        // below passing. What a revert cannot fake is ASKING for the command path, so that is what
+        // is counted. `unix.rs` proves the answer survives a rename of the directory.
+        assert_eq!(
+            paths.command_paths(),
+            1,
+            "`apply` must aim setfacl at the descriptor `SafePath` confined; it never asked for              the command path, which means it built a path of its own"
+        );
+
+        let confined = paths
+            .open_dir(&["alice", "faturalar"])
+            .expect("the folder resolves");
+        let aimed = paths
+            .command_path(&confined)
+            .expect("a command path for the descriptor");
+
+        let calls = runner.calls.borrow().clone();
+        let mut passes = 0;
+        for argv in &calls {
+            let program = argv.first().map(String::as_str);
+            if program != Some(acl::SETFACL) && program != Some(acl::GETFACL) {
+                continue;
+            }
+            passes += 1;
+            assert_eq!(
+                argv.last().map(String::as_str),
+                Some(aimed.as_str()),
+                "every pass must name the object the kernel confined, not a re-joined path a                  symlink swap can redirect: {argv:?}"
+            );
+            assert!(
+                !argv.iter().any(|a| a == "-R" || a == "--recursive"),
+                "no pass may recurse: `-R -b` erases sub-folder grants and `-R` walks into                  .depsis/staging: {argv:?}"
+            );
+            assert!(
+                !argv.iter().any(|a| a == "-P" || a == "--physical"),
+                "-P would make setfacl skip the magic-link target and exit 0 having applied                  nothing: {argv:?}"
+            );
+        }
+        assert_eq!(passes, 5, "getfacl, three setfacl passes, getfacl");
+    }
+
+    /// `.depsis/` must be refused, like it is for move, remove and mkdir.
+    ///
+    /// This was the one path-taking operation that did not close the door. An ACL is the worst of
+    /// the four to let in there: a group entry on `staging` overrides the 0600 that keeps a
+    /// half-uploaded file from being read by another tenant, and the write bit lets a group member
+    /// rewrite a `.part` in flight — `PublishTransfer` checks only the byte count, so substituted
+    /// content of equal length publishes under the uploader's name.
+    ///
+    /// Asserted through `handle`, so it covers the whole path a real caller takes, and asserted on
+    /// the RUNNER being untouched, because a refusal that still spawned the clear would already
+    /// have removed whatever the folder carried.
+    #[test]
+    fn an_acl_may_not_be_applied_to_the_agents_own_tree() {
+        let h = Harness::with_share("alice");
+        let runner = MockCommandRunner::with_responses(acl_replies());
+        let sink = MemorySink::default();
+        let applier =
+            acl::Applier::new(&runner, h.root.path().to_path_buf()).with_probe(acl_present);
+
+        for path in [
+            &[".depsis"][..],
+            &[".depsis", "staging"][..],
+            &[".depsis", "staging", "deeper"][..],
+        ] {
+            let response = h
+                .agent(&runner, &sink)
+                .apply_folder_acl_with(&applier, "alice", path, &[grant(301200, true, true, true)])
+                .expect("a refusal, not a fault");
+            match response {
+                Response::Refused { ref reason } => assert!(
+                    reason.contains(".depsis"),
+                    "the refusal must name the tree: {reason}"
+                ),
+                other => panic!("{path:?} must be refused, got {other:?}"),
+            }
+        }
+
+        assert!(
+            runner.calls.borrow().is_empty(),
+            "nothing may be spawned: the first thing an application does is `setfacl -b`, so a              refusal that ran anyway would already have cleared the folder"
+        );
+    }
+
+    #[test]
+    fn an_empty_path_grants_on_the_share_root() {
+        // The ordinary case for a share-wide grant, and the one an off-by-one in the path join
+        // would break by aiming at the tree above the share.
+        let h = Harness::with_share("alice");
+        let runner = MockCommandRunner::with_responses(acl_replies());
+        let sink = MemorySink::default();
+        let applier =
+            acl::Applier::new(&runner, h.root.path().to_path_buf()).with_probe(acl_present);
+
+        h.agent(&runner, &sink)
+            .apply_folder_acl_with(&applier, "alice", &[], &[grant(301200, true, true, true)])
+            .expect("apply");
+
+        let target = h
+            .share_path(&["alice"])
+            .to_str()
+            .expect("utf-8 tempdir")
+            .to_string();
+        assert_eq!(
+            runner.call(1),
+            Some(vec![
+                acl::SETFACL.to_string(),
+                "-b".to_string(),
+                "--".to_string(),
+                target
+            ])
+        );
+    }
+
+    #[test]
+    fn a_box_without_setfacl_answers_unavailable_and_spawns_nothing() {
+        // 503 and a card naming the package, not a 500. DEPSIS does not ship `acl`, so its absence
+        // is an ordinary state of a machine — reporting it as a fault sends an operator hunting a
+        // broken agent instead of running `apt install acl`.
+        let h = Harness::with_share("alice");
+        std::fs::create_dir(h.share_path(&["alice", "faturalar"])).expect("mkdir");
+
+        let runner = MockCommandRunner::default();
+        let sink = MemorySink::default();
+        let applier =
+            acl::Applier::new(&runner, h.root.path().to_path_buf()).with_probe(acl_absent);
+
+        match h.agent(&runner, &sink).apply_folder_acl_with(
+            &applier,
+            "alice",
+            &["faturalar"],
+            &[grant(301200, true, true, true)],
+        ) {
+            Ok(Response::AclUnavailable { reason }) => assert!(
+                reason.contains("setfacl"),
+                "the message must name the missing program: {reason}"
+            ),
+            other => panic!("expected acl_unavailable, got {other:?}"),
+        }
+        assert!(
+            runner.calls.borrow().is_empty(),
+            "nothing may be spawned once the tools are known to be absent"
+        );
+    }
+
+    #[test]
+    fn a_system_or_root_gid_never_reaches_the_acl_arm() {
+        // Root bypasses every ACL, so an entry for gid 0 grants nothing and reads as a grant; an
+        // entry for gid 27 (`sudo`) or 42 (`shadow`) grants a great deal and reads the same way.
+        // The agent used to refuse only 0, by comparison, and let every other system group through
+        // — the reserved range migration 0015 introduced for exactly this was enforced nowhere on
+        // the privileged side.
+        //
+        // Now the refusal is at PARSE time, which is strictly earlier than the check it replaces:
+        // before authorization, before the environment is read, and before `setfacl -b` could
+        // clear the permissions the folder already carries. That last point is what the second
+        // assertion pins — a request the agent cannot write correctly must not destroy what is
+        // there.
+        let h = Harness::with_share("alice");
+        std::fs::create_dir(h.share_path(&["alice", "faturalar"])).expect("mkdir");
+
+        for gid in [0, 27, 42, 33, 1200, 65534, 400_000] {
+            let raw = format!(
+                r#"{{"op":"apply_folder_acl","share":"alice","path":["faturalar"],"entries":[{{"gid":{gid},"read":true,"write":true,"execute":true}}]}}"#
+            );
+            match call(&h, &raw) {
+                Response::Refused { reason } => assert!(
+                    reason.contains("unparseable"),
+                    "gid {gid} must be refused at the boundary: {reason}"
+                ),
+                other => panic!("gid {gid} must not be applied; got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_dataset_with_no_working_acl_layer_is_a_fault_and_not_a_missing_package() {
+        // ADR-0004's measurement, turned into an answer: `acltype=nfsv4` sets cleanly, reads back
+        // as configured and enforces nothing. `setfacl` says `Operation not supported` and that is
+        // the ONE thing an operator needs told — so it must not arrive as `acl_unavailable`, which
+        // would send them to `apt`, nor as a bare refusal, which nobody pages on.
+        struct Enotsup;
+        impl CommandRunner for Enotsup {
+            fn run(&self, program: &str, args: &[&str]) -> Result<String, SeamError> {
+                if program == acl::GETFACL {
+                    return Ok(PLAIN_ACL.to_string());
+                }
+                Err(SeamError::Command {
+                    program: program.to_string(),
+                    status: 1,
+                    stderr: format!(
+                        "setfacl: {}: Operation not supported",
+                        args.last().copied().unwrap_or_default()
+                    ),
+                })
+            }
+        }
+
+        let h = Harness::with_share("alice");
+        std::fs::create_dir(h.share_path(&["alice", "faturalar"])).expect("mkdir");
+
+        let runner = Enotsup;
+        let sink = MemorySink::default();
+        let applier =
+            acl::Applier::new(&runner, h.root.path().to_path_buf()).with_probe(acl_present);
+
+        let err = h
+            .agent(&runner, &sink)
+            .apply_folder_acl_with(
+                &applier,
+                "alice",
+                &["faturalar"],
+                &[grant(301200, true, true, true)],
+            )
+            .expect_err("a dataset with no ACL layer is a fault the agent must report as one");
+        let message = err.to_string();
+        assert!(
+            message.contains("acltype=posixacl"),
+            "the message must send the operator to `zfs get acltype`: {message}"
+        );
+    }
+
+    #[test]
+    fn an_apply_folder_acl_request_reaches_the_arm() {
+        // The wiring, end to end through `handle`: the JSON parses into the new variant, the policy
+        // allows it, and the arm runs far enough to consult the environment. With the share root
+        // unset — the state of a NAS before storage is configured — the honest answer is a refusal
+        // that names the variable, not a fault.
+        //
+        // Nothing beyond this point can be asserted through `handle` portably: the applier probes
+        // the real filesystem for `setfacl`, so the answer would differ between a developer box and
+        // the Debian VM. That is what `apply_folder_acl_with` above is for.
+        let h = Harness::with_share("alice");
+        let raw = r#"{"op":"apply_folder_acl","share":"alice","path":["faturalar"],"entries":[{"gid":301200,"read":true,"write":false,"execute":true}]}"#;
+
+        without_shares_root(|| match call(&h, raw) {
+            Response::Refused { reason } => assert!(
+                reason.contains(acl::SHARES_ROOT_ENV),
+                "the refusal must name the variable an operator has to set: {reason}"
+            ),
+            other => panic!("expected a refusal naming the share root, got {other:?}"),
+        });
+    }
+
+    #[test]
+    fn a_traversing_or_user_named_grant_never_reaches_setfacl() {
+        // The dispatcher half of the type test in `op.rs`. `..` has no inhabitant of
+        // `SafeComponent` and `AclEntry` has no `uid`, so both refusals are at parse time — before
+        // authorization, before the environment is read, and before anything is spawned.
+        let h = Harness::with_share("alice");
+        for raw in [
+            r#"{"op":"apply_folder_acl","share":"alice","path":["..","..","srv"],"entries":[]}"#,
+            r#"{"op":"apply_folder_acl","share":"alice","path":["docs"],"entries":[{"uid":1001,"read":true,"write":true,"execute":true}]}"#,
+        ] {
+            match call(&h, raw) {
+                Response::Refused { reason } => {
+                    assert!(reason.contains("unparseable"), "{reason}");
+                }
+                other => panic!("expected a parse refusal, got {other:?}"),
+            }
+        }
+    }
+
+    /// Run `f` with `DEPSIS_SHARES_ROOT` unset, then restore it.
+    ///
+    /// `std::env::set_var` is process-global and Rust runs tests in threads, so the mutex is not
+    /// optional. The same shape as `unix.rs`'s `temp_env`, and here rather than shared because the
+    /// two test modules are in different files and a helper that crossed them would have to be
+    /// public in a crate whose whole point is a small surface.
+    fn without_shares_root(f: impl FnOnce()) {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let saved = std::env::var(acl::SHARES_ROOT_ENV).ok();
+        std::env::remove_var(acl::SHARES_ROOT_ENV);
+        f();
+        match saved {
+            Some(value) => std::env::set_var(acl::SHARES_ROOT_ENV, value),
+            None => std::env::remove_var(acl::SHARES_ROOT_ENV),
+        }
     }
 }

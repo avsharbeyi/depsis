@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { DbService } from '../db/db.service.js';
+import { PosixIdentityService } from '../identity/posix.service.js';
 import type { UserRole } from '../auth/session.service.js';
 
 export interface UserRow {
@@ -84,6 +85,14 @@ export class UsersService {
    *
    * `passwordHash`, never a password: hashing belongs to `PasswordService` and a plaintext
    * parameter here is a plaintext value in a stack trace, a slow-query log and an error report.
+   *
+   * The POSIX uid is allocated HERE, in the transaction that writes the row, so that an account
+   * that exists always has one. `PosixIdentityService` can still allocate lazily and has to —
+   * every account created before migration 0015 has a null `posix_uid` — but "allocated at
+   * creation" is the rule that keeps the lazy path off the hot path of an upload, and it is the
+   * only ordering in which the id and the account cannot be committed apart. The allocation takes
+   * a device-wide advisory lock; see the constant in `posix.service.ts` for why `MAX + 1` is not
+   * safe on its own.
    */
   async create(
     organizationId: string,
@@ -92,14 +101,15 @@ export class UsersService {
     passwordHash: string,
   ): Promise<UserRow> {
     try {
-      const rows = await this.db.withTenant(organizationId, (db) =>
-        db.query<UserRow>(
-          `INSERT INTO public.users (organization_id, username, role, password_hash)
-           VALUES ($1, $2, $3, $4)
+      const rows = await this.db.withTenant(organizationId, async (db) => {
+        const posixUid = await PosixIdentityService.allocateWithin(db, 'user');
+        return db.query<UserRow>(
+          `INSERT INTO public.users (organization_id, username, role, password_hash, posix_uid)
+           VALUES ($1, $2, $3, $4, $5)
            RETURNING id::text AS id, username, email, role, disabled_at, created_at`,
-          [organizationId, username, role, passwordHash],
-        ),
-      );
+          [organizationId, username, role, passwordHash, posixUid],
+        );
+      });
       const row = rows[0];
       if (!row) throw new Error('the user row was not returned');
       return row;

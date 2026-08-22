@@ -45,6 +45,8 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::OpenDownload { .. } => "open_download",
         Request::MoveEntry { .. } => "move_entry",
         Request::RemoveEntry { .. } => "remove_entry",
+        Request::CreateDirectory { .. } => "create_directory",
+        Request::ApplyFolderAcl { .. } => "apply_folder_acl",
         Request::ZeroTierStatus {} => "zerotier_status",
         Request::ZeroTierNetworks {} => "zerotier_networks",
         Request::ZeroTierJoin { .. } => "zerotier_join",

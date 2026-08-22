@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AgentService } from '../agent/agent.service.js';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
 import { DbService } from '../db/db.service.js';
+import { PosixIdentityService } from '../identity/posix.service.js';
 import { FilesService } from './files.service.js';
 import { SearchController } from './search.controller.js';
 
@@ -32,10 +33,19 @@ const runnable =
   APP_URL !== undefined && APP_URL !== '' && OWNER_URL !== undefined && OWNER_URL !== '';
 const describeDb = runnable ? describe : describe.skip;
 
-/** Nothing here touches bytes; every route under test is metadata only. */
-const noAgent = {
-  isAvailable: () => false,
-  call: () => Promise.reject(new Error('no test here should call the agent')),
+/**
+ * Nothing here touches bytes, but the fixtures do reach the agent.
+ *
+ * Creating a folder is a filesystem operation now — the agent is asked first and the row is written
+ * only if it agrees — and every search below needs folders to search. So `create_directory` is
+ * answered and everything else still rejects, which keeps "no test here moves bytes" true.
+ */
+const fixtureAgent = {
+  isAvailable: () => true,
+  call: (request: Record<string, unknown>) =>
+    request['op'] === 'create_directory'
+      ? Promise.resolve({ status: 'directory_created' })
+      : Promise.reject(new Error('no test here should move bytes')),
 } as unknown as AgentService;
 
 /** The controller's default page, and its ceiling. Restated so a drift in either one fails here. */
@@ -53,8 +63,31 @@ describeDb('GET /search, at the controller', () => {
   let orgA = '';
   let orgB = '';
   let userA = '';
+  let userB = '';
   let shareA = '';
   let folderB = '';
+
+  /**
+   * A folder, made the way the product makes one: the agent first, the row second.
+   *
+   * `createFolder` needs a share the agent can name and an acting user whose uid stamps the
+   * directory. Neither is what this file is about, so both live here.
+   */
+  const mkdir = (
+    organizationId: string,
+    shareId: string,
+    shareName: string,
+    name: string,
+  ): Promise<{ id: string }> =>
+    files.createFolder(
+      organizationId,
+      { id: shareId, name: shareName },
+      null,
+      name,
+      organizationId === orgA ? userA : userB,
+      'cid-fixture',
+      'fixture',
+    );
 
   beforeAll(async () => {
     db = new DbService(APP_URL as string);
@@ -81,9 +114,10 @@ describeDb('GET /search, at the controller', () => {
         [orgA, orgB],
       );
       userA = seeded.find((r) => r.username === 'search-ayse')?.id ?? '';
+      userB = seeded.find((r) => r.username === 'search-bora')?.id ?? '';
     });
 
-    files = new FilesService(db, noAgent);
+    files = new FilesService(db, fixtureAgent, new PosixIdentityService(db));
     search = new SearchController(files);
 
     shareA = (await files.shareOf(orgA)).id;
@@ -91,13 +125,13 @@ describeDb('GET /search, at the controller', () => {
 
     // 51 matching names, so a page of 50 is visibly a page rather than the whole set.
     for (let i = 0; i < SEEDED; i += 1) {
-      await files.createFolder(orgA, shareA, null, `kayit-${String(i).padStart(2, '0')}`);
+      await mkdir(orgA, shareA, 'search-a', `kayit-${String(i).padStart(2, '0')}`);
     }
     // Something that must NOT match, so a query that returned everything would fail rather than
     // pass by accident.
-    await files.createFolder(orgA, shareA, null, 'baskabirsey');
+    await mkdir(orgA, shareA, 'search-a', 'baskabirsey');
 
-    folderB = (await files.createFolder(orgB, shareB, null, 'onlarin-klasoru')).id;
+    folderB = (await mkdir(orgB, shareB, 'search-b', 'onlarin-klasoru')).id;
   });
 
   afterAll(async () => {
@@ -233,7 +267,7 @@ describeDb('GET /search, at the controller', () => {
   });
 
   it('answers 404 for a scope in the trash', async () => {
-    const folder = await files.createFolder(orgA, shareA, null, 'cope-giden');
+    const folder = await mkdir(orgA, shareA, 'search-a', 'cope-giden');
     await files.trash(orgA, folder.id, userA);
     expect(await statusOf(search.search(signedIn(), 'kayit', folder.id))).toBe(404);
   });

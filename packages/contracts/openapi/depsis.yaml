@@ -1756,8 +1756,7 @@ components:
 
     SetupClaimRequest:
       type: object
-      required:
-        [token, organizationSlug, organizationName, adminUsername, adminPassword]
+      required: [token, organizationSlug, organizationName, adminUsername, adminPassword]
       properties:
         token: { type: string, maxLength: 128 }
         organizationSlug:
@@ -2467,7 +2466,16 @@ components:
         label: { type: [string, 'null'] }
         status:
           type: string
-          enum: [OK, ACCESS_DENIED, NOT_FOUND, REQUESTING_CONFIGURATION, PORT_ERROR, AUTHENTICATION_REQUIRED, UNKNOWN]
+          enum:
+            [
+              OK,
+              ACCESS_DENIED,
+              NOT_FOUND,
+              REQUESTING_CONFIGURATION,
+              PORT_ERROR,
+              AUTHENTICATION_REQUIRED,
+              UNKNOWN,
+            ]
         authorized:
           type: boolean
           description: |

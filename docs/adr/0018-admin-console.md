@@ -34,12 +34,12 @@ harfiyen geçerlidir, ve ADR-0006'nın hiçbir cümlesi değişmez.
 
 Bunun ajana eklemekten daha iyi olmasının sebebi yalnızca uyum değil, **yarıçap**:
 
-| | ajana eklenseydi | ayrı servis |
-|---|---|---|
-| komutun yetkisi | root, ajanın tamamıyla aynı | kendi kullanıcısı, kendi birimi |
-| kapatma yolu | yok — ajan olmadan cihaz çalışmaz | `systemctl disable depsis-console` |
-| sertleştirme | ajanın birimiyle ortak | kendi `ProtectSystem`, `NoNewPrivileges` vb. |
-| bir açık ne verir | dosya sistemi + ZFS + Samba + veri kanalı | bir kabuk, o kullanıcının yetkisiyle |
+|                   | ajana eklenseydi                          | ayrı servis                                  |
+| ----------------- | ----------------------------------------- | -------------------------------------------- |
+| komutun yetkisi   | root, ajanın tamamıyla aynı               | kendi kullanıcısı, kendi birimi              |
+| kapatma yolu      | yok — ajan olmadan cihaz çalışmaz         | `systemctl disable depsis-console`           |
+| sertleştirme      | ajanın birimiyle ortak                    | kendi `ProtectSystem`, `NoNewPrivileges` vb. |
+| bir açık ne verir | dosya sistemi + ZFS + Samba + veri kanalı | bir kabuk, o kullanıcının yetkisiyle         |
 
 ### Varsayılan olarak ayrıcalıksız
 

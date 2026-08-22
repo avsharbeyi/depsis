@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { AgentService } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
+import { PosixIdentityService } from '../identity/posix.service.js';
 import { FilesService } from '../files/files.service.js';
 import { PreferencesRejectedError, PreferencesService } from './preferences.service.js';
 
@@ -28,10 +29,18 @@ const runnable =
   APP_URL !== undefined && APP_URL !== '' && OWNER_URL !== undefined && OWNER_URL !== '';
 const describeDb = runnable ? describe : describe.skip;
 
-/** Nothing here moves bytes; every file in this suite is a metadata row. */
-const noAgent = {
-  isAvailable: () => false,
-  call: () => Promise.reject(new Error('no test here should call the agent')),
+/**
+ * Nothing here moves bytes, but one fixture makes a folder.
+ *
+ * Folder creation goes to the filesystem first now, so an agent that refuses everything would fail
+ * the fixture rather than the assertion. `create_directory` is answered; everything else rejects.
+ */
+const fixtureAgent = {
+  isAvailable: () => true,
+  call: (request: Record<string, unknown>) =>
+    request['op'] === 'create_directory'
+      ? Promise.resolve({ status: 'directory_created' })
+      : Promise.reject(new Error('no test here should move bytes')),
 } as unknown as AgentService;
 
 describeDb('interface preferences, against a real PostgreSQL', () => {
@@ -50,7 +59,7 @@ describeDb('interface preferences, against a real PostgreSQL', () => {
     db = new DbService(APP_URL as string);
     await db.onModuleInit();
     owner = new DbService(OWNER_URL as string);
-    files = new FilesService(db, noAgent);
+    files = new FilesService(db, fixtureAgent, new PosixIdentityService(db));
     preferences = new PreferencesService(db, files);
 
     await owner.withoutTenant('migration-status', async (q) => {
@@ -80,6 +89,23 @@ describeDb('interface preferences, against a real PostgreSQL', () => {
     shareA = (await files.defaultShare(orgA, 'prefs-a')).id;
     shareB = (await files.defaultShare(orgB, 'prefs-b')).id;
   });
+
+  /**
+   * A folder in tenant A, made the way the product makes one: the agent first, the row second.
+   *
+   * One call site — the test that refuses a folder as a wallpaper — so the helper only covers the
+   * share and the actor `createFolder` now needs, and hardcodes tenant A.
+   */
+  const mkdir = (name: string): Promise<{ id: string }> =>
+    files.createFolder(
+      orgA,
+      { id: shareA, name: 'prefs-a' },
+      null,
+      name,
+      aliceA,
+      'cid-fixture',
+      'fixture',
+    );
 
   afterAll(async () => {
     // Preferences before users, users before organizations: the organisation reference is
@@ -295,7 +321,7 @@ describeDb('interface preferences, against a real PostgreSQL', () => {
       preferences.write(orgA, user, { background: { kind: 'file', fileId: trashed } }),
     ).rejects.toBeInstanceOf(PreferencesRejectedError);
 
-    const folder = await files.createFolder(orgA, shareA, null, 'klasor-arkaplan');
+    const folder = await mkdir('klasor-arkaplan');
     await expect(
       preferences.write(orgA, user, { background: { kind: 'file', fileId: folder.id } }),
     ).rejects.toBeInstanceOf(PreferencesRejectedError);

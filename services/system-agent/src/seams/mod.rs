@@ -40,6 +40,18 @@ pub enum SeamError {
     /// bisection (ADR-0017).
     #[error("no such file: {0}")]
     NotFound(String),
+    /// A component of the path is a regular file where a directory was required.
+    ///
+    /// Its own variant for the same reason `NotFound` got one, and after the same mistake. Every
+    /// errno `openat2` returned other than ENOENT/ENOSYS used to collapse into `PathEscape`, so
+    /// opening `alice/notes.txt` as a directory reported "path escapes the share root" — a
+    /// containment violation, which is what a caller trying to break out looks like, for a caller
+    /// who merely had a file in the way. ADR-0017 was written about that class of misdiagnosis
+    /// after P1-D lost a bisection to it.
+    ///
+    /// `PathEscape` is now reserved for the errnos `openat2` actually uses to refuse containment.
+    #[error("not a directory: {0}")]
+    NotADirectory(String),
     /// `RENAME_NOREPLACE` refused rather than overwrote.
     ///
     /// Its own variant for the same reason `NotFound` is: the caller has to tell "your file is not
@@ -116,6 +128,38 @@ pub trait SafePath {
     /// though the file's own contents survived.
     fn open_dir(&self, relative: &[&str]) -> Result<std::fs::File, SeamError>;
 
+    /// A name for an ALREADY-RESOLVED directory that an external program can be given.
+    ///
+    /// The escape hatch for the one thing a descriptor cannot do: `setfacl` is a separate process,
+    /// so it cannot inherit our `openat2` result the way `renameat2` and `fchown` do. Handing it a
+    /// re-joined path would resolve every component a second time with an ORDINARY resolution —
+    /// none of the `RESOLVE_` flags, no root fd — which turns the confinement into a check and
+    /// re-introduces exactly the TOCTOU shape the note on this trait describes. It is not
+    /// theoretical: `setfacl 2.3.2` dereferences a symlink passed as an argument (there is no `-P`
+    /// in our argv, and `-P` cannot be added — see below), so an attacker with create rights in the
+    /// share tree who swaps the named directory for a symlink between our resolve and the exec gets
+    /// a root-owned process writing a group grant onto a directory of their choosing.
+    ///
+    /// The real implementation answers `/proc/self/fd/N`. That is the same INODE the kernel already
+    /// confined — the descriptor pins it, so the name cannot be pointed anywhere else no matter
+    /// what happens to the directory entries above it. Every path component is re-resolved by the
+    /// kernel's procfs, not by walking the share tree.
+    ///
+    /// Two measured facts about `setfacl` shape this seam and are worth stating where the next
+    /// person will read them:
+    ///
+    ///   - `-P` must NOT be combined with this. `/proc/self/fd/N` is itself a magic symlink, and
+    ///     `setfacl -P` skips symlink arguments — it exits 0 and applies nothing, which is the one
+    ///     failure mode worse than an error.
+    ///   - `-R` does not work through it either. `setfacl -R /proc/self/fd/N` applies to the
+    ///     directory and does not descend, because the tree walk refuses to recurse into a symlink.
+    ///     That is a reason the ACL operation is single-folder and not a reason to go back to a
+    ///     joined path; see `op::Request::ApplyFolderAcl`.
+    ///
+    /// Returning a `String` rather than the raw descriptor number keeps the core free of `cfg`:
+    /// `AsRawFd` does not exist on Windows, and CI cross-checks this crate against that target.
+    fn command_path(&self, dir: &std::fs::File) -> Result<String, SeamError>;
+
     /// Move a staged file into place and make the move durable.
     ///
     /// ONE method rather than a rename the caller then has to remember to fsync. ADR-0008 step 5
@@ -140,6 +184,27 @@ pub trait SafePath {
         to_dir: &[&str],
         to: &str,
     ) -> Result<(), SeamError>;
+
+    /// Create ONE directory under `dir`, give it to `uid`/`gid`, and make the entry durable.
+    ///
+    /// One method rather than a `mkdir` the caller then has to remember to chown and fsync, for the
+    /// same reason `publish` bundles its directory fsync: the steps people skip are the last ones,
+    /// and the failures they cause are invisible until something else goes wrong. A directory left
+    /// root-owned is a folder the tenant cannot enter; a directory entry left unsynced is a folder
+    /// that disappears after a power cut, along with any file published into it.
+    ///
+    /// Must create exactly one node. No `mkdir -p` — a missing intermediate component is
+    /// `SeamError::NotFound`, which the caller turns into a 404 rather than papering over.
+    ///
+    /// Must REFUSE a name that is already taken (`SeamError::AlreadyExists`) rather than returning
+    /// success. `mkdir` is idempotent-looking and this operation must not be: the API writes one
+    /// row per call, so a silent success on an existing directory is how two rows come to describe
+    /// one directory on disk.
+    ///
+    /// `uid` and `gid` are numeric and no identity database is consulted. `fchown` takes numbers;
+    /// creating a `/etc/passwd` entry is a separate decision about the appliance's identity store,
+    /// and the visible cost of not making it is that `ls -l` prints numbers instead of names.
+    fn create_dir(&self, dir: &[&str], name: &str, uid: u32, gid: u32) -> Result<(), SeamError>;
 
     /// Give an already-open file to a uid and gid.
     ///

@@ -213,6 +213,13 @@ fn classify_openat2(joined: &str, e: rustix::io::Errno) -> SeamError {
              is blocking it — RestrictSUIDSGID=yes does exactly that"
         ));
     }
+    // The same misdiagnosis one step further out. `open_dir` passes `OFlags::DIRECTORY`, so any
+    // path whose target or whose parent is a regular file comes back ENOTDIR — an ordinary state
+    // of a share somebody uploaded a file into, not an escape attempt. Reporting "path escapes the
+    // share root: alice/notes.txt/x" sends whoever reads the journal looking for an attacker.
+    if e == rustix::io::Errno::NOTDIR {
+        return SeamError::NotADirectory(joined.to_string());
+    }
     SeamError::PathEscape(format!("{joined}: {e}"))
 }
 
@@ -265,6 +272,16 @@ impl SafePath for Openat2SafePath {
         )
     }
 
+    /// `/proc/self/fd/N` — see the note on the trait for why this and not a joined path.
+    ///
+    /// No existence check on `/proc`. If procfs is not mounted the `setfacl` that receives this
+    /// fails with ENOENT and the operator reads a missing-path error, which is the truth; a probe
+    /// here would only move the same failure earlier while adding a stat to every call.
+    fn command_path(&self, dir: &std::fs::File) -> Result<String, SeamError> {
+        use std::os::fd::AsRawFd;
+        Ok(format!("/proc/self/fd/{}", dir.as_raw_fd()))
+    }
+
     fn publish(
         &self,
         from_dir: &[&str],
@@ -306,6 +323,99 @@ impl SafePath for Openat2SafePath {
         destination
             .sync_all()
             .map_err(|e| SeamError::Io(format!("fsync destination directory: {e}")))
+    }
+
+    fn create_dir(&self, dir: &[&str], name: &str, uid: u32, gid: u32) -> Result<(), SeamError> {
+        // The parent, resolved once under RESOLVE_BENEATH. Everything below is relative to THIS
+        // descriptor: the mkdir, the reopen, and the fsync. No path is joined and nothing is
+        // re-resolved, so a component swapped for a symlink after this line cannot redirect any of
+        // it — the same reason `remove_file` and `publish` work from a directory fd.
+        //
+        // A missing intermediate component surfaces here, as `NotFound` from `classify_openat2`,
+        // which is the honest answer and the one the caller turns into a 404. There is no
+        // `mkdir -p` anywhere in this function.
+        let parent = self.open_dir(dir)?;
+
+        // 0750, not 0755. A share folder is not a public place: the group bit is what an ACL entry
+        // has to have something to grant through (ADR-0004 puts the grants on the GROUP, so the
+        // group triad is the mask that bounds them), and the world triad is the one that cannot be
+        // narrowed again by any ACL. A world-readable directory in a multi-tenant share is a
+        // cross-tenant listing regardless of what the ACLs say, and `0750` costs nothing because
+        // nobody outside the owning group is meant to traverse it.
+        //
+        // The mode argument is masked by the process umask, so it is NOT the final word — see the
+        // `fchmod` below, which is.
+        let mode = rustix::fs::Mode::from_raw_mode(0o750);
+        match rustix::fs::mkdirat(&parent, name, mode) {
+            Ok(()) => {}
+            // Refused, never reported as success. `mkdir` looks idempotent and this operation is
+            // not: the API writes one row per call, so a quiet success on a directory that is
+            // already there is how two rows come to describe one directory. Typed, because the
+            // caller answers 409 for this and 404 for the case below it.
+            Err(rustix::io::Errno::EXIST) => {
+                return Err(SeamError::AlreadyExists(name.to_string()))
+            }
+            Err(rustix::io::Errno::NOENT) => return Err(SeamError::NotFound(name.to_string())),
+            Err(e) => return Err(SeamError::Io(format!("mkdir {name}: {e}"))),
+        }
+
+        // From here on a failure leaves a directory on disk that the caller will be told does not
+        // exist, so each step undoes the mkdir before returning. Without that, a transient chown
+        // failure would poison the name permanently: the retry hits the EEXIST branch above and
+        // the user can never create their folder, with no way to remove the one that is in the way
+        // because the API has no row for it.
+        let finish = || -> Result<(), SeamError> {
+            // Reopened through `openat2` from the parent fd rather than kept from `mkdirat`, which
+            // hands back nothing. NO_SYMLINKS is what makes the reopen safe: if the directory just
+            // created were replaced by a symlink in this window, the resolution is refused rather
+            // than followed, and the chown below lands on the object this call made or on nothing.
+            let mut child: Vec<&str> = dir.to_vec();
+            child.push(name);
+            let created = self.open_dir(&child)?;
+
+            // Owner BEFORE mode, and the order is load-bearing. `chown` clears the setuid and
+            // setgid bits, so doing it last would silently drop part of whatever mode was just
+            // set. 0750 carries neither bit today — this order costs nothing now and is the one
+            // that stays correct if a setgid group-inheritance bit is ever wanted here.
+            //
+            // `fchown` on the descriptor, never a path: a chown aimed at a name can be redirected
+            // between the resolution and the call, which is the check-then-use shape the whole
+            // seam exists to avoid.
+            rustix::fs::fchown(
+                &created,
+                Some(rustix::fs::Uid::from_raw(uid)),
+                Some(rustix::fs::Gid::from_raw(gid)),
+            )
+            .map_err(|e| SeamError::Io(format!("fchown directory to {uid}:{gid}: {e}")))?;
+
+            // The umask is the reason this is not left to `mkdirat`'s mode argument. The kernel
+            // masks that argument with the process umask, so a daemon started under umask 077
+            // would create 0700 — no group bit for an ACL to grant through — and a daemon started
+            // under umask 002 would create 0752. Neither is a decision anyone made, and both
+            // depend on how systemd was configured rather than on this file. `fchmod` is not
+            // masked, so the directory ends up at exactly 0750 whatever the unit says.
+            rustix::fs::fchmod(&created, mode)
+                .map_err(|e| SeamError::Io(format!("fchmod directory to 0750: {e}")))?;
+
+            // A new directory entry is a metadata change in the PARENT, and metadata changes are
+            // exactly what a power cut loses while the file data survives. ADR-0008's step 5 for a
+            // rename is the same syscall for the same reason: without it the folder can be gone
+            // after a crash, and anything published into it goes with it.
+            parent
+                .sync_all()
+                .map_err(|e| SeamError::Io(format!("fsync parent directory: {e}")))
+        };
+
+        match finish() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Best effort, and deliberately not reported. The caller needs the reason the
+                // create failed, not the reason the cleanup did; if the rmdir also fails the
+                // original error is still the actionable one.
+                let _ = rustix::fs::unlinkat(&parent, name, rustix::fs::AtFlags::REMOVEDIR);
+                Err(e)
+            }
+        }
     }
 
     fn set_owner(&self, file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError> {
@@ -1361,6 +1471,76 @@ mod tests {
         );
     }
 
+    /// The escalation test: the name handed to `setfacl` must survive a swap of the directory.
+    ///
+    /// This is the kernel half of `acl::Applier::apply`. The module used to give `setfacl` a
+    /// re-joined absolute path, which an ordinary resolution walks a second time — and `setfacl
+    /// 2.3.2` follows a symlink passed as an argument. So an SMB user with create rights in the
+    /// parent could `mv folder folder.bak && ln -s /etc folder` in the window between the agent's
+    /// `openat2` and the exec, and a root process would write their own team's gid at rwx, plus the
+    /// matching default ACL, onto `/etc`. Both the target and the gid are attacker-chosen.
+    ///
+    /// Here the directory is renamed away and a symlink to somewhere else is put in its place,
+    /// exactly as the attack does, AFTER `open_dir` has returned. `command_path` must still name
+    /// the original inode. A joined path would name the attacker's symlink.
+    #[test]
+    fn the_command_path_still_names_the_confined_directory_after_the_name_is_swapped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("share");
+        std::fs::create_dir(&root).expect("mkdir");
+        std::fs::create_dir(root.join("faturalar")).expect("mkdir");
+        // The stand-in for /etc: somewhere outside the share that the attacker wants the ACL on.
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).expect("mkdir");
+        // A file only inside the real folder, so the two directories can be told apart by looking.
+        std::fs::write(root.join("faturalar").join("marker"), b"x").expect("write");
+
+        let sp = Openat2SafePath::open_root(&root).expect("open root");
+        let confined = sp.open_dir(&["faturalar"]).expect("open the folder");
+
+        // The swap, after the check and before the "exec".
+        std::fs::rename(root.join("faturalar"), tmp.path().join("faturalar.bak")).expect("rename");
+        std::os::unix::fs::symlink(&elsewhere, root.join("faturalar")).expect("symlink");
+
+        let aimed = sp.command_path(&confined).expect("a command path");
+        assert!(
+            std::path::Path::new(&aimed).join("marker").exists(),
+            "{aimed} must still resolve to the directory openat2 confined; it resolved somewhere              without the marker, which is the escalation"
+        );
+        assert!(
+            !std::path::Path::new(&aimed)
+                .canonicalize()
+                .expect("canonicalize")
+                .starts_with(&elsewhere),
+            "the command path followed the attacker's symlink"
+        );
+    }
+
+    /// A file where a directory was named is ENOTDIR, and ENOTDIR is not a containment violation.
+    ///
+    /// It used to be reported as one — every errno but ENOENT/ENOSYS became `PathEscape`, so
+    /// `alice/notes.txt/x` came back as "path escapes the share root", which reads as a caller
+    /// trying to break out. ADR-0017 exists because that class of misdiagnosis cost a bisection.
+    /// The dispatcher also depends on the split: `create_directory` answers 404 for this and would
+    /// otherwise fall through to a 500 the caller cannot act on.
+    #[test]
+    fn a_file_in_the_path_is_not_reported_as_an_escape() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("share");
+        std::fs::create_dir(&root).expect("mkdir");
+        std::fs::write(root.join("notes.txt"), b"x").expect("write");
+
+        let sp = Openat2SafePath::open_root(&root).expect("open root");
+        for relative in [&["notes.txt"][..], &["notes.txt", "child"][..]] {
+            match sp.open_dir(relative) {
+                Err(SeamError::NotADirectory(_)) => {}
+                other => panic!(
+                    "{relative:?} must be NotADirectory, not an escape or a fault; got {other:?}"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn an_absolute_looking_component_cannot_reset_the_root() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1678,6 +1858,221 @@ mod tests {
         assert!(
             inside.join("moved.txt").exists(),
             "the payload left the root"
+        );
+    }
+
+    // ── create_dir ──
+    //
+    // Against a real kernel, because every claim here is one a mock cannot make: the mode survives
+    // the umask, `fchown` actually moves the directory, `mkdirat` actually returns EEXIST, and
+    // NO_SYMLINKS actually refuses a symlinked parent.
+
+    fn mode_of(path: &std::path::Path) -> u32 {
+        let meta = std::fs::metadata(path).expect("stat");
+        std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o7777
+    }
+
+    #[test]
+    fn a_created_directory_is_0750_whatever_the_umask_says() {
+        // The umask is the reason `fchmod` follows the `mkdirat`. A daemon started under umask 077
+        // would otherwise get 0700 — no group triad for an ACL to grant through (ADR-0004 puts the
+        // grants on the group) — and one under 002 would get 0752, which is a share directory
+        // every tenant on the box can list. Neither is a decision anyone made.
+        //
+        // The umask is process-wide, so this test sets it and puts it back. Nothing here runs in
+        // parallel with another umask-sensitive test.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("share")).expect("mkdir share");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+
+        let me = rustix::process::getuid().as_raw();
+        let my_group = rustix::process::getgid().as_raw();
+
+        let saved = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
+        sp.create_dir(&["share"], "narrow", me, my_group)
+            .expect("create under a hostile umask");
+        rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o002));
+        sp.create_dir(&["share"], "wide", me, my_group)
+            .expect("create under a permissive umask");
+        rustix::process::umask(saved);
+
+        assert_eq!(
+            mode_of(&tmp.path().join("share").join("narrow")),
+            0o750,
+            "umask 077 narrowed the group triad an ACL has to grant through"
+        );
+        assert_eq!(
+            mode_of(&tmp.path().join("share").join("wide")),
+            0o750,
+            "umask 002 left the share directory readable by every tenant on the box"
+        );
+    }
+
+    #[test]
+    fn a_created_directory_changes_hands_to_the_uid_and_gid_it_was_given() {
+        // Two assertions in one, because only one of them can run without CAP_CHOWN — the same
+        // shape as `set_owner_aims_at_the_descriptor_and_not_at_a_path` above.
+        //
+        // Always: creating with the CURRENT owner exercises the `fchown` call itself, so an
+        // implementation that never wired it up would fail here.
+        //
+        // Only as root: the ownership actually changes. SKIPPED otherwise, loudly, rather than
+        // asserted loosely — a test that passed by expecting EPERM would also pass if the
+        // implementation did nothing at all.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("share")).expect("mkdir share");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+
+        let me = rustix::process::getuid().as_raw();
+        let my_group = rustix::process::getgid().as_raw();
+        sp.create_dir(&["share"], "mine", me, my_group)
+            .expect("chowning to the existing owner is always permitted");
+
+        if me != 0 {
+            eprintln!(
+                "SKIPPED: the ownership half of this test needs CAP_CHOWN and this process is \
+                 uid {me}. The 0750 mode and the EEXIST refusal above are still measured; that a \
+                 directory actually changes hands is only proved when the suite runs as root."
+            );
+            return;
+        }
+
+        sp.create_dir(&["share"], "theirs", 1001, 2001)
+            .expect("create as root");
+        let meta = std::fs::metadata(tmp.path().join("share").join("theirs")).expect("stat");
+        assert_eq!(
+            (
+                std::os::unix::fs::MetadataExt::uid(&meta),
+                std::os::unix::fs::MetadataExt::gid(&meta)
+            ),
+            (1001, 2001),
+            "the directory stayed with the service account"
+        );
+        assert_eq!(
+            mode_of(&tmp.path().join("share").join("theirs")),
+            0o750,
+            "chown must not have cleared bits the mode was meant to carry"
+        );
+    }
+
+    #[test]
+    fn creating_a_directory_that_is_already_there_is_refused_and_distinguishable() {
+        // EEXIST must arrive as `AlreadyExists`, not as `Io`. The caller answers 409 for this and
+        // 404 for a missing parent, and telling them apart by matching on a message string is a
+        // contract nobody declared.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("share")).expect("mkdir share");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+        let me = rustix::process::getuid().as_raw();
+        let my_group = rustix::process::getgid().as_raw();
+
+        sp.create_dir(&["share"], "docs", me, my_group)
+            .expect("create");
+        assert!(
+            matches!(
+                sp.create_dir(&["share"], "docs", me, my_group),
+                Err(SeamError::AlreadyExists(_))
+            ),
+            "a second create reported success, so two rows now describe one directory"
+        );
+
+        // A FILE holding the name is the same refusal. `mkdirat` returns EEXIST for it and the
+        // file must be untouched.
+        std::fs::write(tmp.path().join("share").join("notes.txt"), b"mine").expect("write");
+        assert!(matches!(
+            sp.create_dir(&["share"], "notes.txt", me, my_group),
+            Err(SeamError::AlreadyExists(_))
+        ));
+        assert_eq!(
+            std::fs::read(tmp.path().join("share").join("notes.txt")).expect("read"),
+            b"mine"
+        );
+    }
+
+    #[test]
+    fn a_missing_parent_is_not_found_and_no_intermediate_is_created() {
+        // `NotFound`, not `PathEscape`: a folder that is not there is an ordinary 404, and
+        // reporting it as a containment violation is the false diagnosis `classify_openat2` exists
+        // to prevent. And there is no `mkdir -p` — every node is one call and one database row.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+        let me = rustix::process::getuid().as_raw();
+        let my_group = rustix::process::getgid().as_raw();
+
+        assert!(
+            matches!(
+                sp.create_dir(&["nope"], "deep", me, my_group),
+                Err(SeamError::NotFound(_))
+            ),
+            "a missing parent must be distinguishable from a taken name"
+        );
+        assert!(
+            !tmp.path().join("nope").exists(),
+            "the intermediate directory was created for the caller"
+        );
+    }
+
+    #[test]
+    fn a_directory_cannot_be_created_outside_the_root_through_a_symlink_or_a_dotdot() {
+        // The attack: a user drops a symlink inside their own share pointing at a directory
+        // outside it, then asks the agent — running as root — to create a folder in it. Every
+        // component of the parent is resolved by `openat2` with NO_SYMLINKS, which refuses the
+        // component before the kernel ever asks where it points.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("share");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&root).expect("mkdir share");
+        std::fs::create_dir(&outside).expect("mkdir outside");
+        std::os::unix::fs::symlink(&outside, root.join("escape")).expect("symlink");
+
+        let sp = Openat2SafePath::open_root(&root).expect("open root");
+        let me = rustix::process::getuid().as_raw();
+        let my_group = rustix::process::getgid().as_raw();
+
+        // An ordinary create inside the root still works, so a blanket failure cannot make this
+        // test pass for the wrong reason.
+        sp.create_dir(&["."], "docs", me, my_group)
+            .expect("an ordinary create inside the root must still work");
+
+        assert!(
+            sp.create_dir(&["escape"], "planted", me, my_group).is_err(),
+            "a directory was created outside the root through a symlinked parent"
+        );
+        assert!(
+            !outside.join("planted").exists(),
+            "the escape succeeded even though the call reported an error"
+        );
+
+        // `..` is unrepresentable in `SafeComponent`, so this can only be reached by a bug that
+        // bypasses the type — belt and braces, because the two defences fail for different
+        // reasons.
+        assert!(
+            sp.create_dir(&[".."], "planted", me, my_group).is_err(),
+            "RESOLVE_BENEATH must refuse .. — it escaped instead"
+        );
+        assert!(!tmp.path().join("planted").exists());
+    }
+
+    #[test]
+    fn a_created_directory_is_usable_immediately_by_the_operations_that_follow_it() {
+        // The point of the whole operation. A folder that exists only as a row is one a publish
+        // cannot land in and a move cannot enter, which is how folder support was broken end to
+        // end. This is the integration claim in one place: create, then move a file into it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+        let me = rustix::process::getuid().as_raw();
+        let my_group = rustix::process::getgid().as_raw();
+
+        std::fs::create_dir(tmp.path().join("share")).expect("mkdir share");
+        std::fs::write(tmp.path().join("share").join("a.txt"), b"keep me").expect("write");
+        sp.create_dir(&["share"], "archive", me, my_group)
+            .expect("create");
+        sp.publish(&["share"], "a.txt", &["share", "archive"], "a.txt")
+            .expect("a move into the new directory must work");
+
+        assert_eq!(
+            std::fs::read(tmp.path().join("share").join("archive").join("a.txt")).expect("read"),
+            b"keep me"
         );
     }
 

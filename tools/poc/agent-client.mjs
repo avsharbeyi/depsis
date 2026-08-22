@@ -43,7 +43,10 @@ socket.on('data', (chunk) => {
 function nextLine() {
   if (ready.length > 0) return Promise.resolve(ready.shift());
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('timed out waiting for a reply line')), LINE_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => reject(new Error('timed out waiting for a reply line')),
+      LINE_TIMEOUT_MS,
+    );
     waiting.push({
       resolve: (line) => {
         clearTimeout(timer);

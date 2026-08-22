@@ -88,6 +88,49 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     expect(all.map((u) => u.username)).toContain('ikinci');
   });
 
+  it('gives a new account its POSIX uid in the transaction that creates it', async () => {
+    // An account that exists always has a filesystem identity, so there is no window in which a
+    // person can be signed in and have nowhere for their files to belong. The agent refuses uid 0
+    // and everything below the reserved range names a system service, so both ends are asserted.
+    const created = await users.create(orgA, 'kimlikli', 'member', 'hash');
+
+    const rows = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ posix_uid: number | null }>(`SELECT posix_uid FROM users WHERE id = $1`, [
+        created.id,
+      ]),
+    );
+    const uid = rows[0]?.posix_uid;
+    expect(uid).not.toBeNull();
+    expect(uid).toBeGreaterThanOrEqual(300000);
+    expect(uid).toBeLessThanOrEqual(399999);
+  });
+
+  it('gives two accounts created AT THE SAME MOMENT two different uids', async () => {
+    // The bug the advisory lock in `PosixIdentityService` exists to prevent, run for real.
+    // `allocate_posix_id` is `MAX + 1` over two tables and holds nothing while it reads, so two
+    // overlapping transactions both see the same maximum. Two people with one uid own each other's
+    // files — the filesystem knows nothing about DEPSIS accounts, only about numbers.
+    //
+    // `Promise.all`, not a loop: the pool hands each call its own connection, so the two
+    // transactions genuinely overlap. Serialised, this test would pass against the broken version.
+    const [first, second] = await Promise.all([
+      users.create(orgA, 'esz-bir', 'member', 'hash'),
+      users.create(orgA, 'esz-iki', 'member', 'hash'),
+    ]);
+
+    const rows = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ id: string; posix_uid: number | null }>(
+        `SELECT id::text AS id, posix_uid FROM users WHERE id = ANY($1::uuid[])`,
+        [[first.id, second.id]],
+      ),
+    );
+    expect(rows).toHaveLength(2);
+    const uids = rows.map((r) => r.posix_uid);
+    expect(uids[0]).not.toBeNull();
+    expect(uids[1]).not.toBeNull();
+    expect(new Set(uids).size).toBe(2);
+  });
+
   it('refuses a duplicate address the way the folding rules say, not the way the string does', async () => {
     await users.create(orgA, 'Ayse', 'member', 'hash');
     // Case and the Turkish i-family fold for uniqueness; accents do NOT. `fold_identity` is the

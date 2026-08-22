@@ -28,6 +28,10 @@ import { AgentDataService } from '../agent/agent-data.service.js';
 import { AgentRefusedError, AgentUnavailableError } from '../agent/agent.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import {
+  PosixIdentityUnavailableError,
+  PosixIdentityUnknownUserError,
+} from '../identity/posix.service.js';
+import {
   CrossShareMoveError,
   DirectoryNotEmptyError,
   EntryMissingOnDiskError,
@@ -36,7 +40,9 @@ import {
   FolderNotOnDiskError,
   InvalidNameError,
   MoveIntoDescendantError,
+  NameTakenByTrashedEntryError,
   NameTakenError,
+  NameTakenOnDiskError,
   NotTrashedError,
   TrashedParentError,
   type FileEntryRow,
@@ -156,6 +162,31 @@ export class FilesController {
     );
   }
 
+  /**
+   * Create a folder.
+   *
+   * 503 when the agent is unreachable, and it is not optional. Creating a folder is now a
+   * filesystem operation before it is a database one (`FilesService.createFolder`), so with no
+   * agent there is nothing this endpoint can do except write the row alone — which is the exact
+   * state the change was made to end. Checked up front so the caller is refused before anything is
+   * read or written, rather than discovering it mid-way.
+   *
+   * `agentAvailable()` answers a narrower question than it looks like: whether the SOCKET is
+   * configured, not whether the appliance has storage. An agent running without
+   * `DEPSIS_SHARES_ROOT` is reachable and refuses every path operation, and that case is NOT
+   * covered by the sentence above — it is answered 409, like a name collision. The "KNOWN GAP"
+   * note above `NameTakenByTrashedEntryError` in `files.service.ts` says why separating it needs a
+   * protocol change rather than a mapping change: `refused` is not one condition, and telling its
+   * causes apart would mean matching on the agent's prose.
+   *
+   * THIS OPERATION ANSWERS STATUS CODES THE CONTRACT DOES NOT LIST, in the same way `PATCH
+   * /files/{id}` does and says so. `depsis.yaml` gives 201/403/409/422 for `POST /files/folders`;
+   * this also answers 503 (agent unreachable, storage not set up, or no POSIX identity available)
+   * and 401 (`PosixIdentityUnknownUserError` — the session names an account deleted since
+   * sign-in). Writing it down rather than leaving the deviation silent: the yaml is out of scope
+   * for the change that introduced these, and adding 401/503 to this operation is the next turn's
+   * job.
+   */
   @Post('folders')
   async createFolder(
     @Req() request: AuthenticatedRequest,
@@ -166,12 +197,21 @@ export class FilesController {
     const parsed = createFolderSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('parentId must be a uuid and name a string');
 
+    if (!this.files.agentAvailable()) {
+      throw new ServiceUnavailableException(
+        'the system agent is not reachable; a folder cannot be created without its directory',
+      );
+    }
+
     try {
       const row = await this.files.createFolder(
         session.organizationId,
-        share.id,
+        share,
         parsed.data.parentId ?? null,
         parsed.data.name,
+        session.userId,
+        randomUUID(),
+        'POST /files/folders',
       );
       return toEntry(row);
     } catch (error) {
@@ -199,14 +239,14 @@ export class FilesController {
    * happened. Reversed, a refused rename would leave the row pointing at a place the file is not,
    * and every download of that file would 404 while SMB still showed it in the old folder.
    *
-   * A rename with no `parentId` reaches the agent too, whenever the entry is a FILE:
+   * A rename with no `parentId` reaches the agent too, for files and folders alike:
    * `FilesService.rename` routes it through `move` with the parent it already has. It used to
    * change the row alone, which made `{name}` and `{parentId, name}` two spellings of one request
    * that produced two different truths — and the database-only one left the bytes under the old
-   * name, where a later permanent delete abandoned them on disk with no row to reach them by. A
-   * FOLDER still renames in the database alone, because it has no directory there to rename
-   * (`createFolder` explains why); that branch is unblocked by the same missing operation as the
-   * move-into-a-folder case, namely that the agent cannot create a directory.
+   * name, where a later permanent delete abandoned them on disk with no row to reach them by. The
+   * folder exception that survived that fix is gone with `CreateDirectory`: a folder has a real
+   * directory now, so renaming the row alone would leave the directory — and everything inside
+   * it — under the old name.
    *
    * 503 is not in the contract for this operation and is answered anyway. A move needs the agent,
    * the agent can be absent on a box whose storage is not set up, and the alternatives are a 500
@@ -244,6 +284,7 @@ export class FilesController {
             id,
             share,
             { parentId: parsed.data.parentId, ...(name === undefined ? {} : { name }) },
+            session.userId,
             randomUUID(),
             `PATCH /files/${id}`,
           ),
@@ -259,13 +300,12 @@ export class FilesController {
     // point — an assertion here would become a lie the day the refinement is edited.
     if (name === undefined) throw new BadRequestException('name is required');
 
-    // The share is resolved for a name-only rename too, because a file's rename IS a move: same
-    // parent, new name, one `renameat2` in the agent. `FilesService.rename` decides which kind it
-    // is and routes accordingly, and this route used to be the one that skipped the agent — the
-    // divergence that let a permanently deleted file leave its bytes behind. No `agentAvailable`
-    // pre-check to match the branch above: the agent is the FIRST thing a file rename touches, so
-    // an unreachable one fails before anything has changed, while a folder rename never needs it
-    // and must not start answering 503 because a daemon is down.
+    // The share is resolved for a name-only rename too, because a rename IS a move: same parent,
+    // new name, one `renameat2` in the agent. This route used to be the one that skipped the
+    // agent — the divergence that let a permanently deleted file leave its bytes behind. No
+    // `agentAvailable` pre-check to match the branch above: the agent is the FIRST thing a rename
+    // touches, so an unreachable one fails before anything has changed and `translate` turns it
+    // into the same 503 by a shorter road.
     const share = await this.share(request);
     try {
       return toEntry(
@@ -274,6 +314,7 @@ export class FilesController {
           id,
           name,
           share,
+          session.userId,
           randomUUID(),
           `PATCH /files/${id}`,
         ),
@@ -626,8 +667,33 @@ export function translate(error: unknown): Error {
     // this one tells them the name is taken and that renaming the other file is the way out.
     return new ConflictException(`${error.message}; rename one of them and try again`);
   }
+  // 409, and the sentence is the point: the name is free everywhere the user can see and taken
+  // where they cannot. Somebody made it over SMB, DEPSIS wrote no row, and neither renaming the
+  // invisible thing nor picking another name is obvious without being told which of the two is
+  // happening. The agent's own words go to the journal, as everywhere else in this function.
+  if (error instanceof NameTakenOnDiskError) {
+    return new ConflictException(logged(error.message, error.agentReason));
+  }
+  // Also 409, and it must be checked BEFORE nothing — it is a sibling of the case above, not a
+  // subtype, so order does not matter here; what matters is that the two have different sentences.
+  // The name is held on disk by something the user binned themselves, so the remedy is the bin and
+  // not a hunt for an SMB client. Trashing writes a flag and leaves the directory, while the
+  // unique index excludes trashed rows, which is how the listing can show the name as free.
+  if (error instanceof NameTakenByTrashedEntryError) {
+    return new ConflictException(logged(error.message, error.agentReason));
+  }
   if (error instanceof TrashedParentError) return new ConflictException(error.message);
   if (error instanceof InvalidNameError) return new BadRequestException(error.message);
+  // The session names an account that is not there any more — deleted between sign-in and this
+  // request. 401 rather than 500: there is nothing wrong with the server and nothing the caller
+  // can do except sign in again.
+  if (error instanceof PosixIdentityUnknownUserError) return new UnauthorizedException();
+  // No filesystem identity could be allocated. 503 rather than 500 for the same reason an absent
+  // agent is: the appliance is not broken, it cannot complete this class of request right now, and
+  // the condition (an exhausted id range) is one an administrator resolves rather than a retry.
+  if (error instanceof PosixIdentityUnavailableError) {
+    return new ServiceUnavailableException(error.message);
+  }
   // Four ways a move or a permanent delete can be refused, all of them 409 and all of them
   // carrying their own sentence. A bare 409 on this group would be indistinguishable to a user
   // from the name collision above, and the four have four different remedies.

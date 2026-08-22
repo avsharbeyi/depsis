@@ -156,6 +156,82 @@ impl From<SafeComponent> for String {
     }
 }
 
+/// Why a POSIX id was rejected.
+///
+/// Two variants rather than one, because 0 is the common mistake and deserves the sentence that
+/// names it. Everything else is the same fault seen from further away — a number the API mapped
+/// wrongly — but "root" points at a specific missing step.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PosixIdError {
+    #[error(
+        "0 is root; supply the user's mapped uid and gid. A directory owned by root at 0750 is          one the tenant cannot enter, and an entry for the root group grants nothing while          READING as a grant"
+    )]
+    Root,
+    #[error(
+        "{got} is outside the reserved DEPSIS range {min}-{max}: it belongs to the host's own          accounts, and handing a tenant's data to one of them (33 is www-data, 27 is sudo, 42 is          shadow) is what the reserved range exists to prevent"
+    )]
+    OutOfRange { got: u32, min: u32, max: u32 },
+}
+
+/// A numeric POSIX uid or gid, inside the range migration 0015 reserved for DEPSIS.
+///
+/// A type rather than a comparison, for the reason `AclType` is a type: the agent exists not to
+/// trust the API, and a rule the API is asked to follow is not a rule the agent enforces. Before
+/// this, the privileged side refused the value 0 and nothing else — so uid 33 (`www-data`), gid 27
+/// (`sudo`), gid 42 (`shadow`) and the appliance's own service accounts were all accepted operands
+/// of `PublishTransfer`, `CreateDirectory` and `AclEntry`. The 300000-399999 range that 0015
+/// introduced *precisely* so that "sistem gruplarıyla çakışan bir gid, cihazdaki bir servis
+/// hesabına kullanıcının dosyalarını açmaktır" was enforced in exactly two places, both
+/// unprivileged: the `CHECK` constraints and `assertUsable` in `posix.service.ts`.
+///
+/// The agent's own stated reason for refusing 0 — an API that skipped the uid mapping must fail
+/// loudly here — applies with the same force to an API that mapped it to the WRONG number, and
+/// that was the case being waved through. Now a system id cannot be expressed in a request at all,
+/// the same way `nfsv4` cannot be expressed at dataset creation.
+///
+/// The bounds are duplicated from `0015_teams_and_grants.sql` rather than read from anywhere. That
+/// is deliberate and it is the point: the agent must not depend on the database to know what it
+/// will accept, because the database is on the unprivileged side of the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct PosixId(u32);
+
+impl PosixId {
+    pub const MIN: u32 = 300_000;
+    pub const MAX: u32 = 399_999;
+
+    pub fn parse(value: u32) -> Result<Self, PosixIdError> {
+        if value == 0 {
+            return Err(PosixIdError::Root);
+        }
+        if !(Self::MIN..=Self::MAX).contains(&value) {
+            return Err(PosixIdError::OutOfRange {
+                got: value,
+                min: Self::MIN,
+                max: Self::MAX,
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for PosixId {
+    type Error = PosixIdError;
+    fn try_from(v: u32) -> Result<Self, Self::Error> {
+        Self::parse(v)
+    }
+}
+
+impl From<PosixId> for u32 {
+    fn from(v: PosixId) -> Self {
+        v.0
+    }
+}
+
 /// Why a network id was rejected.
 ///
 /// Its own enum rather than a reuse of `ValidationError`, because the two describe different
@@ -362,12 +438,13 @@ pub enum Request {
         /// reach over SMB and rewrite while the agent is still appending to it. Root-owned until
         /// the moment it becomes visible under its real name is the only window that closes.
         ///
-        /// The agent refuses uid or gid 0. Not because a root-owned file in a share is a privilege
-        /// escalation — it is not, the mode is 0600 and nothing is setuid — but because it is
-        /// precisely the broken state these two fields exist to fix, and an API that omits the
-        /// mapping should fail loudly rather than reproduce the bug.
-        owner_uid: u32,
-        owner_gid: u32,
+        /// `PosixId` refuses 0 and refuses anything outside the reserved range. Not because a
+        /// root-owned file in a share is a privilege escalation — it is not, the mode is 0600 and
+        /// nothing is setuid — but because it is precisely the broken state these two fields exist
+        /// to fix, and an API that omits or mis-maps the identity should fail loudly rather than
+        /// hand a tenant's file to one of the host's own accounts.
+        owner_uid: PosixId,
+        owner_gid: PosixId,
     },
 
     /// Open a published file for reading, and hand back a one-time token for the data socket.
@@ -448,6 +525,79 @@ pub enum Request {
         directory: bool,
     },
 
+    /// Create ONE directory inside a share.
+    ///
+    /// Its absence was not a gap in the operation set, it was a hole under the product. The API
+    /// could write a `folders` row and nothing else, because the closed set had no operation that
+    /// makes a directory — so a folder existed in Postgres and did not exist on disk. Everything
+    /// downstream inherited that: `MoveEntry` on a folder could only ever return 409 because there
+    /// was no directory to rename, a publish into a folder failed because the destination parent
+    /// was not there, and somebody browsing the share over SMB — which is the entire reason a NAS
+    /// exists — saw no folders at all.
+    ///
+    /// ONE node, never `mkdir -p`. The intermediate components must already exist and a missing
+    /// one comes back as `NotFound`, for the same reason `MoveEntry` refuses to create its
+    /// destination parent: an implicit mkdir turns a typo into a directory the user never asked
+    /// for, holding a file they can no longer find. It is also what keeps the disk and the
+    /// database one-to-one — each directory is one call and one row, so a partially-created tree
+    /// cannot leave rows with no parent behind.
+    CreateDirectory {
+        share: SafeComponent,
+        /// Relative to the share root; the LAST element is the name of the directory to create.
+        /// Every element before it must already exist and be a directory.
+        path: Vec<SafeComponent>,
+        /// Who owns the directory. The same pair as `PublishTransfer` and the same type, for the
+        /// same reason: a directory owned by root at 0750 is one the user cannot enter, and one
+        /// owned by a host service account is one the wrong process can, so an API that skipped or
+        /// botched the uid mapping must fail loudly here rather than produce a folder that appears
+        /// in the listing and cannot be opened.
+        owner_uid: PosixId,
+        owner_gid: PosixId,
+    },
+
+    /// Rewrite the POSIX ACL of ONE folder inside a share — access ACL and default ACL both.
+    ///
+    /// The operation the access-control model rests on. `folder_grants` in the database says who
+    /// may read a folder; until this runs, the kernel has never been told, and SMB — which does not
+    /// go through the API at all — enforces the mode bits and nothing else. A grant that exists
+    /// only in Postgres is not a permission, it is a note about one.
+    ///
+    /// The entry list is COMPLETE, never a delta. The agent clears the extended entries before it
+    /// writes, because a merge leaves a group the caller has just removed still holding its old
+    /// permission: `setfacl -m` only ever adds and overwrites, so an entry that is no longer
+    /// mentioned survives. "Here is who may reach this folder" is a statement the caller can make
+    /// correctly; "here is what changed" is one it would have to reconstruct from a disk it cannot
+    /// read.
+    /// ONE folder, never a subtree. There was a `recursive: bool` here and it is gone.
+    ///
+    /// It was the shape §2.2/ADR-0006 rejects everywhere else in this enum — `RemoveEntry` and
+    /// `SafePath::remove_dir` both say it outright about `rm -rf`: one call whose blast radius the
+    /// caller chooses, in the one process that can reach every tenant's data. The ACL variant was
+    /// the same primitive with a different verb, and it was destructive in a way its own comment
+    /// did not admit, because the recursive pass began with `setfacl -R -b`. Measured: a sub-folder
+    /// carrying §6.2's documented narrower grant (`İstisna: daha dar izin` — the entire reason
+    /// `folder_grants` has per-folder rows) lost it and inherited the parent's wider one, while the
+    /// `folder_grants` row went on saying the narrow thing. Two realities, widening.
+    ///
+    /// It also could not survive the fix to the TOCTOU above it: `setfacl -R` does not descend
+    /// through `/proc/self/fd/N`, so keeping recursion meant keeping the joined path that let a
+    /// symlink swap redirect a root-owned `setfacl` onto `/etc`. See the `acl` module note.
+    ///
+    /// A mass re-apply is therefore a loop on the API's side, which is where it belongs: the API
+    /// stores the tree and holds a grant row per folder, so one call per folder writes each row's
+    /// own grant instead of stamping one answer over descendants that disagree with it.
+    ApplyFolderAcl {
+        share: SafeComponent,
+        /// Relative to the share root. EMPTY names the share root itself, which is the ordinary
+        /// case for a share-wide grant. Unlike `CreateDirectory` — where an empty path would mean
+        /// creating the share — there is nothing to lose here: the caller already named the share,
+        /// and granting on the root of the tree it named is the point.
+        ///
+        /// `.depsis/` is refused, like everywhere else a caller-supplied path is accepted.
+        path: Vec<SafeComponent>,
+        entries: Vec<AclEntry>,
+    },
+
     // ── ZeroTier (ADR-0020) ──
     //
     // Four operations, and the set is closed for the same reason the enum as a whole is. A
@@ -487,6 +637,37 @@ pub struct ShareSpec {
     pub name: SafeComponent,
     pub dataset: DatasetName,
     pub read_only: bool,
+}
+
+/// One POSIX ACL entry: a GROUP and the three permission bits.
+///
+/// There is no `uid` field and there must not be one. ADR-0004 chose the grant model, and this
+/// struct is where the choice is enforced rather than remembered: POSIX ACLs become unwieldy past
+/// roughly thirty entries and the mask semantics start biting, so a share-role is a POSIX group and
+/// users join groups. A per-user entry is expressible in the syscall and wrong in the design — so
+/// it is not expressible here, the same way `AclType` makes `nfsv4` unrepresentable rather than
+/// checking for it.
+///
+/// The bits are three booleans rather than a mode number for the same reason every other operand in
+/// this file is typed: `0o755` reaching the wrong field is a silent widening, while a missing
+/// `execute` is a parse error. On a directory `execute` is the bit that permits *entering* it, so a
+/// read-only grant is `r-x` and not `r--`; the API decides that, because the agent does not know
+/// whether the target is a directory and must not guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AclEntry {
+    /// The POSIX group id. Numeric, and no identity database is consulted — `setfacl` takes a
+    /// number and `/etc/passwd` is a separate decision about the appliance's identity store.
+    ///
+    /// `PosixId`, so 0 and the host's own groups are unrepresentable rather than checked. Root
+    /// bypasses every ACL already, so an entry for the root group grants nothing and *reads* as a
+    /// grant; an entry for gid 27 or 42 grants a great deal and reads the same way. Both are an API
+    /// that got the group mapping wrong, and the agent must not be the side that trusts it.
+    pub gid: PosixId,
+    pub read: bool,
+    pub write: bool,
+    /// On a directory this is the bit that permits entering it, not executing anything.
+    pub execute: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -562,6 +743,40 @@ pub enum Response {
     /// if it is not there, the caller's view of the tree disagrees with the disk, and answering
     /// "done" would hide that. That case is `NotFound`.
     Removed {},
+    /// The directory is on disk, owned by the uid and gid the caller named, and the entry has been
+    /// made durable by an `fsync` of its parent.
+    ///
+    /// No payload, like `Moved`. The caller named the path and the agent normalised nothing, so
+    /// echoing it back would only invite a consumer to believe otherwise. What the caller needs to
+    /// know is that the next call — the database row, or a publish into this directory — may now
+    /// proceed, and the status alone says that.
+    DirectoryCreated {},
+    /// The folder's POSIX ACL is what the caller asked for, access ACL and DEFAULT ACL both.
+    ///
+    /// `entries` is how many group entries the folder now carries, and it is here rather than
+    /// omitted — unlike `Moved` and `DirectoryCreated`, which echo nothing — because the number the
+    /// agent wrote is the one thing about this operation the caller cannot derive from its own
+    /// request. It sent a list; a list containing a duplicate or a root group is refused rather
+    /// than trimmed, so the count coming back equal to the count sent is the caller's confirmation
+    /// that nothing was quietly dropped.
+    #[serde(rename = "acl_applied")]
+    AclApplied {
+        entries: usize,
+    },
+    /// The `acl` package is not installed on this box.
+    ///
+    /// The same shape as `SmbUnavailable` and `ZeroTierUnavailable`, and for the same reason: DEPSIS
+    /// packages none of the three, so "absent" is an ordinary configuration state the API turns
+    /// into 503 with a card that names the package. Folding it into `Failed` would send an operator
+    /// hunting a broken agent instead of running `apt install acl`.
+    ///
+    /// A dataset with no working ACL layer is deliberately NOT this. That one is a `Failed` whose
+    /// message names `acltype` — the tools are present and working, and what they are reporting is
+    /// that the kernel enforces no access control on that dataset at all (ADR-0004).
+    #[serde(rename = "acl_unavailable")]
+    AclUnavailable {
+        reason: String,
+    },
     /// The path the operation named is not there.
     ///
     /// Its own variant rather than `Refused`, because the API turns exactly this into 404 and
@@ -662,14 +877,17 @@ pub enum ZeroTierNetworkStatus {
 
 /// Bumped whenever `Request` or `Response` changes shape. The API checks it on connect.
 ///
-/// 3 as of `MoveEntry`/`RemoveEntry`: `Request` gained two variants and `Response` four. The point
-/// of the check is that a NEW API against an OLD agent fails at the handshake, while someone is
-/// watching a deployment. Without the bump the pair shakes hands cleanly and the mismatch surfaces
-/// on the first `MoveEntry` as a generic refusal — a message from which nobody concludes "the agent
-/// binary is stale", and the operation that goes missing here is a delete.
+/// 4 as of `CreateDirectory`/`ApplyFolderAcl`: `Request` gained two variants, `Response` three, and
+/// `AclEntry` is a new operand type. The point of the check is that a NEW API against an OLD agent
+/// fails at the handshake, while someone is watching a deployment. Without the bump the pair shakes
+/// hands cleanly and the mismatch surfaces on the first call as a generic refusal — a message from
+/// which nobody concludes "the agent binary is stale". Here that would be worse than a puzzling
+/// error: an `ApplyFolderAcl` an old agent does not understand leaves the folder carrying whatever
+/// ACL it had before, so the API would record a grant in `folder_grants` that the kernel is not
+/// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[cfg(test)]
 mod deny_unknown_tests {
@@ -986,6 +1204,144 @@ mod tests {
             r#"{"op":"move_entry","share":"alice","to_share":"bob","from":["a"],"to":["a"]}"#
         )
         .is_err());
+    }
+
+    // ── CreateDirectory ──
+
+    #[test]
+    fn a_traversing_component_cannot_be_expressed_in_a_create_directory() {
+        // The type test the brief asks for, and it is a PARSE failure rather than a runtime check.
+        // `Vec<SafeComponent>` has no inhabitant spelled `..`, so no code path in `create_directory`
+        // can be reached with one — the `mkdirat` below it never has to remember to look, which is
+        // the whole reason the operand is a type instead of a string. The same holds for the
+        // `share` field: a share named `..` would be the parent of the share root.
+        assert_eq!(
+            SafeComponent::parse(".."),
+            Err(ValidationError::ContainsDotDot)
+        );
+        for json in [
+            r#"{"op":"create_directory","share":"alice","path":["..","etc"],"owner_uid":1,"owner_gid":1}"#,
+            r#"{"op":"create_directory","share":"alice","path":["docs","..",".."],"owner_uid":1,"owner_gid":1}"#,
+            r#"{"op":"create_directory","share":"alice","path":["a/b"],"owner_uid":1,"owner_gid":1}"#,
+            r#"{"op":"create_directory","share":"alice","path":["a\\b"],"owner_uid":1,"owner_gid":1}"#,
+            r#"{"op":"create_directory","share":"alice","path":["/etc"],"owner_uid":1,"owner_gid":1}"#,
+            r#"{"op":"create_directory","share":"..","path":["docs"],"owner_uid":1,"owner_gid":1}"#,
+            r#"{"op":"create_directory","share":"alice","path":[""],"owner_uid":1,"owner_gid":1}"#,
+            r#"{"op":"create_directory","share":"alice","path":["-p"],"owner_uid":1,"owner_gid":1}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Request>(json).is_err(),
+                "{json} must not deserialize"
+            );
+        }
+    }
+
+    #[test]
+    fn a_well_formed_create_directory_does_parse() {
+        // The negative test above is worth nothing without this one: a parser that rejected
+        // everything would pass it.
+        assert!(serde_json::from_str::<Request>(
+            r#"{"op":"create_directory","share":"alice","path":["docs","2026"],"owner_uid":300101,"owner_gid":302001}"#
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn create_directory_will_not_default_its_owner_or_grow_a_recursive_flag() {
+        // Omitting the owner must fail rather than mean 0. Serde would not default a `u32` here
+        // anyway, but that is a property of the field's type rather than a stated intent, and this
+        // is the pair whose absence produced root-owned objects the tenant cannot use.
+        //
+        // The `parents`/`recursive` cases are the filesystem-shaped version of
+        // `there_is_no_raw_command_variant`: if somebody turns this into `mkdir -p`, one of them
+        // starts parsing. `mkdir -p` would create nodes the API has no rows for.
+        for json in [
+            r#"{"op":"create_directory","share":"alice","path":["d"]}"#,
+            r#"{"op":"create_directory","share":"alice","path":["d"],"owner_uid":300101}"#,
+            r#"{"op":"create_directory","share":"alice","path":["a","b"],"owner_uid":1,"owner_gid":1,"parents":true}"#,
+            r#"{"op":"create_directory","share":"alice","path":["a","b"],"owner_uid":1,"owner_gid":1,"recursive":true}"#,
+            r#"{"op":"create_directory","share":"alice","path":["d"],"owner_uid":1,"owner_gid":1,"mode":511}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Request>(json).is_err(),
+                "{json} must not deserialize"
+            );
+        }
+    }
+
+    // ── ApplyFolderAcl ──
+
+    #[test]
+    fn an_acl_entry_cannot_name_a_user() {
+        // ADR-0004's grant model, as a parse failure rather than a runtime check. If somebody adds
+        // a `uid` to `AclEntry`, the first of these starts deserializing and this test fails —
+        // which is the only way the decision survives the person who made it.
+        for json in [
+            r#"{"op":"apply_folder_acl","share":"alice","path":[],"entries":[{"uid":1001,"read":true,"write":false,"execute":true}]}"#,
+            r#"{"op":"apply_folder_acl","share":"alice","path":[],"entries":[{"gid":301200,"uid":1001,"read":true,"write":false,"execute":true}]}"#,
+            // A mode number instead of the three bits: silent widening if it were accepted.
+            r#"{"op":"apply_folder_acl","share":"alice","path":[],"entries":[{"gid":301200,"mode":511}]}"#,
+            // Every bit is required. A missing `execute` on a directory is the difference between
+            // a folder the group can enter and one it cannot, so it must not default.
+            r#"{"op":"apply_folder_acl","share":"alice","path":[],"entries":[{"gid":301200,"read":true,"write":false}]}"#,
+            // And the path is components, not a path.
+            r#"{"op":"apply_folder_acl","share":"alice","path":["..","etc"],"entries":[]}"#,
+            r#"{"op":"apply_folder_acl","share":"alice","path":["a/b"],"entries":[]}"#,
+            r#"{"op":"apply_folder_acl","share":"..","path":[],"entries":[]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Request>(json).is_err(),
+                "{json} must not deserialize"
+            );
+        }
+    }
+
+    /// A caller that still sends `recursive` must be REFUSED, not quietly obeyed for one folder.
+    ///
+    /// This is the compatibility half of removing the operand, and it is a security property
+    /// rather than tidiness. An API that believes it asked for a subtree and is answered
+    /// `acl_applied` for a single directory records every descendant as enforced when the kernel
+    /// has been told nothing about them — a grant that exists only in Postgres, which is the exact
+    /// failure `ApplyFolderAcl` was added to end. `deny_unknown_fields` turns it into a parse
+    /// error instead; the test exists so nobody "fixes" that by adding `#[serde(default)]`.
+    #[test]
+    fn the_removed_recursive_operand_is_refused_rather_than_ignored() {
+        for json in [
+            r#"{"op":"apply_folder_acl","share":"alice","path":["docs"],"entries":[],"recursive":true}"#,
+            r#"{"op":"apply_folder_acl","share":"alice","path":["docs"],"entries":[],"recursive":false}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Request>(json).is_err(),
+                "{json} must not deserialize: a caller asking for a subtree cannot be told yes for                  one folder"
+            );
+        }
+    }
+
+    #[test]
+    fn a_well_formed_apply_folder_acl_does_parse() {
+        // The negative test above is worth nothing without this one.
+        let parsed: Request = serde_json::from_str(
+            r#"{"op":"apply_folder_acl","share":"alice","path":["docs"],"entries":[{"gid":301200,"read":true,"write":false,"execute":true}]}"#,
+        )
+        .expect("a well-formed grant");
+        assert_eq!(
+            parsed,
+            Request::ApplyFolderAcl {
+                share: SafeComponent::parse("alice").expect("valid"),
+                path: vec![SafeComponent::parse("docs").expect("valid")],
+                entries: vec![AclEntry {
+                    gid: PosixId::parse(301_200).expect("reserved range"),
+                    read: true,
+                    write: false,
+                    execute: true,
+                }],
+            }
+        );
+        // An empty path names the share root — a share-wide grant, which is the ordinary case.
+        assert!(serde_json::from_str::<Request>(
+            r#"{"op":"apply_folder_acl","share":"alice","path":[],"entries":[]}"#
+        )
+        .is_ok());
     }
 
     #[test]

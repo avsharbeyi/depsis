@@ -70,6 +70,28 @@ pub struct MockSafePath {
     /// could not be tested against the mock at all, and the untested path in a root daemon would be
     /// the one that deletes user files.
     owners: std::sync::Mutex<Vec<(u32, u32)>>,
+    /// The path of the most recent `open_dir`, so `command_path` can answer with a real one.
+    ///
+    /// The real implementation asks the kernel for `/proc/self/fd/N` and needs no bookkeeping. The
+    /// mock cannot: recovering a path from a `std::fs::File` portably is not possible, and putting
+    /// a `cfg` here to use procfs on Linux would break the Windows cross-check that keeps this
+    /// crate honest.
+    ///
+    /// "Most recent" is sound for what this is for and nothing more. `Applier::apply` opens exactly
+    /// one directory and then asks for its command path, in that order, on one thread — the pairing
+    /// is immediate. Nothing else calls `command_path`. It is emphatically NOT a general
+    /// descriptor-to-path map, and a second concurrent caller would read the wrong one; that is
+    /// acceptable in a mock whose own doc comment already says storage claims come from the VM.
+    last_dir: std::sync::Mutex<Option<PathBuf>>,
+    /// How many times `command_path` was asked, so a caller can be held to USING it.
+    ///
+    /// The mock necessarily answers `command_path` with the same string a naive join would
+    /// produce — it has no procfs to point at — so a test that only compares the argv cannot tell
+    /// the descriptor form from the re-joined path it replaced. Verified: reverting
+    /// `Applier::apply` to the joined path left every argv assertion passing. Counting the call is
+    /// the part that does discriminate; that what it returns is swap-proof is asserted against a
+    /// real kernel in `unix.rs`.
+    command_paths: std::sync::Mutex<usize>,
 }
 
 impl MockSafePath {
@@ -77,7 +99,17 @@ impl MockSafePath {
         Self {
             root: root.into(),
             owners: std::sync::Mutex::new(Vec::new()),
+            last_dir: std::sync::Mutex::new(None),
+            command_paths: std::sync::Mutex::new(0),
         }
+    }
+
+    /// How many times `command_path` was called. See the field.
+    pub fn command_paths(&self) -> usize {
+        *self
+            .command_paths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The `(uid, gid)` pairs `set_owner` was called with.
@@ -126,7 +158,45 @@ impl SafePath for MockSafePath {
 
     fn open_dir(&self, relative: &[&str]) -> Result<std::fs::File, SeamError> {
         let path = self.join(relative)?;
-        std::fs::File::open(&path).map_err(|e| SeamError::Io(format!("{}: {e}", path.display())))
+        // `NotFound`/`NotADirectory` rather than a blanket `Io`, so the dispatcher arms that turn
+        // those into a 404 and a refusal are reachable from a portable test at all. Before this the
+        // mock reported both as `Io`, and every such arm was only ever exercised against a kernel.
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|_| SeamError::NotFound(path.display().to_string()))?;
+        if !metadata.is_dir() {
+            return Err(SeamError::NotADirectory(path.display().to_string()));
+        }
+        let file = std::fs::File::open(&path)
+            .map_err(|e| SeamError::Io(format!("{}: {e}", path.display())))?;
+        *self
+            .last_dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+        Ok(file)
+    }
+
+    /// A real path under the temp root — see the field note on `last_dir`.
+    fn command_path(&self, _dir: &std::fs::File) -> Result<String, SeamError> {
+        *self
+            .command_paths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+        let held = self
+            .last_dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match held.as_ref() {
+            Some(path) => path
+                .to_str()
+                .map(str::to_string)
+                .ok_or_else(|| SeamError::Io("temp root is not utf-8".to_string())),
+            // Not reachable through `Applier`, which opens before it asks. Reported rather than
+            // defaulted to the root, because a mock that quietly names the wrong directory would
+            // make an ACL test pass while asserting nothing.
+            None => Err(SeamError::Io(
+                "command_path called before any open_dir".to_string(),
+            )),
+        }
     }
 
     fn publish(
@@ -157,6 +227,44 @@ impl SafePath for MockSafePath {
             }
             Err(e) => Err(SeamError::Io(format!("rename {from} -> {to}: {e}"))),
         }
+    }
+
+    fn create_dir(&self, dir: &[&str], name: &str, uid: u32, gid: u32) -> Result<(), SeamError> {
+        let parent = self.join(dir)?;
+        // `join` again with the name as its own component, so a name the dispatcher somehow let
+        // through as a path is refused here too rather than pushed onto a PathBuf.
+        let mut full: Vec<&str> = dir.to_vec();
+        full.push(name);
+        let path = self.join(&full)?;
+
+        // A missing parent must be `NotFound` and not `Io`, because the dispatcher turns exactly
+        // that into a 404. `std::fs::create_dir` reports ENOENT for it, but it reports the same
+        // kind for other things on other platforms, so the parent is checked first and the
+        // distinction is not left to an errno translation this mock does not control.
+        if !parent.is_dir() {
+            return Err(SeamError::NotFound(dir.join("/")));
+        }
+        match std::fs::create_dir(&path) {
+            Ok(()) => {}
+            // `symlink_metadata` is what `create_dir` effectively checks: a dangling symlink at
+            // the name is a name that is TAKEN, and the real `mkdirat` returns EEXIST for it.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(SeamError::AlreadyExists(name.to_string()));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SeamError::NotFound(dir.join("/")));
+            }
+            Err(e) => return Err(SeamError::Io(format!("mkdir {name}: {e}"))),
+        }
+
+        // Recorded, not performed — see the note on `owners`. A real chown needs CAP_CHOWN and a
+        // real 0750 needs a Unix mode, so both claims are measured against a kernel in `unix.rs`;
+        // what the portable tests can pin is that the dispatcher asked for the right owner.
+        self.owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((uid, gid));
+        Ok(())
     }
 
     fn set_owner(&self, _file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError> {
