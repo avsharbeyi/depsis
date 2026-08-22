@@ -888,7 +888,6 @@ export interface paths {
                 404: components["responses"]["Problem"];
                 409: components["responses"]["Problem"];
                 412: components["responses"]["Problem"];
-                501: components["responses"]["Problem"];
             };
         };
         trace?: never;
@@ -1188,6 +1187,101 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Paylaşımlar ve SMB adresleri
+         * @description §9. Bir NAS'ın varlık sebebi Windows'tan bir sürücü olarak görünmek, ve o adresi
+         *     kullanıcıya SÖYLEYEN bir yer yoksa özellik yarım kalır — kimse `\\depsis\belgeler`
+         *     yazacağını tahmin edemez.
+         *
+         *     `published`, ajanın Samba yapılandırmasını gerçekten yazıp yazmadığını söyler. Bu alan
+         *     iyimser DEĞİL: DEPSIS'in veritabanında bir paylaşım satırı olması, smbd'nin onu sunduğu
+         *     anlamına gelmiyor, ve ikisini aynı şeymiş gibi göstermek kullanıcıyı çalışmayan bir
+         *     adresi denemeye gönderir.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Paylaşımlar */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SharePage"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/smb": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Samba yapılandırmasını yeniden yayımla
+         * @description Yalnız yöneticiler. Ajan yapılandırmayı atomik olarak yazar, `testparm` ile doğrular ve
+         *     canlı bir bağlantı denemesi yapar; herhangi biri başarısız olursa ESKİSİNE GERİ DÖNER.
+         *
+         *     Bu üç adımın üçü de gerekli ve sebebi ölçüldü (P0-B): geçersiz bir `full_audit` opname
+         *     `testparm`'dan temiz geçiyor ve sonra smbd'nin BÜTÜN bağlantıları reddetmesine yol
+         *     açıyor. Yalnız `testparm` koşan bir kapı, kapı değil.
+         *
+         *     Uç nokta idempotent: aynı yapılandırma iki kez yayımlanabilir.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Yayımlandı */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SmbPublishResult"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -1750,6 +1844,62 @@ export interface paths {
             };
         };
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/{id}/permanent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Kararlı dosya kimliği. Yol asla kimlik olarak kullanılmaz (ADR-0005). */
+                id: components["parameters"]["FileId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Çöpten kalıcı olarak sil
+         * @description Baytları siler. Geri alınamaz ve bu yüzden ÇÖPTEKİ bir girdide çalışır: çöpte olmayan bir
+         *     girdi 409 alır. Bir tıklamayla kalıcı silme, bir tıklamayla veri kaybıdır; çöp kutusu o
+         *     tıklamanın arasına giren şey.
+         *
+         *     Klasör silmek ÖZYİNELEMELİ ve alttan yukarı: API ağacı biliyor, ajan bilmiyor. Her yaprak
+         *     için bir `RemoveEntry` çağrısı gider ve klasörün kendisi en sona kalır. Bu, tek bir
+         *     "rekürsif sil" işlemi eklemekten yavaş ama ajanın işlem kümesini `rm -rf` yetkisiyle
+         *     genişletmiyor — kapalı kümenin bütün anlamı bu.
+         *
+         *     Yarıda kesilirse silinenler silinmiş kalır: işlem atomik DEĞİL ve olamaz. Kısmen silinmiş
+         *     bir ağaç çöpte durmaya devam eder ve tekrar çağırmak kaldığı yerden devam eder.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Kararlı dosya kimliği. Yol asla kimlik olarak kullanılmaz (ADR-0005). */
+                    id: components["parameters"]["FileId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Silindi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -2457,6 +2607,489 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/teams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Ekipler
+         * @description §6.1'in hiyerarşisinde ekip, organizasyon ile kullanıcı arasındaki katman. İzinler ekibe
+         *     verilir ve kullanıcı ekibe girer — ADR-0004'ün "ACL girdileri kullanıcıya değil gruba
+         *     verilir" kuralı bu. POSIX ACL'ler ~30 girdiden sonra hantallaşıyor ve mask semantiği
+         *     ısırıyor, yani bu bir düzen tercihi değil bir zorunluluk.
+         *
+         *     Her kullanıcı listeyi görür: bir ekibin var olduğu, o ekipte olmayan birinden saklanacak
+         *     bir şey değil ve izin verirken hedefi seçebilmek gerekiyor. Üyelik listesi ayrı bir uçta.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ekipler */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TeamPage"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Ekip oluştur
+         * @description Yalnız yöneticiler. Satır yazılır ve POSIX grubu ayrıca ayrılır; grup dosya sistemine
+         *     yansıtılana kadar `posixGid` null kalır ve bu ekibe verilen izin SMB'de görünmez.
+         *     Yanıt bunu saklamıyor — arayüzün söyleyebilmesi gerekiyor.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateTeamRequest"];
+                };
+            };
+            responses: {
+                /** @description Oluşturuldu */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Team"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Ekibi sil
+         * @description Yalnız organizasyon yöneticileri. Ekibe verilmiş İZİNLER de gider (`ON DELETE CASCADE`) ve
+         *     bu sessiz bir yan etki olamaz: silme, kaç klasörde kaç kişinin erişimini kaybedeceğini
+         *     döndüren bir ön izleme ister. `?dryRun=true` ile çağrıldığında hiçbir şey silinmez ve
+         *     yalnız etki döner — §6.2'nin "her izin değişimi dry-run ile etkilenecek kullanıcı/klasör
+         *     sayısını göstermeli" şartı burada da geçerli, çünkü ekip silmek toplu bir izin
+         *     değişikliğidir.
+         */
+        delete: {
+            parameters: {
+                query?: {
+                    dryRun?: boolean;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ön izleme (yalnız dryRun=true ile) */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PermissionImpact"];
+                    };
+                };
+                /** @description Silindi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Ekibi yeniden adlandır
+         * @description Yalnız organizasyon yöneticileri ya da o ekibin yöneticisi (§6.1: "Ekip yöneticisi —
+         *     kendi ekibi içindeki kullanıcı, klasör ve görevler").
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateTeamRequest"];
+                };
+            };
+            responses: {
+                /** @description Güncellendi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Team"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+            };
+        };
+        trace?: never;
+    };
+    "/teams/{id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Ekip üyeleri */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Üyeler */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TeamMemberPage"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        /**
+         * Üye ekle veya üyeliğini güncelle
+         * @description PUT, POST değil: aynı kullanıcıyı iki kez eklemek bir hata değil, aynı durumu iki kez
+         *     istemektir. `teamAdmin` bayrağını değiştirmek de aynı çağrı.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["TeamMembershipRequest"];
+                };
+            };
+            responses: {
+                /** @description Üyelik yazıldı */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TeamMember"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/members/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                userId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Üyeyi çıkar
+         * @description Bir kişiyi ekipten çıkarmak, o ekibin bütün izinlerini o kişiden almaktır. §6.2'nin
+         *     deny'sız modelinde "şu kişi hariç herkes" demenin TEK yolu bu, o yüzden sık kullanılacak
+         *     ve etkisi görünür olmalı: `?dryRun=true` kaç klasörün erişimini kaybedeceğini döndürür.
+         */
+        delete: {
+            parameters: {
+                query?: {
+                    dryRun?: boolean;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                    userId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ön izleme (yalnız dryRun=true ile) */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PermissionImpact"];
+                    };
+                };
+                /** @description Çıkarıldı */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/{id}/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Kararlı dosya kimliği. Yol asla kimlik olarak kullanılmaz (ADR-0005). */
+                id: components["parameters"]["FileId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Bu klasörün izinleri
+         * @description İki ayrı şey döner ve karıştırılmamalı:
+         *
+         *     - `effective` — ÇAĞIRANIN bu klasörde gerçekten yapabildikleri, miras hesaplandıktan
+         *       sonra. Arayüz düğmeleri buna göre çizer.
+         *     - `grants` — bu düğümde AÇIKÇA yazılmış izin satırları. Yalnız `manage` iznine sahip
+         *       olana döner; olmayan için boş dizi gelir, çünkü kimin nereye erişebildiği kendi başına
+         *       bir bilgidir.
+         *
+         *     `inheritedFrom`, `effective` kümesinin hangi atadan geldiğini söyler (bu düğümün kendisi
+         *     ise kendi kimliği, hiç grant yoksa null). ADR-0021'in miras kuralı temsilci başına EN
+         *     YAKIN atayı seçtiği için "bu izin nereden geliyor" cevaplanabilir bir soru ve
+         *     cevaplanmalı — aksi hâlde bir yöneticinin izni nereden kaldıracağını bulması imkânsız.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Kararlı dosya kimliği. Yol asla kimlik olarak kullanılmaz (ADR-0005). */
+                    id: components["parameters"]["FileId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description İzinler */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["FolderPermissions"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        /**
+         * Bu klasörün açık izinlerini yaz
+         * @description `manage` izni gerekiyor — `modify` YETMEZ. Bir klasöre yazabilen herkesin o klasörün
+         *     iznini de değiştirebilmesi, yetki modelinin kendi kendini geçersiz kılmasıdır (ADR-0021).
+         *
+         *     Gövde bu düğümdeki grant'ların TAMAMINI değiştirir. Kısmi birleştirme, iki yöneticinin
+         *     birbirinin izin listesini yarım yazması demek olurdu.
+         *
+         *     `?dryRun=true` ile hiçbir şey yazılmaz ve yalnız etki döner. §6.2 bunu şart koşuyor ve
+         *     gerekçesi somut: miras bir alt ağacın tamamını değiştiriyor, yani "şu klasörü ekibe
+         *     açayım" tıklaması kişinin farkında olmadığı beş yüz dosyayı açabilir.
+         *
+         *     İzinler dosya sistemine ANINDA yansımaz. POSIX ACL'lerin yeniden yazılması bir iş
+         *     kuyruğu görevi ve tamamlanana kadar iki katman ayrışıktır (ADR-0021'in kabul edilen
+         *     borcu); yanıt `applyingJobId` ile bunu söyler ve arayüz "izinler uygulanıyor"
+         *     gösterebilir.
+         */
+        put: {
+            parameters: {
+                query?: {
+                    dryRun?: boolean;
+                };
+                header?: never;
+                path: {
+                    /** @description Kararlı dosya kimliği. Yol asla kimlik olarak kullanılmaz (ADR-0005). */
+                    id: components["parameters"]["FileId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SetFolderPermissionsRequest"];
+                };
+            };
+            responses: {
+                /** @description Yazıldı, ya da dryRun ise ön izleme */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PermissionWriteResult"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/{id}/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Paylaşım kökünün izinleri
+         * @description `/files/{id}/permissions` ile aynı şey, kök için. Ayrı bir uç nokta olmasının sebebi
+         *     kimlik uzayları: bir paylaşım `file_entries` satırı DEĞİL, ve bir uç noktanın iki farklı
+         *     tablodan kimlik kabul etmesi, hangisinin bulunamadığını söyleyemeyen bir 404 üretir.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description İzinler */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["FolderPermissions"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        /** Paylaşım kökünün açık izinlerini yaz */
+        put: {
+            parameters: {
+                query?: {
+                    dryRun?: boolean;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SetFolderPermissionsRequest"];
+                };
+            };
+            responses: {
+                /** @description Yazıldı, ya da dryRun ise ön izleme */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PermissionWriteResult"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2665,6 +3298,19 @@ export interface components {
             otherSessionsRevoked: number;
         };
         FileEntry: {
+            /**
+             * @description ÇAĞIRANIN bu girdide yapabildikleri, miras hesaplandıktan sonra (ADR-0021).
+             *
+             *     Satır başına, klasör başına değil, ve bunun bir maliyeti var: bir sayfa çizmek, o
+             *     sayfadaki her girdi için ata zincirini yürümek demek. Yine de satır başına, çünkü
+             *     alternatifi arayüzün klasörün iznine bakıp her satıra aynı düğmeleri koyması ve alt
+             *     klasöre dar bir grant konmuş satırda o düğmenin 403 alması — yani sunucunun
+             *     reddedeceği bir şeyi teklif eden bir arayüz.
+             *
+             *     Sunucu bunu sayfa başına TEK ata yürüyüşüyle hesaplar: aynı klasördeki satırların
+             *     atası ortak, ve yalnız kendi grant'ı olan satırlar ek iş çıkarır.
+             */
+            permissions: components["schemas"]["FolderPermission"][];
             /** Format: uuid */
             id: string;
             /** Format: uuid */
@@ -3057,6 +3703,168 @@ export interface components {
              */
             networkId: string;
             label?: string;
+        };
+        Share: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            readOnly: boolean;
+            /**
+             * @description Samba bu paylaşımı GERÇEKTEN sunuyor mu. Veritabanında bir satır olması yetmez —
+             *     ikisini aynı şeymiş gibi göstermek, kullanıcıyı çalışmayan bir adresi denemeye
+             *     göndermektir.
+             */
+            published: boolean;
+            /** @description Windows'un Gezgin'e yazacağı adres, örn. `\\depsis\belgeler`. */
+            uncPath: string;
+            dataset?: string;
+        };
+        SharePage: {
+            items: components["schemas"]["Share"][];
+            /**
+             * @description Ajana ulaşılabiliyor ve Samba kurulu mu. false ise `published` alanlarının hepsi
+             *     false'tur ve bu bir arıza değil, kurulmamış bir bileşendir.
+             */
+            smbAvailable: boolean;
+        };
+        SmbPublishResult: {
+            shares: number;
+            /**
+             * @description Canlı bağlantı denemesi geçti mi. false ise yapılandırma yazıldı ama doğrulanamadı ve
+             *     ESKİSİNE GERİ DÖNÜLDÜ — yani paylaşımlar çalışmaya devam ediyor, yeni yapılandırma
+             *     uygulanmadı.
+             */
+            verified: boolean;
+        };
+        /**
+         * @description §6.2'nin saydığı on bir izin, birebir. `manage` (izin yönet) ayrı: bir klasöre yazabilen
+         *     herkesin o klasörün iznini de değiştirebilmesi, yetki modelinin kendi kendini geçersiz
+         *     kılmasıdır.
+         * @enum {string}
+         */
+        FolderPermission: "list" | "read" | "download" | "create" | "modify" | "move" | "delete" | "share" | "manage" | "versions" | "audit";
+        Team: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            memberCount: number;
+            /**
+             * @description Dosya sistemindeki grup. NULL, grubun HENÜZ YARATILMADIĞI anlamına gelir — ve bu
+             *     durumdaki bir ekibe verilen izin uygulama katmanında görünür, SMB'de görünmez.
+             *     Arayüz bunu söylemek zorunda; iki gerçeklik üretmemenin bedeli bu alanı okumak.
+             */
+            posixGid: number | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        TeamPage: {
+            items: components["schemas"]["Team"][];
+        };
+        CreateTeamRequest: {
+            name: string;
+        };
+        UpdateTeamRequest: {
+            name: string;
+        };
+        TeamMember: {
+            /** Format: uuid */
+            userId: string;
+            username: string;
+            /** @description §6.1'in "Ekip yöneticisi" satırı — kendi ekibi içindeki kullanıcı ve klasörler. */
+            teamAdmin: boolean;
+            /** Format: date-time */
+            addedAt: string;
+        };
+        TeamMemberPage: {
+            items: components["schemas"]["TeamMember"][];
+        };
+        TeamMembershipRequest: {
+            /** Format: uuid */
+            userId: string;
+            /** @default false */
+            teamAdmin: boolean;
+        };
+        /**
+         * @description Tam olarak biri dolu: `userId` ya da `teamId`. İkisi birden dolu ya da ikisi birden boş
+         *     bir satır, veritabanı kısıtıyla da reddediliyor — burada da yazılı olması, üretilmiş
+         *     istemcinin sunucuya sormadan bilebilmesi için.
+         */
+        Grant: {
+            /** Format: uuid */
+            userId?: string | null;
+            /** Format: uuid */
+            teamId?: string | null;
+            /** @description Kullanıcı adı ya da ekip adı. Yalnız yanıtta; istek bunu yok sayar. */
+            displayName?: string;
+            permissions: components["schemas"]["FolderPermission"][];
+        };
+        FolderPermissions: {
+            /**
+             * @description ÇAĞIRANIN bu klasörde gerçekten yapabildikleri, miras hesaplandıktan sonra. Arayüz
+             *     düğmeleri buna göre çizer. Organizasyon yöneticisi için her zaman tam küme.
+             */
+            effective: components["schemas"]["FolderPermission"][];
+            /**
+             * Format: uuid
+             * @description `effective` kümesinin geldiği düğüm. Bu düğümün kendisiyse kendi kimliği; hiç grant
+             *     yoksa null. "Bu izin nereden geliyor" cevaplanabilir bir soru olmalı, yoksa bir
+             *     yöneticinin onu nereden kaldıracağını bulması imkânsız.
+             */
+            inheritedFrom?: string | null;
+            /**
+             * @description Bu düğümde AÇIKÇA yazılmış satırlar. `canManage` false ise BOŞ döner — kimin nereye
+             *     erişebildiği kendi başına bir bilgi ve onu görmek de bir yetki.
+             */
+            grants: components["schemas"]["Grant"][];
+            /** @description Çağıranın `manage` izni var mı. Arayüzün izin sekmesini göstermesi buna bağlı. */
+            canManage: boolean;
+        };
+        SetFolderPermissionsRequest: {
+            /**
+             * @description Bu düğümdeki grant'ların TAMAMI. Boş dizi, bu düğümdeki bütün açık izinleri kaldırır
+             *     ve mirası yeniden yürürlüğe sokar — silmenin yolu bu, çünkü boş bir izin kümesi
+             *     taşıyan bir grant satırı veritabanı tarafından reddediliyor.
+             */
+            grants: components["schemas"]["Grant"][];
+        };
+        /**
+         * @description §6.2: "Her izin değişimi dry-run ile etkilenecek kullanıcı/klasör sayısını göstermeli."
+         *     Sayılar, mirasın ulaştığı ALT AĞACIN tamamı üzerinden hesaplanır — tıklamanın gerçek
+         *     yarıçapı bu, değişen satır sayısı değil.
+         */
+        PermissionImpact: {
+            foldersAffected: number;
+            /** @description Bu değişiklikten sonra erişimi ARTAN kullanıcılar. */
+            usersGaining: components["schemas"]["AffectedUser"][];
+            /**
+             * @description Erişimi AZALAN kullanıcılar. Ayrı bir liste, çünkü bir yöneticinin durup düşünmesi
+             *     gereken taraf bu — birine erişim vermek geri alınabilir, birinden almak o kişinin
+             *     işini o an durdurur.
+             */
+            usersLosing: components["schemas"]["AffectedUser"][];
+        };
+        AffectedUser: {
+            /** Format: uuid */
+            userId: string;
+            username: string;
+            before: components["schemas"]["FolderPermission"][];
+            after: components["schemas"]["FolderPermission"][];
+        };
+        PermissionWriteResult: {
+            /** @description false ise dryRun'dı ve hiçbir şey yazılmadı. */
+            applied: boolean;
+            impact: components["schemas"]["PermissionImpact"];
+            /**
+             * Format: uuid
+             * @description POSIX ACL'leri yeniden yazan iş. İzinler dosya sistemine ANINDA yansımıyor ve
+             *     tamamlanana kadar iki katman ayrışık (ADR-0021'in kabul edilen borcu). Arayüz bunu
+             *     "izinler uygulanıyor" diye göstermeli; sessizce tamamlanmış gibi davranmak, SMB'den
+             *     hâlâ erişilebilen bir klasörü kapalı sanmaktır.
+             *
+             *     Ajan ulaşılamazsa null olur ve yazma yine de yapılır — uygulama katmanı doğru,
+             *     dosya sistemi geride. Bu durumun görünür olması, gizlenmesinden iyidir.
+             */
+            applyingJobId?: string | null;
         };
     };
     responses: {

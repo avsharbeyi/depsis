@@ -447,16 +447,10 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
         '412': { $ref: '#/components/responses/Problem' }
-        '501':
-          # `parentId` ile taşıma HENÜZ YAZILMADI ve bunun sebebi ajanın işlem kümesi: içinde
-          # bir dosyayı başka bir klasöre taşıyacak işlem yok. Yalnızca veritabanı satırını
-          # taşımak, veritabanı ile diskin ayrışması demek olurdu — bir dosyanın listede bir
-          # yerde, diskte başka bir yerde durması, bu üründe kabul edilemez.
-          #
-          # 501 burada yayımlanıyor çünkü üretilmiş istemcinin bunu "taşıma yok" diye
-          # gösterebilmesi gerekiyor; belgelenmemiş bir durum kodu, istemci için taşıma
-          # hatasıyla ayırt edilemez.
-          $ref: '#/components/responses/Problem'
+        # 501 KALDIRILDI. Taşıma artık ajanın `MoveEntry` işlemiyle gerçekten yapılıyor:
+        # önce dosya sistemi, sonra veritabanı. Sıra bu yönde çünkü ters sırada, rename
+        # başarısız olduğunda satır yeni yerini gösterir ve diskteki dosya eski yerinde kalır —
+        # veritabanıyla diskin ayrışması, bu üründe kabul edilmeyen tek şey.
     delete:
       tags: [files]
       summary: Çöp kutusuna taşı
@@ -644,6 +638,51 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/FileEntryPage' }
         '422': { $ref: '#/components/responses/Problem' }
+
+  /shares:
+    get:
+      tags: [system]
+      summary: Paylaşımlar ve SMB adresleri
+      description: |
+        §9. Bir NAS'ın varlık sebebi Windows'tan bir sürücü olarak görünmek, ve o adresi
+        kullanıcıya SÖYLEYEN bir yer yoksa özellik yarım kalır — kimse `\\depsis\belgeler`
+        yazacağını tahmin edemez.
+
+        `published`, ajanın Samba yapılandırmasını gerçekten yazıp yazmadığını söyler. Bu alan
+        iyimser DEĞİL: DEPSIS'in veritabanında bir paylaşım satırı olması, smbd'nin onu sunduğu
+        anlamına gelmiyor, ve ikisini aynı şeymiş gibi göstermek kullanıcıyı çalışmayan bir
+        adresi denemeye gönderir.
+      responses:
+        '200':
+          description: Paylaşımlar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SharePage' }
+
+  /system/smb:
+    post:
+      tags: [system]
+      summary: Samba yapılandırmasını yeniden yayımla
+      description: |
+        Yalnız yöneticiler. Ajan yapılandırmayı atomik olarak yazar, `testparm` ile doğrular ve
+        canlı bir bağlantı denemesi yapar; herhangi biri başarısız olursa ESKİSİNE GERİ DÖNER.
+
+        Bu üç adımın üçü de gerekli ve sebebi ölçüldü (P0-B): geçersiz bir `full_audit` opname
+        `testparm`'dan temiz geçiyor ve sonra smbd'nin BÜTÜN bağlantıları reddetmesine yol
+        açıyor. Yalnız `testparm` koşan bir kapı, kapı değil.
+
+        Uç nokta idempotent: aynı yapılandırma iki kez yayımlanabilir.
+      responses:
+        '200':
+          description: Yayımlandı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SmbPublishResult' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409':
+          # Ajan reddetti ve eskisine geri döndü. Paylaşımlar çalışmaya devam ediyor.
+          $ref: '#/components/responses/Problem'
+        '503': { $ref: '#/components/responses/Problem' }
 
   /system/telemetry:
     get:
@@ -902,6 +941,33 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
+  /files/{id}/permanent:
+    parameters:
+      - $ref: '#/components/parameters/FileId'
+    delete:
+      tags: [files]
+      summary: Çöpten kalıcı olarak sil
+      description: |
+        Baytları siler. Geri alınamaz ve bu yüzden ÇÖPTEKİ bir girdide çalışır: çöpte olmayan bir
+        girdi 409 alır. Bir tıklamayla kalıcı silme, bir tıklamayla veri kaybıdır; çöp kutusu o
+        tıklamanın arasına giren şey.
+
+        Klasör silmek ÖZYİNELEMELİ ve alttan yukarı: API ağacı biliyor, ajan bilmiyor. Her yaprak
+        için bir `RemoveEntry` çağrısı gider ve klasörün kendisi en sona kalır. Bu, tek bir
+        "rekürsif sil" işlemi eklemekten yavaş ama ajanın işlem kümesini `rm -rf` yetkisiyle
+        genişletmiyor — kapalı kümenin bütün anlamı bu.
+
+        Yarıda kesilirse silinenler silinmiş kalır: işlem atomik DEĞİL ve olamaz. Kısmen silinmiş
+        bir ağaç çöpte durmaya devam eder ve tekrar çağırmak kaldığı yerden devam eder.
+      responses:
+        '204': { description: Silindi }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409':
+          # Çöpte olmayan bir girdi. 404 yanlış olurdu — girdi VAR, yalnızca bu işlem için
+          # doğru durumda değil, ve kullanıcıya "önce çöpe at" demek gerekiyor.
+          $ref: '#/components/responses/Problem'
         '503': { $ref: '#/components/responses/Problem' }
 
   /files/{id}/restore:
@@ -1255,6 +1321,269 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /teams:
+    get:
+      tags: [teams]
+      summary: Ekipler
+      description: |
+        §6.1'in hiyerarşisinde ekip, organizasyon ile kullanıcı arasındaki katman. İzinler ekibe
+        verilir ve kullanıcı ekibe girer — ADR-0004'ün "ACL girdileri kullanıcıya değil gruba
+        verilir" kuralı bu. POSIX ACL'ler ~30 girdiden sonra hantallaşıyor ve mask semantiği
+        ısırıyor, yani bu bir düzen tercihi değil bir zorunluluk.
+
+        Her kullanıcı listeyi görür: bir ekibin var olduğu, o ekipte olmayan birinden saklanacak
+        bir şey değil ve izin verirken hedefi seçebilmek gerekiyor. Üyelik listesi ayrı bir uçta.
+      responses:
+        '200':
+          description: Ekipler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamPage' }
+    post:
+      tags: [teams]
+      summary: Ekip oluştur
+      description: |
+        Yalnız yöneticiler. Satır yazılır ve POSIX grubu ayrıca ayrılır; grup dosya sistemine
+        yansıtılana kadar `posixGid` null kalır ve bu ekibe verilen izin SMB'de görünmez.
+        Yanıt bunu saklamıyor — arayüzün söyleyebilmesi gerekiyor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTeamRequest' }
+      responses:
+        '201':
+          description: Oluşturuldu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Team' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /teams/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [teams]
+      summary: Ekibi yeniden adlandır
+      description: |
+        Yalnız organizasyon yöneticileri ya da o ekibin yöneticisi (§6.1: "Ekip yöneticisi —
+        kendi ekibi içindeki kullanıcı, klasör ve görevler").
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateTeamRequest' }
+      responses:
+        '200':
+          description: Güncellendi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Team' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [teams]
+      summary: Ekibi sil
+      description: |
+        Yalnız organizasyon yöneticileri. Ekibe verilmiş İZİNLER de gider (`ON DELETE CASCADE`) ve
+        bu sessiz bir yan etki olamaz: silme, kaç klasörde kaç kişinin erişimini kaybedeceğini
+        döndüren bir ön izleme ister. `?dryRun=true` ile çağrıldığında hiçbir şey silinmez ve
+        yalnız etki döner — §6.2'nin "her izin değişimi dry-run ile etkilenecek kullanıcı/klasör
+        sayısını göstermeli" şartı burada da geçerli, çünkü ekip silmek toplu bir izin
+        değişikliğidir.
+      parameters:
+        - name: dryRun
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Ön izleme (yalnız dryRun=true ile)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PermissionImpact' }
+        '204': { description: Silindi }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /teams/{id}/members:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [teams]
+      summary: Ekip üyeleri
+      responses:
+        '200':
+          description: Üyeler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamMemberPage' }
+        '404': { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [teams]
+      summary: Üye ekle veya üyeliğini güncelle
+      description: |
+        PUT, POST değil: aynı kullanıcıyı iki kez eklemek bir hata değil, aynı durumu iki kez
+        istemektir. `teamAdmin` bayrağını değiştirmek de aynı çağrı.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TeamMembershipRequest' }
+      responses:
+        '200':
+          description: Üyelik yazıldı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamMember' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /teams/{id}/members/{userId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: userId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [teams]
+      summary: Üyeyi çıkar
+      description: |
+        Bir kişiyi ekipten çıkarmak, o ekibin bütün izinlerini o kişiden almaktır. §6.2'nin
+        deny'sız modelinde "şu kişi hariç herkes" demenin TEK yolu bu, o yüzden sık kullanılacak
+        ve etkisi görünür olmalı: `?dryRun=true` kaç klasörün erişimini kaybedeceğini döndürür.
+      parameters:
+        - name: dryRun
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Ön izleme (yalnız dryRun=true ile)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PermissionImpact' }
+        '204': { description: Çıkarıldı }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /files/{id}/permissions:
+    parameters:
+      - $ref: '#/components/parameters/FileId'
+    get:
+      tags: [permissions]
+      summary: Bu klasörün izinleri
+      description: |
+        İki ayrı şey döner ve karıştırılmamalı:
+
+        - `effective` — ÇAĞIRANIN bu klasörde gerçekten yapabildikleri, miras hesaplandıktan
+          sonra. Arayüz düğmeleri buna göre çizer.
+        - `grants` — bu düğümde AÇIKÇA yazılmış izin satırları. Yalnız `manage` iznine sahip
+          olana döner; olmayan için boş dizi gelir, çünkü kimin nereye erişebildiği kendi başına
+          bir bilgidir.
+
+        `inheritedFrom`, `effective` kümesinin hangi atadan geldiğini söyler (bu düğümün kendisi
+        ise kendi kimliği, hiç grant yoksa null). ADR-0021'in miras kuralı temsilci başına EN
+        YAKIN atayı seçtiği için "bu izin nereden geliyor" cevaplanabilir bir soru ve
+        cevaplanmalı — aksi hâlde bir yöneticinin izni nereden kaldıracağını bulması imkânsız.
+      responses:
+        '200':
+          description: İzinler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FolderPermissions' }
+        '404': { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [permissions]
+      summary: Bu klasörün açık izinlerini yaz
+      description: |
+        `manage` izni gerekiyor — `modify` YETMEZ. Bir klasöre yazabilen herkesin o klasörün
+        iznini de değiştirebilmesi, yetki modelinin kendi kendini geçersiz kılmasıdır (ADR-0021).
+
+        Gövde bu düğümdeki grant'ların TAMAMINI değiştirir. Kısmi birleştirme, iki yöneticinin
+        birbirinin izin listesini yarım yazması demek olurdu.
+
+        `?dryRun=true` ile hiçbir şey yazılmaz ve yalnız etki döner. §6.2 bunu şart koşuyor ve
+        gerekçesi somut: miras bir alt ağacın tamamını değiştiriyor, yani "şu klasörü ekibe
+        açayım" tıklaması kişinin farkında olmadığı beş yüz dosyayı açabilir.
+
+        İzinler dosya sistemine ANINDA yansımaz. POSIX ACL'lerin yeniden yazılması bir iş
+        kuyruğu görevi ve tamamlanana kadar iki katman ayrışıktır (ADR-0021'in kabul edilen
+        borcu); yanıt `applyingJobId` ile bunu söyler ve arayüz "izinler uygulanıyor"
+        gösterebilir.
+      parameters:
+        - name: dryRun
+          in: query
+          schema: { type: boolean, default: false }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetFolderPermissionsRequest' }
+      responses:
+        '200':
+          description: Yazıldı, ya da dryRun ise ön izleme
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PermissionWriteResult' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /shares/{id}/permissions:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [permissions]
+      summary: Paylaşım kökünün izinleri
+      description: |
+        `/files/{id}/permissions` ile aynı şey, kök için. Ayrı bir uç nokta olmasının sebebi
+        kimlik uzayları: bir paylaşım `file_entries` satırı DEĞİL, ve bir uç noktanın iki farklı
+        tablodan kimlik kabul etmesi, hangisinin bulunamadığını söyleyemeyen bir 404 üretir.
+      responses:
+        '200':
+          description: İzinler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FolderPermissions' }
+        '404': { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [permissions]
+      summary: Paylaşım kökünün açık izinlerini yaz
+      parameters:
+        - name: dryRun
+          in: query
+          schema: { type: boolean, default: false }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetFolderPermissionsRequest' }
+      responses:
+        '200':
+          description: Yazıldı, ya da dryRun ise ön izleme
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PermissionWriteResult' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
 components:
   securitySchemes:
     sessionCookie:
@@ -1598,8 +1927,22 @@ components:
 
     FileEntry:
       type: object
-      required: [id, parentId, name, kind, size, modifiedAt]
+      required: [id, parentId, name, kind, size, modifiedAt, permissions]
       properties:
+        permissions:
+          type: array
+          description: |
+            ÇAĞIRANIN bu girdide yapabildikleri, miras hesaplandıktan sonra (ADR-0021).
+
+            Satır başına, klasör başına değil, ve bunun bir maliyeti var: bir sayfa çizmek, o
+            sayfadaki her girdi için ata zincirini yürümek demek. Yine de satır başına, çünkü
+            alternatifi arayüzün klasörün iznine bakıp her satıra aynı düğmeleri koyması ve alt
+            klasöre dar bir grant konmuş satırda o düğmenin 403 alması — yani sunucunun
+            reddedeceği bir şeyi teklif eden bir arayüz.
+
+            Sunucu bunu sayfa başına TEK ata yürüyüşüyle hesaplar: aynı klasördeki satırların
+            atası ortak, ve yalnız kendi grant'ı olan satırlar ek iş çıkarır.
+          items: { $ref: '#/components/schemas/FolderPermission' }
         id: { type: string, format: uuid }
         parentId:
           type: [string, 'null']
@@ -2148,3 +2491,226 @@ components:
             olarak birleştirilecek bir değerin iki yerde doğrulanması, bir yerde unutulmasından
             ucuz.
         label: { type: string, maxLength: 64 }
+
+    Share:
+      type: object
+      required: [id, name, readOnly, published, uncPath]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        readOnly: { type: boolean }
+        published:
+          type: boolean
+          description: |
+            Samba bu paylaşımı GERÇEKTEN sunuyor mu. Veritabanında bir satır olması yetmez —
+            ikisini aynı şeymiş gibi göstermek, kullanıcıyı çalışmayan bir adresi denemeye
+            göndermektir.
+        uncPath:
+          type: string
+          description: Windows'un Gezgin'e yazacağı adres, örn. `\\depsis\belgeler`.
+        dataset: { type: string }
+
+    SharePage:
+      type: object
+      required: [items, smbAvailable]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Share' }
+        smbAvailable:
+          type: boolean
+          description: |
+            Ajana ulaşılabiliyor ve Samba kurulu mu. false ise `published` alanlarının hepsi
+            false'tur ve bu bir arıza değil, kurulmamış bir bileşendir.
+
+    SmbPublishResult:
+      type: object
+      required: [shares, verified]
+      properties:
+        shares: { type: integer }
+        verified:
+          type: boolean
+          description: |
+            Canlı bağlantı denemesi geçti mi. false ise yapılandırma yazıldı ama doğrulanamadı ve
+            ESKİSİNE GERİ DÖNÜLDÜ — yani paylaşımlar çalışmaya devam ediyor, yeni yapılandırma
+            uygulanmadı.
+
+    FolderPermission:
+      type: string
+      description: |
+        §6.2'nin saydığı on bir izin, birebir. `manage` (izin yönet) ayrı: bir klasöre yazabilen
+        herkesin o klasörün iznini de değiştirebilmesi, yetki modelinin kendi kendini geçersiz
+        kılmasıdır.
+      enum: [list, read, download, create, modify, move, delete, share, manage, versions, audit]
+
+    Team:
+      type: object
+      required: [id, name, memberCount, posixGid, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        memberCount: { type: integer }
+        posixGid:
+          type: [integer, 'null']
+          description: |
+            Dosya sistemindeki grup. NULL, grubun HENÜZ YARATILMADIĞI anlamına gelir — ve bu
+            durumdaki bir ekibe verilen izin uygulama katmanında görünür, SMB'de görünmez.
+            Arayüz bunu söylemek zorunda; iki gerçeklik üretmemenin bedeli bu alanı okumak.
+        createdAt: { type: string, format: date-time }
+
+    TeamPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Team' }
+
+    CreateTeamRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+
+    UpdateTeamRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+
+    TeamMember:
+      type: object
+      required: [userId, username, teamAdmin, addedAt]
+      properties:
+        userId: { type: string, format: uuid }
+        username: { type: string }
+        teamAdmin:
+          type: boolean
+          description: §6.1'in "Ekip yöneticisi" satırı — kendi ekibi içindeki kullanıcı ve klasörler.
+        addedAt: { type: string, format: date-time }
+
+    TeamMemberPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TeamMember' }
+
+    TeamMembershipRequest:
+      type: object
+      required: [userId]
+      properties:
+        userId: { type: string, format: uuid }
+        teamAdmin: { type: boolean, default: false }
+
+    Grant:
+      type: object
+      required: [permissions]
+      description: |
+        Tam olarak biri dolu: `userId` ya da `teamId`. İkisi birden dolu ya da ikisi birden boş
+        bir satır, veritabanı kısıtıyla da reddediliyor — burada da yazılı olması, üretilmiş
+        istemcinin sunucuya sormadan bilebilmesi için.
+      properties:
+        userId: { type: [string, 'null'], format: uuid }
+        teamId: { type: [string, 'null'], format: uuid }
+        displayName:
+          type: string
+          description: Kullanıcı adı ya da ekip adı. Yalnız yanıtta; istek bunu yok sayar.
+        permissions:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/FolderPermission' }
+
+    FolderPermissions:
+      type: object
+      required: [effective, grants, canManage]
+      properties:
+        effective:
+          type: array
+          description: |
+            ÇAĞIRANIN bu klasörde gerçekten yapabildikleri, miras hesaplandıktan sonra. Arayüz
+            düğmeleri buna göre çizer. Organizasyon yöneticisi için her zaman tam küme.
+          items: { $ref: '#/components/schemas/FolderPermission' }
+        inheritedFrom:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            `effective` kümesinin geldiği düğüm. Bu düğümün kendisiyse kendi kimliği; hiç grant
+            yoksa null. "Bu izin nereden geliyor" cevaplanabilir bir soru olmalı, yoksa bir
+            yöneticinin onu nereden kaldıracağını bulması imkânsız.
+        grants:
+          type: array
+          description: |
+            Bu düğümde AÇIKÇA yazılmış satırlar. `canManage` false ise BOŞ döner — kimin nereye
+            erişebildiği kendi başına bir bilgi ve onu görmek de bir yetki.
+          items: { $ref: '#/components/schemas/Grant' }
+        canManage:
+          type: boolean
+          description: Çağıranın `manage` izni var mı. Arayüzün izin sekmesini göstermesi buna bağlı.
+
+    SetFolderPermissionsRequest:
+      type: object
+      required: [grants]
+      properties:
+        grants:
+          type: array
+          description: |
+            Bu düğümdeki grant'ların TAMAMI. Boş dizi, bu düğümdeki bütün açık izinleri kaldırır
+            ve mirası yeniden yürürlüğe sokar — silmenin yolu bu, çünkü boş bir izin kümesi
+            taşıyan bir grant satırı veritabanı tarafından reddediliyor.
+          items: { $ref: '#/components/schemas/Grant' }
+
+    PermissionImpact:
+      type: object
+      required: [foldersAffected, usersGaining, usersLosing]
+      description: |
+        §6.2: "Her izin değişimi dry-run ile etkilenecek kullanıcı/klasör sayısını göstermeli."
+        Sayılar, mirasın ulaştığı ALT AĞACIN tamamı üzerinden hesaplanır — tıklamanın gerçek
+        yarıçapı bu, değişen satır sayısı değil.
+      properties:
+        foldersAffected: { type: integer }
+        usersGaining:
+          type: array
+          description: Bu değişiklikten sonra erişimi ARTAN kullanıcılar.
+          items: { $ref: '#/components/schemas/AffectedUser' }
+        usersLosing:
+          type: array
+          description: |
+            Erişimi AZALAN kullanıcılar. Ayrı bir liste, çünkü bir yöneticinin durup düşünmesi
+            gereken taraf bu — birine erişim vermek geri alınabilir, birinden almak o kişinin
+            işini o an durdurur.
+          items: { $ref: '#/components/schemas/AffectedUser' }
+
+    AffectedUser:
+      type: object
+      required: [userId, username, before, after]
+      properties:
+        userId: { type: string, format: uuid }
+        username: { type: string }
+        before:
+          type: array
+          items: { $ref: '#/components/schemas/FolderPermission' }
+        after:
+          type: array
+          items: { $ref: '#/components/schemas/FolderPermission' }
+
+    PermissionWriteResult:
+      type: object
+      required: [applied, impact]
+      properties:
+        applied:
+          type: boolean
+          description: false ise dryRun'dı ve hiçbir şey yazılmadı.
+        impact: { $ref: '#/components/schemas/PermissionImpact' }
+        applyingJobId:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            POSIX ACL'leri yeniden yazan iş. İzinler dosya sistemine ANINDA yansımıyor ve
+            tamamlanana kadar iki katman ayrışık (ADR-0021'in kabul edilen borcu). Arayüz bunu
+            "izinler uygulanıyor" diye göstermeli; sessizce tamamlanmış gibi davranmak, SMB'den
+            hâlâ erişilebilen bir klasörü kapalı sanmaktır.
+
+            Ajan ulaşılamazsa null olur ve yazma yine de yapılır — uygulama katmanı doğru,
+            dosya sistemi geride. Bu durumun görünür olması, gizlenmesinden iyidir.

@@ -190,6 +190,22 @@ jobs:
           DB_DIR: packages/db
         run: bash tools/ci/migration-check.sh
 
+      - name: The permission schema's constraints actually bite
+        # Separate from the gate above because it asks a different question: that one measures
+        # tenant isolation and reversibility across the whole schema, this one measures whether a
+        # single migration's CHECK constraints refuse what they claim to refuse.
+        #
+        # It exists because one of them did not. `folder_grants_not_empty` was written as
+        # `array_length(permissions, 1) >= 1`, which returns NULL on an empty array — and a CHECK
+        # constraint PASSES on NULL. The constraint was written, reviewed, and enforced nothing.
+        # Only writing an empty array to a real database found it.
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGUSER: postgres
+          PGPASSWORD: ci-postgres
+        run: bash tools/ci/permissions-schema-check.sh
+
       - name: Tenant-context integration tests (P1-B)
         # The unit tests in apps/api run in the `static` job against a fake pool and settle the
         # chokepoint's control flow. These are the other half — the parts that are PostgreSQL's
@@ -206,6 +222,25 @@ jobs:
           PGUSER: postgres
           PGPASSWORD: ci-postgres
         run: |
+          # Rootless podman, started here rather than left absent.
+          #
+          # `apps/api/src/apps` guards its container block on the socket EXISTING, so without this
+          # the three tests that talk to a real runtime would skip — and a skip is what the guard
+          # below refuses to accept. Excluding them would have been the cheaper fix and the worse
+          # one: podman is preinstalled on this runner, so the choice was between measuring the
+          # integration and explaining why we do not.
+          #
+          # The ROOTLESS socket, matching ADR-0019's deployment decision. The root socket would
+          # also work and would test a configuration the product refuses to install code through.
+          systemctl --user enable --now podman.socket || podman system service --time=0             "unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" &
+          for _ in $(seq 1 30); do
+            [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" ] && break
+            sleep 1
+          done
+          export DEPSIS_TEST_PODMAN_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
+          echo "DEPSIS_TEST_PODMAN_SOCKET=$DEPSIS_TEST_PODMAN_SOCKET" >> "$GITHUB_ENV"
+          ls -l "$DEPSIS_TEST_PODMAN_SOCKET" || echo "::warning::podman socket did not appear"
+
           psql -d postgres -c "ALTER ROLE depsis_owner PASSWORD 'ci-owner'"
           psql -d postgres -c "ALTER ROLE depsis_app   PASSWORD 'ci-app'"
 
@@ -281,12 +316,53 @@ jobs:
               console.error("::error::the vitest report contains no tests at all");
               process.exit(1);
             }
+            // Named exemptions, each with an argument — not a tolerated COUNT.
+            //
+            // The rule stays absolute: any skip that is not on this list fails the job. What
+            // changed is granularity. The exclusion used to be per FILE, and
+            // remote.integration.test.ts has twenty tests that run here plus one that cannot —
+            // dropping the file to excuse the one would have thrown away the twenty.
+            //
+            // Anything joining this list needs its own sentence, not an analogy to these.
+            const ALLOWED = [
+              {
+                // DEPSIS does not package zerotier-one, and a CI job has no business joining a
+                // global peer-to-peer network to prove it can. The read path against a real
+                // daemon is covered by tools/poc/p1-g-remote.sh on the VM.
+                match: /against the real zerotier-one/,
+                why: "needs a running zerotier-one daemon (P1-G covers it)",
+              },
+            ];
+
             const skipped = tests.filter((a) => a.status === "pending" || a.status === "skipped");
-            console.log(tests.length + " test(s) ran, " + skipped.length + " skipped");
-            if (skipped.length > 0) {
-              console.error("::error::the tenant-context integration tests skipped; the database gate was not open");
-              for (const t of skipped.slice(0, 10)) console.error("  skipped: " + t.fullName);
+            const excused = [];
+            const unexplained = [];
+            for (const t of skipped) {
+              const rule = ALLOWED.find((r) => r.match.test(t.fullName));
+              (rule ? excused : unexplained).push(rule ? t.fullName + " — " + rule.why : t.fullName);
+            }
+
+            console.log(tests.length + " test(s) ran, " + skipped.length + " skipped (" +
+                        excused.length + " excused, " + unexplained.length + " unexplained)");
+            for (const line of excused) console.log("  excused: " + line);
+
+            if (unexplained.length > 0) {
+              console.error("::error::integration tests skipped with no recorded reason; a gate was not open");
+              for (const line of unexplained.slice(0, 10)) console.error("  skipped: " + line);
               process.exit(1);
+            }
+
+            // The other direction, and the one a tolerance list makes newly possible: an
+            // exemption whose tests started running again is an exemption nobody removed. Left
+            // alone it grows into the tolerance this list exists to avoid.
+            for (const rule of ALLOWED) {
+              const stillNeeded = skipped.some((t) => rule.match.test(t.fullName));
+              const existsAtAll = tests.some((t) => rule.match.test(t.fullName));
+              if (existsAtAll && !stillNeeded) {
+                console.error("::error::this exemption is no longer needed and must be removed: " +
+                              rule.match);
+                process.exit(1);
+              }
             }
           ' "$report"
           done
@@ -312,4 +388,11 @@ jobs:
     name: e2e (Playwright — desktop + mobile-360)
     runs-on: ubuntu-latest
     steps:
-      - run: echo "::notice::Not yet implemented. Enabled when apps/web exists (Phase 1)."
+      - run: |
+          echo "::notice::Not yet implemented, and the old reason for that has expired."
+          echo "apps/web now exists and carries fourteen screens, so 'enabled when apps/web"
+          echo "exists' stopped being true. What is actually missing is a harness: Playwright,"
+          echo "a browser download, and a stack the browser can reach — the API, the web server"
+          echo "and a migrated database, brought up the way tools/dev/up.sh does it locally."
+          echo "Until that exists this job measures nothing, and says so rather than passing"
+          echo "quietly. §18 and §21 both list e2e as a deliverable."
