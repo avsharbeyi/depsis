@@ -225,6 +225,28 @@
         "owner_uid",
         "owner_gid"
       ]
+    },
+    {
+      "description": "Throw a staging file away.\n\nThe missing half of the upload path, and its absence was a dead end rather than a gap:\n`.depsis/staging` counts against the user's `refquota`, Samba vetoes `/.depsis/` and the API\nfilters the prefix server-side, so abandoned chunks are invisible to the user, undeletable\nby the user, undeletable by the API — which cannot write inside a share at all — and, until\nnow, undeletable by the agent. Every failed checksum, every cancelled upload and every\n`EDQUOT` was permanent.\n\nRefused while a data connection is streaming. Unlinking a file a worker is still appending\nto leaves the worker writing to an unlinked inode and reporting success.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "discard_transfer"
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "staging_name": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "staging_name"
+      ]
     }
   ],
   "$defs": {
@@ -452,6 +474,23 @@
       "required": [
         "status",
         "bytes"
+      ]
+    },
+    {
+      "description": "A staging file was thrown away. `existed` is false when there was nothing there, which is a\nsuccess: a caller retrying a discard must not have to tell \"already clean\" apart from a\nfault.",
+      "type": "object",
+      "properties": {
+        "existed": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "const": "discarded"
+        }
+      },
+      "required": [
+        "status",
+        "existed"
       ]
     },
     {

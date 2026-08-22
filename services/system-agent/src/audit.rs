@@ -41,6 +41,7 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::PublishSambaConfig { .. } => "publish_samba_config",
         Request::OpenTransfer { .. } => "open_transfer",
         Request::PublishTransfer { .. } => "publish_transfer",
+        Request::DiscardTransfer { .. } => "discard_transfer",
     }
 }
 

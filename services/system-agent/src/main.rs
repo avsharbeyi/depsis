@@ -58,6 +58,7 @@ fn serve() -> std::process::ExitCode {
     use depsis_agent::authz::Policy;
     use depsis_agent::data::DataChannel;
     use depsis_agent::dispatch::Agent;
+    use depsis_agent::sweep;
     use depsis_agent::transfer::TransferRegistry;
 
     // The uid the API runs as is configuration, not something to discover. Guessing it — by
@@ -123,6 +124,30 @@ fn serve() -> std::process::ExitCode {
         &transfers,
     );
 
+    // How long an untouched staging file survives. Configuration rather than a constant, because
+    // the number that makes it safe lives in the API — it must exceed the upload lifetime the API
+    // advertises to tus clients, or the agent deletes uploads the API promised to keep. The agent
+    // cannot check that from here; what it CAN refuse is a value short enough to be wrong under any
+    // policy, and it does.
+    let max_age = match std::env::var("DEPSIS_STAGING_MAX_AGE_HOURS") {
+        Ok(raw) if !raw.trim().is_empty() => match raw.trim().parse::<u64>() {
+            Ok(hours) => {
+                match sweep::checked_max_age(std::time::Duration::from_secs(hours * 3600)) {
+                    Ok(age) => age,
+                    Err(e) => {
+                        eprintln!("depsis-agent: {e}");
+                        return std::process::ExitCode::FAILURE;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("depsis-agent: DEPSIS_STAGING_MAX_AGE_HOURS is not a number: {e}");
+                return std::process::ExitCode::FAILURE;
+            }
+        },
+        _ => sweep::DEFAULT_MAX_AGE,
+    };
+
     let data = DataChannel {
         policy: Policy { api_uid },
         audit: &audit,
@@ -152,6 +177,33 @@ fn serve() -> std::process::ExitCode {
                 std::process::exit(1);
             }
         });
+
+        // Housekeeping, and deliberately NOT a systemd .timer running a script. Only this process
+        // holds both the share root descriptor — so the sweep stays inside openat2(RESOLVE_BENEATH)
+        // instead of walking paths as root — and the transfer registry, so "old" can be told apart
+        // from "old but streaming right now". An external collector has neither and would
+        // eventually delete a live upload (ADR-0017).
+        //
+        // Absent share root means nothing to sweep, and no thread. A box before storage is set up
+        // has no staging directories at all.
+        if let Some(paths) = shares.as_ref() {
+            // Reborrowed before the `move`, which the thread needs for `paths`. Writing `&transfers`
+            // inside a `move` closure captures the registry BY VALUE — the mutex would go with the
+            // sweeper and the two socket loops would lose it.
+            let registry = &transfers;
+            let journal = &audit;
+            scope.spawn(move || loop {
+                let report = sweep::sweep_once(paths, registry, journal, max_age);
+                if report.removed > 0 || report.unreadable > 0 {
+                    eprintln!(
+                        "depsis-agent: sweep removed {} abandoned staging file(s), spared {}, \
+                         could not read {}",
+                        report.removed, report.spared, report.unreadable
+                    );
+                }
+                std::thread::sleep(sweep::SWEEP_INTERVAL);
+            });
+        }
 
         if let Err(e) = unix::serve_loop(&listeners.control, &agent) {
             eprintln!("depsis-agent: control loop failed: {e}");

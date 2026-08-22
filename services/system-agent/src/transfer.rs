@@ -89,6 +89,18 @@ pub enum ClaimError {
     NotYours,
 }
 
+/// What `abandon` found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Abandoned {
+    /// There was a pending transfer and it is gone; the file can now be removed.
+    Released,
+    /// A data connection is writing to it right now. Nothing was changed.
+    Streaming,
+    /// No transfer named this file. The file may still exist — an abandoned one from before a
+    /// restart, say — so this is not by itself a reason to refuse the caller.
+    NotKnown,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum InsertError {
     /// Another transfer already names this file — pending, or currently streaming.
@@ -197,6 +209,31 @@ impl TransferRegistry {
             },
         );
         Ok((transfer, key))
+    }
+
+    /// Give up on a transfer that has not started streaming.
+    ///
+    /// Without this, an API that opens a transfer and then decides against it — the user cancelled,
+    /// the tus upload was terminated, a validation failed — has no way back: the name stays
+    /// reserved for `TRANSFER_TTL` and the staging file cannot be deleted while it is, because
+    /// `DiscardTransfer` refuses a reserved name. Five minutes of a name being unusable after every
+    /// cancelled upload is the kind of thing that gets "fixed" by removing the interlock.
+    ///
+    /// A STREAMING transfer is never cancelled from here. Dropping the registry entry under a live
+    /// data connection would let the file be unlinked while a worker is still appending to it, and
+    /// the worker would go on writing to an unlinked inode and report success.
+    pub fn abandon(&mut self, share: &str, staging_name: &str) -> Abandoned {
+        let key = (share.to_string(), staging_name.to_string());
+        if self.in_flight.contains_key(&key) {
+            return Abandoned::Streaming;
+        }
+        match self.by_name.remove(&key) {
+            Some(token) => {
+                self.pending.remove(&token);
+                Abandoned::Released
+            }
+            None => Abandoned::NotKnown,
+        }
     }
 
     /// Is this staging file spoken for — waiting for data, or being written right now?

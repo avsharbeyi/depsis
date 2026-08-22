@@ -155,6 +155,28 @@ koşar, harici bir zamanlayıcıda değil, çünkü hem paylaşım kök fd'sini 
 bileşen odur — mtime'a bakan harici bir toplayıcı "eski" ile "eski ama şu anda akmakta" arasını
 ayırt edemez ve eninde sonunda canlı bir yüklemeyi siler.
 
+**Üçü de uygulandı** (`data.rs`'te `rollback`, `dispatch::discard_transfer`, `sweep.rs`). İki şey
+uygulama sırasında karara dönüştü ve burada duruyor:
+
+`DiscardTransfer` bekleyen bir transferi de **iptal eder**, sadece dosyayı silmez. Aksi hâlde
+vazgeçen bir API'nin geri dönüşü yoktu: isim `TRANSFER_TTL` boyunca rezerve kalır ve rezerveyken
+dosya silinemez, yani iptal edilen her yüklemeden sonra beş dakika o ad kullanılamaz. Bu, ergeç
+kilidi kaldırarak "düzeltilecek" cinsten bir davranış. AKAN bir transfer buradan iptal edilmiyor:
+kaydı canlı bir veri bağlantısının altından çekmek, dosyanın bir işçi hâlâ ona eklerken silinmesine
+izin verir ve işçi bağlantısı kesilmiş bir inode'a yazmaya devam edip `stored` bildirir.
+
+Süpürme yaşı bir yapılandırma (`DEPSIS_STAGING_MAX_AGE_HOURS`, varsayılan 24 saat), ve **onu
+güvenli kılan sayı API'de**: API'nin tus istemcilerine ilan ettiği yükleme ömründen uzun olmak
+zorunda. API 48 saat diyor ve bu 24'e ayarlıysa, ajan API'nin saklamaya söz verdiği yüklemeleri
+siler ve istemcinin bir sonraki PATCH'i artık var olmayan bir dosyaya devam etmeye çalışır. Bu
+bağlanma ajanın içinden doğrulanamıyor; doğrulanabilen tek şey, hangi politika altında olursa olsun
+yanlış olacak kadar kısa bir değerin reddedilmesi (`MIN_MAX_AGE`, `TRANSFER_TTL`'in çok üstünde),
+ve bu yapılıyor. Gerisi burada yazılı duruyor.
+
+Ayrıca süpürücü, kök daemon'da dosya silen tek döngü olduğu için **her silmeyi tek tek günlüğe
+yazıyor** ve her dosya için kayıt defterine YENİDEN soruyor — listeleme ile silme arasında bir veri
+bağlantısı başlayabilir, ve tam o pencere canlı bir yüklemenin yok edileceği yer.
+
 ### `fsync`'in bir hata dalı olmalı
 
 Linux geri yazma hatalarını dosya tanımı başına **bir kez** raporlar (errseq): kirli sayfalar çoktan

@@ -108,6 +108,11 @@ export type AgentRequest =
       owner_uid: number;
       share: SafeComponent;
       staging_name: SafeComponent;
+    }
+  | {
+      op: 'discard_transfer';
+      share: SafeComponent;
+      staging_name: SafeComponent;
     };
 /**
  * A ZFS dataset name, e.g. `tank/depsis/users/1001`.
@@ -174,6 +179,10 @@ export type AgentResponse =
   | {
       bytes: number;
       status: 'publish';
+    }
+  | {
+      existed: boolean;
+      status: 'discarded';
     }
   | {
       reason: string;

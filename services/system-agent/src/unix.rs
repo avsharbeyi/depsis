@@ -135,6 +135,66 @@ impl Openat2SafePath {
     }
 }
 
+impl Openat2SafePath {
+    /// Read one directory, keeping the entries of a given kind and — optionally — only those older
+    /// than a cutoff.
+    ///
+    /// Everything here is relative to a descriptor this call resolved under RESOLVE_BENEATH: the
+    /// directory is opened with `open_dir`, the entries come from that descriptor, and each `stat`
+    /// is an `fstatat` against it. Nothing is a path, because the one consumer of this is a loop
+    /// that unlinks files as root.
+    ///
+    /// `SYMLINK_NOFOLLOW` on the stat, and the kind check that follows it, are what stop a symlink
+    /// in the share root being reported as a directory to descend into or a file to delete.
+    fn entries(
+        &self,
+        relative: &[&str],
+        keep: impl Fn(rustix::fs::FileType) -> bool,
+        older_than: Option<Duration>,
+    ) -> Result<Vec<String>, SeamError> {
+        let dir_fd = self.open_dir(relative)?;
+        let mut reader = rustix::fs::Dir::read_from(&dir_fd)
+            .map_err(|e| SeamError::Io(format!("open directory stream: {e}")))?;
+        let now = std::time::SystemTime::now();
+        let mut names = Vec::new();
+
+        while let Some(entry) = reader.read() {
+            let entry = entry.map_err(|e| SeamError::Io(format!("readdir: {e}")))?;
+            let raw = entry.file_name();
+            if raw.to_bytes() == b"." || raw.to_bytes() == b".." {
+                continue;
+            }
+            let stat = match rustix::fs::statat(&dir_fd, raw, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            {
+                Ok(stat) => stat,
+                // Raced with something else removing it. Not an error: this exists to clean up
+                // abandoned files, and losing that race means the job is already done.
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(e) => return Err(SeamError::Io(format!("stat entry: {e}"))),
+            };
+            if !keep(rustix::fs::FileType::from_raw_mode(stat.st_mode)) {
+                continue;
+            }
+
+            if let Some(cutoff) = older_than {
+                let mtime = std::time::UNIX_EPOCH
+                    + Duration::from_secs(u64::try_from(stat.st_mtime).unwrap_or(u64::MAX));
+                // A file dated in the future counts as fresh. Clock skew must never make this MORE
+                // eager: keeping a stale file one cycle longer costs disk, deleting a live upload
+                // costs the user's data.
+                if now.duration_since(mtime).unwrap_or_default() <= cutoff {
+                    continue;
+                }
+            }
+
+            let name = String::from_utf8_lossy(raw.to_bytes()).into_owned();
+            names.push(name);
+        }
+        names.sort();
+        Ok(names)
+    }
+}
+
 /// Turn an `openat2` errno into the right kind of `SeamError`.
 ///
 /// ENOSYS gets its own branch because reporting it as a path escape is a false diagnosis at the
@@ -254,6 +314,38 @@ impl SafePath for Openat2SafePath {
             Some(rustix::fs::Gid::from_raw(gid)),
         )
         .map_err(|e| SeamError::Io(format!("fchown to {uid}:{gid}: {e}")))
+    }
+
+    fn list_dirs(&self, relative: &[&str]) -> Result<Vec<String>, SeamError> {
+        self.entries(
+            relative,
+            |kind| kind == rustix::fs::FileType::Directory,
+            None,
+        )
+    }
+
+    fn list_stale_files(
+        &self,
+        relative: &[&str],
+        older_than: Duration,
+    ) -> Result<Vec<String>, SeamError> {
+        self.entries(
+            relative,
+            |kind| kind == rustix::fs::FileType::RegularFile,
+            Some(older_than),
+        )
+    }
+
+    fn remove_file(&self, dir: &[&str], name: &str) -> Result<bool, SeamError> {
+        // Relative to a directory descriptor this call just resolved under RESOLVE_BENEATH. An
+        // `unlink` on a joined path would re-resolve every component, and this one runs as root in
+        // a loop over names the agent did not choose.
+        let parent = self.open_dir(dir)?;
+        match rustix::fs::unlinkat(&parent, name, rustix::fs::AtFlags::empty()) {
+            Ok(()) => Ok(true),
+            Err(rustix::io::Errno::NOENT) => Ok(false),
+            Err(e) => Err(SeamError::Io(format!("unlink {name}: {e}"))),
+        }
     }
 }
 

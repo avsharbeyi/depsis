@@ -122,6 +122,31 @@ pub trait SafePath {
     /// are broken", and the fastest-looking repair is to widen the mode — which is exactly the
     /// cross-tenant read the threat model exists to prevent. Ownership is the correct axis.
     fn set_owner(&self, file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError>;
+
+    /// The names of the directories directly under `relative`.
+    ///
+    /// For finding the shares. Symlinks are NOT followed and do not appear: a symlink in the share
+    /// root pointing at `/` would otherwise turn the sweeper below into a recursive delete of the
+    /// whole filesystem, which is the single worst thing a root daemon can be talked into.
+    fn list_dirs(&self, relative: &[&str]) -> Result<Vec<String>, SeamError>;
+
+    /// The names of the regular files directly under `relative` last modified more than
+    /// `older_than` ago.
+    ///
+    /// Regular files only, and the age comes from the kernel rather than from anything the caller
+    /// sent. Both halves matter: this feeds a delete loop in a process running as root.
+    fn list_stale_files(
+        &self,
+        relative: &[&str],
+        older_than: std::time::Duration,
+    ) -> Result<Vec<String>, SeamError>;
+
+    /// Unlink one file under `dir`. `Ok(false)` if it was already gone.
+    ///
+    /// "Already gone" is a normal outcome, not an error: the sweeper and an explicit
+    /// `DiscardTransfer` can race for the same abandoned file, and turning that into a failure
+    /// would make a successful cleanup look like a fault.
+    fn remove_file(&self, dir: &[&str], name: &str) -> Result<bool, SeamError>;
 }
 
 /// Where unguessable values come from.

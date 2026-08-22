@@ -42,6 +42,12 @@ describe('the emitted agent schema', () => {
       'create_dataset',
       'create_snapshot',
       'diff_snapshots',
+      // The reclaim half, and the reason the set has one at all: `.depsis/staging` counts against
+      // the user's refquota, Samba vetoes `/.depsis/` and this API filters the prefix server-side,
+      // so an abandoned chunk was invisible to the user, undeletable by the user, undeletable here
+      // — the API cannot write inside a share — and undeletable by the agent. Without this the
+      // upload path leaked quota nobody could free.
+      'discard_transfer',
       // The bulk data path's control half. `open_transfer` resolves and opens a staging file and
       // returns a one-time token; the bytes travel on a separate socket, because Node cannot
       // receive an SCM_RIGHTS descriptor and so the cleanest design — the agent passing the fd —

@@ -379,6 +379,50 @@ if [ -n "$TOKEN" ]; then
     || ok 'and the refused publish left the destination untouched'
 fi
 
+head1 'abandoned staging files can be reclaimed'
+# Until this operation existed the upload path was a dead end: `.depsis/staging` counts against the
+# user's refquota, Samba vetoes `/.depsis/` and the API filters the prefix server-side, so an
+# abandoned chunk was invisible to the user, undeletable by the user, undeletable by the API — which
+# cannot write inside a share at all — and undeletable by the agent. Quota nobody could reclaim.
+DOPEN=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+  '{"correlation_id":"p1d-7","reason":"cancelled upload","request":{"op":"open_transfer","share":"alice","staging_name":"junk.part"}}' 2>&1)
+DTOK=$(printf '%s' "$DOPEN" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+[ -n "$DTOK" ] && ok 'a transfer to abandon was opened' || bad "could not open one: $DOPEN"
+[ -e "$SHARES/alice/.depsis/staging/junk.part" ] \
+  && ok 'and its staging file exists' \
+  || bad 'no staging file after OpenTransfer'
+
+DISC=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+  '{"correlation_id":"p1d-8","reason":"cancelled upload","request":{"op":"discard_transfer","share":"alice","staging_name":"junk.part"}}' 2>&1)
+case "$DISC" in
+  *'"status":"discarded"'*'"existed":true'*) ok 'DiscardTransfer removed it' ;;
+  *) bad "discard failed: $DISC" ;;
+esac
+[ -e "$SHARES/alice/.depsis/staging/junk.part" ] \
+  && bad 'the staging file survived a discard' \
+  || ok 'the file is gone from the filesystem, not just from the registry'
+
+# Retrying must be a success. The sweeper can legitimately have got there first, and a caller that
+# has to tell "already clean" apart from a fault will eventually treat one as the other.
+AGAIN=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+  '{"correlation_id":"p1d-9","reason":"cancelled upload","request":{"op":"discard_transfer","share":"alice","staging_name":"junk.part"}}' 2>&1)
+case "$AGAIN" in
+  *'"existed":false'*) ok 'and discarding it again is a success, not an error' ;;
+  *) bad "the second discard was not a clean success: $AGAIN" ;;
+esac
+
+# The name has to be usable again straight away. If the registry entry outlived the file, every
+# cancelled upload would block its own name for TRANSFER_TTL — five minutes — and the interlock
+# that produces that would be the first thing someone removed.
+REOPEN=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+  '{"correlation_id":"p1d-10","reason":"retry","request":{"op":"open_transfer","share":"alice","staging_name":"junk.part"}}' 2>&1)
+case "$REOPEN" in
+  *'"token"'*) ok 'the same staging name can be opened again immediately' ;;
+  *) bad "the name was still reserved: $REOPEN" ;;
+esac
+runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+  '{"correlation_id":"p1d-11","reason":"tidy","request":{"op":"discard_transfer","share":"alice","staging_name":"junk.part"}}' >/dev/null 2>&1
+
 head1 'a bad chunk leaves nothing behind'
 OPEN2=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
   '{"correlation_id":"p1d-4","reason":"P1-D short-chunk probe","request":{"op":"open_transfer","share":"alice","staging_name":"short.part"}}' 2>&1)

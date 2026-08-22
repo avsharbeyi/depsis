@@ -64,20 +64,28 @@ pub struct MockSafePath {
     /// the call never being made. Recording lets the dispatcher tests assert that the publish path
     /// asks for the right owner; that it actually takes effect is measured against a real kernel
     /// in `unix.rs` and end to end in P1-D.
-    owners: RefCell<Vec<(u32, u32)>>,
+    /// A `Mutex` rather than a `RefCell`, and not for concurrency inside the mock — nothing here
+    /// is shared between threads. It is so `MockSafePath` is `Sync`, which the sweeper requires of
+    /// any `SafePath` because it runs on its own thread. A `RefCell` here would mean the sweeper
+    /// could not be tested against the mock at all, and the untested path in a root daemon would be
+    /// the one that deletes user files.
+    owners: std::sync::Mutex<Vec<(u32, u32)>>,
 }
 
 impl MockSafePath {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            owners: RefCell::new(Vec::new()),
+            owners: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     /// The `(uid, gid)` pairs `set_owner` was called with.
     pub fn owners(&self) -> Vec<(u32, u32)> {
-        self.owners.borrow().clone()
+        self.owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -141,8 +149,73 @@ impl SafePath for MockSafePath {
     }
 
     fn set_owner(&self, _file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError> {
-        self.owners.borrow_mut().push((uid, gid));
+        self.owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((uid, gid));
         Ok(())
+    }
+
+    fn list_dirs(&self, relative: &[&str]) -> Result<Vec<String>, SeamError> {
+        let path = self.join(relative)?;
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&path)
+            .map_err(|e| SeamError::Io(format!("{}: {e}", path.display())))?
+        {
+            let entry = entry.map_err(|e| SeamError::Io(format!("readdir: {e}")))?;
+            // `symlink_metadata`, so a symlink to a directory is not reported as one.
+            let meta = entry
+                .path()
+                .symlink_metadata()
+                .map_err(|e| SeamError::Io(format!("stat: {e}")))?;
+            if meta.is_dir() {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    fn list_stale_files(
+        &self,
+        relative: &[&str],
+        older_than: std::time::Duration,
+    ) -> Result<Vec<String>, SeamError> {
+        let path = self.join(relative)?;
+        let now = std::time::SystemTime::now();
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&path)
+            .map_err(|e| SeamError::Io(format!("{}: {e}", path.display())))?
+        {
+            let entry = entry.map_err(|e| SeamError::Io(format!("readdir: {e}")))?;
+            let meta = entry
+                .path()
+                .symlink_metadata()
+                .map_err(|e| SeamError::Io(format!("stat: {e}")))?;
+            if !meta.is_file() {
+                continue;
+            }
+            let modified = meta
+                .modified()
+                .map_err(|e| SeamError::Io(format!("mtime: {e}")))?;
+            // A file from the future is treated as fresh. Clock skew must never make the sweeper
+            // MORE eager: the cost of keeping a stale file one cycle longer is disk, and the cost
+            // of deleting a live upload is the user's data.
+            if now.duration_since(modified).unwrap_or_default() > older_than {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    fn remove_file(&self, dir: &[&str], name: &str) -> Result<bool, SeamError> {
+        let path = self.join(dir)?.join(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(SeamError::Io(format!("unlink {name}: {e}"))),
+        }
     }
 }
 

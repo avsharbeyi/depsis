@@ -12,7 +12,9 @@ use crate::audit::{self, Outcome, Sink};
 use crate::authz::{Decision, Policy};
 use crate::op::{AclType, Request, Response, SCHEMA_VERSION};
 use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource};
-use crate::transfer::{InsertError, PendingTransfer, TransferRegistry, MAX_PENDING_TRANSFERS};
+use crate::transfer::{
+    Abandoned, InsertError, PendingTransfer, TransferRegistry, MAX_PENDING_TRANSFERS,
+};
 use std::io::Seek;
 use std::sync::Mutex;
 
@@ -163,6 +165,35 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// ADR-0008 steps 4 and 5. The directory fsync is the one people skip, and skipping it means
     /// a power cut can leave the data on disk with nothing pointing at it — the file survived and
     /// the rename did not.
+    /// Throw a staging file away.
+    ///
+    /// Two steps that must happen in this order: release the registry entry, then unlink. Doing it
+    /// the other way round would unlink a file whose descriptor the registry still holds, and the
+    /// entry would keep a deleted inode alive against `MAX_PENDING_TRANSFERS` until it timed out.
+    fn discard_transfer(&self, share: &str, staging_name: &str) -> Result<Response, SeamError> {
+        let Some(paths) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+
+        {
+            let mut registry = self
+                .transfers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if registry.abandon(share, staging_name) == Abandoned::Streaming {
+                return Ok(Response::Refused {
+                    reason: format!("{staging_name} is being written right now"),
+                });
+            }
+        }
+
+        let staging = [share, STAGING_DIR[0], STAGING_DIR[1]];
+        let existed = paths.remove_file(&staging, staging_name)?;
+        Ok(Response::Discarded { existed })
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "Every operand is one the agent must not infer. The share and the staging name \
@@ -479,6 +510,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     *owner_gid,
                 )
             }
+
+            Request::DiscardTransfer {
+                share,
+                staging_name,
+            } => self.discard_transfer(share.as_str(), staging_name.as_str()),
 
             Request::PublishSambaConfig { shares } => {
                 // testparm is necessary but NOT sufficient. P0-B measured an invalid
@@ -898,6 +934,107 @@ mod tests {
             b"final contents",
             "the original must be untouched"
         );
+    }
+
+    // ── discarding ──
+
+    fn discard(h: &Harness, share: &str, staging_name: &str) -> Response {
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let raw = format!(
+            r#"{{"op":"discard_transfer","share":"{share}","staging_name":"{staging_name}"}}"#
+        );
+        h.agent(&r, &s)
+            .handle(&raw, peer(API_UID), "c-discard", "cancelled upload")
+    }
+
+    #[test]
+    fn a_discarded_staging_file_is_gone_and_its_name_is_free_again() {
+        // The dead end this closes: `.depsis/staging` counts against the user's refquota, Samba
+        // vetoes `/.depsis/` and the API filters the prefix server-side, so an abandoned chunk was
+        // invisible to the user, undeletable by the user, undeletable by the API — which cannot
+        // write inside a share at all — and undeletable by the agent. Quota nobody could reclaim.
+        let h = Harness::with_share("alice");
+        assert!(matches!(
+            open_transfer(&h, "alice", "cancelled.part"),
+            Response::Transfer { .. }
+        ));
+        assert!(h
+            .share_path(&["alice", ".depsis", "staging", "cancelled.part"])
+            .exists());
+
+        match discard(&h, "alice", "cancelled.part") {
+            Response::Discarded { existed } => assert!(existed),
+            other => panic!("expected a discard, got {other:?}"),
+        }
+        assert!(!h
+            .share_path(&["alice", ".depsis", "staging", "cancelled.part"])
+            .exists());
+
+        // The registry entry went with it. Without that the descriptor would sit against
+        // MAX_PENDING_TRANSFERS holding a deleted inode alive until the TTL expired, and the name
+        // would stay reserved for five minutes after every cancelled upload.
+        {
+            let registry = h.transfers.lock().expect("lock");
+            assert_eq!(registry.pending_count(), 0);
+            assert!(!registry.is_busy("alice", "cancelled.part"));
+        }
+        assert!(
+            matches!(
+                open_transfer(&h, "alice", "cancelled.part"),
+                Response::Transfer { .. }
+            ),
+            "and the user can retry under the same name immediately"
+        );
+    }
+
+    #[test]
+    fn discarding_a_file_that_is_already_gone_is_a_success() {
+        // A caller retrying a discard must not have to tell "already clean" apart from a fault —
+        // and the sweeper can legitimately have got there first.
+        let h = Harness::with_share("alice");
+        match discard(&h, "alice", "never-existed.part") {
+            Response::Discarded { existed } => assert!(!existed),
+            other => panic!("expected a discard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn discarding_is_refused_while_a_data_connection_is_writing() {
+        // Unlinking a file a worker is still appending to leaves that worker writing into an
+        // unlinked inode and reporting `stored`. The bytes go nowhere and nothing says so.
+        let h = Harness::with_share("alice");
+        let token = match open_transfer(&h, "alice", "live.part") {
+            Response::Transfer { token, .. } => token,
+            other => panic!("expected a transfer, got {other:?}"),
+        };
+
+        // Claim it the way the data channel does, and hold the in-flight guard for the call.
+        let key = {
+            let mut registry = h.transfers.lock().expect("lock");
+            let (_transfer, key) = registry.claim(&token, peer(API_UID)).expect("claim");
+            key
+        };
+        let guard = crate::transfer::guard_in_flight(&h.transfers, key);
+
+        match discard(&h, "alice", "live.part") {
+            Response::Refused { reason } => {
+                assert!(reason.contains("being written right now"), "got: {reason}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(
+            h.share_path(&["alice", ".depsis", "staging", "live.part"])
+                .exists(),
+            "the file must still be there for the connection that is writing it"
+        );
+
+        // And once the connection ends, the same call works.
+        drop(guard);
+        assert!(matches!(
+            discard(&h, "alice", "live.part"),
+            Response::Discarded { existed: true }
+        ));
     }
 
     #[test]

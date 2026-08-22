@@ -287,6 +287,22 @@ pub enum Request {
         owner_uid: u32,
         owner_gid: u32,
     },
+
+    /// Throw a staging file away.
+    ///
+    /// The missing half of the upload path, and its absence was a dead end rather than a gap:
+    /// `.depsis/staging` counts against the user's `refquota`, Samba vetoes `/.depsis/` and the API
+    /// filters the prefix server-side, so abandoned chunks are invisible to the user, undeletable
+    /// by the user, undeletable by the API — which cannot write inside a share at all — and, until
+    /// now, undeletable by the agent. Every failed checksum, every cancelled upload and every
+    /// `EDQUOT` was permanent.
+    ///
+    /// Refused while a data connection is streaming. Unlinking a file a worker is still appending
+    /// to leaves the worker writing to an unlinked inode and reporting success.
+    DiscardTransfer {
+        share: SafeComponent,
+        staging_name: SafeComponent,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -333,6 +349,12 @@ pub enum Response {
     /// The staged file is in place and the destination directory has been fsynced.
     Publish {
         bytes: u64,
+    },
+    /// A staging file was thrown away. `existed` is false when there was nothing there, which is a
+    /// success: a caller retrying a discard must not have to tell "already clean" apart from a
+    /// fault.
+    Discarded {
+        existed: bool,
     },
     Refused {
         reason: String,

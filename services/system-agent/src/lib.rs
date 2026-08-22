@@ -41,6 +41,7 @@ pub mod data;
 pub mod dispatch;
 pub mod op;
 pub mod seams;
+pub mod sweep;
 pub mod transfer;
 
 /// Emit the JSON Schema for the request/response contract.
