@@ -165,7 +165,7 @@ printf '%s\n' "$DB_URL" > /etc/depsis/db-url
 printf '%s\n' "$KEY"    > /etc/depsis/secret.key
 chown root:root /etc/depsis/db-url /etc/depsis/secret.key
 chmod 0400      /etc/depsis/db-url /etc/depsis/secret.key
-printf 'DEPSIS_API_PORT=%s\nNODE_ENV=production\nDEPSIS_AGENT_SOCKET=/run/depsis/agent.sock\nDEPSIS_ZFS_POOLS=\n' \
+printf 'DEPSIS_API_PORT=%s\nNODE_ENV=production\nDEPSIS_AGENT_SOCKET=/run/depsis/agent.sock\nDEPSIS_AGENT_DATA_SOCKET=/run/depsis/agent-data.sock\nDEPSIS_ZFS_POOLS=\n' \
   "$PORT" > /etc/depsis/api.env
 printf 'DEPSIS_API_UID=%s\n' "$(id -u depsis-api)" > /etc/depsis/agent.env
 printf 'DEPSIS_SHARES_ROOT=%s\n' "$SHARES" >> /etc/depsis/agent.env

@@ -49,6 +49,18 @@ const schema = z.object({
     .optional()
     .transform((value) => (value === undefined || value === '' ? null : value)),
 
+  // The agent's BULK DATA socket, separate from the control one above (ADR-0017).
+  //
+  // Two variables rather than one derived from the other, because a deployment that moves one has
+  // no reason to have moved the other in the same way, and deriving `agent-data.sock` from
+  // `agent.sock` would be a rule nobody wrote down. Optional for the same reason as the control
+  // socket: a development machine has neither.
+  DEPSIS_AGENT_DATA_SOCKET: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => (value === undefined || value === '' ? null : value)),
+
   // The file holding the key that seals TOTP secrets at rest (ADR-0016).
   //
   // A FILE, not the key itself in the environment: an environment variable is readable through
@@ -88,6 +100,7 @@ export interface AppConfig {
   port: number;
   nodeEnv: 'development' | 'test' | 'production';
   agentSocket: string | null;
+  agentDataSocket: string | null;
   secretKeyFile: string | null;
   zfsPools: readonly string[];
 }
@@ -103,6 +116,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     port: parsed.data.DEPSIS_API_PORT,
     nodeEnv: parsed.data.NODE_ENV,
     agentSocket: parsed.data.DEPSIS_AGENT_SOCKET,
+    agentDataSocket: parsed.data.DEPSIS_AGENT_DATA_SOCKET,
     secretKeyFile: parsed.data.DEPSIS_SECRET_KEY_FILE,
     zfsPools: parsed.data.DEPSIS_ZFS_POOLS,
   };

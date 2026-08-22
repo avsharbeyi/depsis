@@ -294,6 +294,28 @@ kontrolünü tamamen silmek hiçbir yüklemeyi kaybettirmiyor. Kontrolün kazand
 küçük ve yine de değerli: API olmayan bir süreç önsöz ayrıştırıcısına ve kayıt defterine hiç
 ulaşamadan reddediliyor, ve günlüğe "jeton hatası" değil "yetkisiz çağıran" olarak geçiyor.
 
+**İstemci yarısı yazıldıktan sonra:** `AgentDataService` (`apps/api/src/agent/`), 9 test, ve dört
+mutasyonun dördü de yakalandı. Kayda değer iki şey:
+
+`pipeline(..., { end: false })` — tasarımda "yanıtı kaybetmemek için şart" diye yazmıştım.
+Mutasyonla `end: true` yapıldığında **bütün testler yine geçti**: AF_UNIX'te yarı kapatma yalnız
+yazma yönünü kapatıyor ve yanıt okuma yönünden geliyor. Seçenek duruyor, ama sebebi artık doğru
+yazılı: kardeş kanalda ölçülen Windows adlandırılmış boru davranışı (5 bağlantının 2'sinde yanıt
+tamamen kayboluyordu). Testin adı da ölçtüğü şeye çekildi.
+
+`ExactLength` — bildirilen uzunluktan FAZLA gönderen bir çağıran, korumasız **askıda kalır**: ajan
+tam `length` bayt okuyup okumayı bırakıyor, fazlası soket tamponunu dolduruyor ve yazma hiç
+boşalmıyor. Askıda kalma buradaki en kötü hata biçimi, çünkü ajanın on altı işçisinden birini boşta
+kalma süresi boyunca tutuyor ve çağıranın kendi loglarında hiçbir şey görünmüyor. Bu test, sahte
+ajanın da tam olarak `length` kadar okuması sayesinde anlamlı — daha hoşgörülü bir sahte, hatayı
+hiç üretemezdi.
+
+**Hâlâ açık, ve kapsam dışı bırakıldığı için burada yazılı:** yayımlanan dosya artık yükleyene ait,
+ama onu içeren PAYLAŞIM DİZİNİ root:root 0755. Yani kiracı dosyasını okuyabiliyor, silemiyor ve
+adını değiştiremiyor — bunun için dizinde yazma izni gerekiyor. Bu, transfer yolunun değil paylaşım
+oluşturmanın (`CreateDataset` ve Samba tarafının) sorunu; buraya bir `chown` eklemek, her yüklemenin
+paylaşımın kendi izinlerini yeniden yazması demek olurdu.
+
 **Ölçülmemiş, ve tasarım kararı olarak duruyor:** ZFS `refquota` altında `EDQUOT`'un `write`'ta mı
 `fsync`'te mi yüzeye çıktığı (P0-G `EDQUOT`'u ölçtü ama hangi çağrıda olduğunu değil), ve gerçek bir
 `RENAME_NOREPLACE`'in uçuştaki bir dosya üzerindeki davranışı. İkisi de Debian VM'e ait.

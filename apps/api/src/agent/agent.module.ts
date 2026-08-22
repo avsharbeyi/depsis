@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 
 import { APP_CONFIG } from '../config.module.js';
 import type { AppConfig } from '../config.js';
+import { AgentDataService } from './agent-data.service.js';
 import { AgentService } from './agent.service.js';
 
 /**
@@ -19,7 +20,17 @@ import { AgentService } from './agent.service.js';
       inject: [APP_CONFIG],
       useFactory: (config: AppConfig) => new AgentService(config.agentSocket),
     },
+    {
+      // Deliberately NOT behind the same queue. `AgentService` serialises every call because the
+      // agent's control loop serves one connection at a time; the data socket is served from a
+      // fixed worker pool, and putting uploads on the control queue would mean a ten-gigabyte
+      // transfer blocking every `pool_status` behind it — the exact coupling the second socket
+      // exists to break (ADR-0017).
+      provide: AgentDataService,
+      inject: [APP_CONFIG],
+      useFactory: (config: AppConfig) => new AgentDataService(config.agentDataSocket),
+    },
   ],
-  exports: [AgentService],
+  exports: [AgentService, AgentDataService],
 })
 export class AgentModule {}
