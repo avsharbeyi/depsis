@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="DEPSIS">
+  <!-- One SVG rather than the usual ladder of PNGs. `sizes: "any"` on a vector satisfies every
+       launcher that reads the manifest, and a set of rasterised icons would be six binary files
+       nobody can review in a diff. -->
+  <rect width="192" height="192" rx="34" fill="#1f5f9e"/>
+  <g fill="none" stroke="#ffffff" stroke-width="11" stroke-linecap="round">
+    <ellipse cx="96" cy="58" rx="52" ry="20"/>
+    <path d="M44 58v76c0 11 23 20 52 20s52-9 52-20V58"/>
+    <path d="M44 96c0 11 23 20 52 20s52-9 52-20"/>
+  </g>
+</svg>

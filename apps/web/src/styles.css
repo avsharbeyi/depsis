@@ -163,3 +163,206 @@ img {
   border-radius: 6px;
   background: #ffffff;
 }
+
+/* ─── the application shell ───────────────────────────────────────────────────
+ *
+ * Everything above this line was written for four centred forms, and `body { place-items: center }`
+ * is right for those. The shell has to override it: a file table centred in the viewport with a
+ * 34rem cap is a file table nobody can read a filename in.
+ */
+body:has(.shell) {
+  display: block;
+  padding: 0;
+}
+
+.shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.shell-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1.25rem;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.shell-bar nav {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.nav-item {
+  padding: 0.35rem 0.7rem;
+  border-radius: 6px;
+  color: var(--fg);
+  text-decoration: none;
+}
+.nav-item:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.nav-item.current {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  font-weight: 600;
+}
+
+/* `margin-left: auto` rather than `justify-content: space-between` on the bar: the nav must sit
+ * next to the brand, not be spread across the width, and this keeps that true when the bar wraps. */
+.shell-who {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.shell-main {
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.card.wide {
+  width: 100%;
+  max-width: 72rem;
+  margin: 0 auto;
+}
+
+.row-between {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0 1.5rem;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.tile-label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.tile-value {
+  font-size: 1.25rem;
+  font-variant-numeric: tabular-nums;
+}
+.tile-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* A table is the right shape for a file listing and the wrong shape for a narrow screen. Rather
+ * than reflowing it into cards — which loses the column alignment that makes a listing scannable —
+ * it scrolls inside its own box, so the PAGE never scrolls sideways. */
+.table-scroll {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+th,
+td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+th {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+tr.dimmed td {
+  opacity: 0.55;
+}
+
+.ok {
+  color: #1a7f37;
+}
+.bad {
+  color: var(--error);
+  font-weight: 600;
+}
+@media (prefers-color-scheme: dark) {
+  .ok {
+    color: #4ac26b;
+  }
+}
+
+.crumbs {
+  margin: 0.5rem 0 1rem;
+  font-size: 0.95rem;
+}
+.crumb,
+.linklike {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.button-like {
+  display: inline-block;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+
+/* Below this width the secondary columns cost more than they inform: a phone showing a filename,
+ * a size and the two buttons that act on it is usable, and one showing six truncated columns is
+ * not. */
+@media (max-width: 40rem) {
+  .hide-narrow {
+    display: none;
+  }
+  .shell-who .muted {
+    display: none;
+  }
+  .shell-main {
+    padding: 0.75rem;
+  }
+  .card {
+    padding: 1rem;
+  }
+}

@@ -7,6 +7,8 @@ import { api } from './api.js';
 
 interface Props {
   onSignedIn: (note: string | null) => void;
+  /** Why the caller was sent back here — an expired session, say. Shown once, above the form. */
+  note?: string | null;
 }
 
 type Step = 'password' | 'second-factor';
@@ -19,7 +21,7 @@ type Step = 'password' | 'second-factor';
  * a user to "resume" a half-finished login in another tab, and that is the intended behaviour
  * rather than an oversight.
  */
-export function SignIn({ onSignedIn }: Props): React.JSX.Element {
+export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
   const [step, setStep] = useState<Step>('password');
   const [organizationSlug, setSlug] = useState('');
   const [email, setEmail] = useState('');
@@ -123,6 +125,11 @@ export function SignIn({ onSignedIn }: Props): React.JSX.Element {
   return (
     <main className="card">
       <h1>Sign in to DEPSIS</h1>
+      {note !== null && (
+        <p className="warning" role="alert">
+          {note}
+        </p>
+      )}
       <form onSubmit={(e) => void submitPassword(e)}>
         <label>
           Organisation

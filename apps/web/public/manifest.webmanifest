@@ -1,0 +1,19 @@
+{
+  "name": "DEPSIS",
+  "short_name": "DEPSIS",
+  "description": "Yerel ağ depolama cihazı yönetimi",
+  "lang": "tr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#16181c",
+  "theme_color": "#1f5f9e",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

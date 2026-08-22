@@ -1376,6 +1376,13 @@ export interface components {
             id: string;
             email: string;
             displayName: string;
+            /**
+             * @description Arayüzün yönetici ekranlarını gösterip göstermeyeceğini bilmesi için. Bir YETKİ KARARI
+             *     DEĞİL — sunucu her isteği kendi kontrol ediyor; bu yalnızca kullanıcıya çağıramayacağı
+             *     bir düğmeyi göstermemek için.
+             * @enum {string}
+             */
+            role: "admin" | "member";
             organizationSlug: string;
             /** @description Onaylanmış bir TOTP kaydı var mı. */
             mfaEnrolled: boolean;

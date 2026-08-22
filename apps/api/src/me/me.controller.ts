@@ -121,6 +121,9 @@ export class MeController {
       id: user.id,
       email: user.email,
       displayName: user.display_name,
+      // From the SESSION, which read it in the same statement that resolved the cookie — not from
+      // the row loaded here, which is a second read and therefore a second moment.
+      role: request.depsis?.role ?? 'member',
       organizationSlug: user.slug,
       mfaEnrolled: await this.mfa.isEnrolled(session.organizationId, session.userId),
       recoveryCodesRemaining: await this.mfa.remainingRecoveryCodes(

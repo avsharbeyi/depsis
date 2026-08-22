@@ -1,28 +1,32 @@
 import type { OpenApi } from '@depsis/contracts';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { api } from './api.js';
-
-/** Straight from the contract, so a field renamed in the YAML breaks this file. */
-type CurrentUser = OpenApi.components['schemas']['CurrentUser'];
+import { Files } from './Files.js';
+import { Dashboard } from './Dashboard.js';
 import { SetupWizard } from './SetupWizard.js';
 import { Security } from './Security.js';
 import { SignIn } from './SignIn.js';
+import { Users } from './Users.js';
+
+/** Straight from the contract, so a field renamed in the YAML breaks this file. */
+type CurrentUser = OpenApi.components['schemas']['CurrentUser'];
 
 type Screen =
   | { name: 'loading' }
   | { name: 'unreachable' }
   | { name: 'setup' }
-  | { name: 'sign-in' }
+  | { name: 'sign-in'; note: string | null }
   | { name: 'signed-in'; note: string | null };
 
 /**
- * Three screens and no router.
+ * Four panes and a hash router.
  *
- * A routing library would be a dependency carrying URL history, nested layouts and code splitting —
- * none of which three screens need, and all of which would have to be pinned and justified. When
- * the file browser arrives it will need real routing and that will be a decision with an ADR
- * behind it; until then a discriminated union is the honest size of the problem.
+ * Still no routing library. What changed since there were three screens is that the panes are now
+ * addressable — a file browser that cannot be linked to, reloaded or navigated back through is not
+ * a file browser — and `location.hash` gives that for nothing. A library would bring URL history,
+ * nested layouts and code splitting, none of which this needs and all of which would have to be
+ * pinned and justified.
  */
 export function App(): React.JSX.Element {
   const [screen, setScreen] = useState<Screen>({ name: 'loading' });
@@ -37,95 +41,187 @@ export function App(): React.JSX.Element {
         setScreen({ name: 'unreachable' });
         return;
       }
-      // Written as two literals rather than one with a ternary inside: the union is discriminated
-      // on `name`, and a computed `name` widens to `'setup' | 'sign-in'` which TypeScript cannot
-      // match against either member.
-      setScreen(data.setupRequired ? { name: 'setup' } : { name: 'sign-in' });
+      if (data.setupRequired) {
+        setScreen({ name: 'setup' });
+        return;
+      }
+      // A live cookie means the app should come up signed in rather than at the login form. Asking
+      // `/me` is what decides it, because the cookie is HttpOnly and this code cannot read it.
+      const me = await api.GET('/me', {});
+      setScreen(
+        me.data === undefined ? { name: 'sign-in', note: null } : { name: 'signed-in', note: null },
+      );
     })();
   }, []);
 
   switch (screen.name) {
     case 'loading':
-      return <main className="card">Loading…</main>;
+      return <main className="card">Yükleniyor…</main>;
 
     case 'unreachable':
       return (
         <main className="card">
-          <h1>Cannot reach the server</h1>
-          <p>The DEPSIS API did not answer. Check that the service is running:</p>
+          <h1>Sunucuya ulaşılamıyor</h1>
+          <p>DEPSIS API yanıt vermedi. Servisin çalıştığını doğrulayın:</p>
           <pre>systemctl status depsis-api</pre>
         </main>
       );
 
     case 'setup':
-      return <SetupWizard onComplete={() => setScreen({ name: 'sign-in' })} />;
+      return <SetupWizard onComplete={() => setScreen({ name: 'sign-in', note: null })} />;
 
     case 'sign-in':
-      return <SignIn onSignedIn={(note) => setScreen({ name: 'signed-in', note })} />;
+      return (
+        <SignIn note={screen.note} onSignedIn={(note) => setScreen({ name: 'signed-in', note })} />
+      );
 
     case 'signed-in':
-      return <SignedIn note={screen.note} onSignedOut={() => setScreen({ name: 'sign-in' })} />;
+      return (
+        <SignedIn note={screen.note} onSignedOut={(note) => setScreen({ name: 'sign-in', note })} />
+      );
   }
+}
+
+type Pane = 'dashboard' | 'files' | 'security' | 'users';
+
+const PANES: ReadonlyArray<{ id: Pane; label: string; adminOnly: boolean }> = [
+  { id: 'dashboard', label: 'Panel', adminOnly: false },
+  { id: 'files', label: 'Dosyalar', adminOnly: false },
+  { id: 'security', label: 'Güvenlik', adminOnly: false },
+  { id: 'users', label: 'Kullanıcılar', adminOnly: true },
+];
+
+function paneFromHash(): Pane {
+  const raw = window.location.hash.replace(/^#\/?/, '');
+  return PANES.some((p) => p.id === raw) ? (raw as Pane) : 'dashboard';
 }
 
 interface SignedInProps {
   note: string | null;
-  onSignedOut: () => void;
+  onSignedOut: (note: string | null) => void;
 }
 
 /**
- * The landing page, such as it is.
+ * The application, once there is a session.
  *
  * It reads `/me` rather than carrying anything over from the sign-in screen: the session is the
- * cookie, and the server is the only thing that knows what it means. Passing a user object down
- * from the login form would mean the page believed something the server had not been asked about.
+ * cookie, and the server is the only thing that knows what it means.
  */
 function SignedIn({ note, onSignedOut }: SignedInProps): React.JSX.Element {
   const [me, setMe] = useState<CurrentUser | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [pane, setPane] = useState<Pane>(paneFromHash);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
-    void loadMe().then(setMe);
-  }, [reloadKey]);
+    const onHashChange = (): void => setPane(paneFromHash());
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
-  if (me === null) return <main className="card">Loading…</main>;
+  /**
+   * A 401 anywhere means the session ended — expired, revoked, or the account disabled — and the
+   * only correct response is to go back to the sign-in form and say why.
+   *
+   * This exists because the previous version turned every `/me` failure into `null` and rendered
+   * an unconditional "Loading…", so a session that ended while the tab was open left the product
+   * apparently frozen with no error and no way forward.
+   */
+  const onUnauthenticated = useCallback(() => {
+    onSignedOut('Oturumunuz sona erdi. Lütfen tekrar giriş yapın.');
+  }, [onSignedOut]);
+
+  useEffect(() => {
+    void (async () => {
+      const { data, response } = await api.GET('/me', {});
+      if (response.status === 401) {
+        onUnauthenticated();
+        return;
+      }
+      if (data === undefined) {
+        setFailed(true);
+        return;
+      }
+      setMe(data);
+    })();
+  }, [reloadKey, onUnauthenticated]);
+
+  if (failed) {
+    return (
+      <main className="card">
+        <h1>Hesabınız okunamadı</h1>
+        <p className="error" role="alert">
+          Sunucu yanıt verdi ama hesap bilgisi gelmedi. Sayfayı yenilemek çoğu zaman yeter.
+        </p>
+        <button type="button" onClick={() => window.location.reload()}>
+          Yenile
+        </button>
+      </main>
+    );
+  }
+  if (me === null) return <main className="card">Yükleniyor…</main>;
+
+  const visible = PANES.filter((p) => !p.adminOnly || me.role === 'admin');
 
   return (
-    <main className="card">
-      <h1>Signed in as {me.displayName}</h1>
-      <p className="muted">
-        {me.email} · {me.organizationSlug}
-      </p>
-      {note !== null && (
-        <p className="warning" role="alert">
-          {note}
-        </p>
-      )}
+    <div className="shell">
+      <header className="shell-bar">
+        <span className="brand">DEPSIS</span>
+        <nav aria-label="Ana gezinme">
+          {visible.map((p) => (
+            <a
+              key={p.id}
+              href={`#/${p.id}`}
+              className={p.id === pane ? 'nav-item current' : 'nav-item'}
+              aria-current={p.id === pane ? 'page' : undefined}
+            >
+              {p.label}
+            </a>
+          ))}
+        </nav>
+        <div className="shell-who">
+          <span className="muted">
+            {me.displayName} · {me.organizationSlug}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              void api.POST('/auth/logout', {}).then(() => onSignedOut(null));
+            }}
+          >
+            Çıkış
+          </button>
+        </div>
+      </header>
 
-      <Security
-        mfaEnrolled={me.mfaEnrolled}
-        recoveryCodesRemaining={me.recoveryCodesRemaining}
-        onChanged={() => setReloadKey((k) => k + 1)}
-      />
+      <main className="shell-main">
+        {note !== null && (
+          <p className="warning" role="alert">
+            {note}
+          </p>
+        )}
 
-      <hr />
-      <p className="muted">
-        Files, shares and search are not built yet. This page says so rather than pretending to be a
-        dashboard.
-      </p>
-      <button
-        type="button"
-        onClick={() => {
-          void api.POST('/auth/logout', {}).then(onSignedOut);
-        }}
-      >
-        Sign out
-      </button>
-    </main>
+        {pane === 'dashboard' && (
+          <Dashboard onUnauthenticated={onUnauthenticated} isAdmin={me.role === 'admin'} />
+        )}
+        {pane === 'files' && <Files onUnauthenticated={onUnauthenticated} />}
+        {pane === 'security' && (
+          <section className="card">
+            <h1>Güvenlik</h1>
+            <p className="muted">
+              {me.email} · {me.organizationSlug}
+            </p>
+            <Security
+              mfaEnrolled={me.mfaEnrolled}
+              recoveryCodesRemaining={me.recoveryCodesRemaining}
+              onChanged={() => setReloadKey((k) => k + 1)}
+            />
+          </section>
+        )}
+        {pane === 'users' && me.role === 'admin' && (
+          <Users currentUserId={me.id} onUnauthenticated={onUnauthenticated} />
+        )}
+      </main>
+    </div>
   );
-}
-
-async function loadMe(): Promise<CurrentUser | null> {
-  const { data } = await api.GET('/me', {});
-  return data ?? null;
 }

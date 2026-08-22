@@ -843,7 +843,7 @@ components:
 
     CurrentUser:
       type: object
-      required: [id, email, displayName, organizationSlug, mfaEnrolled, recoveryCodesRemaining]
+      required: [id, email, displayName, role, organizationSlug, mfaEnrolled, recoveryCodesRemaining]
       description: |
         `username` değil `email` — LoginRequest ile aynı düzeltme, aynı gerekçeyle.
 
@@ -855,6 +855,13 @@ components:
         id: { type: string, format: uuid }
         email: { type: string }
         displayName: { type: string }
+        role:
+          type: string
+          enum: [admin, member]
+          description: |
+            Arayüzün yönetici ekranlarını gösterip göstermeyeceğini bilmesi için. Bir YETKİ KARARI
+            DEĞİL — sunucu her isteği kendi kontrol ediyor; bu yalnızca kullanıcıya çağıramayacağı
+            bir düğmeyi göstermemek için.
         organizationSlug: { type: string }
         mfaEnrolled:
           type: boolean
