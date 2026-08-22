@@ -45,18 +45,40 @@ pub fn operation_name(request: &Request) -> &'static str {
 }
 
 /// Where audit entries go. Real deployment writes to the journal; tests collect in memory.
-pub trait Sink {
+///
+/// `Sync`, and the bound is load-bearing rather than tidy. The data channel runs on worker threads
+/// (ADR-0017) and every one of them has to be able to record what it did — §16 requires a
+/// privileged call to be explicable afterwards, and the data connection is the one that actually
+/// writes user data as root. Without this bound `&Agent` cannot cross a thread boundary at all, and
+/// the path of least resistance when writing that loop is to drop the audit rather than fix the
+/// types. Putting the bound here first makes the compiler enforce that the channel is auditable.
+pub trait Sink: Sync {
     fn record(&self, entry: Entry);
 }
 
 #[derive(Default)]
 pub struct MemorySink {
-    pub entries: std::cell::RefCell<Vec<Entry>>,
+    /// A `Mutex`, not a `RefCell`, for the reason on the trait above: a `RefCell` is not `Sync`, so
+    /// the test sink would be the one thing preventing the real code from being tested at all.
+    pub entries: std::sync::Mutex<Vec<Entry>>,
+}
+
+impl MemorySink {
+    /// The recorded entries. Poison is recovered: a test that panicked while holding the lock has
+    /// already failed, and a second panic here would replace its message with a less useful one.
+    pub fn entries(&self) -> std::sync::MutexGuard<'_, Vec<Entry>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 impl Sink for MemorySink {
     fn record(&self, entry: Entry) {
-        self.entries.borrow_mut().push(entry);
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(entry);
     }
 }
 

@@ -37,6 +37,7 @@
 
 pub mod audit;
 pub mod authz;
+pub mod data;
 pub mod dispatch;
 pub mod op;
 pub mod seams;

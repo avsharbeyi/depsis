@@ -47,6 +47,14 @@ pub struct Agent<'a, R: CommandRunner, S: Sink, P: SafePath> {
     /// which is the normal state of a NAS before setup — the transfer operations then refuse,
     /// with a reason, rather than the agent refusing to start at all.
     pub paths: Option<&'a P>,
+    /// Deliberately NOT `+ Sync`, unlike `Sink`.
+    ///
+    /// The design review recommended making every one of `Agent`'s shared types `Sync` so the whole
+    /// struct could cross into the data channel's worker threads. Passing the whole struct is what
+    /// makes that necessary, and passing less is better: the data channel needs the policy, the
+    /// audit sink and the confined paths, and it never mints a token or runs a command. Requiring
+    /// `Sync` here would spread the constraint to `MockTokenSource` and, by the same argument,
+    /// `CommandRunner` and `MockCommandRunner` — contagion bought for nothing.
     pub tokens: &'a dyn TokenSource,
     /// Shared with the data socket's accept loop, which runs concurrently with this one. The
     /// control loop is deliberately serial (ADR-0006), but bulk transfers must not be: a 10 GB
@@ -593,7 +601,7 @@ mod tests {
         let resp = agent(&r, &s, &h).handle(r#"{"op":"ping"}"#, peer(1000), "c3", "probe");
         assert!(matches!(resp, Response::Refused { .. }));
         assert!(r.calls.borrow().is_empty());
-        let entries = s.entries.borrow();
+        let entries = s.entries();
         assert_eq!(entries.len(), 1);
         assert!(matches!(entries[0].outcome, Outcome::Refused(_)));
         assert_eq!(entries[0].uid, 1000);
@@ -718,7 +726,7 @@ mod tests {
             "corr-abc",
             "scheduled snapshot",
         );
-        let entries = s.entries.borrow();
+        let entries = s.entries();
         let e = entries.first().expect("an entry was recorded");
         assert_eq!(e.correlation_id, "corr-abc");
         assert_eq!(e.uid, API_UID);
@@ -735,7 +743,7 @@ mod tests {
         let resp = agent(&r, &s, &h).handle("{not json", peer(API_UID), "c10", "junk");
         assert!(matches!(resp, Response::Refused { .. }));
         // An append-only log must not contain a guess about what was asked.
-        assert!(s.entries.borrow().is_empty());
+        assert!(s.entries().is_empty());
     }
     // ── transfers ──
     //
@@ -984,7 +992,7 @@ mod tests {
         h.agent(&r, &s)
             .handle(raw, peer(API_UID), "c-audit", "upload for job 7");
 
-        let entries = s.entries.borrow();
+        let entries = s.entries();
         assert!(
             entries.iter().any(|e| e.operation == "open_transfer"),
             "the audit trail must name the operation, got {entries:?}"

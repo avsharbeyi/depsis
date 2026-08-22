@@ -28,6 +28,18 @@ impl Policy {
     /// second place, and two authorization models drift. The application decides *whether a
     /// user may do a thing*; the agent decides *whether the caller is the application*.
     pub fn authorize(&self, peer: PeerIdentity, _request: &Request) -> Decision {
+        self.authorize_peer(peer)
+    }
+
+    /// The same decision, for a connection that carries no `Request` at all.
+    ///
+    /// This is a split, not a second policy. `authorize` above has always ignored its request
+    /// argument — the comment on it says why — so the data channel (ADR-0017), which has a peer and
+    /// a byte stream and nothing resembling an operation, would otherwise have to invent a dummy
+    /// `Request::Ping` to ask the question. That dummy is the problem: it reads as though the
+    /// channel were authorized for pinging, and it makes the two call sites diverge the moment
+    /// anyone gives `authorize` a per-operation rule. One function decides; the other delegates.
+    pub fn authorize_peer(&self, peer: PeerIdentity) -> Decision {
         if peer.uid == self.api_uid {
             Decision::Allow
         } else if peer.uid == 0 {
