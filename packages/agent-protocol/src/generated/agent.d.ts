@@ -91,6 +91,21 @@ export type AgentRequest =
        */
       expected_bytes: number;
       op: 'publish_transfer';
+      owner_gid: number;
+      /**
+       * Who owns the file once it lands.
+       *
+       * On PUBLISH rather than on `OpenTransfer`, deliberately. Staging happens inside the share
+       * — `.depsis/staging/` — so a staging file owned by the tenant is a file the tenant can
+       * reach over SMB and rewrite while the agent is still appending to it. Root-owned until
+       * the moment it becomes visible under its real name is the only window that closes.
+       *
+       * The agent refuses uid or gid 0. Not because a root-owned file in a share is a privilege
+       * escalation — it is not, the mode is 0600 and nothing is setuid — but because it is
+       * precisely the broken state these two fields exist to fix, and an API that omits the
+       * mapping should fail loudly rather than reproduce the bug.
+       */
+      owner_uid: number;
       share: SafeComponent;
       staging_name: SafeComponent;
     };

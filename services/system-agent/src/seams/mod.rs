@@ -108,6 +108,20 @@ pub trait SafePath {
         to_dir: &[&str],
         to: &str,
     ) -> Result<(), SeamError>;
+
+    /// Give an already-open file to a uid and gid.
+    ///
+    /// Takes the FILE, not a path, for the same reason `open` returns one: a path would be
+    /// re-resolved, and a chown aimed at a path is a chown that can be pointed somewhere else
+    /// between the resolution and the call. Aimed at the descriptor, it changes the object
+    /// `openat2` confined and nothing else — even if every component of the path it came from has
+    /// since been replaced.
+    ///
+    /// Why this exists at all: without it a published file stays root-owned at 0600, so the user
+    /// who uploaded it cannot read it back over SMB or through the API. That presents as "uploads
+    /// are broken", and the fastest-looking repair is to widen the mode — which is exactly the
+    /// cross-tenant read the threat model exists to prevent. Ownership is the correct axis.
+    fn set_owner(&self, file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError>;
 }
 
 /// Where unguessable values come from.

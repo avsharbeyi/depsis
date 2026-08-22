@@ -57,11 +57,27 @@ impl Transport for MockTransport {
 /// VM (ADR-0007: "mock backend ile alınan sonuçlar depolama davranışının kanıtı sayılamaz").
 pub struct MockSafePath {
     root: PathBuf,
+    /// Every `set_owner` call, in order.
+    ///
+    /// Recorded rather than performed. A real `chown` needs CAP_CHOWN, so a portable test running
+    /// as an ordinary user could only ever assert "it failed" — which is indistinguishable from
+    /// the call never being made. Recording lets the dispatcher tests assert that the publish path
+    /// asks for the right owner; that it actually takes effect is measured against a real kernel
+    /// in `unix.rs` and end to end in P1-D.
+    owners: RefCell<Vec<(u32, u32)>>,
 }
 
 impl MockSafePath {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            owners: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The `(uid, gid)` pairs `set_owner` was called with.
+    pub fn owners(&self) -> Vec<(u32, u32)> {
+        self.owners.borrow().clone()
     }
 }
 
@@ -122,6 +138,11 @@ impl SafePath for MockSafePath {
         }
         std::fs::rename(&source, &destination)
             .map_err(|e| SeamError::Io(format!("rename {from} -> {to}: {e}")))
+    }
+
+    fn set_owner(&self, _file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError> {
+        self.owners.borrow_mut().push((uid, gid));
+        Ok(())
     }
 }
 

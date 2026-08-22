@@ -332,8 +332,12 @@ if [ -n "$TOKEN" ]; then
   STAGED=$(cat "$SHARES/alice/.depsis/staging/probe.part" 2>/dev/null)
   check 'the staged bytes are the bytes that were sent, head included' "$STAGED" "$PAYLOAD"
 
+  # The uid and gid the file will belong to. depsis-api is standing in for a tenant account here;
+  # what matters is that it is NOT root and NOT the agent, so "the uploader can read it back" is a
+  # real question rather than a tautology.
+  OWNER_UID=$(id -u depsis-api); OWNER_GID=$(id -g depsis-api)
   PUB=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
-    "{\"correlation_id\":\"p1d-3\",\"reason\":\"P1-D upload probe\",\"request\":{\"op\":\"publish_transfer\",\"share\":\"alice\",\"staging_name\":\"probe.part\",\"destination\":[\"hello.txt\"],\"expected_bytes\":${#PAYLOAD}}}" 2>&1)
+    "{\"correlation_id\":\"p1d-3\",\"reason\":\"P1-D upload probe\",\"request\":{\"op\":\"publish_transfer\",\"share\":\"alice\",\"staging_name\":\"probe.part\",\"destination\":[\"hello.txt\"],\"expected_bytes\":${#PAYLOAD},\"owner_uid\":$OWNER_UID,\"owner_gid\":$OWNER_GID}}" 2>&1)
   case "$PUB" in
     *'"status":"publish"'*) ok 'PublishTransfer moved it into the share' ;;
     *) bad "publish failed: $PUB" ;;
@@ -344,12 +348,35 @@ if [ -n "$TOKEN" ]; then
     && bad 'the staging file is still there after a publish' \
     || ok 'the staging file is gone, because publish renames rather than copies'
 
-  # The known gap, asserted so it cannot be forgotten: nothing chowns a published file, so it lands
-  # root:0600 and the account that uploaded it cannot read it. ADR-0017 records this; the operands
-  # and the fchown are the next piece of work. Measuring it here means the day it is fixed, this
-  # line fails and has to be updated deliberately.
-  OWNER=$(stat -c '%U:%a' "$SHARES/alice/hello.txt" 2>/dev/null)
-  check 'a published file is still root-owned and 0600 (the known ownership gap)' "$OWNER" 'root:600'
+  # The gap that used to be asserted here as a known defect. A published file was root-owned at
+  # 0600, so the account that uploaded it could not read it back — and the fastest-looking repair
+  # would have been to widen the mode, which is the cross-tenant read the threat model exists to
+  # prevent. The axis is ownership, and the mode stays closed.
+  check 'the published file belongs to the uploader, not to root' \
+    "$(stat -c '%U:%G:%a' "$SHARES/alice/hello.txt" 2>/dev/null)" "depsis-api:depsis-api:600"
+  # The claim that actually matters, made by reading the file AS that account rather than by
+  # reasoning about the mode.
+  if runuser -u depsis-api -- cat "$SHARES/alice/hello.txt" >/dev/null 2>&1; then
+    ok 'and that account can read it back'
+  else
+    bad 'the owner still cannot read its own published file'
+  fi
+
+  # Refusing root ownership, measured rather than argued: a caller that omits the mapping must be
+  # told, not silently handed back the bug the operands were added to fix.
+  runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+    '{"correlation_id":"p1d-5","reason":"probe","request":{"op":"open_transfer","share":"alice","staging_name":"asroot.part"}}' > "$WORK/r.json" 2>&1
+  RTOK=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$WORK/r.json")
+  runuser -u depsis-api -- node tools/poc/agent-client.mjs data1 "$RTOK" 0 'x' >/dev/null 2>&1
+  RPUB=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+    '{"correlation_id":"p1d-6","reason":"probe","request":{"op":"publish_transfer","share":"alice","staging_name":"asroot.part","destination":["asroot.txt"],"expected_bytes":1,"owner_uid":0,"owner_gid":0}}' 2>&1)
+  case "$RPUB" in
+    *'owned by root'*) ok 'publishing a file to root is refused, with a reason that names the fix' ;;
+    *) bad "root ownership was not refused: $RPUB" ;;
+  esac
+  [ -e "$SHARES/alice/asroot.txt" ] \
+    && bad 'the refused publish moved the file anyway' \
+    || ok 'and the refused publish left the destination untouched'
 fi
 
 head1 'a bad chunk leaves nothing behind'

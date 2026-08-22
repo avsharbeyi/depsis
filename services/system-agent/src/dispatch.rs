@@ -163,12 +163,22 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// ADR-0008 steps 4 and 5. The directory fsync is the one people skip, and skipping it means
     /// a power cut can leave the data on disk with nothing pointing at it — the file survived and
     /// the rename did not.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Every operand is one the agent must not infer. The share and the staging name \
+                  come from the caller because only it knows which upload this is; the destination \
+                  because only it knows where the user asked for the file; expected_bytes and the \
+                  owner pair because both are checked rather than trusted. Bundling them into a \
+                  struct would satisfy the lint and put a parameter list behind one more name."
+    )]
     fn publish_transfer(
         &self,
         share: &str,
         staging_name: &str,
         destination: &[&str],
         expected_bytes: u64,
+        owner_uid: u32,
+        owner_gid: u32,
     ) -> Result<Response, SeamError> {
         let Some(paths) = self.paths else {
             return Ok(Response::Refused {
@@ -180,6 +190,16 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 reason: "destination is empty".to_string(),
             });
         };
+        // Refused before anything is opened. A published file owned by root at 0600 is unreadable
+        // by the person who uploaded it, which is the exact failure these operands were added to
+        // end — accepting 0 here would let a caller that forgot the mapping reintroduce it, and it
+        // would present as "uploads are broken" rather than as a missing field.
+        if owner_uid == 0 || owner_gid == 0 {
+            return Ok(Response::Refused {
+                reason: "a published file may not be owned by root; supply the user's uid and gid"
+                    .to_string(),
+            });
+        }
 
         // Publishing a file that is still being written renames a half-written object into the
         // user's tree — the exact outcome atomic publish exists to prevent. The agent holds the
@@ -203,6 +223,13 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             .metadata()
             .map_err(|e| SeamError::Io(format!("stat staging file: {e}")))?
             .len();
+
+        // Ownership BEFORE the fsync, and the order is the whole reason this is not one line
+        // further down. `fchown` changes inode metadata; `fsync` is what makes inode metadata
+        // durable. Chowning after the fsync would leave a window where a power cut publishes the
+        // file under its real name with the old owner still recorded — a file the user can see and
+        // cannot read, with nothing left to fix it, because the staging entry is gone.
+        paths.set_owner(&file, owner_uid, owner_gid)?;
 
         // ADR-0008 step 2, done HERE rather than assumed.
         //
@@ -439,6 +466,8 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 staging_name,
                 destination,
                 expected_bytes,
+                owner_uid,
+                owner_gid,
             } => {
                 let dest: Vec<&str> = destination.iter().map(|c| c.as_str()).collect();
                 self.publish_transfer(
@@ -446,6 +475,8 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     staging_name.as_str(),
                     &dest,
                     *expected_bytes,
+                    *owner_uid,
+                    *owner_gid,
                 )
             }
 
@@ -828,7 +859,7 @@ mod tests {
         )
         .expect("stage");
 
-        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"done.part","destination":["report.txt"],"expected_bytes":14}"#;
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"done.part","destination":["report.txt"],"expected_bytes":14,"owner_uid":1000,"owner_gid":1000}"#;
         match h
             .agent(&r, &s)
             .handle(raw, peer(API_UID), "c-pub", "publish")
@@ -854,7 +885,7 @@ mod tests {
             b"different",
         )
         .expect("stage again");
-        let raw2 = r#"{"op":"publish_transfer","share":"alice","staging_name":"again.part","destination":["report.txt"],"expected_bytes":9}"#;
+        let raw2 = r#"{"op":"publish_transfer","share":"alice","staging_name":"again.part","destination":["report.txt"],"expected_bytes":9,"owner_uid":1000,"owner_gid":1000}"#;
         match h
             .agent(&r, &s)
             .handle(raw2, peer(API_UID), "c-pub2", "publish")
@@ -902,7 +933,7 @@ mod tests {
             Response::Transfer { .. }
         ));
 
-        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"live.part","destination":["out.txt"],"expected_bytes":7}"#;
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"live.part","destination":["out.txt"],"expected_bytes":7,"owner_uid":1000,"owner_gid":1000}"#;
         match h
             .agent(&r, &s)
             .handle(raw, peer(API_UID), "c-busy", "publish")
@@ -913,6 +944,70 @@ mod tests {
         assert!(
             !h.share_path(&["alice", "out.txt"]).exists(),
             "nothing may have been moved"
+        );
+    }
+
+    #[test]
+    fn a_published_file_is_handed_to_the_uploader_not_left_with_root() {
+        // The gap that P1-D asserted for two commits: a published file stayed root-owned at 0600,
+        // so the person who uploaded it could not read it back. What is measured here is that the
+        // publish path ASKS for the right owner; that the ask takes effect is measured against a
+        // real kernel in `unix.rs` and end to end in P1-D, because a chown needs CAP_CHOWN and a
+        // portable test running as an ordinary user could only ever assert that it failed.
+        let h = Harness::with_share("alice");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        std::fs::write(
+            h.share_path(&["alice", ".depsis", "staging", "owned.part"]),
+            b"twelve bytes",
+        )
+        .expect("stage");
+
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"owned.part","destination":["mine.txt"],"expected_bytes":12,"owner_uid":1000,"owner_gid":1001}"#;
+        match h.agent(&r, &s).handle(raw, peer(API_UID), "c", "publish") {
+            Response::Publish { bytes } => assert_eq!(bytes, 12),
+            other => panic!("expected a publish, got {other:?}"),
+        }
+        assert_eq!(
+            h.paths.as_ref().expect("paths").owners(),
+            vec![(1000, 1001)],
+            "the uid and gid the caller supplied must reach the filesystem seam unchanged"
+        );
+    }
+
+    #[test]
+    fn a_publish_that_would_leave_the_file_root_owned_is_refused() {
+        // Not because root ownership is an escalation — the mode is 0600 and nothing is setuid —
+        // but because it is exactly the broken state the operands exist to end. A caller that
+        // forgot the mapping must fail loudly rather than reproduce the bug it was sent to fix.
+        let h = Harness::with_share("alice");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        std::fs::write(
+            h.share_path(&["alice", ".depsis", "staging", "root.part"]),
+            b"x",
+        )
+        .expect("stage");
+
+        for raw in [
+            r#"{"op":"publish_transfer","share":"alice","staging_name":"root.part","destination":["a.txt"],"expected_bytes":1,"owner_uid":0,"owner_gid":1000}"#,
+            r#"{"op":"publish_transfer","share":"alice","staging_name":"root.part","destination":["b.txt"],"expected_bytes":1,"owner_uid":1000,"owner_gid":0}"#,
+        ] {
+            match h.agent(&r, &s).handle(raw, peer(API_UID), "c", "publish") {
+                Response::Refused { reason } => {
+                    assert!(reason.contains("owned by root"), "got: {reason}");
+                }
+                other => panic!("root ownership must be refused, got {other:?}"),
+            }
+        }
+        assert!(
+            h.paths.as_ref().expect("paths").owners().is_empty(),
+            "a refused publish must not have touched the file at all"
+        );
+        assert!(
+            h.share_path(&["alice", ".depsis", "staging", "root.part"])
+                .exists(),
+            "and the staging file must survive so a corrected call can still publish it"
         );
     }
 
@@ -930,7 +1025,7 @@ mod tests {
         )
         .expect("stage");
 
-        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"short.part","destination":["full.txt"],"expected_bytes":9999}"#;
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"short.part","destination":["full.txt"],"expected_bytes":9999,"owner_uid":1000,"owner_gid":1000}"#;
         match h
             .agent(&r, &s)
             .handle(raw, peer(API_UID), "c-short", "publish")

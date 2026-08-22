@@ -164,16 +164,15 @@ impl SafePath for Openat2SafePath {
                 // 0600 while it is being written: a staging file readable by everyone on the box
                 // is a cross-tenant read of data that has not even landed yet.
                 //
-                // KNOWN GAP, stated here because an earlier version of this comment claimed the
-                // opposite. It said ownership "is fixed up at publish" — nothing does that. There
-                // is no chown or fchown anywhere in this crate, so a published file stays root:root
-                // 0600 and its owner cannot read it over SMB or through the API. That presents as
-                // "uploads are broken", and the fastest-looking repair is to widen the mode, which
-                // is precisely the cross-tenant read the threat model exists to prevent. The fix is
-                // ownership operands on OpenTransfer and an fchown of the held descriptor before
-                // publish — on the fd, not a path, so it stays the object openat2 confined. Until
-                // that lands, publishing is incomplete and this comment says so rather than
-                // asserting a step that is missing.
+                // It stays 0600 after publish too, and that is the intent rather than an oversight.
+                // The file becomes the uploader's by OWNERSHIP, not by a wider mode —
+                // `SafePath::set_owner` runs on the held descriptor before the rename. Widening the
+                // mode instead would be the obvious-looking fix and the wrong one: it would make
+                // every uploaded file readable by every other tenant on the box.
+                //
+                // This comment has been wrong once already. An earlier version said ownership "is
+                // fixed up at publish" when nothing did that, so P1-D now asserts the owner of a
+                // published file directly rather than trusting either the code or this paragraph.
                 rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
             ),
             // APPEND, and the flag is load-bearing. Without it the write position comes only from
@@ -238,6 +237,23 @@ impl SafePath for Openat2SafePath {
         destination
             .sync_all()
             .map_err(|e| SeamError::Io(format!("fsync destination directory: {e}")))
+    }
+
+    fn set_owner(&self, file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError> {
+        // `fchown`, on the descriptor. The path-taking form would re-resolve, and a chown aimed at
+        // a path can be redirected between the resolution and the call — the same check-then-use
+        // shape that made `SafePath` return a file in the first place.
+        //
+        // Note what the kernel does for free here: chown clears any setuid and setgid bits. The
+        // agent never sets them, so this changes nothing today; it is worth knowing because the
+        // unit deliberately does not enable `RestrictSUIDSGID=` (it would disable `openat2`), and
+        // this is one of the reasons that is affordable.
+        rustix::fs::fchown(
+            file,
+            Some(rustix::fs::Uid::from_raw(uid)),
+            Some(rustix::fs::Gid::from_raw(gid)),
+        )
+        .map_err(|e| SeamError::Io(format!("fchown to {uid}:{gid}: {e}")))
     }
 }
 
@@ -994,6 +1010,42 @@ mod tests {
         assert!(split_envelope("").is_err());
         assert!(split_envelope("[]").is_err());
         assert!(split_envelope("null").is_err());
+    }
+
+    #[test]
+    fn set_owner_aims_at_the_descriptor_and_not_at_a_path() {
+        // Two assertions in one, because only one of them can run without CAP_CHOWN.
+        //
+        // Always: chowning to the CURRENT owner is permitted for anyone, so the call itself is
+        // exercised — a `set_owner` that was never wired to `fchown` would fail here.
+        //
+        // Only as root: the ownership actually changes. Skipped otherwise rather than asserted
+        // loosely, because a test that passes for an ordinary user by expecting EPERM would also
+        // pass if the implementation did nothing at all.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("f"), b"x").expect("seed");
+        let paths = Openat2SafePath::open_root(dir.path()).expect("root");
+        let file = paths.open(&["f"], OpenIntent::Read).expect("open");
+
+        let me = rustix::process::getuid().as_raw();
+        let my_group = rustix::process::getgid().as_raw();
+        paths
+            .set_owner(&file, me, my_group)
+            .expect("chowning a file to its existing owner is always permitted");
+
+        if me != 0 {
+            return;
+        }
+        paths.set_owner(&file, 1000, 1001).expect("fchown as root");
+        let after = std::fs::metadata(dir.path().join("f")).expect("stat");
+        assert_eq!(
+            (
+                std::os::unix::fs::MetadataExt::uid(&after),
+                std::os::unix::fs::MetadataExt::gid(&after)
+            ),
+            (1000, 1001),
+            "the file the descriptor names must be the file that changed hands"
+        );
     }
 
     // ── socket activation ──
