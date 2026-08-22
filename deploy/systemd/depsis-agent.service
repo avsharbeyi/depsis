@@ -20,8 +20,12 @@ Documentation=file:///usr/share/doc/depsis/adr/0006-system-agent.md
 # — measured: both units carried them in the wrong section and neither was in effect.
 StartLimitBurst=5
 StartLimitIntervalSec=60
-Requires=depsis-agent.socket
-After=depsis-agent.socket zfs.target
+# BOTH sockets. The agent refuses to start with only one of them, and it is right to: with only
+# the control socket the API would mint transfer tokens and stage files for data connections that
+# can never arrive, so every upload would fail after a five-minute timeout and look like a network
+# fault rather than a missing unit.
+Requires=depsis-agent.socket depsis-agent-data.socket
+After=depsis-agent.socket depsis-agent-data.socket zfs.target
 
 [Service]
 # Type=exec, not simple: systemd then considers the unit started only once execve has actually
@@ -41,6 +45,20 @@ EnvironmentFile=/etc/depsis/agent.env
 Restart=on-failure
 RestartSec=2s
 
+# ─── the ceilings the code assumes ────────────────────────────────────────────
+# Both numbers exist because the agent's own limits are meaningless without them.
+#
+# MAX_PENDING_TRANSFERS is 64 open descriptors held by a root daemon, plus MAX_DATA_CONNECTIONS
+# (16) live connections, plus two listeners, the control connection, the pipes of whatever `zfs`
+# child is running, and stdio. 1024 leaves room for all of it several times over while still being
+# a limit — the inherited default is 524288, which is not a bound so much as the absence of one.
+LimitNOFILE=1024
+
+# 16 data workers, the control thread, and the processes the agent execs. TasksMax bounds the
+# blast radius if a future change ever spawns per connection instead of using the pool; without it
+# that regression would look like nothing at all until the box ran out of pids.
+TasksMax=64
+
 # ─── hardening that is free here ──────────────────────────────────────────────
 # "Free" means measured, not assumed. P0-E timed every directive below against
 # `readlink /proc/self/ns/mnt` on systemd 257 and kept only the ones that leave the service in
@@ -59,9 +77,29 @@ IPAddressDeny=any
 
 RestrictNamespaces=yes
 RestrictRealtime=yes
-RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
+
+# RestrictSUIDSGID=yes is DELIBERATELY ABSENT, and this is the most expensive line in the file.
+#
+# It blocks openat2(2) outright. systemd implements the directive with a seccomp filter on the mode
+# argument of every file-creating syscall; for openat2 the mode lives inside a `struct open_how` in
+# userspace memory, which seccomp cannot dereference, so it denies the call rather than risk letting
+# a setuid file through. openat2(RESOLVE_BENEATH) is the ENTIRE containment mechanism for anything
+# written into a share (ADR-0017), so with this directive on, every upload fails.
+#
+# Measured, not read: P1-D reported "path escapes the share root: alice/.depsis/staging/probe.part"
+# for a path that escapes nothing, and finding the cause took a directive-by-directive bisection of
+# this file. Both halves of that have been fixed — the agent now names ENOSYS for what it is, and
+# refuses to start at all if openat2 is unavailable rather than failing every transfer individually.
+#
+# What is given up, and why it is affordable: the directive stops a process CREATING setuid or
+# setgid files. This agent creates files in exactly one place, with a fixed mode of 0600 built from
+# an `OpenIntent`, and the caller cannot express a mode at all — there is no operand for it anywhere
+# in the request enum. NoNewPrivileges=yes above still prevents any setuid binary being USED to gain
+# privilege through this service. The residual risk is a future change that adds a caller-supplied
+# mode, which is a code review away, not a seccomp filter away.
+
 
 # Measured safe: neither of these puts the service in its own mount namespace.
 ProtectClock=yes

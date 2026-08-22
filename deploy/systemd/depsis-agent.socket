@@ -19,6 +19,13 @@ After=zfs.target
 [Socket]
 ListenStream=/run/depsis/agent.sock
 
+# The name is the contract. Two socket units now feed this one service, and systemd's descriptor
+# ORDER follows unit load order — it is not stable across a rename or a restart. The agent looks
+# both sockets up by FileDescriptorName= and refuses to start if either is missing or unnamed.
+# Without this key systemd would name the descriptor after the unit file, and the agent would
+# refuse to start rather than guess which socket is which.
+FileDescriptorName=control
+
 # 0660 root:depsis-api. Not 0666, not world-readable, and deliberately NOT owned by the API
 # user: the API may connect, but must not be able to unlink or replace the socket and stand a
 # fake agent up in its place.

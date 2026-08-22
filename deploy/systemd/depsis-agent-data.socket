@@ -1,0 +1,63 @@
+# The bulk data socket for the DEPSIS system agent.
+#
+# A SECOND socket into the same service, not a second service and not a second protocol on the
+# control socket. ADR-0017 has the full argument; the operational half of it is here.
+#
+# Why not the control socket: it serves one connection at a time on purpose, because agent
+# operations mutate global system state and serialising them is what makes the audit log a true
+# serial history. A ten-gigabyte upload on that socket would hold it for the duration, and every
+# `zfs list` behind it would wait. Uploads and control calls have opposite shapes — many minutes
+# versus milliseconds, many at once versus strictly one — so they get separate accept loops.
+#
+# Why not a second service: the two channels share the transfer registry, which holds open file
+# descriptors resolved under `openat2(RESOLVE_BENEATH)` by the control channel and used by the
+# data channel. That capability cannot cross a process boundary here — Node's `net` has no
+# SCM_RIGHTS, and neither would a second Rust daemon without inventing a third protocol to pass
+# it. One process, two sockets, one registry.
+
+[Unit]
+Description=DEPSIS system agent bulk data socket
+Documentation=file:///usr/share/doc/depsis/adr/0017-bulk-data-channel.md
+
+# Bound to the control socket, and both directions of that matter.
+#
+# Requires= + After=: this socket's path lives in /run/depsis, and that directory is created by
+# RuntimeDirectory= in depsis-agent.socket — declared there and ONLY there. Two units declaring
+# the same RuntimeDirectory= is the hazard being avoided: systemd removes it when the unit stops,
+# so whichever stopped first would pull the directory out from under the other.
+#
+# PartOf=: stopping or restarting the control socket propagates here. Without it an administrator
+# who stops depsis-agent.socket leaves a listening root socket behind whose directory has just
+# been deleted — and After= then guarantees this one stops first, before that deletion.
+Requires=depsis-agent.socket
+After=depsis-agent.socket
+PartOf=depsis-agent.socket
+
+[Socket]
+ListenStream=/run/depsis/agent-data.sock
+Service=depsis-agent.service
+
+# The name is the contract. The agent looks its sockets up by FileDescriptorName= and refuses to
+# start if either is missing, because systemd's descriptor ORDER follows unit load order and is
+# not ours to predict. Reading fd 3 as "the control socket" would eventually make the agent parse
+# uploaded file bytes as JSON commands and stream a user's data into a control connection.
+FileDescriptorName=data
+
+# Same gate as the control socket: 0660 root:depsis-api. The data channel carries user file
+# content, so world access here would be a read of one tenant's upload by any local account.
+SocketUser=root
+SocketGroup=depsis-api
+SocketMode=0660
+
+Accept=no
+
+# Larger than the control socket's 16. The agent serves these from a fixed pool of workers
+# (MAX_DATA_CONNECTIONS in unix.rs) over a rendezvous queue, so anything past that pool waits in
+# the kernel's backlog by design — that is the backpressure, and it needs somewhere to sit.
+Backlog=64
+
+# Deliberately NO RuntimeDirectory= here; see the [Unit] section above.
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

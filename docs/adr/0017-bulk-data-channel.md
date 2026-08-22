@@ -232,6 +232,46 @@ tarafın kendi denetim üstverisini yazmasına izin vermek olurdu.
 | Kaybolan son yanıt istemciye görünüyor                          | ✅                                      |
 | 32 eşzamanlı yükleme                                            | ✅ hepsi tamamlandı                     |
 
+### Uygulandıktan sonra ölçülenler
+
+Yukarıdaki tablo tasarımı ölçüyordu. Bunlar, kodu ve birim dosyalarını gerçek systemd altında
+(pid 1 olarak systemd 257, Debian 13) çalıştırınca çıkanlar.
+
+**`RestrictSUIDSGID=yes`, `openat2(2)`'yi tamamen kapatıyor.** Bu ADR'nin dayandığı bütün
+sınırlandırma mekanizması o çağrı. systemd bu direktifi, dosya yaratan her sistem çağrısının mod
+argümanını süzen bir seccomp filtresiyle uyguluyor; `openat2`'de mod kullanıcı alanındaki bir
+`struct open_how`'un içinde duruyor ve seccomp işaretçiyi çözemediği için çağrıyı setuid dosya
+riskine girmektense komple reddediyor. Sonuç: her yükleme başarısız.
+
+Bunu bulmayı zorlaştıran şey benim kendi hata eşlemem oldu. `openat2`'den dönen her `errno`
+`SeamError::PathEscape`'e çevriliyordu, yani ENOSYS **"path escapes the share root:
+alice/.depsis/staging/probe.part"** diye rapor ediliyordu — hiçbir yerden kaçmayan bir yol için bir
+sınırlandırma ihlali. Sebebi bulmak birim dosyasını direktif direktif ikiye bölmeyi gerektirdi.
+
+İki taraf da düzeltildi:
+
+- `depsis-agent.service`'ten `RestrictSUIDSGID` kaldırıldı, neyin verildiği ve neyin karşıladığı
+  dosyaya yazıldı: ajan dosyayı tek bir yerde, `OpenIntent`'ten türeyen sabit 0600 moduyla yaratıyor
+  ve çağıran mod diye bir işlenen ifade edemiyor.
+- `Openat2SafePath::open_root` artık başlangıçta bir kez `.`'yi çözerek `openat2`'nin gerçekten
+  çalıştığını **kanıtlıyor**. Çalışmıyorsa servis hiç ayağa kalkmıyor. Aksi hâlde ajan kendini sağlıklı
+  ilan ederken her yükleme tek tek bir sınırlandırma hatasıyla düşüyor.
+
+**Yarım soket kümesi, birim grafiği üzerinden ulaşılamaz.** P1-D'ye önce "yalnız kontrol soketi
+başlatılırsa ajan reddetmeli" diye bir test yazdım; ajan yine de başladı ve test düştü. Sebep
+`depsis-agent.service`'in kendi `Requires=depsis-agent.socket depsis-agent-data.socket` satırı:
+servisi tetiklemek veri soketini bağımlılık olarak çekiyor. Ajanın fail-closed kontrolü yanlış
+değil, ama systemd'nin garantisi ondan önce devreye giriyor. Test ikiye ayrıldı — birincisi
+`Requires=`'in gerçekten çalıştığını ölçüyor, ikincisi ajanın kendi reddini `systemd-socket-activate
+--fdname=control` ile, birim grafiğinin dışında ölçüyor.
+
+**`serve`'deki peer→kayıt sıralaması güvenliği değil atfı sağlıyor.** Yorumu "aksi hâlde yetkisiz
+biri başkasının canlı jetonunu yakardı" diye yazmıştım; bir mutasyon testi bunu yalanladı.
+`TransferRegistry::claim` uyuşmayan uid'i zaten reddedip kaydı geri koyuyor, dolayısıyla peer
+kontrolünü tamamen silmek hiçbir yüklemeyi kaybettirmiyor. Kontrolün kazandırdığı gerçek şey daha
+küçük ve yine de değerli: API olmayan bir süreç önsöz ayrıştırıcısına ve kayıt defterine hiç
+ulaşamadan reddediliyor, ve günlüğe "jeton hatası" değil "yetkisiz çağıran" olarak geçiyor.
+
 **Ölçülmemiş, ve tasarım kararı olarak duruyor:** ZFS `refquota` altında `EDQUOT`'un `write`'ta mı
 `fsync`'te mi yüzeye çıktığı (P0-G `EDQUOT`'u ölçtü ama hangi çağrıda olduğunu değil), ve gerçek bir
 `RENAME_NOREPLACE`'in uçuştaki bir dosya üzerindeki davranışı. İkisi de Debian VM'e ait.

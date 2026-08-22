@@ -56,6 +56,7 @@ the environment, never inferred from a caller."
 fn serve() -> std::process::ExitCode {
     use depsis_agent::audit::StderrSink;
     use depsis_agent::authz::Policy;
+    use depsis_agent::data::DataChannel;
     use depsis_agent::dispatch::Agent;
     use depsis_agent::transfer::TransferRegistry;
 
@@ -80,7 +81,7 @@ fn serve() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
 
-    let listener = match unix::listener_from_systemd() {
+    let listeners = match unix::listeners_from_systemd() {
         Ok(l) => l,
         Err(e) => {
             eprintln!("depsis-agent: {e}");
@@ -122,14 +123,43 @@ fn serve() -> std::process::ExitCode {
         &transfers,
     );
 
-    eprintln!("depsis-agent: serving, api_uid={api_uid}");
-    match unix::serve_loop(&listener, &agent) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("depsis-agent: serve loop failed: {e}");
-            std::process::ExitCode::FAILURE
+    let data = DataChannel {
+        policy: Policy { api_uid },
+        audit: &audit,
+        transfers: &transfers,
+    };
+
+    eprintln!(
+        "depsis-agent: serving, api_uid={api_uid}, data workers={}",
+        unix::MAX_DATA_CONNECTIONS
+    );
+
+    // Two loops, and neither ever returns in normal operation. The control loop stays on this
+    // thread and keeps its deliberate one-connection-at-a-time behaviour; the data loop runs its
+    // own fixed pool beside it.
+    //
+    // `thread::scope` is what lets both borrow the same registry and audit sink off this stack
+    // without an `Arc` around either. Its cost is that it JOINS, and that is why a failure below
+    // exits the process rather than returning: if the control loop died and this function simply
+    // returned an error, the scope would block forever waiting for a data loop that is still
+    // happily accepting connections, and systemd would see a service that is neither working nor
+    // dead. Skipping destructors on the way out is acceptable for a daemon whose durable state is
+    // already fsynced before any reply is sent; a half-served agent is not.
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            if let Err(e) = unix::serve_data_loop(&listeners.data, &data) {
+                eprintln!("depsis-agent: data loop failed: {e}");
+                std::process::exit(1);
+            }
+        });
+
+        if let Err(e) = unix::serve_loop(&listeners.control, &agent) {
+            eprintln!("depsis-agent: control loop failed: {e}");
+            std::process::exit(1);
         }
-    }
+        // The control listener closed cleanly, which only happens on shutdown.
+        std::process::exit(0);
+    })
 }
 
 #[cfg(not(unix))]

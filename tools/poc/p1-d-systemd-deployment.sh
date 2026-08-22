@@ -30,6 +30,10 @@ DB_NAME="${DEPSIS_E2E_DB:-depsis_systemd}"
 PREFIX=/usr/local/lib/depsis
 WORK="$(mktemp -d)"
 chmod 0755 "$WORK"
+# A stand-in for the share tree. No ZFS here, so this is a plain directory — the agent confines
+# itself to it with openat2(RESOLVE_BENEATH) either way, and what is being measured is the two-
+# socket path, not the filesystem underneath it.
+SHARES=/srv/depsis-p1d
 PASSED=0
 FAILED=0
 
@@ -39,13 +43,16 @@ check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$3', got '$2'
 head1(){ printf '\n== %s ==\n' "$1"; }
 
 cleanup() {
-  systemctl stop depsis-api.service depsis-agent.service depsis-agent.socket 2>/dev/null
-  systemctl disable depsis-api.service depsis-agent.socket 2>/dev/null
+  systemctl stop depsis-api.service depsis-agent.service \
+                 depsis-agent-data.socket depsis-agent.socket 2>/dev/null
+  systemctl disable depsis-api.service depsis-agent.socket depsis-agent-data.socket 2>/dev/null
+  systemctl reset-failed depsis-agent.service 2>/dev/null
   rm -f /etc/systemd/system/depsis-api.service \
         /etc/systemd/system/depsis-agent.service \
-        /etc/systemd/system/depsis-agent.socket
+        /etc/systemd/system/depsis-agent.socket \
+        /etc/systemd/system/depsis-agent-data.socket
   systemctl daemon-reload 2>/dev/null
-  rm -rf "$WORK"
+  rm -rf "$WORK" "$SHARES"
 }
 trap cleanup EXIT
 
@@ -59,14 +66,14 @@ ok 'root, systemd as pid 1, both builds and PostgreSQL are present'
 
 head1 'the units parse'
 install -d -m 0755 /etc/systemd/system
-cp deploy/systemd/depsis-agent.socket deploy/systemd/depsis-agent.service \
-   deploy/systemd/depsis-api.service /etc/systemd/system/
+cp deploy/systemd/depsis-agent.socket deploy/systemd/depsis-agent-data.socket \
+   deploy/systemd/depsis-agent.service deploy/systemd/depsis-api.service /etc/systemd/system/
 systemctl daemon-reload
 
 # `systemd-analyze verify` resolves every directive and every referenced path. It is the check that
 # a unit file has no misspelled directive silently ignored at load — systemd logs those and starts
 # the service anyway, so a typo in a hardening line is a protection that is simply absent.
-for unit in depsis-agent.socket depsis-agent.service depsis-api.service; do
+for unit in depsis-agent.socket depsis-agent-data.socket depsis-agent.service depsis-api.service; do
   if out=$(systemd-analyze verify "/etc/systemd/system/$unit" 2>&1); then
     ok "$unit verifies"
   else
@@ -161,6 +168,8 @@ chmod 0400      /etc/depsis/db-url /etc/depsis/secret.key
 printf 'DEPSIS_API_PORT=%s\nNODE_ENV=production\nDEPSIS_AGENT_SOCKET=/run/depsis/agent.sock\nDEPSIS_ZFS_POOLS=\n' \
   "$PORT" > /etc/depsis/api.env
 printf 'DEPSIS_API_UID=%s\n' "$(id -u depsis-api)" > /etc/depsis/agent.env
+printf 'DEPSIS_SHARES_ROOT=%s\n' "$SHARES" >> /etc/depsis/agent.env
+install -d -m 0755 "$SHARES" "$SHARES/alice" "$SHARES/alice/.depsis" "$SHARES/alice/.depsis/staging"
 chmod 0644 /etc/depsis/api.env /etc/depsis/agent.env
 
 # The service user must NOT be able to read the sources. That is what makes the credential
@@ -196,6 +205,175 @@ fi
 # Socket activation: the service must NOT be running yet.
 check 'the agent is not running before the first connection' \
   "$(systemctl is-active depsis-agent.service 2>&1)" 'inactive'
+
+head1 'two sockets, both guaranteed'
+# An earlier version of this section tried to prove the agent refuses to start with only the
+# control socket, by starting that socket alone and connecting. It could not: the agent started
+# anyway and the check failed. The reason is in depsis-agent.service — `Requires=depsis-agent.socket
+# depsis-agent-data.socket` — so triggering the service pulls the data socket in as a dependency,
+# and the half-configured state the test described is unreachable through the unit graph.
+#
+# That is a better outcome than the test assumed, but only if it is measured rather than believed,
+# because it is a property of the unit file and one edit away from being untrue. So: connect to the
+# control socket with only it started, and assert that systemd brought the OTHER one up.
+SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+  '{"correlation_id":"p1d-0","reason":"probe","request":{"op":"ping"}}' > "$WORK/one.txt" 2>&1
+sleep 1
+check 'triggering the service started the data socket too, via Requires=' \
+  "$(systemctl is-active depsis-agent-data.socket 2>&1)" 'active'
+check 'and the agent came up' "$(systemctl is-active depsis-agent.service 2>&1)" 'active'
+
+# The agent's own fail-closed check, exercised where the unit graph cannot reach: one named
+# descriptor, handed over by systemd-socket-activate rather than pid 1. This is the backstop for a
+# hand-run daemon or an edited unit, and without running it the refusal is only a unit test.
+# `systemd-socket-activate` listens until it is killed, so this is bounded explicitly rather than
+# with `wait` — measured the hard way: the first version of this block hung the whole probe.
+timeout 10 systemd-socket-activate --fdname=control -l "$WORK/half.sock" \
+  --setenv=DEPSIS_API_UID="$(id -u depsis-api)" \
+  --setenv=DEPSIS_SHARES_ROOT="$SHARES" \
+  "$PREFIX/depsis-agent" --serve > "$WORK/half.log" 2>&1 &
+HALF_PID=$!
+sleep 1
+# As root, not as depsis-api, and the reason is not laziness. systemd-socket-activate creates its
+# socket with the invoking umask — 0755 here — and connecting to a Unix socket needs WRITE
+# permission on it, so depsis-api could not reach it at all and the EACCES was swallowed by the
+# error handler, producing a silent failure shaped like a pass. Identity is irrelevant to what is
+# measured here: the agent refuses in `listeners_from_systemd`, before it ever accepts anything.
+node -e '
+  import("node:net").then(({ default: net }) => {
+    const s = net.connect(process.argv[1]);
+    s.on("connect", () => s.write("{}\n"));
+    s.on("error", () => {});
+    setTimeout(() => s.destroy(), 400);
+  });
+' "$WORK/half.sock" >/dev/null 2>&1
+sleep 1
+kill "$HALF_PID" 2>/dev/null
+pkill -f "$WORK/half.sock" 2>/dev/null
+wait "$HALF_PID" 2>/dev/null
+if grep -q 'no socket named "data"' "$WORK/half.log" 2>/dev/null; then
+  ok 'given only a control descriptor, the agent refuses and names the socket it is missing'
+else
+  bad "the agent accepted a half-configured descriptor set: $(tail -c 200 "$WORK/half.log" 2>/dev/null)"
+fi
+
+if [ -S /run/depsis/agent-data.sock ]; then
+  ok 'systemd created /run/depsis/agent-data.sock'
+  check 'the data socket is 0660 too' "$(stat -c '%a' /run/depsis/agent-data.sock)" '660'
+  check 'the data socket is root:depsis-api' \
+    "$(stat -c '%U:%G' /run/depsis/agent-data.sock)" "root:depsis-api"
+else
+  bad 'no data socket after the service was triggered'
+  journalctl -u depsis-agent-data.socket -n 15 --no-pager
+fi
+
+# The directive that cost a bisection. RestrictSUIDSGID=yes blocks openat2(2) outright — systemd
+# filters the mode argument of file-creating syscalls, and openat2 carries its mode inside a struct
+# in userspace memory that seccomp cannot read, so it denies the call. openat2(RESOLVE_BENEATH) is
+# the whole containment mechanism for share writes, so the directive turns every upload into a
+# "path escapes the share root" error for a path that escapes nothing. Asserted here by name so
+# that re-adding it fails loudly rather than at the next upload.
+check 'RestrictSUIDSGID is off, because it would disable openat2' \
+  "$(systemctl show -p RestrictSUIDSGID --value depsis-agent.service)" 'no'
+
+head1 'each socket speaks its own protocol'
+# The by-name mapping, end to end. systemd's descriptor ORDER follows unit load order; if the agent
+# read fd 3 as "the control socket" these two answers would be swapped, and the swap is exactly the
+# failure that would corrupt a user's file — control JSON appended to a staging file, upload bytes
+# parsed as commands.
+CONTROL_REPLY=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+  '{"correlation_id":"p1d-1","reason":"probe","request":{"op":"ping"}}' 2>&1)
+case "$CONTROL_REPLY" in
+  *'"status":"ok"'*) ok 'the control socket answers the control protocol' ;;
+  *) bad "the control socket answered: $CONTROL_REPLY" ;;
+esac
+
+DATA_REPLY=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs data nosuchtoken 0 x 2>&1)
+case "$DATA_REPLY" in
+  *'"kind":"refused"'*) ok 'the data socket answers the data protocol' ;;
+  *) bad "the data socket answered: $DATA_REPLY" ;;
+esac
+
+# What order did systemd ACTUALLY use? Recorded rather than predicted: `remove_var` in the agent
+# does not rewrite /proc/PID/environ, which still holds the values it was execve'd with.
+AGENTPID=$(systemctl show -p MainPID --value depsis-agent.service)
+FDNAMES=$(tr '\0' '\n' < "/proc/$AGENTPID/environ" 2>/dev/null | sed -n 's/^LISTEN_FDNAMES=//p')
+if [ -n "$FDNAMES" ]; then
+  ok "systemd passed LISTEN_FDNAMES=$FDNAMES (the order is systemd's, the mapping is by name)"
+else
+  bad 'could not read LISTEN_FDNAMES from the running agent'
+fi
+
+head1 'a file travels the whole path'
+# OpenTransfer on the control socket, the bytes on the data socket, PublishTransfer on the control
+# socket again. This is the first time the two channels have been exercised together against real
+# systemd, and the only thing that proves the token survives between two connections.
+OPEN=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+  '{"correlation_id":"p1d-2","reason":"P1-D upload probe","request":{"op":"open_transfer","share":"alice","staging_name":"probe.part"}}' 2>&1)
+TOKEN=$(printf '%s' "$OPEN" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+if [ -n "$TOKEN" ]; then
+  ok 'OpenTransfer returned a token'
+else
+  bad "OpenTransfer failed: $OPEN"
+fi
+
+PAYLOAD='hello world'
+if [ -n "$TOKEN" ]; then
+  # `data1` writes the preamble and the body in ONE syscall — the ordinary case for any client that
+  # pipes a body straight into the socket, and the case that breaks if the preamble reader throws
+  # away whatever followed the newline. The failure is silent: the file still ends up the declared
+  # length, because the copy loop simply reads further.
+  SENT=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs data1 "$TOKEN" 0 "$PAYLOAD" 2>&1)
+  case "$SENT" in
+    *'"status":"stored"'*) ok 'the data socket stored the chunk' ;;
+    *) bad "the upload failed: $SENT" ;;
+  esac
+  STAGED=$(cat "$SHARES/alice/.depsis/staging/probe.part" 2>/dev/null)
+  check 'the staged bytes are the bytes that were sent, head included' "$STAGED" "$PAYLOAD"
+
+  PUB=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+    "{\"correlation_id\":\"p1d-3\",\"reason\":\"P1-D upload probe\",\"request\":{\"op\":\"publish_transfer\",\"share\":\"alice\",\"staging_name\":\"probe.part\",\"destination\":[\"hello.txt\"],\"expected_bytes\":${#PAYLOAD}}}" 2>&1)
+  case "$PUB" in
+    *'"status":"publish"'*) ok 'PublishTransfer moved it into the share' ;;
+    *) bad "publish failed: $PUB" ;;
+  esac
+  check 'the published file holds the uploaded bytes' \
+    "$(cat "$SHARES/alice/hello.txt" 2>/dev/null)" "$PAYLOAD"
+  [ -e "$SHARES/alice/.depsis/staging/probe.part" ] \
+    && bad 'the staging file is still there after a publish' \
+    || ok 'the staging file is gone, because publish renames rather than copies'
+
+  # The known gap, asserted so it cannot be forgotten: nothing chowns a published file, so it lands
+  # root:0600 and the account that uploaded it cannot read it. ADR-0017 records this; the operands
+  # and the fchown are the next piece of work. Measuring it here means the day it is fixed, this
+  # line fails and has to be updated deliberately.
+  OWNER=$(stat -c '%U:%a' "$SHARES/alice/hello.txt" 2>/dev/null)
+  check 'a published file is still root-owned and 0600 (the known ownership gap)' "$OWNER" 'root:600'
+fi
+
+head1 'a bad chunk leaves nothing behind'
+OPEN2=$(runuser -u depsis-api -- node tools/poc/agent-client.mjs control \
+  '{"correlation_id":"p1d-4","reason":"P1-D short-chunk probe","request":{"op":"open_transfer","share":"alice","staging_name":"short.part"}}' 2>&1)
+TOKEN2=$(printf '%s' "$OPEN2" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+if [ -n "$TOKEN2" ]; then
+  # Declare eleven bytes, send four, and hang up. On a real socket this is what a client that died
+  # mid-chunk looks like, and it must not produce a shorter file reported as stored.
+  SHORT=$(runuser -u depsis-api -- node -e '
+    import("node:net").then(async ({ default: net }) => {
+      const s = net.connect("/run/depsis/agent-data.sock");
+      await new Promise((r) => s.once("connect", r));
+      s.write(JSON.stringify({ token: process.argv[1], offset: 0, length: 11 }) + "\n");
+      await new Promise((r) => setTimeout(r, 200));
+      s.write("abcd");
+      await new Promise((r) => setTimeout(r, 200));
+      s.destroy();
+    });
+  ' "$TOKEN2" 2>&1)
+  sleep 1
+  SIZE=$(stat -c '%s' "$SHARES/alice/.depsis/staging/short.part" 2>/dev/null)
+  check 'a client that dies mid-chunk leaves a zero-length staging file' "${SIZE:-missing}" '0'
+fi
 
 head1 'the API, started by systemd'
 systemctl start depsis-api.service

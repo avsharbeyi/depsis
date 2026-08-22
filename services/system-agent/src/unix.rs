@@ -14,6 +14,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use depsis_agent::audit::Sink;
+use depsis_agent::data::DataChannel;
 use depsis_agent::dispatch::Agent;
 use depsis_agent::op::Response;
 use depsis_agent::seams::{
@@ -53,7 +54,40 @@ impl Openat2SafePath {
             rustix::fs::Mode::empty(),
         )
         .map_err(|e| SeamError::Io(format!("open root {}: {e}", root_display.display())))?;
-        Ok(Self { root, root_display })
+        let confined = Self { root, root_display };
+        confined.prove_openat2_works()?;
+        Ok(confined)
+    }
+
+    /// Resolve `.` under the root, once, at startup.
+    ///
+    /// Not a formality. `openat2` is the entire containment mechanism — everything else in this
+    /// file assumes the kernel is enforcing RESOLVE_BENEATH — and it can be absent for two reasons
+    /// that have nothing to do with the code: a kernel older than 5.6, or a seccomp filter.
+    ///
+    /// The second one is not hypothetical and was not predictable from the documentation. P1-D
+    /// measured `RestrictSUIDSGID=yes` in the agent's own unit blocking `openat2` outright: systemd
+    /// implements that directive by filtering the mode argument of every file-creating syscall, and
+    /// for `openat2` the mode lives inside a `struct open_how` in userspace memory, which seccomp
+    /// cannot dereference — so it denies the call rather than let a setuid file through. The unit
+    /// now sets `RestrictSUIDSGID=no` and says why, but a unit file is edited by people, and the
+    /// failure mode without this probe is every upload failing individually with a containment
+    /// error while the agent reports itself healthy.
+    ///
+    /// Failing at startup instead means the journal says it once, plainly, and the service does not
+    /// come up pretending it can confine anything.
+    fn prove_openat2_works(&self) -> Result<(), SeamError> {
+        rustix::fs::openat2(
+            &self.root,
+            OsStr::new(".").as_bytes(),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+            Self::resolve_flags(),
+        )
+        .map(drop)
+        .map_err(|e| classify_openat2(".", e))
     }
 }
 
@@ -92,13 +126,31 @@ impl Openat2SafePath {
             mode,
             Self::resolve_flags(),
         )
-        .map_err(|e| SeamError::PathEscape(format!("{joined}: {e}")))?;
+        .map_err(|e| classify_openat2(&joined, e))?;
 
         // The descriptor IS the result. It is not dropped and no path is handed back: whoever
         // holds this file holds the object the kernel just confined, and no second resolution
         // happens anywhere.
         Ok(std::fs::File::from(fd))
     }
+}
+
+/// Turn an `openat2` errno into the right kind of `SeamError`.
+///
+/// ENOSYS gets its own branch because reporting it as a path escape is a false diagnosis at the
+/// worst possible moment. P1-D measured exactly that: every transfer failed with "path escapes the
+/// share root: alice/.depsis/staging/probe.part", which reads as a containment violation — a
+/// caller trying to break out — when the truth was that the syscall had been switched off by a
+/// line in a unit file. It took a directive-by-directive bisection to find, and the misleading
+/// message is what made the bisection necessary.
+fn classify_openat2(joined: &str, e: rustix::io::Errno) -> SeamError {
+    if e == rustix::io::Errno::NOSYS {
+        return SeamError::Io(format!(
+            "openat2 is unavailable ({joined}): the kernel is older than 5.6, or a seccomp filter \
+             is blocking it — RestrictSUIDSGID=yes does exactly that"
+        ));
+    }
+    SeamError::PathEscape(format!("{joined}: {e}"))
 }
 
 impl SafePath for Openat2SafePath {
@@ -308,7 +360,99 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
               by this function being called once, from main. The core crate `depsis_agent` \
               remains forbid(unsafe_code)."
 )]
-pub fn listener_from_systemd() -> Result<UnixListener, SeamError> {
+/// The two listening sockets systemd hands over, taken BY NAME.
+///
+/// A struct rather than a `Vec`, because a positional list is exactly the bug this exists to
+/// prevent. Two `.socket` units pointing at one service produce two descriptors, and their order
+/// is systemd's business, not ours — it depends on unit load order and can change when a unit is
+/// renamed, reordered or restarted. Reading fd 3 as "the control socket" is therefore a coin
+/// flip, and losing it means the agent answers control requests on the socket the API streams
+/// user data into, and reads file bytes as if they were JSON commands.
+#[derive(Debug)]
+pub struct Listeners {
+    pub control: UnixListener,
+    pub data: UnixListener,
+}
+
+/// The names the units declare via `FileDescriptorName=`.
+pub const CONTROL_FD_NAME: &str = "control";
+pub const DATA_FD_NAME: &str = "data";
+
+/// Map `LISTEN_FDNAMES` onto descriptor offsets, or refuse.
+///
+/// Split out from the adoption below so it can be tested without conjuring real listening sockets
+/// at fixed descriptor numbers. Everything that can go wrong lives here; the adoption itself is
+/// three lines with no decisions in it.
+///
+/// Fails closed at every step. An agent that starts with a socket it cannot name is an agent whose
+/// attack surface nobody can review, and one that starts with only the control socket accepts
+/// `OpenTransfer` calls whose data connections can never arrive — the API would mint tokens,
+/// stage files and time them out, reporting a plausible-looking upload failure every time.
+fn socket_offsets(fdnames: Option<&str>, listen_fds: i32) -> Result<(i32, i32), SeamError> {
+    let Some(fdnames) = fdnames else {
+        return Err(SeamError::Io(
+            "LISTEN_FDNAMES unset: the socket units must declare FileDescriptorName=".into(),
+        ));
+    };
+
+    let names: Vec<&str> = fdnames.split(':').collect();
+    if i32::try_from(names.len()).unwrap_or(i32::MAX) != listen_fds {
+        // Without a name per descriptor there is no mapping at all, only a guess.
+        return Err(SeamError::Io(format!(
+            "LISTEN_FDS is {listen_fds} but LISTEN_FDNAMES names {} sockets",
+            names.len()
+        )));
+    }
+
+    let mut control: Option<i32> = None;
+    let mut data: Option<i32> = None;
+    for (index, name) in names.iter().enumerate() {
+        let offset = i32::try_from(index).unwrap_or(i32::MAX);
+        let slot = match *name {
+            CONTROL_FD_NAME => &mut control,
+            DATA_FD_NAME => &mut data,
+            other => {
+                return Err(SeamError::Io(format!(
+                    "systemd passed a socket named {other:?}, which this agent does not serve"
+                )))
+            }
+        };
+        if slot.is_some() {
+            // Two units with the same FileDescriptorName=. Picking either one would leave a
+            // listening root socket that nothing ever accepts on.
+            return Err(SeamError::Io(format!(
+                "two sockets are both named {name:?}"
+            )));
+        }
+        *slot = Some(offset);
+    }
+
+    match (control, data) {
+        (Some(c), Some(d)) => Ok((c, d)),
+        (None, _) => Err(SeamError::Io(format!(
+            "no socket named {CONTROL_FD_NAME:?}; is depsis-agent.socket running?"
+        ))),
+        (_, None) => Err(SeamError::Io(format!(
+            "no socket named {DATA_FD_NAME:?}; is depsis-agent-data.socket running?"
+        ))),
+    }
+}
+
+/// Adopt the listening sockets systemd created.
+///
+/// The agent does NOT create its own sockets. systemd owning them is what makes each socket file's
+/// ownership and mode the first authorization gate — enforced by the kernel before the agent has
+/// read a single byte, and declared in a unit file reviewable independently of this code
+/// (ADR-0006).
+///
+/// This implements the `sd_listen_fds` protocol directly rather than pulling in a crate. The
+/// protocol is three environment variables; a dependency would add an unaudited transitive tree to
+/// a process running as root, which is a worse trade than the lines below.
+#[allow(
+    unsafe_code,
+    reason = "The one unavoidable unsafe in the binary: adopting a descriptor from systemd means               asserting ownership of an integer, which no safe API can express. The assertion is               discharged by the LISTEN_PID check — the descriptors were passed to *this* pid — by               `socket_offsets` refusing duplicate names so neither is adopted twice, and by this               function being called once, from main. The core crate `depsis_agent` remains               forbid(unsafe_code)."
+)]
+pub fn listeners_from_systemd() -> Result<Listeners, SeamError> {
     // LISTEN_PID guards against a descriptor inherited by a process that was never meant to have
     // it: systemd stamps the pid it activated, so anything forked from us sees a mismatch.
     let listen_pid: u32 = std::env::var("LISTEN_PID")
@@ -326,14 +470,9 @@ pub fn listener_from_systemd() -> Result<UnixListener, SeamError> {
         .map_err(|_| SeamError::Io("LISTEN_FDS unset".into()))?
         .parse()
         .map_err(|_| SeamError::Io("LISTEN_FDS is not a number".into()))?;
-    if listen_fds != 1 {
-        // More than one would mean the unit declares several ListenStream= entries. Rather than
-        // guess which is the control socket, refuse: an agent listening on a socket nobody can
-        // name is an agent whose attack surface nobody can review.
-        return Err(SeamError::Io(format!(
-            "expected exactly 1 socket from systemd, got {listen_fds}"
-        )));
-    }
+
+    let fdnames = std::env::var("LISTEN_FDNAMES").ok();
+    let (control_offset, data_offset) = socket_offsets(fdnames.as_deref(), listen_fds)?;
 
     // Clear the variables so nothing spawned later can mistake itself for the activated service.
     // `ExecRunner` calls `env_clear` as well, so this is belt and braces — but leaving pid-stamped
@@ -342,22 +481,35 @@ pub fn listener_from_systemd() -> Result<UnixListener, SeamError> {
     std::env::remove_var("LISTEN_FDS");
     std::env::remove_var("LISTEN_FDNAMES");
 
-    // SAFETY: systemd passed this descriptor to this pid (verified above), nothing else in the
-    // process owns it, and this function runs exactly once.
-    let owned = unsafe { OwnedFd::from_raw_fd(SD_LISTEN_FDS_START) };
+    // SAFETY: systemd passed these descriptors to this pid (verified above), nothing else in the
+    // process owns them, and this function runs exactly once. The two offsets are distinct because
+    // `socket_offsets` refuses duplicate names, so neither descriptor is adopted twice.
+    let (control, data) = unsafe {
+        (
+            OwnedFd::from_raw_fd(SD_LISTEN_FDS_START + control_offset),
+            OwnedFd::from_raw_fd(SD_LISTEN_FDS_START + data_offset),
+        )
+    };
 
-    // Confirm it really is a stream socket before trusting it. A misconfigured unit
-    // (`ListenDatagram=`, say) then fails here with a clear message rather than producing
-    // baffling behaviour at accept time.
-    let kind = rustix::net::sockopt::socket_type(&owned)
-        .map_err(|e| SeamError::Io(format!("fd {SD_LISTEN_FDS_START} is not a socket: {e}")))?;
+    Ok(Listeners {
+        control: UnixListener::from(expect_stream_socket(control, CONTROL_FD_NAME)?),
+        data: UnixListener::from(expect_stream_socket(data, DATA_FD_NAME)?),
+    })
+}
+
+/// Confirm an adopted descriptor really is a stream socket.
+///
+/// A misconfigured unit (`ListenDatagram=`, say) then fails here with a clear message rather than
+/// producing baffling behaviour at accept time.
+fn expect_stream_socket(fd: OwnedFd, name: &str) -> Result<OwnedFd, SeamError> {
+    let kind = rustix::net::sockopt::socket_type(&fd)
+        .map_err(|e| SeamError::Io(format!("the {name} fd is not a socket: {e}")))?;
     if kind != rustix::net::SocketType::STREAM {
         return Err(SeamError::Io(format!(
-            "fd {SD_LISTEN_FDS_START} is a socket but not SOCK_STREAM ({kind:?})"
+            "the {name} fd is a socket but not SOCK_STREAM ({kind:?})"
         )));
     }
-
-    Ok(UnixListener::from(owned))
+    Ok(fd)
 }
 
 /// Serve requests until the listener closes.
@@ -451,6 +603,122 @@ fn serve_one<R: CommandRunner, S: Sink, P: SafePath>(
 
     let response = agent.handle(&request_json, peer, &correlation_id, &reason);
     respond(stream, &response)
+}
+
+/// How many data connections may be in flight at once.
+///
+/// A FIXED pool, not a thread per connection. The control loop can be serial because its
+/// operations are short and mutate global state; a data connection is neither — it holds a worker
+/// for as long as a client takes to send a chunk, so serialising it would let one slow uploader
+/// stall every other one. Spawning per connection is the other extreme and is worse: connection
+/// rate would become thread count on a root daemon, which is a denial-of-service primitive handed
+/// to anyone in the `depsis-api` group.
+///
+/// Sixteen because the memory ceiling is this times `data::COPY_BUFFER` (1 MiB in total) and the
+/// descriptor ceiling is this plus `MAX_PENDING_TRANSFERS`, both small enough to state out loud.
+pub const MAX_DATA_CONNECTIONS: usize = 16;
+
+/// Serve data connections until the listener closes.
+///
+/// The queue is a RENDEZVOUS channel — capacity zero — so a connection is only accepted once a
+/// worker is free to take it. Any buffer here would be a place for connections to pile up out of
+/// sight of the kernel's own `Backlog=`, and the honest backpressure is to leave them queued where
+/// the socket unit already bounds them.
+pub fn serve_data_loop<S: Sink>(
+    listener: &UnixListener,
+    channel: &DataChannel<'_, S>,
+) -> Result<(), SeamError> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<UnixStream>(0);
+    let rx = std::sync::Mutex::new(rx);
+
+    std::thread::scope(|scope| {
+        for _ in 0..MAX_DATA_CONNECTIONS {
+            let rx = &rx;
+            scope.spawn(move || data_worker(rx, channel));
+        }
+
+        let result = accept_into(listener, &tx);
+        // Dropping the last sender is what lets the workers finish; without it the scope would
+        // join on threads still blocked in `recv`.
+        drop(tx);
+        result
+    })
+}
+
+/// Hand every accepted connection to whichever worker is free.
+fn accept_into(
+    listener: &UnixListener,
+    tx: &std::sync::mpsc::SyncSender<UnixStream>,
+) -> Result<(), SeamError> {
+    loop {
+        let stream = match listener.accept() {
+            Ok((stream, _addr)) => stream,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue
+            }
+            // Same reasoning as the control loop: EMFILE/ENFILE is transient and has no
+            // `std::io::ErrorKind`, so without this arm it falls through to the fatal one and an
+            // exhausted descriptor table becomes a crash.
+            Err(e) if is_descriptor_shortage(&e) => {
+                eprintln!("depsis-agent: out of descriptors on data accept ({e}); retrying");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+            Err(e) => return Err(SeamError::Io(format!("data accept: {e}"))),
+        };
+
+        if tx.send(stream).is_err() {
+            // Every worker is gone. Continuing would accept connections nothing will ever read.
+            return Err(SeamError::Io("all data workers have exited".into()));
+        }
+    }
+}
+
+fn data_worker<S: Sink>(
+    rx: &std::sync::Mutex<std::sync::mpsc::Receiver<UnixStream>>,
+    channel: &DataChannel<'_, S>,
+) {
+    loop {
+        let stream = {
+            // Poison is recovered rather than propagated: one worker panicking must not take the
+            // whole data channel down with it, which is what `unwrap` here would do to all sixteen.
+            let guard = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match guard.recv() {
+                Ok(stream) => stream,
+                Err(_) => return,
+            }
+        };
+        if let Err(e) = serve_data_one(&stream, channel) {
+            eprintln!("depsis-agent: data connection failed: {e}");
+        }
+    }
+}
+
+fn serve_data_one<S: Sink>(
+    stream: &UnixStream,
+    channel: &DataChannel<'_, S>,
+) -> Result<(), SeamError> {
+    stream
+        .set_write_timeout(Some(IO_TIMEOUT))
+        .map_err(|e| SeamError::Io(format!("set data write timeout: {e}")))?;
+
+    // Identity comes from the kernel, before a single byte of the preamble is read or trusted.
+    let peer = peer_of(stream)?;
+
+    // `&UnixStream` implements both `Read` and `Write`, which is what lets the closure below keep
+    // its own shared borrow for `set_read_timeout` while the channel reads through this one. A
+    // `&mut UnixStream` would have made the two mutually exclusive and forced a `try_clone`.
+    let mut io = stream;
+    channel.serve(&mut io, peer, |budget| {
+        stream
+            .set_read_timeout(Some(budget))
+            .map_err(|e| SeamError::Io(format!("arm the data read timeout: {e}")))
+    })
 }
 
 /// Read one newline-terminated request under an ABSOLUTE deadline.
@@ -735,9 +1003,13 @@ mod tests {
         // Guards the SAFETY assertion above. If this check regressed, the unsafe block would be
         // adopting a descriptor that may belong to another process's socket.
         temp_env(
-            &[("LISTEN_PID", Some("1")), ("LISTEN_FDS", Some("1"))],
+            &[
+                ("LISTEN_PID", Some("1")),
+                ("LISTEN_FDS", Some("2")),
+                ("LISTEN_FDNAMES", Some("control:data")),
+            ],
             || {
-                let err = listener_from_systemd().expect_err("must refuse a foreign LISTEN_PID");
+                let err = listeners_from_systemd().expect_err("must refuse a foreign LISTEN_PID");
                 assert!(
                     err.to_string().contains("meant for someone else"),
                     "got: {err}"
@@ -749,21 +1021,87 @@ mod tests {
     #[test]
     fn running_without_socket_activation_is_refused() {
         temp_env(&[("LISTEN_PID", None), ("LISTEN_FDS", None)], || {
-            let err = listener_from_systemd().expect_err("must refuse");
+            let err = listeners_from_systemd().expect_err("must refuse");
             assert!(err.to_string().contains("LISTEN_PID unset"), "got: {err}");
         });
     }
 
+    // ── which descriptor is which ──
+    //
+    // These drive `socket_offsets` directly rather than `listeners_from_systemd`, because the
+    // latter would need two real listening sockets sitting at fixed descriptor numbers. Every
+    // decision lives in the pure function; the adoption around it has none. The end-to-end proof
+    // that systemd really sets these variables is in the P1-D deployment probe, against pid 1.
+
     #[test]
-    fn more_than_one_socket_is_refused() {
-        let me = std::process::id().to_string();
-        temp_env(
-            &[("LISTEN_PID", Some(&me)), ("LISTEN_FDS", Some("2"))],
-            || {
-                let err = listener_from_systemd().expect_err("must refuse");
-                assert!(err.to_string().contains("got 2"), "got: {err}");
-            },
+    fn the_control_socket_is_found_by_name_and_not_by_position() {
+        // The whole reason `Listeners` is a struct. systemd's descriptor order follows unit load
+        // order, so `data` arriving first is not a hypothetical — and reading fd 3 as the control
+        // socket would make the agent parse uploaded file bytes as JSON commands and stream a
+        // user's data into whatever answered the control connection.
+        assert_eq!(
+            socket_offsets(Some("control:data"), 2).expect("both named"),
+            (0, 1)
         );
+        assert_eq!(
+            socket_offsets(Some("data:control"), 2).expect("both named"),
+            (1, 0)
+        );
+    }
+
+    #[test]
+    fn a_descriptor_nobody_named_is_refused() {
+        // systemd always sets LISTEN_FDNAMES when it passes descriptors, so an absent value means
+        // something other than systemd handed them over.
+        let err = socket_offsets(None, 2).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("LISTEN_FDNAMES unset"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_name_this_agent_does_not_serve_is_refused() {
+        // Fail closed. A listening root socket nobody accepts on is worse than not starting.
+        let err = socket_offsets(Some("control:data:debug"), 3).expect_err("must refuse");
+        assert!(err.to_string().contains("\"debug\""), "got: {err}");
+    }
+
+    #[test]
+    fn the_control_socket_alone_is_not_enough_to_start() {
+        // Starting here would be the worst of both worlds: the API mints transfer tokens and
+        // stages files for data connections that can never arrive, so every upload fails after a
+        // five-minute timeout and looks like a network problem.
+        let err = socket_offsets(Some("control"), 1).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("depsis-agent-data.socket"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_data_socket_alone_is_not_enough_to_start() {
+        let err = socket_offsets(Some("data"), 1).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("depsis-agent.socket"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn two_sockets_sharing_a_name_are_refused() {
+        let err = socket_offsets(Some("control:control"), 2).expect_err("must refuse");
+        assert!(err.to_string().contains("both named"), "got: {err}");
+    }
+
+    #[test]
+    fn a_name_list_that_does_not_match_the_descriptor_count_is_refused() {
+        // Without one name per descriptor there is no mapping, only a guess — and a guess here
+        // picks a socket for the agent to trust.
+        let err = socket_offsets(Some("control:data"), 3).expect_err("must refuse");
+        assert!(err.to_string().contains("names 2 sockets"), "got: {err}");
+        let err = socket_offsets(Some("control:data:extra"), 2).expect_err("must refuse");
+        assert!(err.to_string().contains("names 3 sockets"), "got: {err}");
     }
 
     /// Set environment variables for the duration of `f`, then restore them.
