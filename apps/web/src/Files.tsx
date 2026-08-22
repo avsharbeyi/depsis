@@ -833,12 +833,21 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
   }
 
   function chosen(event: React.ChangeEvent<HTMLInputElement>, keepPaths: boolean): void {
-    const picked = event.target.files;
-    // Cleared straight away so choosing the SAME file again still fires `change`.
+    // COPIED BEFORE THE INPUT IS CLEARED, and the order is the whole point.
+    //
+    // `event.target.files` is a LIVE FileList, not a snapshot. Setting `value = ''` empties the
+    // list the variable still points at, so the previous version read `picked.length === 0` on
+    // the very files the user had just chosen and returned without uploading anything. Choosing
+    // a file from the Yükle menu did nothing at all, silently, on every platform. Found by the
+    // e2e suite rather than by anyone using it, because there is no error to see.
+    //
+    // The clearing itself is still needed: without it, choosing the SAME file twice does not
+    // fire `change` a second time. It just has to happen after the copy.
+    const files = Array.from(event.target.files ?? []);
     event.target.value = '';
-    if (picked === null || picked.length === 0) return;
+    if (files.length === 0) return;
     setMenuOpen(false);
-    void runUploads(Array.from(picked), keepPaths);
+    void runUploads(files, keepPaths);
   }
 
   /* ── selection ── */

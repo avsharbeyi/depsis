@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // Playwright transpiles these files itself and never asks tsc for output, so the project's
+    // usual composite/declaration settings would only produce build artefacts nobody consumes.
+    // What is wanted here is the type CHECK — and eslint's `projectService`, which needs every
+    // linted file to belong to some tsconfig or the type-aware rules report the whole directory as
+    // untyped.
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "incremental": false,
+    "noEmit": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": ["**/*.ts"]
+}

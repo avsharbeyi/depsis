@@ -4,6 +4,11 @@ packages:
   - 'apps/*'
   - 'packages/*'
   - 'services/*'
+  # The Playwright suite. A workspace member rather than a loose directory, so that `pnpm lint` and
+  # `pnpm typecheck` — and therefore the `static` CI job — cover it like everything else. Left
+  # outside, the e2e code would be the only TypeScript in the repository nothing type-checks, which
+  # is a poor property for the code whose whole job is catching what the other checks cannot.
+  - 'e2e'
 minimumReleaseAgeExclude:
   - '@vitejs/plugin-react@6.1.0'
   - vite@8.2.2

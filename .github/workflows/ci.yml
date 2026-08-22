@@ -3,7 +3,8 @@ name: CI
 # Pipeline order per master prompt §19:
 #   format -> lint -> typecheck -> unit -> integration -> e2e -> security -> build -> signed artifacts
 # Stages not yet implemented are declared here as explicit, visibly-skipped jobs rather than
-# omitted, so that "we have no e2e coverage yet" stays legible instead of silently absent.
+# omitted, so that a missing stage stays legible instead of silently absent. `e2e` was one of
+# them until the Playwright suite and tools/dev/e2e-stack.sh existed; `integration` still is.
 
 on:
   push:
@@ -367,6 +368,258 @@ jobs:
           ' "$report"
           done
 
+  e2e:
+    name: e2e (Playwright — desktop + mobile-360)
+    runs-on: ubuntu-latest
+    # The suite takes about five minutes on a sixteen-core box with eight workers; a two-core
+    # runner is slower and the stack has to be built first. Thirty is generous for that and still
+    # finite — the default is six HOURS, and the failure this bounds is a stack that came up but
+    # never answers, which otherwise holds a runner all afternoon before anyone notices.
+    timeout-minutes: 30
+    # This job used to print a notice explaining what was missing: Playwright, a browser download,
+    # and a stack the browser could reach. All three now exist, so it runs the suite instead.
+    #
+    # The stack is EXTERNAL to Playwright — `bash tools/dev/e2e-stack.sh` brings it up and this job
+    # tears it down — rather than a `webServer` entry. e2e/playwright.config.ts carries the full
+    # argument; the short version is that a stack that only comes up under the test runner is a
+    # stack no developer can bring up before pushing, and `webServer` reports a failed migration as
+    # a timeout.
+    services:
+      postgres:
+        # The same definition as the `migrations` job, deliberately: the schema uses the built-in
+        # uuidv7(), which does not exist before 18, and bootstrap.sql refuses to proceed without it.
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: ci-postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: ci-postgres
+      # Outside the working tree. A JSON report written into the repository is an untracked file
+      # that `pnpm format:check` then reports as unformatted — the same trap the migrations job's
+      # vitest report fell into.
+      DEPSIS_E2E_JSON_REPORT: ${{ runner.temp }}/playwright-report.json
+      # No silent fallback to an agent-less stack. Without an agent this job used to run with
+      # eighteen of its tests gating themselves out with test.fixme — every mutation on the file
+      # manager, which is the screen the appliance exists for — behind a green tick. The stack
+      # script refuses to come up rather than take that path here.
+      DEPSIS_E2E_REQUIRE_AGENT: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install the PostgreSQL 18 client
+        # The runner image ships an older psql, and packages/db/bootstrap.sql — which
+        # tools/dev/e2e-stack.sh runs twice — uses `\if :{?var}`, which needs a recent client.
+        run: |
+          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-18
+          psql --version
+
+      - name: Cache the browser
+        id: browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # Keyed on the lockfile, because that is what pins @playwright/test — and a browser build
+          # belongs to a Playwright version, not to a commit. A stale browser under a new
+          # Playwright is refused at launch with a version mismatch rather than silently used.
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Chromium
+        # `install-deps` on a cache hit, the full `install --with-deps` otherwise. The apt libraries
+        # chromium links against live in the runner image and are NOT in the cached directory, so a
+        # cache hit still needs them — skipping this step entirely on a hit would produce a browser
+        # that fails to launch with a missing shared object.
+        run: |
+          if [ '${{ steps.browser.outputs.cache-hit }}' = 'true' ]; then
+            npx playwright install-deps chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Its own key rather than sharing the `rust` job's: that job builds --all-targets with
+          # dev-dependencies and this one builds a single release binary, and one cache holding
+          # both is a cache that misses for both.
+          key: e2e-agent
+
+      - name: Build the storage agent
+        # A step of its own so a compile error is reported as a compile error rather than as
+        # "the stack did not come up". The stack script would build it too; finding the binary
+        # already there is the fast path.
+        #
+        # In this product a folder is a database row AND a directory, so with no agent every
+        # mutation on the file manager answers 503. `systemd-socket-activate` — from the systemd
+        # package, already on the runner image — hands it its two sockets the way the .socket units
+        # do on an appliance. tools/dev/e2e-stack.sh carries the full argument.
+        run: cargo build --locked --release --bin depsis-agent
+
+      - name: Bring the stack up
+        # Two databases, two API processes, two web origins, one privileged agent — the script
+        # explains why at length. It builds the API and the web bundle itself, so a broken build
+        # fails here, before a single browser starts, with the build's own error rather than a
+        # wall of timeouts.
+        run: bash tools/dev/e2e-stack.sh
+
+      - name: Run the suite
+        run: pnpm test:e2e
+
+      - name: Prove the suite was not empty
+        # ANTI FALSE GREEN, and the same discipline as the migrations job's skip gate above.
+        #
+        # A Playwright run that matched no files exits 0 and prints "no tests found". A testDir
+        # typo, a renamed spec, or a `testIgnore` that grew too wide all land there — and every one
+        # of them reports a green tick over zero measurements. This reads the JSON report and
+        # refuses that, in three separate ways.
+        #
+        # `if: always()`, so that a run which produced no report at all is a failure of THIS step
+        # with a readable message, rather than a step that quietly did not happen.
+        if: always()
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            let report;
+            try {
+              report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            } catch (e) {
+              console.error("::error::could not read the Playwright report: " + e.message);
+              process.exit(1);
+            }
+
+            // The report nests suites by directory and by describe block, so the specs have to be
+            // walked out rather than read off the top level.
+            const specs = [];
+            const walk = (suite) => {
+              for (const spec of suite.specs ?? []) specs.push(spec);
+              for (const child of suite.suites ?? []) walk(child);
+            };
+            for (const suite of report.suites ?? []) walk(suite);
+            const tests = specs.flatMap((spec) =>
+              spec.tests.map((t) => ({ title: spec.title, ...t })),
+            );
+
+            if (tests.length === 0) {
+              console.error("::error::the Playwright report contains no tests at all");
+              process.exit(1);
+            }
+
+            const byProject = new Map();
+            for (const t of tests) {
+              const row = byProject.get(t.projectName) ?? { ran: 0, skipped: 0 };
+              row.ran += 1;
+              if (t.results[0]?.status === "skipped") row.skipped += 1;
+              byProject.set(t.projectName, row);
+            }
+            // Printed to the log AND to the job summary. A skipped test is green on the summary
+            // and measured nothing, and the count is the only place on the run page where the
+            // difference between "56 passed" and "56 ran, 18 of them skipped" is visible at all —
+            // otherwise it lives inside a report artefact nobody downloads on a green run.
+            const lines = [];
+            for (const [name, row] of byProject) {
+              console.log(name + ": " + row.ran + " test(s), " + row.skipped + " skipped");
+              lines.push("| " + name + " | " + (row.ran - row.skipped) + " | " + row.skipped + " |");
+            }
+            if (process.env.GITHUB_STEP_SUMMARY) {
+              fs.appendFileSync(
+                process.env.GITHUB_STEP_SUMMARY,
+                "### Playwright\n\n| project | measured | skipped |\n| --- | --- | --- |\n" +
+                  lines.join("\n") + "\n",
+              );
+            }
+
+            // The job is NAMED "desktop + mobile-360" and that name is a promise. A project that
+            // contributed nothing means the configuration moved, and the half of the suite that
+            // only the narrow viewport can falsify — the dock is reachable, the page does not
+            // scroll sideways — stopped being measured while the tick stayed green.
+            //
+            // "kurulum" is in the list even though the job name does not mention it, and it is the
+            // one that most needed adding. Playwright errors on a run that matched NOTHING, never
+            // on a single project that matched nothing — so a renamed setup.kurulum.spec.ts, or a
+            // WIZARD_SPECS glob that drifted, would leave the wizard project contributing zero
+            // tests and this job green. That is the first screen anybody who plugs the box in ever
+            // sees. `row.ran === row.skipped` rather than a fixed count, because the project
+            // legitimately carries one declared test.fixme.
+            for (const required of ["desktop", "mobile-360", "kurulum"]) {
+              const row = byProject.get(required);
+              if (row === undefined || row.ran === row.skipped) {
+                console.error("::error::the " + required +
+                  " project ran no tests; this job claims to cover it");
+                process.exit(1);
+              }
+            }
+
+            // Every skip must say why. `test.fixme(condition, reason)` puts the sentence in the
+            // report, so a plain `test.skip` — which carries none — fails here. That is the whole
+            // point: a skipped test is green on the summary and measured nothing, and the only
+            // thing separating an honest gate from a hidden failure is the recorded reason.
+            const mute = tests.filter(
+              (t) =>
+                t.results[0]?.status === "skipped" &&
+                !(t.annotations ?? []).some(
+                  (a) => a.type === "fixme" && (a.description ?? "") !== "",
+                ),
+            );
+            if (mute.length > 0) {
+              console.error("::error::" + mute.length +
+                " test(s) were skipped with no recorded reason; use test.fixme(cond, why)");
+              for (const t of mute.slice(0, 10)) {
+                console.error("  " + t.projectName + " › " + t.title);
+              }
+              process.exit(1);
+            }
+          ' "$DEPSIS_E2E_JSON_REPORT"
+
+      - name: The stack's own logs
+        # Printed on failure, because the browser-side artefacts below say what the page did and
+        # these say what the API did. A 500 behind a failed assertion is invisible in a trace.
+        if: failure()
+        run: |
+          for log in /tmp/depsis-e2e/*.log; do
+            [ -f "$log" ] || continue
+            echo "── $log"
+            tail -80 "$log"
+          done
+
+      - name: Traces and screenshots
+        # `retain-on-failure` and `only-on-failure` in the config mean these directories hold
+        # exactly the runs that went wrong. An e2e failure nobody can look at is a test nobody
+        # believes, and the next person deletes it.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-traces
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Stop the stack
+        if: always()
+        run: bash tools/dev/e2e-stack.sh --down
+
   # ── Declared but not yet implemented ────────────────────────────────────────
   # These exist so their absence is visible in every CI run. Each is enabled by the
   # PoC named in its ADR.
@@ -383,16 +636,3 @@ jobs:
           echo "Also P1-C (tools/poc/p1-c-api-agent.sh): the API and the agent talking over a real"
           echo "Unix socket, which needs root and socket activation. apps/api's"
           echo "agent.integration.test.ts is excluded from the migrations job for that reason."
-
-  e2e:
-    name: e2e (Playwright — desktop + mobile-360)
-    runs-on: ubuntu-latest
-    steps:
-      - run: |
-          echo "::notice::Not yet implemented, and the old reason for that has expired."
-          echo "apps/web now exists and carries fourteen screens, so 'enabled when apps/web"
-          echo "exists' stopped being true. What is actually missing is a harness: Playwright,"
-          echo "a browser download, and a stack the browser can reach — the API, the web server"
-          echo "and a migrated database, brought up the way tools/dev/up.sh does it locally."
-          echo "Until that exists this job measures nothing, and says so rather than passing"
-          echo "quietly. §18 and §21 both list e2e as a deliverable."

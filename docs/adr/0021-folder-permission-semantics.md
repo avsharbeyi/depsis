@@ -88,6 +88,43 @@ Miras, POSIX default ACL ile (`setfacl -d`). Bu, DEPSIS'in miras kuralıyla **ta
 kopyalanır, DEPSIS'in kuralı ise her okumada yeniden hesaplanır. Bir grant değiştiğinde alt
 ağacın POSIX ACL'lerinin yeniden yazılması gerekir ve bu bir iştir, bir tetikleyici değil.
 
+## Çelişen iki uygulama, ve hangisinin kazandığı
+
+Bu ADR yazıldığında `packages/authz` Faz 0'dan beri duruyordu ve BAŞKA bir model uyguluyor:
+
+|                | `packages/authz/resolve.ts` (Faz 0)         | bu ADR                        |
+| -------------- | ------------------------------------------- | ----------------------------- |
+| miras          | zincir boyunca BİRLEŞİM                     | temsilci başına EN YAKIN ata  |
+| daraltma       | düğümde `inherit: false`                    | alt düğüme daha dar grant     |
+| şema karşılığı | yok — 0015'te `inherit` kolonu yok          | `folder_grants` satırı        |
+| izin adları    | `manage_acl`, `view_versions`, `view_audit` | `manage`, `versions`, `audit` |
+
+Üç artefakt üç farklı şey söylüyordu: paket, bu ADR, ve migration 0015. Karar:
+
+**Bu ADR kazanır ve `packages/authz` ona uydurulur.** Gerekçe, ikisinin daraltmayı nasıl ifade
+ettiği:
+
+`inherit: false` bir düğümde mirası HERKES için kesiyor. "Bu alt klasör stajyerlere daha dar
+olsun" demek için, o düğümde mirası kapatıp geri kalan HERKESİ yeniden listelemek gerekir — ve
+listede unutulan biri sessizce erişimini kaybeder. Bir yetki modelinin en kötü özelliği, doğru
+kullanımının bir listeyi eksiksiz hatırlamayı gerektirmesidir.
+
+Temsilci başına en yakın ata, daraltmayı YEREL yapıyor: yalnız daraltmak istediğin temsilci için
+alt düğüme bir satır koyuyorsun, başka kimse etkilenmiyor. §6.2'nin diyagramı da bunu çiziyor —
+"İstisna: daha dar izin", miras düğümünden sarkan tek bir dal.
+
+Ayrıca 0015'te `inherit` kolonu yok ve eklemek istemiyoruz: kolon, yukarıdaki footgun'ı şemaya
+kalıcı hâle getirmek olurdu.
+
+**İzin adları da sözleşmeye uyar**, pakete değil: `folder_permission` enum'u veritabanında ve
+`FolderPermission` yayımlanmış sözleşmede. İkisini değiştirmek bir migration ve üretilmiş her
+istemcinin kırılması demek; paket ise iç bir modül ve on testi var. Geniş yüzey dar olanı
+belirler.
+
+ADR-0004'ün "Grant modeli" bölümündeki çözümleme kuralları bu noktada BU ADR tarafından
+geçersiz kılınır. ADR-0004'ün geri kalanı — POSIX ACL'in tek uygulanan substrat olması, girdilerin
+gruba verilmesi, uygulama yetkisinin dosya sistemi yetkisinin alt kümesi olması — aynen geçerli.
+
 ## Sonuçlar
 
 **Kazanılan:** çok kullanıcılı bir NAS'ın en temel işi — bir klasörü yalnızca birine açmak.

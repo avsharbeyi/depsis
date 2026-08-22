@@ -133,7 +133,16 @@ export function SetupWizard({ onComplete }: Props): React.JSX.Element {
               <input
                 value={organizationSlug}
                 onChange={(e) => setSlug(e.target.value.toLowerCase().trim())}
-                pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+                // The dash is ESCAPED, and it has to be. HTML compiles `pattern` with the `v`
+                // flag, where a bare trailing `-` in a character class is reserved for set
+                // operations and raises "Invalid character class" — and a pattern that does not
+                // compile is IGNORED rather than reported, so this field silently had no
+                // client-side constraint at all. Measured: with `ge cer siz!!` typed in,
+                // `validity.patternMismatch` was false. The username field two labels down
+                // escapes it correctly; this was one miss in a pair, and the e2e suite is what
+                // noticed, because there is nothing to see when a constraint quietly stops
+                // existing.
+                pattern="[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?"
                 placeholder="ev"
                 maxLength={63}
                 required
