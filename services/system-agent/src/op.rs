@@ -403,6 +403,51 @@ pub enum Request {
         staging_name: SafeComponent,
     },
 
+    /// Move one entry to another name, inside one share.
+    ///
+    /// The same `renameat2(RENAME_NOREPLACE)` plus destination-directory `fsync` that
+    /// `PublishTransfer` uses, aimed at a file the user already owns rather than at a staged one.
+    /// Refusing to overwrite is not a convenience: a move that silently replaces the file already
+    /// sitting at the destination destroys data the user never named, and there is no undo in this
+    /// product.
+    ///
+    /// ONE share, not two, and the single `share` field is what enforces it. A rename across
+    /// datasets returns `EXDEV` (ADR-0008) because every DEPSIS share is its own ZFS dataset, so a
+    /// cross-share `MoveEntry` could only ever be a copy-then-delete — a different operation, with
+    /// a different failure mode and a different cost, which therefore deserves its own name rather
+    /// than a surprise inside this one.
+    MoveEntry {
+        share: SafeComponent,
+        /// Where it is now, relative to the share root. The last element is the entry's own name.
+        from: Vec<SafeComponent>,
+        /// Where it goes, relative to the same share root. The last element is the new name; the
+        /// elements before it must already exist and be directories.
+        to: Vec<SafeComponent>,
+    },
+
+    /// Delete exactly ONE entry inside a share. Never a tree.
+    ///
+    /// `directory` is a required operand rather than something the agent works out by stat-ing the
+    /// path, and that is deliberate twice over. `unlinkat` needs `AT_REMOVEDIR` or not, so the
+    /// distinction has to be made somewhere; making the CALLER state it means a caller that
+    /// believes it is deleting a file and finds a directory gets a refusal instead of a surprise.
+    /// Deciding it from a stat would also be check-then-use on the one operation that cannot be
+    /// undone.
+    ///
+    /// There is no recursive variant and there will not be one. A non-empty directory comes back
+    /// as an error (`ENOTEMPTY`) and the API walks the tree itself. The reason is §2.2 and
+    /// ADR-0006: the closed operation set exists so that no single call the agent accepts has a
+    /// blast radius the caller chooses. "Delete this subtree" is `rm -rf` behind a typed name — one
+    /// bug in the unprivileged side, or one confused-deputy request, and it is the whole share.
+    /// The API knows the tree because the API stores the tree; the agent only needs to be able to
+    /// remove a leaf.
+    RemoveEntry {
+        share: SafeComponent,
+        path: Vec<SafeComponent>,
+        /// Is the entry a directory? The caller knows and has to say.
+        directory: bool,
+    },
+
     // ── ZeroTier (ADR-0020) ──
     //
     // Four operations, and the set is closed for the same reason the enum as a whole is. A
@@ -469,8 +514,17 @@ pub enum Response {
         temperature_celsius: Option<i32>,
         raw: String,
     },
+    /// The Samba configuration was written AND proved.
+    ///
+    /// `verified` is not decoration. `testparm` passing means the file parses; P0-B measured an
+    /// invalid `full_audit` opname passing it cleanly and then making smbd refuse every
+    /// connection, so this flag reports the live connection attempt that followed. The agent only
+    /// ever returns it `true` — a publish that cannot be proved rolls back and comes back as
+    /// `refused` — but the contract carries the field because a client must be able to tell
+    /// "shares are served" from "a file was written".
     Published {
         shares: usize,
+        verified: bool,
     },
     /// A transfer is open. `offset` is how many bytes the staging file already holds, so a
     /// resumed upload knows where to continue without asking the filesystem itself.
@@ -494,6 +548,33 @@ pub enum Response {
     /// fault.
     Discarded {
         existed: bool,
+    },
+    /// The entry is at its new name and the destination directory has been fsynced.
+    ///
+    /// No payload. The caller named both ends of the move and nothing about them changed, so
+    /// echoing them back would only invite a consumer to believe the agent had normalised
+    /// something.
+    Moved {},
+    /// The entry is gone.
+    ///
+    /// No `existed` flag, unlike `Discarded`. Discarding a staging file races the sweeper, so
+    /// "already clean" is a success there. Removing an entry the user asked to remove is different:
+    /// if it is not there, the caller's view of the tree disagrees with the disk, and answering
+    /// "done" would hide that. That case is `NotFound`.
+    Removed {},
+    /// The path the operation named is not there.
+    ///
+    /// Its own variant rather than `Refused`, because the API turns exactly this into 404 and
+    /// everything else in `Refused` into something else entirely. Collapsing them would put the
+    /// API back to matching on prose.
+    NotFound {
+        reason: String,
+    },
+    /// The operation would have collided with something that is already there: a destination name
+    /// that is taken, or a directory that still has children. 409, not 404 and not 500 — the caller
+    /// can fix both by doing something different.
+    Conflict {
+        reason: String,
     },
     /// The local node. `node_id` is ZeroTier's own address for this machine.
     #[serde(rename = "zerotier_status")]
@@ -525,6 +606,16 @@ pub enum Response {
     /// 500. A fault the operator caused and a fault the operator must fix look nothing alike.
     #[serde(rename = "zerotier_unavailable")]
     ZeroTierUnavailable {
+        reason: String,
+    },
+    /// Samba is not installed on this box.
+    ///
+    /// The same shape as `ZeroTierUnavailable` and for the same reason: DEPSIS packages neither,
+    /// so "absent" is an ordinary state of a machine that the API turns into 503 and the UI names
+    /// in a card. Collapsing it into `Failed` would send an operator hunting a broken agent
+    /// instead of installing a package, and it is what `SharePage.smbAvailable` reports.
+    #[serde(rename = "smb_unavailable")]
+    SmbUnavailable {
         reason: String,
     },
     Refused {
@@ -571,13 +662,14 @@ pub enum ZeroTierNetworkStatus {
 
 /// Bumped whenever `Request` or `Response` changes shape. The API checks it on connect.
 ///
-/// 2 as of the ZeroTier work: `Request` gained four variants and `Response` five, and the point of
-/// the check is that a NEW API against an OLD agent fails at the handshake, while someone is
+/// 3 as of `MoveEntry`/`RemoveEntry`: `Request` gained two variants and `Response` four. The point
+/// of the check is that a NEW API against an OLD agent fails at the handshake, while someone is
 /// watching a deployment. Without the bump the pair shakes hands cleanly and the mismatch surfaces
-/// on the first `ZeroTierJoin` as a generic refusal — a message from which nobody concludes "the
-/// agent binary is stale". `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it;
-/// they are one number in two languages.
-pub const SCHEMA_VERSION: u32 = 2;
+/// on the first `MoveEntry` as a generic refusal — a message from which nobody concludes "the agent
+/// binary is stale", and the operation that goes missing here is a delete.
+/// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
+/// languages.
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[cfg(test)]
 mod deny_unknown_tests {
@@ -813,6 +905,87 @@ mod tests {
         let json = r#"{"op":"create_snapshot","dataset":"-R","name":"s1"}"#;
         let parsed: Result<Request, _> = serde_json::from_str(json);
         assert!(parsed.is_err());
+    }
+
+    // ── MoveEntry / RemoveEntry ──
+
+    #[test]
+    fn a_traversing_component_cannot_be_expressed_in_a_move_or_a_remove() {
+        // The type test the brief asks for, and it is a PARSE failure rather than a runtime check:
+        // `Vec<SafeComponent>` has no inhabitant spelled `..`, so no dispatch code path can be
+        // reached with one. Nothing downstream has to remember to look, which is the whole reason
+        // the operand is a type instead of a string.
+        assert_eq!(
+            SafeComponent::parse(".."),
+            Err(ValidationError::ContainsDotDot)
+        );
+        for json in [
+            r#"{"op":"move_entry","share":"alice","from":["..","etc"],"to":["x"]}"#,
+            r#"{"op":"move_entry","share":"alice","from":["a"],"to":["..","..","etc","passwd"]}"#,
+            r#"{"op":"move_entry","share":"alice","from":["a/b"],"to":["c"]}"#,
+            r#"{"op":"move_entry","share":"..","from":["a"],"to":["b"]}"#,
+            r#"{"op":"remove_entry","share":"alice","path":["..","etc"],"directory":false}"#,
+            r#"{"op":"remove_entry","share":"alice","path":["a\\b"],"directory":false}"#,
+            r#"{"op":"remove_entry","share":"alice","path":["-rf"],"directory":false}"#,
+            r#"{"op":"remove_entry","share":"alice","path":[""],"directory":false}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Request>(json).is_err(),
+                "{json} must not deserialize"
+            );
+        }
+    }
+
+    #[test]
+    fn a_well_formed_move_and_remove_do_parse() {
+        // The negative test above is worth nothing without this one: a parser that rejected
+        // everything would pass it.
+        assert!(serde_json::from_str::<Request>(
+            r#"{"op":"move_entry","share":"alice","from":["docs","a.txt"],"to":["archive","a.txt"]}"#
+        )
+        .is_ok());
+        assert!(serde_json::from_str::<Request>(
+            r#"{"op":"remove_entry","share":"alice","path":["docs","a.txt"],"directory":false}"#
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn remove_entry_will_not_default_its_directory_flag() {
+        // Omitting `directory` must fail rather than mean `false`. A caller that forgot the field
+        // and got "file" by default would hit EISDIR on every directory — recoverable — but the
+        // reverse default would be worse, and neither belongs in an operation with no undo. The
+        // caller states what it thinks it is deleting.
+        assert!(serde_json::from_str::<Request>(
+            r#"{"op":"remove_entry","share":"alice","path":["d"]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn there_is_no_recursive_delete_variant() {
+        // The filesystem-shaped version of `there_is_no_raw_command_variant`. If someone adds an
+        // operation whose blast radius the caller chooses, one of these starts parsing.
+        for json in [
+            r#"{"op":"remove_entry","share":"alice","path":["d"],"directory":true,"recursive":true}"#,
+            r#"{"op":"remove_tree","share":"alice","path":["d"]}"#,
+            r#"{"op":"remove_entry","share":"alice","path":[],"directory":true,"force":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Request>(json).is_err(),
+                "{json} must not deserialize"
+            );
+        }
+    }
+
+    #[test]
+    fn a_move_names_one_share_and_cannot_name_two() {
+        // Cross-dataset rename is EXDEV (ADR-0008), so a two-share move would be a copy wearing a
+        // move's name. The schema has one `share` field; a request carrying a second is refused.
+        assert!(serde_json::from_str::<Request>(
+            r#"{"op":"move_entry","share":"alice","to_share":"bob","from":["a"],"to":["a"]}"#
+        )
+        .is_err());
     }
 
     #[test]

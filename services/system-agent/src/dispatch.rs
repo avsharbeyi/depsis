@@ -396,6 +396,170 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         Ok(Response::Publish { bytes: size })
     }
 
+    /// Does this caller-supplied path reach into the agent's own bookkeeping?
+    ///
+    /// `.depsis/` is inside the share — ADR-0008 puts staging there so a publish is an O(1)
+    /// same-dataset rename — which means a caller-supplied `Vec<SafeComponent>` can name it, and
+    /// `MoveEntry`/`RemoveEntry` would otherwise be a second door into it.
+    ///
+    /// Both doors are dangerous in the same direction. A move OUT of staging renames a `.part`
+    /// into the user's tree without the byte-count check `PublishTransfer` performs — precisely
+    /// the "the client died at 90% and the short file permanently took the good copy's name"
+    /// failure that check exists to prevent. A move INTO staging, or a remove inside it, steps
+    /// past the transfer registry's interlock on a file a data connection may be appending to.
+    /// The upload path has three operations of its own and they are the only way in.
+    fn touches_agent_state(path: &[&str]) -> bool {
+        path.first() == Some(&STAGING_DIR[0])
+    }
+
+    /// Move one entry to another name inside a share, durably, without ever overwriting.
+    fn move_entry(&self, share: &str, from: &[&str], to: &[&str]) -> Result<Response, SeamError> {
+        let Some(paths) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+        // An empty side names the share root. Renaming a share is a dataset operation with a
+        // dataset's consequences, and it must not be reachable by leaving a list empty.
+        let (Some((from_name, from_dirs)), Some((to_name, to_dirs))) =
+            (from.split_last(), to.split_last())
+        else {
+            return Ok(Response::Refused {
+                reason: "a move needs a source and a destination; the share root is not an entry"
+                    .to_string(),
+            });
+        };
+        if Self::touches_agent_state(from) || Self::touches_agent_state(to) {
+            return Ok(Response::Refused {
+                reason: format!(
+                    "{}/ is the agent's own tree; use the transfer operations",
+                    STAGING_DIR[0]
+                ),
+            });
+        }
+
+        let mut source_dir: Vec<&str> = vec![share];
+        source_dir.extend_from_slice(from_dirs);
+        let mut destination_dir: Vec<&str> = vec![share];
+        destination_dir.extend_from_slice(to_dirs);
+
+        // `SafePath::publish` IS this operation: `renameat2(RENAME_NOREPLACE)` between two
+        // directory descriptors resolved under `RESOLVE_BENEATH`, followed by an `fsync` of the
+        // destination directory, in ONE call so the fsync cannot be skipped here the way it was
+        // never skippable there. Reusing it rather than adding a second seam method is the whole
+        // point — two implementations of ADR-0008 step 5 is one too many, and the second is always
+        // the one that forgets.
+        //
+        // Nothing here checks first and moves afterwards. The refusal to overwrite is the kernel's,
+        // inside the same syscall as the move, so there is no window in which the destination can
+        // appear between a check and a rename.
+        //
+        // A destination parent that does not exist arrives as `NotFound` from `open_dir`, which is
+        // the honest answer: the folder the caller named is not there.
+        match paths.publish(&source_dir, from_name, &destination_dir, to_name) {
+            Ok(()) => Ok(Response::Moved {}),
+            Err(SeamError::NotFound(what)) => Ok(Response::NotFound {
+                reason: format!("{what}: no such entry"),
+            }),
+            // The destination is taken and the source is STILL THERE — `RENAME_NOREPLACE` is
+            // all-or-nothing, so a refused move has changed nothing at all.
+            Err(SeamError::AlreadyExists(what)) => Ok(Response::Conflict {
+                reason: format!("{what}: something is already there"),
+            }),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Delete exactly ONE entry inside a share.
+    ///
+    /// Not a tree. A directory with children comes back as `Conflict`, and the API — which stores
+    /// the tree and therefore knows it — walks the children itself. See `op::Request::RemoveEntry`
+    /// for why the agent must not be given an operation whose blast radius the caller chooses.
+    fn remove_entry(
+        &self,
+        share: &str,
+        path: &[&str],
+        directory: bool,
+    ) -> Result<Response, SeamError> {
+        let Some(paths) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+        let Some((name, dirs)) = path.split_last() else {
+            return Ok(Response::Refused {
+                reason: "a remove needs a path; the share root is not an entry".to_string(),
+            });
+        };
+        if Self::touches_agent_state(path) {
+            return Ok(Response::Refused {
+                reason: format!(
+                    "{}/ is the agent's own tree; use discard_transfer",
+                    STAGING_DIR[0]
+                ),
+            });
+        }
+
+        // The same interlock `DiscardTransfer` asks, and it is worth being precise about what it
+        // does and does not catch here, because the obvious reading of it is wrong.
+        //
+        // A READ takes no reservation — `TransferRegistry::insert` says why, and P1-D measured the
+        // bug that made it so — therefore this does NOT refuse while a download is streaming. It
+        // does not need to: unlinking a file whose reader holds an open descriptor leaves that
+        // reader on the same inode with the same bytes, and the space comes back when it closes.
+        // The dangerous direction is a WRITER, and a writer is always in `.depsis/staging`, which
+        // the refusal above has already made unreachable.
+        //
+        // The check stays because it is the honest statement of the invariant — the agent does not
+        // unlink a name the registry has spoken for — and because the day a read does take a
+        // reservation, this is the line that would otherwise have to be remembered.
+        let key = path.join("/");
+        {
+            let registry = self
+                .transfers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if registry.is_busy(share, &key) {
+                return Ok(Response::Refused {
+                    reason: format!("{key} has a transfer open right now"),
+                });
+            }
+        }
+
+        let mut parent: Vec<&str> = vec![share];
+        parent.extend_from_slice(dirs);
+
+        let removed = if directory {
+            match paths.remove_dir(&parent, name) {
+                Ok(removed) => removed,
+                // Not a fault. There is no loop above this and no recursive flag below it: the
+                // agent's answer to a populated directory is "no", and the caller's answer is to
+                // remove the children first.
+                Err(SeamError::NotEmpty(_)) => {
+                    return Ok(Response::Conflict {
+                        reason: format!("{key} still has entries in it"),
+                    })
+                }
+                Err(other) => return Err(other),
+            }
+        } else {
+            paths.remove_file(&parent, name)?
+        };
+
+        if !removed {
+            // Distinguishable, deliberately, and the opposite of `Discarded { existed: false }`.
+            // A discard races the sweeper, so "already gone" is a success there. A remove the user
+            // asked for finding nothing means the caller's picture of the tree and the disk have
+            // diverged; answering "done" would hide that and the API would report a deletion that
+            // never happened.
+            return Ok(Response::NotFound {
+                reason: format!("{key}: no such entry"),
+            });
+        }
+
+        Ok(Response::Removed {})
+    }
+
     /// Handle one raw request line.
     ///
     /// Returns a `Response` in every case, including refusal — the caller is a program, and a
@@ -623,17 +787,82 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 self.open_download(share.as_str(), &parts, peer, correlation_id, reason)
             }
 
+            Request::MoveEntry { share, from, to } => {
+                let from: Vec<&str> = from.iter().map(|c| c.as_str()).collect();
+                let to: Vec<&str> = to.iter().map(|c| c.as_str()).collect();
+                self.move_entry(share.as_str(), &from, &to)
+            }
+
+            Request::RemoveEntry {
+                share,
+                path,
+                directory,
+            } => {
+                let parts: Vec<&str> = path.iter().map(|c| c.as_str()).collect();
+                let response = self.remove_entry(share.as_str(), &parts, *directory)?;
+
+                // A second audit record, and only for a removal that actually happened.
+                //
+                // `handle` already logged the intent before this ran, but `audit::Entry` carries
+                // the operation NAME and nothing else — §16 keeps operands out of the trail by
+                // default so that a field added later cannot leak a secret into it. That default is
+                // right everywhere except here: this is the one operation with no undo, and
+                // "remove_entry, allowed" does not answer "which file is gone?".
+                //
+                // A share name and a path are names, not contents, so recording them breaks none of
+                // §16's rules. They go beside the caller's own reason because that is the field
+                // that carries free text; the correlation id, uid and pid come from the envelope,
+                // so the deletion can be followed back to the HTTP request that caused it.
+                if matches!(response, Response::Removed {}) {
+                    self.audit.record(audit::entry(
+                        correlation_id,
+                        peer,
+                        request,
+                        &format!(
+                            "{reason} | removed {}/{}{}",
+                            share.as_str(),
+                            parts.join("/"),
+                            if *directory { " (directory)" } else { "" }
+                        ),
+                        Outcome::Allowed,
+                    ));
+                }
+                Ok(response)
+            }
+
             Request::PublishSambaConfig { shares } => {
-                // testparm is necessary but NOT sufficient. P0-B measured an invalid
-                // full_audit opname passing testparm cleanly and then making smbd refuse every
-                // connection. The real implementation must follow this with a live connection
-                // smoke test and roll back on failure (§17); this skeleton stops at validation
-                // and says so rather than pretending the gate is complete.
-                self.runner
-                    .run(bin::TESTPARM, &["-s", "--suppress-prompt"])?;
-                Ok(Response::Published {
-                    shares: shares.len(),
-                })
+                // The whole sequence — generate, write atomically, testparm, live connection,
+                // roll back on any refusal — lives in `samba`, because every step of it is
+                // filesystem work that has to be tested against a real directory rather than
+                // asserted about an argv. What stays here is the mapping onto the three answers
+                // the API can act on, and they are deliberately three:
+                //
+                //   published        the shares are being served, proved by a client connecting
+                //   smb_unavailable  Samba is not installed here — a 503, not a fault (§17)
+                //   refused          Samba said no and the PREVIOUS configuration is back, so
+                //                    whatever worked before still works (409)
+                //
+                // Anything else, the failed rollback above all, is an error: it must be audited
+                // as a failure, because it is the one outcome that leaves the box worse than it
+                // was found.
+                let config = crate::samba::config_path();
+                let host = crate::samba::Host::new(self.runner);
+                match crate::samba::publish(&config, shares, &host) {
+                    Ok(outcome) => Ok(Response::Published {
+                        shares: outcome.shares,
+                        verified: outcome.verified,
+                    }),
+                    Err(e) if e.is_unavailable() => Ok(Response::SmbUnavailable {
+                        reason: e.to_string(),
+                    }),
+                    Err(
+                        e @ (crate::samba::SambaError::RejectedRolledBack(_)
+                        | crate::samba::SambaError::Unrepresentable(_)),
+                    ) => Ok(Response::Refused {
+                        reason: e.to_string(),
+                    }),
+                    Err(e) => Err(SeamError::Io(e.to_string())),
+                }
             }
 
             // ── ZeroTier (ADR-0020) ──
@@ -1487,5 +1716,348 @@ mod tests {
             "attack",
         );
         assert!(matches!(resp, Response::Refused { .. }));
+    }
+
+    // ── MoveEntry / RemoveEntry ──
+    //
+    // Against `MockSafePath`, which is a REAL filesystem under a tempdir. What these pin is what
+    // the dispatcher decides — which refusal, which status, and what is left on disk afterwards.
+    // The syscall-level claims (RENAME_NOREPLACE actually refusing, AT_REMOVEDIR actually not
+    // recursing, NO_SYMLINKS actually confining) are measured against a real kernel in `unix.rs`,
+    // because a lexical mock could report any of them and prove none.
+
+    fn call(h: &Harness, raw: &str) -> Response {
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        h.agent(&r, &s)
+            .handle(raw, peer(API_UID), "c-entry", "user asked")
+    }
+
+    #[test]
+    fn a_move_relocates_the_entry_and_keeps_its_contents() {
+        let h = Harness::with_share("alice");
+        std::fs::create_dir(h.share_path(&["alice", "docs"])).expect("mkdir docs");
+        std::fs::create_dir(h.share_path(&["alice", "archive"])).expect("mkdir archive");
+        std::fs::write(h.share_path(&["alice", "docs", "a.txt"]), b"keep me").expect("write");
+
+        let raw = r#"{"op":"move_entry","share":"alice","from":["docs","a.txt"],"to":["archive","b.txt"]}"#;
+        assert!(
+            matches!(call(&h, raw), Response::Moved {}),
+            "the move must succeed"
+        );
+
+        assert!(!h.share_path(&["alice", "docs", "a.txt"]).exists());
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "archive", "b.txt"])).expect("read"),
+            b"keep me",
+            "a move must not touch the bytes"
+        );
+    }
+
+    #[test]
+    fn a_move_onto_an_existing_name_is_refused_and_changes_nothing() {
+        // The one outcome this product cannot accept: a silent overwrite. Both files must be
+        // exactly where they were, with exactly the contents they had.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "from.txt"]), b"the mover").expect("write src");
+        std::fs::write(h.share_path(&["alice", "to.txt"]), b"the resident").expect("write dst");
+
+        let raw = r#"{"op":"move_entry","share":"alice","from":["from.txt"],"to":["to.txt"]}"#;
+        match call(&h, raw) {
+            Response::Conflict { reason } => assert!(reason.contains("to.txt"), "{reason}"),
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "to.txt"])).expect("read dst"),
+            b"the resident",
+            "the destination was overwritten"
+        );
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "from.txt"])).expect("read src"),
+            b"the mover",
+            "a refused move must leave the source in place"
+        );
+    }
+
+    #[test]
+    fn moving_something_that_is_not_there_is_a_not_found_and_not_a_failure() {
+        // The API turns this into 404. Arriving as `Failed` would make it a 500 for a case the
+        // client can act on — the file was renamed over SMB since the listing it is working from.
+        let h = Harness::with_share("alice");
+        let raw = r#"{"op":"move_entry","share":"alice","from":["ghost.txt"],"to":["b.txt"]}"#;
+        assert!(
+            matches!(call(&h, raw), Response::NotFound { .. }),
+            "a missing source must be distinguishable"
+        );
+    }
+
+    #[test]
+    fn a_move_into_a_folder_that_does_not_exist_is_refused_rather_than_creating_it() {
+        // No implicit mkdir. Creating the parent would make a typo in the destination produce a
+        // directory the user never asked for, containing the file they can no longer find.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "a.txt"]), b"x").expect("write");
+
+        let raw = r#"{"op":"move_entry","share":"alice","from":["a.txt"],"to":["nope","a.txt"]}"#;
+        assert!(matches!(call(&h, raw), Response::NotFound { .. }));
+        assert!(
+            h.share_path(&["alice", "a.txt"]).exists(),
+            "the source must survive a refused move"
+        );
+        assert!(!h.share_path(&["alice", "nope"]).exists());
+    }
+
+    #[test]
+    fn a_move_cannot_carry_a_file_out_of_or_into_the_agents_own_tree() {
+        // Out of staging would rename a half-written `.part` into the user's tree without the
+        // byte-count check `PublishTransfer` performs; into it would step past the registry's
+        // interlock. The upload path has its own three operations and they are the only way in.
+        let h = Harness::with_share("alice");
+        std::fs::write(
+            h.share_path(&["alice", ".depsis", "staging", "half.part"]),
+            b"incomplete",
+        )
+        .expect("stage");
+        std::fs::write(h.share_path(&["alice", "mine.txt"]), b"x").expect("write");
+
+        let out = r#"{"op":"move_entry","share":"alice","from":[".depsis","staging","half.part"],"to":["report.txt"]}"#;
+        assert!(matches!(call(&h, out), Response::Refused { .. }));
+        assert!(
+            !h.share_path(&["alice", "report.txt"]).exists(),
+            "a half-written upload reached the user's tree"
+        );
+
+        let into = r#"{"op":"move_entry","share":"alice","from":["mine.txt"],"to":[".depsis","staging","mine.txt"]}"#;
+        assert!(matches!(call(&h, into), Response::Refused { .. }));
+        assert!(h.share_path(&["alice", "mine.txt"]).exists());
+    }
+
+    #[test]
+    fn a_move_cannot_name_the_share_root_as_either_end() {
+        // An empty list is the share itself. Renaming a share is a dataset operation with a
+        // dataset's consequences and must not be reachable by omitting elements.
+        let h = Harness::with_share("alice");
+        for raw in [
+            r#"{"op":"move_entry","share":"alice","from":[],"to":["x"]}"#,
+            r#"{"op":"move_entry","share":"alice","from":["x"],"to":[]}"#,
+        ] {
+            assert!(matches!(call(&h, raw), Response::Refused { .. }), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_traversing_move_never_reaches_the_filesystem() {
+        // Refused at parse time by `SafeComponent`, before authorization and before any path work.
+        // The dispatcher half of the type test in `op.rs`.
+        let h = Harness::with_share("alice");
+        let raw = r#"{"op":"move_entry","share":"alice","from":["..","..","etc","passwd"],"to":["stolen"]}"#;
+        match call(&h, raw) {
+            Response::Refused { reason } => assert!(reason.contains("unparseable"), "{reason}"),
+            other => panic!("expected a parse refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_file_is_removed_and_a_second_removal_says_so() {
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "gone.txt"]), b"x").expect("write");
+
+        let raw = r#"{"op":"remove_entry","share":"alice","path":["gone.txt"],"directory":false}"#;
+        assert!(matches!(call(&h, raw), Response::Removed {}));
+        assert!(!h.share_path(&["alice", "gone.txt"]).exists());
+
+        // NOT a success on the second call, unlike `DiscardTransfer`. A discard races the sweeper;
+        // a remove the user asked for finding nothing means their picture of the tree and the disk
+        // have diverged, and the API has to answer 404 rather than report a deletion.
+        assert!(
+            matches!(call(&h, raw), Response::NotFound { .. }),
+            "removing something that is not there must be distinguishable"
+        );
+    }
+
+    #[test]
+    fn an_empty_directory_is_removed_and_a_populated_one_is_refused() {
+        let h = Harness::with_share("alice");
+        std::fs::create_dir(h.share_path(&["alice", "empty"])).expect("mkdir");
+        std::fs::create_dir(h.share_path(&["alice", "full"])).expect("mkdir");
+        std::fs::write(h.share_path(&["alice", "full", "child.txt"]), b"still mine")
+            .expect("write");
+
+        let empty = r#"{"op":"remove_entry","share":"alice","path":["empty"],"directory":true}"#;
+        assert!(matches!(call(&h, empty), Response::Removed {}));
+        assert!(!h.share_path(&["alice", "empty"]).exists());
+
+        // The headline property: there is no way to ask the agent for a tree. The API walks it.
+        let full = r#"{"op":"remove_entry","share":"alice","path":["full"],"directory":true}"#;
+        match call(&h, full) {
+            Response::Conflict { reason } => assert!(reason.contains("full"), "{reason}"),
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "full", "child.txt"])).expect("read"),
+            b"still mine",
+            "the child was destroyed on the way to refusing"
+        );
+    }
+
+    #[test]
+    fn removing_a_file_that_is_being_downloaded_is_allowed_and_the_reader_keeps_its_bytes() {
+        // Pinning the behaviour rather than the guess. A read takes no registry reservation
+        // (`TransferRegistry::insert`, measured in P1-D), so `is_busy` is false here and the remove
+        // goes through — which is correct: the reader holds an open descriptor, so it stays on the
+        // same inode with the same contents, and the space comes back when it closes.
+        //
+        // The case that WOULD be dangerous is unlinking a file a writer is appending to, and that
+        // one is unreachable: a writer is always in `.depsis/staging`, which `remove_entry`
+        // refuses outright.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "busy.txt"]), b"being read").expect("write");
+
+        let open = r#"{"op":"open_download","share":"alice","path":["busy.txt"]}"#;
+        let token = match call(&h, open) {
+            Response::Download { token, .. } => token,
+            other => panic!("expected a download, got {other:?}"),
+        };
+
+        let remove =
+            r#"{"op":"remove_entry","share":"alice","path":["busy.txt"],"directory":false}"#;
+        assert!(matches!(call(&h, remove), Response::Removed {}));
+        assert!(!h.share_path(&["alice", "busy.txt"]).exists());
+
+        // The descriptor the agent opened is still in the registry and still readable — the whole
+        // reason a download does not have to hold the name.
+        let mut registry = h
+            .transfers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut transfer, _) = registry.claim(&token, peer(API_UID)).expect("claim");
+        drop(registry);
+        let mut bytes = Vec::new();
+        transfer
+            .file
+            .seek(std::io::SeekFrom::Start(0))
+            .expect("rewind");
+        std::io::Read::read_to_end(&mut transfer.file, &mut bytes).expect("read");
+        assert_eq!(
+            bytes, b"being read",
+            "the unlinked inode must still serve the reader"
+        );
+    }
+
+    #[test]
+    fn a_remove_cannot_reach_the_agents_own_tree_or_the_share_root() {
+        let h = Harness::with_share("alice");
+        std::fs::write(
+            h.share_path(&["alice", ".depsis", "staging", "live.part"]),
+            b"in flight",
+        )
+        .expect("stage");
+
+        let staging = r#"{"op":"remove_entry","share":"alice","path":[".depsis","staging","live.part"],"directory":false}"#;
+        assert!(matches!(call(&h, staging), Response::Refused { .. }));
+        assert!(h
+            .share_path(&["alice", ".depsis", "staging", "live.part"])
+            .exists());
+
+        let root = r#"{"op":"remove_entry","share":"alice","path":[],"directory":true}"#;
+        assert!(
+            matches!(call(&h, root), Response::Refused { .. }),
+            "an empty path names the share itself and must never be a delete"
+        );
+        assert!(h.share_path(&["alice"]).exists());
+    }
+
+    #[test]
+    fn a_removal_is_recorded_with_the_share_the_path_and_the_correlation_id() {
+        // An operation with no undo has to be answerable afterwards. `Entry` carries the operation
+        // NAME only by design (§16), which is right everywhere except here — "remove_entry,
+        // allowed" does not answer "which file is gone?".
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::with_share("alice");
+        std::fs::create_dir(h.share_path(&["alice", "docs"])).expect("mkdir");
+        std::fs::write(h.share_path(&["alice", "docs", "receipt.pdf"]), b"x").expect("write");
+
+        let raw = r#"{"op":"remove_entry","share":"alice","path":["docs","receipt.pdf"],"directory":false}"#;
+        assert!(matches!(
+            h.agent(&r, &s)
+                .handle(raw, peer(API_UID), "corr-42", "user emptied the trash"),
+            Response::Removed {}
+        ));
+
+        let entries = s.entries();
+        let recorded = entries
+            .iter()
+            .find(|e| e.reason.contains("removed"))
+            .unwrap_or_else(|| panic!("no removal record in {entries:?}"));
+        assert_eq!(recorded.operation, "remove_entry");
+        assert_eq!(recorded.correlation_id, "corr-42");
+        assert!(
+            recorded.reason.contains("alice/docs/receipt.pdf"),
+            "{}",
+            recorded.reason
+        );
+        assert!(
+            recorded.reason.contains("user emptied the trash"),
+            "the caller's own reason must survive: {}",
+            recorded.reason
+        );
+    }
+
+    #[test]
+    fn a_refused_removal_leaves_no_record_claiming_the_file_is_gone() {
+        // The other half of the audit claim. A trail that says "removed" for a delete that did not
+        // happen is worse than no trail: it is evidence for the wrong conclusion.
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::with_share("alice");
+        let raw = r#"{"op":"remove_entry","share":"alice","path":["ghost.txt"],"directory":false}"#;
+        assert!(matches!(
+            h.agent(&r, &s)
+                .handle(raw, peer(API_UID), "corr-43", "user emptied the trash"),
+            Response::NotFound { .. }
+        ));
+        assert!(
+            !s.entries().iter().any(|e| e.reason.contains("removed")),
+            "a removal that did not happen was recorded as one"
+        );
+    }
+
+    #[test]
+    fn move_and_remove_are_refused_before_storage_is_set_up() {
+        let h = Harness::bare();
+        for raw in [
+            r#"{"op":"move_entry","share":"alice","from":["a"],"to":["b"]}"#,
+            r#"{"op":"remove_entry","share":"alice","path":["a"],"directory":false}"#,
+        ] {
+            match call(&h, raw) {
+                Response::Refused { reason } => {
+                    assert!(reason.contains("no share root"), "{reason}");
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn move_and_remove_still_require_the_api_uid() {
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "a.txt"]), b"x").expect("write");
+        for raw in [
+            r#"{"op":"move_entry","share":"alice","from":["a.txt"],"to":["b.txt"]}"#,
+            r#"{"op":"remove_entry","share":"alice","path":["a.txt"],"directory":false}"#,
+        ] {
+            assert!(matches!(
+                h.agent(&r, &s).handle(raw, peer(1000), "c-deny", "probe"),
+                Response::Refused { .. }
+            ));
+        }
+        assert!(
+            h.share_path(&["alice", "a.txt"]).exists(),
+            "an unauthorized caller changed the filesystem"
+        );
     }
 }

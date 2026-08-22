@@ -4,14 +4,16 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { api, API_BASE_URL, problemMessage } from './api.js';
 import { formatBytes } from './Dashboard.js';
 import type { Tone } from './ui.js';
-import { Bar, ConfirmBox, Empty, PromptBox, TONES, toneRgb, Win } from './ui.js';
+import { Bar, ConfirmBox, Empty, FolderPicker, PromptBox, TONES, toneRgb, Win } from './ui.js';
 
 type FileEntry = OpenApi.components['schemas']['FileEntry'];
 type FileEntryPage = OpenApi.components['schemas']['FileEntryPage'];
 
 interface Props {
   notify: (kind: 'ok' | 'error', text: string) => void;
-  onUnauthenticated: () => void;
+  /** The optional note replaces the default sign-out sentence. A batch cut off by an expired
+   *  session reports what it already did there, because this screen unmounts with the desk. */
+  onUnauthenticated: (note?: string) => void;
 }
 
 /** A step in the trail. Navigation is by id — never by a path string — because that is what the
@@ -40,7 +42,47 @@ type Modal =
   | { kind: 'none' }
   | { kind: 'new-folder' }
   | { kind: 'rename'; entry: FileEntry }
-  | { kind: 'trash'; entries: FileEntry[] };
+  | { kind: 'trash'; entries: FileEntry[] }
+  | { kind: 'permanent'; entries: FileEntry[] }
+  | { kind: 'empty-trash' }
+  | { kind: 'move'; entries: FileEntry[] }
+  /** A drop, which chose its own destination — so it is answered by a `ConfirmBox` naming the
+   *  folder rather than by the picker. */
+  | { kind: 'move-drop'; entries: FileEntry[]; target: FileEntry };
+
+/** How many direct children a folder about to be destroyed holds, as the server reported it.
+ *  `more` is the contract's `hasMore` — there is no total (§14), so a full page becomes "200+". */
+interface ChildCount {
+  n: number;
+  more: boolean;
+}
+
+/** Names in a confirmation before the list stops being read. Past this the box turns into a wall
+ *  of text and the number at the top — the thing that actually has to land — is what gets skipped. */
+const NAMES_SHOWN = 10;
+
+/**
+ * What the server says THIS caller may do to THIS row.
+ *
+ * The contract puts the list on every entry for one stated reason: so the interface does not draw
+ * a button the server is going to refuse (§6.2, ADR-0021). Today every member gets the same seven
+ * back, so reading the field changes nothing on screen — which is exactly why it has to be read
+ * now, because the day the `folder_grants` ancestor walk lands, an unread field turns into a row
+ * of buttons that answer 403.
+ */
+function can(
+  entry: FileEntry,
+  permission: OpenApi.components['schemas']['FolderPermission'],
+): boolean {
+  return entry.permissions.includes(permission);
+}
+
+/** Whether a drag carries files from outside the browser. An internal row drag has no `Files`
+ *  entry, and without this test the whole card lights up as an upload target while the user is
+ *  only moving a row from one folder to another. */
+function hasFiles(transfer: DataTransfer): boolean {
+  return Array.from(transfer.types).includes('Files');
+}
 
 /* ─── row glyphs ────────────────────────────────────────────────────────────── */
 
@@ -163,6 +205,14 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
   const [dragOver, setDragOver] = useState(false);
   const [progress, setProgress] = useState<{ label: string; percent: number } | null>(null);
   const [modal, setModal] = useState<Modal>({ kind: 'none' });
+  /** Filled while the permanent-delete box is open. Absent for a folder means "not counted", not
+   *  "empty" — the box words those two differently on purpose. */
+  const [childCounts, setChildCounts] = useState<ReadonlyMap<string, ChildCount>>(new Map());
+  /** The ids being dragged. A drag begun on a row inside the selection carries the whole
+   *  selection, so this is a set rather than one id. */
+  const [drag, setDrag] = useState<ReadonlySet<string> | null>(null);
+  /** The folder row the pointer is currently over, for `.frow.over`. */
+  const [over, setOver] = useState<string | null>(null);
   const [counts, setCounts] = useState<{ home: string | null; trash: string | null }>({
     home: null,
     trash: null,
@@ -324,6 +374,51 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
     };
   }, [reloadKey]);
 
+  /* ── how much a permanent delete is about to destroy ──
+     The box opens straight away and the numbers land a moment later, because a confirmation that
+     waits for a round trip before appearing reads as a click that did nothing.
+
+     Only a positive count is shown. A trashed folder's children keep `trashed_at` NULL — the bin
+     is one flag on one row (ADR-0008) — so it is not settled that this listing returns them, and
+     an empty answer can mean "no children" or "not visible from here". Printing "0 öğe" over a
+     folder that in fact holds forty is the one number this box must never print, so an empty
+     answer produces no number at all and the box says "ve içindekiler" instead. */
+  useEffect(() => {
+    const doomed =
+      modal.kind === 'permanent'
+        ? modal.entries
+        : modal.kind === 'empty-trash'
+          ? (entries ?? [])
+          : null;
+    if (doomed === null) return undefined;
+    // Only the rows the box will actually print. Emptying a bin that holds a full page of folders
+    // would otherwise open two hundred listings at once to fill in ten lines of text.
+    const folders = doomed.slice(0, NAMES_SHOWN).filter((entry) => entry.kind === 'folder');
+    setChildCounts(new Map());
+    if (folders.length === 0) return undefined;
+    let cancelled = false;
+    void (async () => {
+      const pages = await Promise.all(
+        folders.map(async (folder) => {
+          const { data } = await api.GET('/files', {
+            params: { query: { parentId: folder.id, limit: PAGE } },
+          });
+          return { id: folder.id, page: data };
+        }),
+      );
+      if (cancelled) return;
+      const next = new Map<string, ChildCount>();
+      for (const { id, page } of pages) {
+        if (page === undefined || page.items.length === 0) continue;
+        next.set(id, { n: page.items.length, more: page.hasMore });
+      }
+      setChildCounts(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [modal, entries]);
+
   /* ── the upload menu closes the way every menu does ── */
   useEffect(() => {
     if (!menuOpen) return undefined;
@@ -354,6 +449,19 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
   }, []);
 
   /* ── mutations ── */
+
+  /**
+   * Open a box that acts on rows, and only if there are rows.
+   *
+   * The three boxes behind this all begin with a count of what is about to happen, and a count of
+   * nothing is the one thing they must never print: the permanent-delete body would read
+   * " diskten silinecek. BU İŞLEM GERİ ALINAMAZ" with the number missing, over a list of nothing,
+   * and answering "evet" would then do nothing and report nothing.
+   */
+  function openOn(kind: 'trash' | 'permanent' | 'move', list: FileEntry[]): void {
+    if (list.length === 0) return;
+    setModal({ kind, entries: list });
+  }
 
   async function createFolder(name: string): Promise<void> {
     setModal({ kind: 'none' });
@@ -394,7 +502,15 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
     setModal({ kind: 'none' });
     let failed = 0;
     for (const entry of list) {
-      const { error } = await api.DELETE('/files/{id}', { params: { path: { id: entry.id } } });
+      const { error, response } = await api.DELETE('/files/{id}', {
+        params: { path: { id: entry.id } },
+      });
+      // Without this, an expired session turned ten selected rows into ten toasts blaming the
+      // rows for a refusal that had nothing to do with them, on a desk with no session left.
+      if (response.status === 401) {
+        onUnauthenticated();
+        return;
+      }
       if (error !== undefined) {
         failed += 1;
         notify('error', problemMessage(error, `"${entry.name}" çöp kutusuna taşınamadı.`));
@@ -416,9 +532,13 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
   async function restore(list: FileEntry[]): Promise<void> {
     let failed = 0;
     for (const entry of list) {
-      const { error } = await api.POST('/files/{id}/restore', {
+      const { error, response } = await api.POST('/files/{id}/restore', {
         params: { path: { id: entry.id } },
       });
+      if (response.status === 401) {
+        onUnauthenticated();
+        return;
+      }
       if (error !== undefined) {
         failed += 1;
         // A 409 here is the interesting one: the name was taken back while the row sat in the bin.
@@ -433,6 +553,185 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
           ? `"${list[0].name}" geri alındı.`
           : `${back} öğe geri alındı.`,
       );
+    }
+    setPicking(false);
+    reload();
+  }
+
+  /**
+   * Destroy the bytes.
+   *
+   * A loop, and the contract is why: `DELETE /files/{id}/permanent` walks a folder bottom-up and
+   * is NOT atomic — cut off halfway, what went is gone and the rest stays in the bin, and calling
+   * again picks up where it stopped. So the screen has to report a partial result honestly: how
+   * many went, how many did not, and what the first refusal said. One "başarısız" toast over a
+   * bin that is now half empty leaves the reader with no idea which half.
+   *
+   * Returns how many rows are gone, and whether the session outlived the run: emptying the bin
+   * has something to add afterwards, and it must not add it to a desk that has been replaced by
+   * the sign-in form.
+   */
+  async function permanentDelete(
+    list: FileEntry[],
+    label: string,
+  ): Promise<{ done: number; signedOut: boolean }> {
+    setModal({ kind: 'none' });
+    if (list.length === 0) return { done: 0, signedOut: false };
+
+    let done = 0;
+    let firstError = '';
+    for (const [index, entry] of list.entries()) {
+      setProgress({
+        label: `${label} · ${index + 1}/${list.length} · ${entry.name}`,
+        percent: Math.round((index / list.length) * 100),
+      });
+      const { error, response } = await api.DELETE('/files/{id}/permanent', {
+        params: { path: { id: entry.id } },
+      });
+      if (response.status === 401) {
+        setProgress(null);
+        // The tally goes with the sign-out, not into a toast: `onUnauthenticated` swaps the whole
+        // desk for the sign-in form and the toast stack unmounts with it. A bin emptied down to
+        // item 47 of 200 must not come back looking 46 items lighter for no stated reason.
+        onUnauthenticated(
+          done === 0
+            ? undefined
+            : `Oturumunuz sona erdi. Kesilmeden önce ${done} öğe kalıcı olarak silinmişti.`,
+        );
+        return { done, signedOut: true };
+      }
+      // 204: no body, so `data` is undefined on success too. `response.ok` is the only honest test.
+      if (response.ok) {
+        done += 1;
+        continue;
+      }
+      // 404 is done, not failed, for the same reason the server accepts the agent's `not_found`:
+      // the row this call exists to remove is already gone. The bin is FLAT — a folder and a file
+      // trashed separately both appear as rows — so purging the folder first takes the file's row
+      // with it, and counting the follow-up 404 as a failure would report destroyed data as
+      // surviving, over a bin the reader can see is empty.
+      if (response.status === 404) {
+        done += 1;
+        continue;
+      }
+      const message = problemMessage(
+        error,
+        response.status === 409
+          ? // The entry exists but is not in the bin. Only the FALLBACK, because 409 on this route
+            // carries at least six different refusals — a folder with bytes on disk the database
+            // cannot name among them — and that sentence is the one worth reading.
+            `"${entry.name}" çöpte değil — kalıcı silmek için önce çöpe atın.`
+          : `"${entry.name}" kalıcı olarak silinemedi.`,
+      );
+      if (firstError === '') firstError = message;
+    }
+    setProgress(null);
+
+    const failed = list.length - done;
+    if (done > 0) {
+      notify(
+        'ok',
+        done === 1 && list[0] !== undefined
+          ? `"${list[0].name}" kalıcı olarak silindi.`
+          : `${done} öğe kalıcı olarak silindi.`,
+      );
+    }
+    if (failed > 0) {
+      notify('error', `${failed} öğe silinemedi, ${done} öğe silindi. ${firstError}`);
+    }
+    setPicking(false);
+    reload();
+    return { done, signedOut: false };
+  }
+
+  /** The bin holds whatever one page of it holds — there is no total in the contract — so what is
+   *  on screen is what gets emptied, and the reader is told if there may be more behind it. */
+  async function emptyTrash(): Promise<void> {
+    const list = entries ?? [];
+    const hadMore = more;
+    const { done, signedOut } = await permanentDelete(list, 'Çöp boşaltılıyor');
+    // Only when something actually went, and never as an 'ok': a run in which every delete was
+    // refused ended on a green tick telling the reader to do it again, and 'ok' dismisses itself
+    // after four seconds — so the one instruction that matters after a partial purge was the one
+    // that vanished. Nothing at all once the session went with it; the sign-in note carries the
+    // tally there and this stack is no longer on screen.
+    if (hadMore && done > 0 && !signedOut) {
+      notify('error', 'Çöpte bu sayfaya sığmayan öğeler kalmış olabilir; boşaltmayı yineleyin.');
+    }
+  }
+
+  /**
+   * Move rows into another folder.
+   *
+   * `parentId` on `PATCH /files/{id}`: one column on the same row, one `rename(2)` on the disk.
+   * The two refusals worth translating are both 409 — a destination in another share, which is an
+   * EXDEV the server will not paper over (ADR-0008), and a folder dropped inside itself.
+   *
+   * `targetName` is carried all the way down to the toast because a move has no undo and the
+   * screen is the only record of where things went. "3 öğe taşındı." over a two-hundred-row
+   * listing tells the reader that something left, and nothing at all about where to look for it.
+   */
+  async function move(list: FileEntry[], target: string | null, targetName: string): Promise<void> {
+    setModal({ kind: 'none' });
+    if (list.length === 0) return;
+
+    let done = 0;
+    let firstError = '';
+    for (const [index, entry] of list.entries()) {
+      if (entry.id === target) {
+        // The picker closes this door for every selected folder; a drop can still land a row on
+        // itself, and a cycle is not something to find out about from a 409.
+        if (firstError === '') firstError = `"${entry.name}" kendi içine taşınamaz.`;
+        continue;
+      }
+      // Every move, not only a batch. `busy` is what disables the row controls and turns off
+      // `draggable`, so a single move that left the screen unlocked let a second irreversible
+      // operation start on top of the first one.
+      setProgress({
+        label: `Taşınıyor · ${index + 1}/${list.length} · ${entry.name}`,
+        percent: Math.round((index / list.length) * 100),
+      });
+      const { error, response } = await api.PATCH('/files/{id}', {
+        params: { path: { id: entry.id } },
+        body: { parentId: target },
+      });
+      if (response.status === 401) {
+        setProgress(null);
+        // As in `permanentDelete`: the toast stack goes with the desk, so a half-applied batch is
+        // reported on the sign-in form or not at all.
+        onUnauthenticated(
+          done === 0
+            ? undefined
+            : `Oturumunuz sona erdi. Kesilmeden önce ${done} öğe "${targetName}" içine taşınmıştı.`,
+        );
+        return;
+      }
+      if (error === undefined) {
+        done += 1;
+        continue;
+      }
+      const message =
+        response.status === 409
+          ? problemMessage(
+              error,
+              `"${entry.name}" oraya taşınamadı: hedef başka bir paylaşımda ya da klasörün kendi altında.`,
+            )
+          : problemMessage(error, `"${entry.name}" taşınamadı.`);
+      if (firstError === '') firstError = message;
+    }
+    setProgress(null);
+
+    const failed = list.length - done;
+    if (done > 0) {
+      notify(
+        'ok',
+        done === 1 && list[0] !== undefined
+          ? `"${list[0].name}" → "${targetName}"`
+          : `${done} öğe "${targetName}" içine taşındı.`,
+      );
+    }
+    if (failed > 0) {
+      notify('error', `${failed} öğe taşınamadı, ${done} öğe taşındı. ${firstError}`);
     }
     setPicking(false);
     reload();
@@ -574,7 +873,7 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
    */
   function download(list: FileEntry[]): void {
     for (const entry of list) {
-      if (entry.kind !== 'file') continue;
+      if (entry.kind !== 'file' || !can(entry, 'download')) continue;
       const anchor = document.createElement('a');
       anchor.href = `${API_BASE_URL}/files/${entry.id}/content`;
       anchor.download = entry.name;
@@ -590,6 +889,23 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
   const meta =
     entries === null ? '—' : `${entries.length}${more ? '+' : ''} ${searching ? 'sonuç' : 'öğe'}`;
 
+  /**
+   * Every folder the move picker must refuse — all of them, not the first.
+   *
+   * With a single id the picker only closed the door when the selection held exactly one folder.
+   * Select two and the reader could walk INTO one source and press "Buraya taşı": `move` catches
+   * a folder aimed at itself, and the server's `MoveIntoDescendantError` catches the rest with a
+   * 409 — but by then the batch is half applied, the other rows sitting inside a folder that did
+   * not move. Nothing is corrupted and the result is still not something to hand a reader.
+   *
+   * Spread rather than passed as `undefined`: `exactOptionalPropertyTypes`.
+   */
+  const moveExclude = ((): { excludeIds?: ReadonlySet<string> } => {
+    if (modal.kind !== 'move') return {};
+    const folders = modal.entries.filter((entry) => entry.kind === 'folder');
+    return folders.length === 0 ? {} : { excludeIds: new Set(folders.map((entry) => entry.id)) };
+  })();
+
   return (
     <section
       // No `card` here, and that is the point. `App` mounts this screen inside `Win`, so a `.card`
@@ -601,6 +917,10 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
       className={picking ? 'fm on picking' : 'fm on'}
       style={dragOver ? DROP : undefined}
       onDragOver={(event) => {
+        // Only a drag carrying files is an upload. Without the test, dragging a row from one
+        // folder to another lights the whole card as a drop target and `preventDefault` here
+        // would also make every square inch of it accept the row.
+        if (!hasFiles(event.dataTransfer)) return;
         event.preventDefault();
         if (!trashed) setDragOver(true);
       }}
@@ -611,6 +931,7 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
         if (!(to instanceof Node) || !event.currentTarget.contains(to)) setDragOver(false);
       }}
       onDrop={(event) => {
+        if (!hasFiles(event.dataTransfer)) return;
         event.preventDefault();
         setDragOver(false);
         const dropped = Array.from(event.dataTransfer.files);
@@ -643,14 +964,25 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
         >
           ☑ Seç
         </button>
-        <button
-          type="button"
-          className="mk"
-          disabled={trashed || busy}
-          onClick={() => setModal({ kind: 'new-folder' })}
-        >
-          + Klasör
-        </button>
+        {trashed ? (
+          <button
+            type="button"
+            className="mk"
+            disabled={busy || entries === null || entries.length === 0}
+            onClick={() => setModal({ kind: 'empty-trash' })}
+          >
+            🗑 Çöpü boşalt
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="mk"
+            disabled={busy}
+            onClick={() => setModal({ kind: 'new-folder' })}
+          >
+            + Klasör
+          </button>
+        )}
         <button
           type="button"
           className="mk up"
@@ -797,24 +1129,56 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
 
       <div className={sel.size > 0 ? 'selbar on' : 'selbar'}>
         <span className="n">{sel.size} seçili</span>
+        {/* Every one of these is gated on `selected.length` as well as on `busy`. The selection
+            bar is driven by `sel`, which the listing effect clears only AFTER the response lands,
+            while `entries` is emptied the moment the request goes out — so during any re-list the
+            bar was still lit over a `selected` that had already become []. Pressing "Kalıcı sil"
+            there opened the one dialog in the appliance that must never be vague with no number
+            in it at all, and confirming it did nothing and said nothing. */}
         {trashed ? (
-          <button type="button" className="sb" onClick={() => void restore(selected)}>
-            ↺ Geri al
-          </button>
+          <>
+            <button
+              type="button"
+              className="sb"
+              disabled={busy || selected.length === 0}
+              onClick={() => void restore(selected)}
+            >
+              ↺ Geri al
+            </button>
+            <button
+              type="button"
+              className="sb dl"
+              disabled={busy || selected.length === 0 || !selected.every((e) => can(e, 'delete'))}
+              onClick={() => openOn('permanent', selected)}
+            >
+              ✕ Kalıcı sil
+            </button>
+          </>
         ) : (
           <>
             <button
               type="button"
               className="sb"
-              disabled={selected.every((entry) => entry.kind !== 'file')}
+              disabled={
+                !selected.some((entry) => entry.kind === 'file' && can(entry, 'download')) || busy
+              }
               onClick={() => download(selected)}
             >
               ⤓ İndir
             </button>
             <button
               type="button"
+              className="sb"
+              disabled={busy || selected.length === 0 || !selected.every((e) => can(e, 'move'))}
+              onClick={() => openOn('move', selected)}
+            >
+              ⇄ Taşı
+            </button>
+            <button
+              type="button"
               className="sb dl"
-              onClick={() => setModal({ kind: 'trash', entries: selected })}
+              disabled={busy || selected.length === 0 || !selected.every((e) => can(e, 'delete'))}
+              onClick={() => openOn('trash', selected)}
             >
               🗑 Çöpe at
             </button>
@@ -882,13 +1246,67 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
             };
             const clickable = picking || opens;
 
+            /* A row can be dragged into a folder row. Not in the bin — a trashed entry has no
+               place in the tree to be moved to — not while a long operation is running, and not
+               if the server would refuse the move anyway. */
+            const draggable = !trashed && !busy && can(entry, 'move');
+            const dragging = drag?.has(entry.id) === true;
+            const target =
+              drag !== null && !trashed && entry.kind === 'folder' && !drag.has(entry.id);
+
+            const classes = ['frow'];
+            if (chosenRow) classes.push('sel');
+            if (dragging) classes.push('drag');
+            if (over === entry.id) classes.push('over');
+
             return (
               <div
                 key={entry.id}
-                className={chosenRow ? 'frow sel' : 'frow'}
+                className={classes.join(' ')}
                 role={clickable ? 'button' : undefined}
                 tabIndex={clickable ? 0 : undefined}
                 style={clickable ? { cursor: 'pointer' } : undefined}
+                draggable={draggable}
+                onDragStart={(event) => {
+                  if (!draggable) return;
+                  // A drag begun on a row that is part of the selection carries the whole
+                  // selection; one begun outside it carries that row alone. Anything else moves
+                  // rows the user did not mean to touch, and a move is not undoable here.
+                  const ids = sel.has(entry.id) ? new Set(sel) : new Set([entry.id]);
+                  setDrag(ids);
+                  event.dataTransfer.effectAllowed = 'move';
+                  // Some browsers cancel a drag whose transfer is empty before it begins.
+                  event.dataTransfer.setData('text/plain', entry.name);
+                }}
+                onDragEnd={() => {
+                  setDrag(null);
+                  setOver(null);
+                }}
+                onDragOver={(event) => {
+                  if (!target) return;
+                  // Stops the card underneath from treating this as a drop of its own.
+                  event.preventDefault();
+                  event.stopPropagation();
+                  event.dataTransfer.dropEffect = 'move';
+                  setOver(entry.id);
+                }}
+                onDragLeave={() => setOver((current) => (current === entry.id ? null : current))}
+                onDrop={(event) => {
+                  if (!target || drag === null) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const moving = (entries ?? []).filter((row) => drag.has(row.id));
+                  setDrag(null);
+                  setOver(null);
+                  if (moving.length === 0) return;
+                  // One row is a gesture aimed at one thing, and the toast afterwards names where
+                  // it went. A batch is not: a drag begun on a selected row carries the WHOLE
+                  // selection, so a small slip with fifty rows ticked would relocate all fifty on
+                  // one unanswered gesture. Every other route to this operation states its count
+                  // first, and this one has to as well.
+                  if (moving.length === 1) void move(moving, entry.id, entry.name);
+                  else setModal({ kind: 'move-drop', entries: moving, target: entry });
+                }}
                 onClick={clickable ? activate : undefined}
                 onKeyDown={
                   clickable
@@ -928,16 +1346,43 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
                     click or renaming a file would also select it. */}
                 <div className="fact" onClick={(event) => event.stopPropagation()}>
                   {trashed ? (
-                    <button
-                      type="button"
-                      title="Geri al"
-                      aria-label={`${entry.name} geri al`}
-                      onClick={() => void restore([entry])}
-                    >
-                      ↺
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        title="Geri al"
+                        aria-label={`${entry.name} geri al`}
+                        disabled={busy}
+                        onClick={() => void restore([entry])}
+                      >
+                        ↺
+                      </button>
+                      <span className="gap" aria-hidden />
+                      {can(entry, 'delete') && (
+                        <button
+                          type="button"
+                          className="del"
+                          title="Kalıcı sil"
+                          aria-label={`${entry.name} kalıcı olarak sil`}
+                          disabled={busy}
+                          onClick={() => openOn('permanent', [entry])}
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </>
                   ) : (
                     <>
+                      {can(entry, 'move') && (
+                        <button
+                          type="button"
+                          title="Taşı"
+                          aria-label={`${entry.name} taşı`}
+                          disabled={busy}
+                          onClick={() => openOn('move', [entry])}
+                        >
+                          ⇄
+                        </button>
+                      )}
                       {previewAs(entry) !== null && (
                         <button
                           type="button"
@@ -948,7 +1393,7 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
                           👁
                         </button>
                       )}
-                      {entry.kind === 'file' && (
+                      {entry.kind === 'file' && can(entry, 'download') && (
                         <button
                           type="button"
                           title="İndir"
@@ -958,26 +1403,30 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
                           ⤓
                         </button>
                       )}
-                      <button
-                        type="button"
-                        title="Ad değiştir"
-                        aria-label={`${entry.name} adını değiştir`}
-                        disabled={busy}
-                        onClick={() => setModal({ kind: 'rename', entry })}
-                      >
-                        ✎
-                      </button>
+                      {can(entry, 'modify') && (
+                        <button
+                          type="button"
+                          title="Ad değiştir"
+                          aria-label={`${entry.name} adını değiştir`}
+                          disabled={busy}
+                          onClick={() => setModal({ kind: 'rename', entry })}
+                        >
+                          ✎
+                        </button>
+                      )}
                       <span className="gap" aria-hidden />
-                      <button
-                        type="button"
-                        className="del"
-                        title="Çöpe at"
-                        aria-label={`${entry.name} çöpe at`}
-                        disabled={busy}
-                        onClick={() => setModal({ kind: 'trash', entries: [entry] })}
-                      >
-                        🗑
-                      </button>
+                      {can(entry, 'delete') && (
+                        <button
+                          type="button"
+                          className="del"
+                          title="Çöpe at"
+                          aria-label={`${entry.name} çöpe at`}
+                          disabled={busy}
+                          onClick={() => openOn('trash', [entry])}
+                        >
+                          🗑
+                        </button>
+                      )}
                     </>
                   )}
                 </div>
@@ -1023,6 +1472,57 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
           yesLabel="Çöpe at"
           danger
           onYes={() => void trash(modal.entries)}
+          onNo={() => setModal({ kind: 'none' })}
+        />
+      )}
+      {modal.kind === 'permanent' && (
+        <ConfirmBox
+          title="Kalıcı olarak sil"
+          // The count comes first and the warning is shouted, because this is the one dialog in
+          // the appliance whose "evet" cannot be taken back. "Emin misiniz?" tells the reader
+          // nothing about what they are about to lose; "3 dosya ve 1 klasör" tells them everything.
+          body={`${tally(modal.entries)} diskten silinecek. BU İŞLEM GERİ ALINAMAZ — çöp kutusundan geri getirilemez. Klasörler içindekilerle birlikte, alttan yukarı silinir; işlem yarıda kesilirse silinenler silinmiş kalır ve kalanlar çöpte durmaya devam eder.`}
+          list={destroyList(modal.entries, childCounts)}
+          yesLabel="Kalıcı olarak sil"
+          danger
+          onYes={() => void permanentDelete(modal.entries, 'Kalıcı siliniyor')}
+          onNo={() => setModal({ kind: 'none' })}
+        />
+      )}
+      {modal.kind === 'empty-trash' && (
+        <ConfirmBox
+          title="Çöpü boşalt"
+          body={`Çöpteki ${tally(entries ?? [])}${more ? ' (ve bu sayfaya sığmayanlar)' : ''} diskten silinecek. BU İŞLEM GERİ ALINAMAZ. Öğeler tek tek silinir; yarıda kesilirse silinenler gitmiş olur, kalanlar çöpte durur ve boşaltmayı yinelemek kaldığı yerden devam eder.`}
+          list={destroyList(entries ?? [], childCounts)}
+          yesLabel="Çöpü boşalt"
+          danger
+          onYes={() => void emptyTrash()}
+          onNo={() => setModal({ kind: 'none' })}
+        />
+      )}
+      {modal.kind === 'move' && (
+        <FolderPicker
+          title={
+            modal.entries.length === 1 && modal.entries[0] !== undefined
+              ? `"${modal.entries[0].name}" nereye taşınsın?`
+              : `${modal.entries.length} öğe nereye taşınsın?`
+          }
+          {...moveExclude}
+          confirmLabel="Buraya taşı"
+          onPick={(destination, where) => void move(modal.entries, destination, where)}
+          onCancel={() => setModal({ kind: 'none' })}
+        />
+      )}
+      {modal.kind === 'move-drop' && (
+        <ConfirmBox
+          title="Taşımayı onaylayın"
+          // The count and the destination, both, because a drop chose the destination by pointer
+          // and a move has no undo: the only two facts the reader needs before saying evet are how
+          // many rows are about to leave and which folder they are about to be in.
+          body={`${tally(modal.entries)} "${modal.target.name}" klasörüne taşınacak. Taşımanın geri alması yoktur — geri getirmek için aynı öğeleri elle geri taşımanız gerekir.`}
+          list={nameList(modal.entries)}
+          yesLabel="Taşı"
+          onYes={() => void move(modal.entries, modal.target.id, modal.target.name)}
           onNo={() => setModal({ kind: 'none' })}
         />
       )}
@@ -1095,6 +1595,41 @@ const DROP: React.CSSProperties = {
   boxShadow: 'inset 0 0 0 1.5px var(--live), 0 16px 40px -20px rgba(0, 0, 0, 0.8)',
   background: 'rgba(79, 227, 168, 0.07)',
 };
+
+/** "3 dosya ve 1 klasör" — the sentence the reader has to see before an irreversible button. */
+function tally(entries: FileEntry[]): string {
+  const files = entries.filter((entry) => entry.kind === 'file').length;
+  const folders = entries.length - files;
+  const parts: string[] = [];
+  if (files > 0) parts.push(`${files} dosya`);
+  if (folders > 0) parts.push(`${folders} klasör`);
+  return parts.join(' ve ');
+}
+
+/** Just the names, capped the same way. A move does not destroy anything, so the per-folder
+ *  weights `destroyList` goes and fetches would be paid for a number nobody needs here. */
+function nameList(entries: FileEntry[]): string[] {
+  const shown = entries.slice(0, NAMES_SHOWN).map((entry) => entry.name);
+  if (entries.length > NAMES_SHOWN) {
+    shown.push(`… ve ${entries.length - NAMES_SHOWN} öğe daha`);
+  }
+  return shown;
+}
+
+/** The same list, item by item, with each folder's weight beside it where the server gave one. */
+function destroyList(entries: FileEntry[], counts: ReadonlyMap<string, ChildCount>): string[] {
+  const shown = entries.slice(0, NAMES_SHOWN).map((entry) => {
+    if (entry.kind !== 'folder') return `${entry.name} · ${formatBytes(entry.size)}`;
+    const count = counts.get(entry.id);
+    return count === undefined
+      ? `${entry.name} · klasör ve içindekiler`
+      : `${entry.name} · klasör · ${count.n}${count.more ? '+' : ''} öğe ve altındakiler`;
+  });
+  if (entries.length > NAMES_SHOWN) {
+    shown.push(`… ve ${entries.length - NAMES_SHOWN} öğe daha`);
+  }
+  return shown;
+}
 
 function sorted(items: FileEntry[]): FileEntry[] {
   return [...items].sort((a, b) => {

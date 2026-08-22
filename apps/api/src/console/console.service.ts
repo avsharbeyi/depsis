@@ -328,10 +328,9 @@ export class ConsoleService implements OnModuleDestroy {
     }
 
     const rows = await this.db.withTenant(organizationId, (q) =>
-      q.query<{ closed_at: Date | null }>(
-        `SELECT closed_at FROM console_sessions WHERE id = $1`,
-        [id],
-      ),
+      q.query<{ closed_at: Date | null }>(`SELECT closed_at FROM console_sessions WHERE id = $1`, [
+        id,
+      ]),
     );
     const row = rows[0];
     if (row === undefined) throw new ConsoleSessionNotFoundError();
@@ -380,11 +379,7 @@ export class ConsoleService implements OnModuleDestroy {
    * this is not one lookup: "your shell timed out" and "there is no such shell" send an operator
    * to different places.
    */
-  private async require(
-    organizationId: string,
-    userId: string,
-    id: string,
-  ): Promise<LiveSession> {
+  private async require(organizationId: string, userId: string, id: string): Promise<LiveSession> {
     const session = this.live.get(id);
     if (
       session !== undefined &&

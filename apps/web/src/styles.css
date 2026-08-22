@@ -29,8 +29,10 @@
  *      dead rules for screens that will never exist are how a stylesheet starts lying about the
  *      product. Those endpoints exist now, so the rules came back; each family carries the note
  *      below. The principle did not change: no selector here without a screen, no screen without
- *      an API. The one thing still missing is a move affordance, because PATCH /files/{id} answers
- *      501 for parentId. Families the port had brought over anyway and that no endpoint can ever
+ *      an API. The move affordance that used to be listed here as missing has landed — PATCH
+ *      /files/{id} moves for real now instead of answering 501 for parentId — so .frow.drag and
+ *      .frow.over below are its drag rules, not a reservation. Families the port had brought
+ *      over anyway and that no endpoint can ever
  *      fill — the task manager's .tmtop/.errbox and its .tree pid colours, the expanding .conn
  *      client list, .tabs, .gear, .dk.plus, .frow .exp, .kill.tk — have since been deleted rather
  *      than left as a reservation, for exactly the reason stated above.

@@ -145,10 +145,7 @@ export class AppsController {
   @Delete(':slug')
   @HttpCode(204)
   @UseGuards(AdminGuard)
-  async remove(
-    @Req() request: AuthenticatedRequest,
-    @Param('slug') slug: string,
-  ): Promise<void> {
+  async remove(@Req() request: AuthenticatedRequest, @Param('slug') slug: string): Promise<void> {
     requireSameOrigin(request);
     const organizationId = requireOrganization(request);
     const name = slugSchema.safeParse(slug);

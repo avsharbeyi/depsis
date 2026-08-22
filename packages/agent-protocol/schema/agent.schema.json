@@ -275,6 +275,70 @@
       ]
     },
     {
+      "description": "Move one entry to another name, inside one share.\n\nThe same `renameat2(RENAME_NOREPLACE)` plus destination-directory `fsync` that\n`PublishTransfer` uses, aimed at a file the user already owns rather than at a staged one.\nRefusing to overwrite is not a convenience: a move that silently replaces the file already\nsitting at the destination destroys data the user never named, and there is no undo in this\nproduct.\n\nONE share, not two, and the single `share` field is what enforces it. A rename across\ndatasets returns `EXDEV` (ADR-0008) because every DEPSIS share is its own ZFS dataset, so a\ncross-share `MoveEntry` could only ever be a copy-then-delete — a different operation, with\na different failure mode and a different cost, which therefore deserves its own name rather\nthan a surprise inside this one.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "Where it is now, relative to the share root. The last element is the entry's own name.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "op": {
+          "type": "string",
+          "const": "move_entry"
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "to": {
+          "description": "Where it goes, relative to the same share root. The last element is the new name; the\nelements before it must already exist and be directories.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "from",
+        "to"
+      ]
+    },
+    {
+      "description": "Delete exactly ONE entry inside a share. Never a tree.\n\n`directory` is a required operand rather than something the agent works out by stat-ing the\npath, and that is deliberate twice over. `unlinkat` needs `AT_REMOVEDIR` or not, so the\ndistinction has to be made somewhere; making the CALLER state it means a caller that\nbelieves it is deleting a file and finds a directory gets a refusal instead of a surprise.\nDeciding it from a stat would also be check-then-use on the one operation that cannot be\nundone.\n\nThere is no recursive variant and there will not be one. A non-empty directory comes back\nas an error (`ENOTEMPTY`) and the API walks the tree itself. The reason is §2.2 and\nADR-0006: the closed operation set exists so that no single call the agent accepts has a\nblast radius the caller chooses. \"Delete this subtree\" is `rm -rf` behind a typed name — one\nbug in the unprivileged side, or one confused-deputy request, and it is the whole share.\nThe API knows the tree because the API stores the tree; the agent only needs to be able to\nremove a leaf.",
+      "type": "object",
+      "properties": {
+        "directory": {
+          "description": "Is the entry a directory? The caller knows and has to say.",
+          "type": "boolean"
+        },
+        "op": {
+          "type": "string",
+          "const": "remove_entry"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "path",
+        "directory"
+      ]
+    },
+    {
       "description": "The local node's own identity and reachability: node id, online, daemon version.\n\nReadable by any signed-in user (ADR-0020): a device knowing its own id is not a secret.",
       "type": "object",
       "properties": {
@@ -510,6 +574,7 @@
       ]
     },
     {
+      "description": "The Samba configuration was written AND proved.\n\n`verified` is not decoration. `testparm` passing means the file parses; P0-B measured an\ninvalid `full_audit` opname passing it cleanly and then making smbd refuse every\nconnection, so this flag reports the live connection attempt that followed. The agent only\never returns it `true` — a publish that cannot be proved rolls back and comes back as\n`refused` — but the contract carries the field because a client must be able to tell\n\"shares are served\" from \"a file was written\".",
       "type": "object",
       "properties": {
         "shares": {
@@ -520,11 +585,15 @@
         "status": {
           "type": "string",
           "const": "published"
+        },
+        "verified": {
+          "type": "boolean"
         }
       },
       "required": [
         "status",
-        "shares"
+        "shares",
+        "verified"
       ]
     },
     {
@@ -607,6 +676,66 @@
       "required": [
         "status",
         "existed"
+      ]
+    },
+    {
+      "description": "The entry is at its new name and the destination directory has been fsynced.\n\nNo payload. The caller named both ends of the move and nothing about them changed, so\nechoing them back would only invite a consumer to believe the agent had normalised\nsomething.",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "moved"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    {
+      "description": "The entry is gone.\n\nNo `existed` flag, unlike `Discarded`. Discarding a staging file races the sweeper, so\n\"already clean\" is a success there. Removing an entry the user asked to remove is different:\nif it is not there, the caller's view of the tree disagrees with the disk, and answering\n\"done\" would hide that. That case is `NotFound`.",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "removed"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    {
+      "description": "The path the operation named is not there.\n\nIts own variant rather than `Refused`, because the API turns exactly this into 404 and\neverything else in `Refused` into something else entirely. Collapsing them would put the\nAPI back to matching on prose.",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "not_found"
+        }
+      },
+      "required": [
+        "status",
+        "reason"
+      ]
+    },
+    {
+      "description": "The operation would have collided with something that is already there: a destination name\nthat is taken, or a directory that still has children. 409, not 404 and not 500 — the caller\ncan fix both by doing something different.",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "conflict"
+        }
+      },
+      "required": [
+        "status",
+        "reason"
       ]
     },
     {
@@ -696,6 +825,23 @@
         "status": {
           "type": "string",
           "const": "zerotier_unavailable"
+        }
+      },
+      "required": [
+        "status",
+        "reason"
+      ]
+    },
+    {
+      "description": "Samba is not installed on this box.\n\nThe same shape as `ZeroTierUnavailable` and for the same reason: DEPSIS packages neither,\nso \"absent\" is an ordinary state of a machine that the API turns into 503 and the UI names\nin a card. Collapsing it into `Failed` would send an operator hunting a broken agent\ninstead of installing a package, and it is what `SharePage.smbAvailable` reports.",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "smb_unavailable"
         }
       },
       "required": [

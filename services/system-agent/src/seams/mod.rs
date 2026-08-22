@@ -40,6 +40,22 @@ pub enum SeamError {
     /// bisection (ADR-0017).
     #[error("no such file: {0}")]
     NotFound(String),
+    /// `RENAME_NOREPLACE` refused rather than overwrote.
+    ///
+    /// Its own variant for the same reason `NotFound` is: the caller has to tell "your file is not
+    /// there" from "the name you asked for is taken", because those are a 404 and a 409 and the
+    /// user does something different about each. Before this, both arrived as `Io` and the only
+    /// way to separate them was to match on the message text — which is a contract nobody declared
+    /// and the next person to reword an error would have broken silently.
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+    /// A directory removal found children.
+    ///
+    /// Not a failure of the agent. The agent removes ONE entry and never a tree (see
+    /// `SafePath::remove_dir`), so this is the ordinary answer when the caller has not finished
+    /// walking, and the caller can act on it.
+    #[error("directory is not empty: {0}")]
+    NotEmpty(String),
     #[error("io: {0}")]
     Io(String),
     #[error("command {program} failed with status {status}: {stderr}")]
@@ -110,6 +126,13 @@ pub trait SafePath {
     /// Must refuse rather than overwrite. `RENAME_NOREPLACE` was measured working on ZFS 2.3.2 in
     /// P0-G; `linkat` + `unlink` is the portable fallback. Either way, publishing never silently
     /// destroys a file the user already has.
+    ///
+    /// TWO callers, not one, and the second is why the error variants below are typed.
+    /// `PublishTransfer` moves a staged upload into place; `MoveEntry` moves a file the user
+    /// already owns. They are the same syscall pair — `renameat2(RENAME_NOREPLACE)` followed by an
+    /// `fsync` of the destination directory — and giving the second one its own seam method would
+    /// have meant two implementations of the step people skip. Implementations must report a
+    /// missing source as `NotFound` and a taken destination as `AlreadyExists`.
     fn publish(
         &self,
         from_dir: &[&str],
@@ -156,6 +179,23 @@ pub trait SafePath {
     /// `DiscardTransfer` can race for the same abandoned file, and turning that into a failure
     /// would make a successful cleanup look like a fault.
     fn remove_file(&self, dir: &[&str], name: &str) -> Result<bool, SeamError>;
+
+    /// Remove one EMPTY directory under `dir`. `Ok(false)` if it was already gone.
+    ///
+    /// `unlinkat` with `AT_REMOVEDIR`, relative to a descriptor resolved under the same
+    /// confinement as everything else here — never a joined path, because this runs as root.
+    ///
+    /// Empty is the point, not a limitation to be worked around later. A directory with children
+    /// comes back as `SeamError::NotEmpty` and the caller walks the tree itself. A recursive
+    /// variant would be `rm -rf` wearing a typed name: one call whose blast radius the caller
+    /// chooses, in the one process that can reach every tenant's data. §2.2 and ADR-0006 keep the
+    /// operation set closed precisely so that no such call exists to be confused into.
+    ///
+    /// Separate from `remove_file` rather than a `bool` on it, because the two differ by a syscall
+    /// flag and by what a mistake costs: `unlinkat` without `AT_REMOVEDIR` on a directory is
+    /// `EISDIR` and harmless, while a caller that meant "file" and reached a directory should hear
+    /// about it rather than have the agent guess.
+    fn remove_dir(&self, dir: &[&str], name: &str) -> Result<bool, SeamError>;
 }
 
 /// Where unguessable values come from.

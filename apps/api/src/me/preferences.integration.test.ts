@@ -237,9 +237,9 @@ describeDb('interface preferences, against a real PostgreSQL', () => {
 
   it('holds the shortcut bounds the grid depends on', async () => {
     const tooMany = Array.from({ length: 61 }, (_, i) => ({ id: `s${i}`, cell: i }));
-    await expect(
-      preferences.write(orgA, aliceA, { shortcuts: tooMany }),
-    ).rejects.toBeInstanceOf(PreferencesRejectedError);
+    await expect(preferences.write(orgA, aliceA, { shortcuts: tooMany })).rejects.toBeInstanceOf(
+      PreferencesRejectedError,
+    );
 
     // 60 is legal, so the cap is a cap and not an off-by-one.
     const exactly = Array.from({ length: 60 }, (_, i) => ({ id: `s${i}`, cell: i }));

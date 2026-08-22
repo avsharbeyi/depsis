@@ -102,12 +102,7 @@ export class SetupService implements OnModuleInit {
         q.query<{ organization_id: string; user_id: string }>(
           `SELECT organization_id::text AS organization_id, user_id::text AS user_id
              FROM public.claim_system_setup($1, $2, $3, $4)`,
-          [
-            request.organizationSlug,
-            request.organizationName,
-            request.adminUsername,
-            hash,
-          ],
+          [request.organizationSlug, request.organizationName, request.adminUsername, hash],
         ),
       );
 

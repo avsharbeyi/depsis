@@ -16,6 +16,7 @@ import { MeModule } from './me/me.module.js';
 import { OrganizationsModule } from './organizations/organizations.module.js';
 import { RemoteModule } from './remote/remote.module.js';
 import { SetupModule } from './setup/setup.module.js';
+import { SharesModule } from './shares/shares.module.js';
 import { SystemModule } from './system/system.module.js';
 import { UsersModule } from './users/users.module.js';
 
@@ -35,6 +36,7 @@ import { UsersModule } from './users/users.module.js';
     OrganizationsModule,
     RemoteModule,
     SetupModule,
+    SharesModule,
     SystemModule,
     UsersModule,
   ],

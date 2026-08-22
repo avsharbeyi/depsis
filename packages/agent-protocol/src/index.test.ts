@@ -48,6 +48,10 @@ describe('the emitted agent schema', () => {
       // — the API cannot write inside a share — and undeletable by the agent. Without this the
       // upload path leaked quota nobody could free.
       'discard_transfer',
+      // Rename and relocate, one `renameat2(RENAME_NOREPLACE)` on two descriptors the agent
+      // resolved itself. Named for the entry rather than for the syscall because the API asks for
+      // an outcome, and because `rename` in this product already means the metadata-only kind.
+      'move_entry',
       // The bulk data path's control half. `open_transfer` resolves and opens a staging file and
       // returns a one-time token; the bytes travel on a separate socket, because Node cannot
       // receive an SCM_RIGHTS descriptor and so the cleanest design — the agent passing the fd —
@@ -63,6 +67,11 @@ describe('the emitted agent schema', () => {
       'publish_samba_config',
       'publish_transfer',
       'read_smart_summary',
+      // ONE entry, never a tree. The recursive delete the permanent-delete endpoint appears to
+      // need is deliberately absent: an operation whose blast radius the caller chooses is `rm -rf`
+      // behind a typed name, in the one process that can reach every tenant's data. The API walks
+      // the tree from the leaves up, because the API is the side that stores it (§2.2, ADR-0006).
+      'remove_entry',
       // ADR-0020's four, and the shape of them is the point. A general `ZeroTierRequest { path }`
       // proxy would have been the network form of the free-form command §2.2 forbids: one variant
       // through which every other endpoint of zerotier-one's local API becomes reachable. Instead
@@ -131,9 +140,21 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 2 since the ZeroTier
-    // variants; the pair is what makes a new API against a stale agent fail at the handshake
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 3 since `MoveEntry` and
+    // `RemoveEntry`; the pair is what makes a new API against a stale agent fail at the handshake
     // instead of on the first privileged call.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(2);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(3);
+  });
+
+  it('agrees with the number the agent actually reports', () => {
+    // The literal above has already drifted once: op.rs went to 3 with `MoveEntry`/`RemoveEntry`
+    // and this constant stayed at 2, which would have made `AgentService.onModuleInit` fail the
+    // handshake and answer 503 from EVERY agent-backed endpoint on a correctly matched pair. A
+    // test that only pins the literal cannot see that, because the literal is the thing that was
+    // wrong. So this one reads the other language.
+    const opRs = readFileSync(resolve(here, '../../../services/system-agent/src/op.rs'), 'utf8');
+    const declared = /pub const SCHEMA_VERSION: u32 = (\d+);/.exec(opRs)?.[1];
+    expect(declared, 'SCHEMA_VERSION was not found in op.rs — has it been renamed?').toBeDefined();
+    expect(Number(declared)).toBe(EXPECTED_SCHEMA_VERSION);
   });
 });

@@ -13,6 +13,7 @@ import { usePrefs, type Prefs } from './prefs.js';
 import { Remote } from './Remote.js';
 import { SetupWizard } from './SetupWizard.js';
 import { setSoundEnabled, sfx } from './sfx.js';
+import { Shares } from './Shares.js';
 import { Shortcuts } from './Shortcuts.js';
 import { SidePanel } from './SidePanel.js';
 import { BrandMark, SignIn } from './SignIn.js';
@@ -54,6 +55,7 @@ export type PaneId =
   | 'notes'
   | 'tasks'
   | 'users'
+  | 'shares'
   | 'account'
   | 'transfers'
   | 'backups'
@@ -85,6 +87,16 @@ const PANES: Record<PaneId, PaneMeta> = {
     glyph: '🗂',
     tone: 'iris',
     wide: true,
+    adminOnly: false,
+  },
+  shares: {
+    // Reading the list is not an admin endpoint, and it should not be: the address is the thing an
+    // ordinary member needs most and the one thing they cannot guess. Only republishing is gated.
+    slug: 'paylasimlar',
+    label: 'Paylaşımlar',
+    glyph: '💽',
+    tone: 'cool',
+    wide: false,
     adminOnly: false,
   },
   notes: {
@@ -169,6 +181,7 @@ const PANES: Record<PaneId, PaneMeta> = {
  *  and it is a design decision rather than whatever order the object literal happens to have. */
 const DOCK_ORDER: PaneId[] = [
   'files',
+  'shares',
   'notes',
   'tasks',
   'transfers',
@@ -404,10 +417,18 @@ function Desktop({
    * This exists because an earlier version turned every `/me` failure into `null` and rendered an
    * unconditional "Loading…", so a session that ended while the tab was open left the product
    * apparently frozen with no error and no way forward.
+   *
+   * The optional `note` is how a half-finished batch survives the sign-out. Signing out unmounts
+   * the whole desk, the toast stack with it, so a screen that lost its session at item 47 of 200
+   * permanent deletes cannot report the 46 it already destroyed in a toast — nobody would ever see
+   * it. The sign-in form is the only surface still standing, so the tally is carried to it.
    */
-  const onUnauthenticated = useCallback(() => {
-    onSignedOut('Oturumunuz sona erdi. Lütfen tekrar giriş yapın.');
-  }, [onSignedOut]);
+  const onUnauthenticated = useCallback(
+    (note?: string) => {
+      onSignedOut(note ?? 'Oturumunuz sona erdi. Lütfen tekrar giriş yapın.');
+    },
+    [onSignedOut],
+  );
 
   useEffect(() => {
     void (async () => {
@@ -775,7 +796,8 @@ function PaneBody({
   prefsLoaded: boolean;
   save: (next: Prefs) => Promise<boolean>;
   notify: Notify;
-  onUnauthenticated: () => void;
+  /** `note` replaces the default sign-out sentence — see `onUnauthenticated` on the desk. */
+  onUnauthenticated: (note?: string) => void;
 }): React.JSX.Element {
   switch (pane) {
     case 'files':
@@ -784,6 +806,8 @@ function PaneBody({
       return <Notes notify={notify} />;
     case 'tasks':
       return <Tasks notify={notify} me={me} users={snapshot?.users ?? null} />;
+    case 'shares':
+      return <Shares notify={notify} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />;
     case 'users':
       return <Users currentUserId={me.id} notify={notify} onUnauthenticated={onUnauthenticated} />;
     case 'account':
@@ -800,7 +824,7 @@ function PaneBody({
         <Backups notify={notify} snapshot={snapshot} />
       );
     case 'apps':
-      return <Apps notify={notify} isAdmin={isAdmin} />;
+      return <Apps notify={notify} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />;
     case 'remote':
       return <Remote notify={notify} isAdmin={isAdmin} />;
     case 'console':

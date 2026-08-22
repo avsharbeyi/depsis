@@ -41,7 +41,12 @@ const MIN_PASSWORD = 12;
 const MAX_PASSWORD = 1024;
 
 const createSchema = z.object({
-  username: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  username: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
   role: z.enum(['admin', 'member']).default('member'),
   password: z.string().min(MIN_PASSWORD).max(MAX_PASSWORD),
 });

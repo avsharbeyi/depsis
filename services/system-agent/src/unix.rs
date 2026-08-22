@@ -290,8 +290,14 @@ impl SafePath for Openat2SafePath {
             rustix::fs::RenameFlags::NOREPLACE,
         ) {
             Ok(()) => {}
+            // Typed, not prose. `MoveEntry` has to answer 404 for a source that is not there and
+            // 409 for a destination that is taken, and matching on a message string to tell them
+            // apart would be a contract nobody declared.
             Err(rustix::io::Errno::EXIST) => {
-                return Err(SeamError::Io(format!("{to}: already exists")));
+                return Err(SeamError::AlreadyExists(to.to_string()));
+            }
+            Err(rustix::io::Errno::NOENT) => {
+                return Err(SeamError::NotFound(from.to_string()));
             }
             Err(e) => return Err(SeamError::Io(format!("rename {from} -> {to}: {e}"))),
         }
@@ -348,6 +354,25 @@ impl SafePath for Openat2SafePath {
             Ok(()) => Ok(true),
             Err(rustix::io::Errno::NOENT) => Ok(false),
             Err(e) => Err(SeamError::Io(format!("unlink {name}: {e}"))),
+        }
+    }
+
+    fn remove_dir(&self, dir: &[&str], name: &str) -> Result<bool, SeamError> {
+        // Same shape as `remove_file` and for the same reason: relative to a descriptor this call
+        // resolved under RESOLVE_BENEATH, never a joined path, because this runs as root.
+        let parent = self.open_dir(dir)?;
+        match rustix::fs::unlinkat(&parent, name, rustix::fs::AtFlags::REMOVEDIR) {
+            Ok(()) => Ok(true),
+            Err(rustix::io::Errno::NOENT) => Ok(false),
+            // The kernel is what stops this from becoming a tree delete. There is no loop here and
+            // no `-r`: a directory with children comes back as an error and the caller walks the
+            // tree itself (§2.2, ADR-0006). POSIX permits either errno for a non-empty directory
+            // and Linux uses ENOTEMPTY, but a `#[forbid(unsafe_code)]` daemon that deletes user
+            // data should not depend on which one this kernel picked.
+            Err(rustix::io::Errno::NOTEMPTY | rustix::io::Errno::EXIST) => {
+                Err(SeamError::NotEmpty(name.to_string()))
+            }
+            Err(e) => Err(SeamError::Io(format!("rmdir {name}: {e}"))),
         }
     }
 }
@@ -1480,6 +1505,180 @@ mod tests {
         // object and report success having flushed nothing relevant.
         std::fs::write(tmp.path().join("plain.txt"), b"x").expect("write");
         assert!(sp.open_dir(&["plain.txt"]).is_err());
+    }
+
+    // ── move and remove, against a real kernel ──
+    //
+    // The dispatcher tests for `MoveEntry`/`RemoveEntry` run against `MockSafePath`, whose
+    // containment is lexical and whose `rename` is `std::fs::rename`. That is enough to pin what
+    // the dispatcher DECIDES and nothing at all about what the syscalls DO, so the three claims
+    // that matter — the rename refuses to replace, the rmdir refuses to recurse, and neither can
+    // be aimed through a symlink — are measured here.
+
+    #[test]
+    fn a_move_refuses_to_replace_and_leaves_both_sides_alone() {
+        // RENAME_NOREPLACE, on this kernel and this filesystem. A silently-ignored flag would turn
+        // "refuse to overwrite" into "overwrite" — the worst possible way for a flag to fail, and
+        // in this product the way a user loses a file they never named.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("a")).expect("mkdir a");
+        std::fs::create_dir(tmp.path().join("b")).expect("mkdir b");
+        std::fs::write(tmp.path().join("a/note.txt"), b"the one being moved").expect("write src");
+        std::fs::write(tmp.path().join("b/note.txt"), b"the one already there").expect("write dst");
+
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+        match sp.publish(&["a"], "note.txt", &["b"], "note.txt") {
+            Err(SeamError::AlreadyExists(_)) => {}
+            Err(other) => panic!("expected AlreadyExists, got {other:?}"),
+            Ok(()) => panic!("RENAME_NOREPLACE did not hold: the destination was overwritten"),
+        }
+
+        assert_eq!(
+            std::fs::read(tmp.path().join("b/note.txt")).expect("read dst"),
+            b"the one already there",
+            "the file the user already had was destroyed"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("a/note.txt")).expect("read src"),
+            b"the one being moved",
+            "a refused move must be all-or-nothing; the source vanished"
+        );
+    }
+
+    #[test]
+    fn a_move_of_something_that_is_not_there_is_not_a_path_escape() {
+        // ADR-0017's lesson, applied to the new operation: every errno collapsing into
+        // `PathEscape` made an ordinary miss read as a containment violation. The API turns this
+        // one into 404, so it has to arrive as `NotFound`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("a")).expect("mkdir a");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+
+        match sp.publish(&["a"], "ghost.txt", &["a"], "other.txt") {
+            Err(SeamError::NotFound(_)) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_move_preserves_the_contents_and_fsyncs_the_destination_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("a")).expect("mkdir a");
+        std::fs::create_dir(tmp.path().join("b")).expect("mkdir b");
+        std::fs::write(tmp.path().join("a/note.txt"), b"contents must survive").expect("write");
+
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+        sp.publish(&["a"], "note.txt", &["b"], "renamed.txt")
+            .expect("the move must succeed");
+
+        assert!(!tmp.path().join("a/note.txt").exists());
+        assert_eq!(
+            std::fs::read(tmp.path().join("b/renamed.txt")).expect("read"),
+            b"contents must survive"
+        );
+    }
+
+    #[test]
+    fn a_populated_directory_cannot_be_removed() {
+        // The property the closed operation set is FOR. There is no recursive delete to reach: a
+        // directory with a child comes back as an error and the child is still there afterwards.
+        // The parent is a named directory rather than the root itself, because that is how the
+        // dispatcher always calls it: the first component is the share.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("share/full")).expect("mkdir");
+        std::fs::write(tmp.path().join("share/full/child.txt"), b"still mine").expect("write");
+
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+        match sp.remove_dir(&["share"], "full") {
+            Err(SeamError::NotEmpty(_)) => {}
+            Err(other) => panic!("expected NotEmpty, got {other:?}"),
+            Ok(_) => panic!("a populated directory was removed: the agent can delete a tree"),
+        }
+        assert!(
+            tmp.path().join("share/full/child.txt").exists(),
+            "the child was deleted on the way to failing"
+        );
+    }
+
+    #[test]
+    fn an_empty_directory_is_removed_and_a_missing_one_is_reported_as_such() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("share/empty")).expect("mkdir");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+
+        assert!(
+            matches!(sp.remove_dir(&["share"], "empty"), Ok(true)),
+            "an empty directory must come away"
+        );
+        assert!(!tmp.path().join("share/empty").exists());
+        assert!(
+            matches!(sp.remove_dir(&["share"], "empty"), Ok(false)),
+            "a second removal must report that there was nothing there"
+        );
+    }
+
+    #[test]
+    fn remove_dir_will_not_unlink_a_file_and_remove_file_will_not_unlink_a_directory() {
+        // AT_REMOVEDIR is not decoration. Without the flag the two operations would blur, and a
+        // caller that said "file" while meaning a directory — or the reverse — would find out by
+        // its effect rather than by an error.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("share")).expect("mkdir share");
+        std::fs::write(tmp.path().join("share/plain.txt"), b"x").expect("write");
+        std::fs::create_dir(tmp.path().join("share/dir")).expect("mkdir");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+
+        assert!(sp.remove_dir(&["share"], "plain.txt").is_err());
+        assert!(tmp.path().join("share/plain.txt").exists());
+        assert!(sp.remove_file(&["share"], "dir").is_err());
+        assert!(tmp.path().join("share/dir").exists());
+    }
+
+    #[test]
+    fn neither_a_move_nor_a_remove_can_be_aimed_through_a_symlink() {
+        // The attack the whole flag set exists for, on the two operations that destroy data: a
+        // user drops a symlink inside their own share pointing at a directory outside it, then
+        // asks the agent — running as root — to move a file into it, or to delete something in it.
+        // NO_SYMLINKS refuses the component before the kernel ever asks where it points.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        let inside = root.join("share");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&inside).expect("mkdir share");
+        std::fs::create_dir(&outside).expect("mkdir outside");
+        std::fs::write(outside.join("victim.txt"), b"not yours").expect("write victim");
+        std::fs::write(inside.join("payload.txt"), b"mine").expect("write payload");
+        std::os::unix::fs::symlink(&outside, inside.join("escape")).expect("symlink");
+
+        let sp = Openat2SafePath::open_root(&root).expect("open root");
+
+        // A same-directory move still works, so a blanket failure cannot make this test pass for
+        // the wrong reason.
+        sp.publish(&["share"], "payload.txt", &["share"], "moved.txt")
+            .expect("an ordinary move inside the root must still work");
+
+        assert!(
+            sp.publish(&["share"], "moved.txt", &["share", "escape"], "moved.txt")
+                .is_err(),
+            "a move landed outside the root through a symlinked directory"
+        );
+        assert!(
+            sp.remove_file(&["share", "escape"], "victim.txt").is_err(),
+            "a delete reached outside the root through a symlinked directory"
+        );
+        assert!(
+            sp.remove_dir(&[".."], "outside").is_err(),
+            "a directory outside the root was removable"
+        );
+
+        assert!(
+            outside.join("victim.txt").exists(),
+            "the file outside the root was deleted"
+        );
+        assert!(
+            inside.join("moved.txt").exists(),
+            "the payload left the root"
+        );
     }
 
     /// NO_XDEV, against a real mount boundary.

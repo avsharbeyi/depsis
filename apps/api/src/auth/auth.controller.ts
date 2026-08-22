@@ -48,7 +48,12 @@ const loginSchema = z.object({
   // so an address here was a second thing to type and a second thing to typo. The tenant is
   // gone too: `system_setup` is a singleton, so the box has exactly one organisation and
   // asking which one was a question with a single possible answer.
-  username: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  username: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
   // Optional, and the interface never sends it. Only a box holding more than one organisation
   // needs it, which a claimed appliance never does.
   organizationSlug: z.string().trim().min(1).max(63).optional(),

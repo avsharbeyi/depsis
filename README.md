@@ -88,20 +88,29 @@ imzalı apt deposundan kurar.
 
 Ürünün hangi kısmının bittiğini iddia etmek yerine ölçüyoruz. Bugün itibarıyla eksik olanlar:
 
-- Taşıma. `PATCH /files/{id}` `parentId` alıyor ama **501** dönüyor: ajanın işlem kümesinde bir
-  dosyayı taşıyacak işlem yok, ve yalnızca veritabanı satırını taşımak veritabanıyla diskin
-  ayrışması demek olurdu. Aynı sebeple çöp kutusu kalıcı boşaltılamıyor.
+- **Klasörler diskte YOK, yalnızca veritabanı satırı.** Ajanda `mkdir` işlemi olmadığı için
+  `POST /files/folders` bir satır yazıyor ve dizin yaratmıyor. Sonucu: bir klasörü taşımak dosya
+  sistemi tarafında hiçbir zaman çalışamaz, ve bir klasörün adını değiştirmek yalnız satırı
+  değiştirir. Dosyalar için ikisi de gerçek — `MoveEntry` ile ajandan geçiyor.
+
+  Bu, listelemenin ve indirmenin bugün çalışmasını engellemiyor (yol her zaman satırlardan
+  kuruluyor) ama SMB'den bakan biri klasörleri göremez. Ajana `mkdir` eklemek ayrı bir tur.
 - Ekip (`teams`) ve klasör bazlı ACL (§6.2). Şu an yalnız organizasyon düzeyinde admin/member var.
 - Dosya sistemi olaylarından metadata'yı besleyen endeksleyici. Bu olmadan yalnız DEPSIS
   üzerinden yüklenen dosyalar listede görünür; SMB'den yazılanlar görünmez.
 - ZFS havuzu yaratma. Ajan dataset ve anlık görüntü yaratabiliyor, havuz yaratamıyor — mirror
   sihirbazı bu yüzden yok.
-- Samba paylaşımı gerçekten yazılmıyor: `publish_samba_config` ajanda duruyor ama API onu bir kez
-  bile çağırmıyor.
+- Samba'nın kullanıcı eşlemesi. Yapılandırma artık gerçekten yazılıyor (atomik + `testparm` +
+  canlı bağlantı denemesi + başarısızlıkta geri dönüş) ama bölümlerde `valid users` yok: bir
+  paylaşımı kimin açabileceği henüz POSIX izinlerine bırakılmış durumda. §6.2'nin API'siyle
+  birlikte gelecek.
 - Kullanıcı → POSIX uid eşlemesi (ADR-0004). Yayımlanan dosyalar şimdilik API'nin servis hesabına
   ait.
-- Arayüz `docs/arayuz-v5-taslak.html` referansına henüz taşınmadı: stil sayfası taşındı, ekranlar
-  taşınmadı.
+- İzin arayüzü. Şema (0015) ve sözleşme yazıldı, uçlar yazılmadı — `contract.test.ts` on bir
+  işlemi "tarif edilmiş ama sunulmuyor" olarak sayıyor ve her birinin gerekçesi kayıtlı.
+  `FileEntry.permissions` bugün herkese aynı yedi izni döndürüyor; bu bir yer tutucu değil,
+  bugünün doğru cevabı — her `/files` ucu kiracının her üyesini kabul ediyor ve yalnız RLS
+  daraltıyor.
 - Tarayıcı (e2e) testleri. CI'da `echo` yapan bir iş olarak duruyor.
 - Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`
   yalnız DEPSIS'in kendi aldıklarını gösterir ve yanıtta `complete: false` ile bunu söyler.

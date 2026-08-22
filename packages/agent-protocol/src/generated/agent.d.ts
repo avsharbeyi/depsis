@@ -124,6 +124,28 @@ export type AgentRequest =
       staging_name: SafeComponent;
     }
   | {
+      /**
+       * Where it is now, relative to the share root. The last element is the entry's own name.
+       */
+      from: SafeComponent[];
+      op: 'move_entry';
+      share: SafeComponent;
+      /**
+       * Where it goes, relative to the same share root. The last element is the new name; the
+       * elements before it must already exist and be directories.
+       */
+      to: SafeComponent[];
+    }
+  | {
+      /**
+       * Is the entry a directory? The caller knows and has to say.
+       */
+      directory: boolean;
+      op: 'remove_entry';
+      path: SafeComponent[];
+      share: SafeComponent;
+    }
+  | {
       op: 'zerotier_status';
     }
   | {
@@ -208,6 +230,7 @@ export type AgentResponse =
   | {
       shares: number;
       status: 'published';
+      verified: boolean;
     }
   | {
       offset: number;
@@ -226,6 +249,20 @@ export type AgentResponse =
   | {
       existed: boolean;
       status: 'discarded';
+    }
+  | {
+      status: 'moved';
+    }
+  | {
+      status: 'removed';
+    }
+  | {
+      reason: string;
+      status: 'not_found';
+    }
+  | {
+      reason: string;
+      status: 'conflict';
     }
   | {
       node_id: string;
@@ -248,6 +285,10 @@ export type AgentResponse =
   | {
       reason: string;
       status: 'zerotier_unavailable';
+    }
+  | {
+      reason: string;
+      status: 'smb_unavailable';
     }
   | {
       reason: string;

@@ -229,9 +229,10 @@ export class RemoteService {
     // The row is closed rather than deleted: rejoining writes a new row, and "who put this
     // appliance on that network, and for how long" stays answerable (migration 0013).
     await this.db.withTenant(organizationId, (q) =>
-      q.query(`UPDATE public.remote_networks SET left_at = now() WHERE id = $1 AND left_at IS NULL`, [
-        row.id,
-      ]),
+      q.query(
+        `UPDATE public.remote_networks SET left_at = now() WHERE id = $1 AND left_at IS NULL`,
+        [row.id],
+      ),
     );
   }
 
@@ -279,9 +280,7 @@ export class RemoteService {
       // fragment of a response body — and none of it is actionable by the caller while all of it
       // describes the privileged side's internals. It goes to the journal beside the agent's own
       // audit entry for the same correlation id (§16).
-      this.logger.error(
-        `${request.op} failed [${correlationId}]: ${oneLine(response.reason)}`,
-      );
+      this.logger.error(`${request.op} failed [${correlationId}]: ${oneLine(response.reason)}`);
       throw new RemoteUnavailableError(
         'the local ZeroTier API answered with a fault; see the system log for this request',
       );

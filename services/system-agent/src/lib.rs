@@ -40,6 +40,7 @@ pub mod authz;
 pub mod data;
 pub mod dispatch;
 pub mod op;
+pub mod samba;
 pub mod seams;
 pub mod sweep;
 pub mod transfer;

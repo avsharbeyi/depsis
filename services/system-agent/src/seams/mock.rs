@@ -141,11 +141,22 @@ impl SafePath for MockSafePath {
         // `std::fs::rename` OVERWRITES, which is the opposite of what the real one does, so the
         // refusal is checked here first. That check is racy — which is the point of the note on
         // this struct: the mock exercises the dispatcher, and storage claims come from the VM.
-        if destination.exists() {
-            return Err(SeamError::Io(format!("{to}: already exists")));
+        //
+        // `symlink_metadata`, not `exists()`: a dangling symlink at the destination is a name that
+        // is TAKEN, and `exists()` follows the link and reports it free. Overwriting it would be
+        // the same data loss the NOREPLACE flag exists to prevent, arrived at through the mock.
+        if destination.symlink_metadata().is_ok() {
+            return Err(SeamError::AlreadyExists(to.to_string()));
         }
-        std::fs::rename(&source, &destination)
-            .map_err(|e| SeamError::Io(format!("rename {from} -> {to}: {e}")))
+        match std::fs::rename(&source, &destination) {
+            Ok(()) => Ok(()),
+            // The typed variants the trait asks for. `MoveEntry` turns these into 404 and 409, and
+            // the dispatcher tests that assert that run against this implementation.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(SeamError::NotFound(from.to_string()))
+            }
+            Err(e) => Err(SeamError::Io(format!("rename {from} -> {to}: {e}"))),
+        }
     }
 
     fn set_owner(&self, _file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError> {
@@ -215,6 +226,22 @@ impl SafePath for MockSafePath {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(SeamError::Io(format!("unlink {name}: {e}"))),
+        }
+    }
+
+    fn remove_dir(&self, dir: &[&str], name: &str) -> Result<bool, SeamError> {
+        let path = self.join(dir)?.join(name);
+        // `remove_dir`, never `remove_dir_all`. The real implementation cannot recurse — one
+        // `unlinkat(AT_REMOVEDIR)` either succeeds or returns ENOTEMPTY — and a mock that quietly
+        // could would let a test assert a tree delete the agent is incapable of. That is worse than
+        // no test: it reads as coverage for behaviour the product deliberately does not have.
+        match std::fs::remove_dir(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                Err(SeamError::NotEmpty(name.to_string()))
+            }
+            Err(e) => Err(SeamError::Io(format!("rmdir {name}: {e}"))),
         }
     }
 }

@@ -49,9 +49,7 @@ const describeConsole = dbRunnable ? describe : describe.skip;
 /** A socket path `net` can listen on: a filesystem socket on Unix, a named pipe on Windows. */
 function endpoint(prefix: string): string {
   const name = `depsis-console-${prefix}-${randomUUID()}`;
-  return process.platform === 'win32'
-    ? `\\\\.\\pipe\\${name}`
-    : join(tmpdir(), `${name}.sock`);
+  return process.platform === 'win32' ? `\\\\.\\pipe\\${name}` : join(tmpdir(), `${name}.sock`);
 }
 
 /** A named pipe is not a file and has nothing to unlink. */
@@ -309,18 +307,15 @@ describeConsole('console sessions, against a real PostgreSQL and a real socket',
     fake.latest().send({ t: 'line', s: 'cat /etc/shadow' });
     fake.latest().out('root:$6$verysecrethash:19000:0:99999:7:::\n');
 
-    const lines = await until(
-      async () => {
-        const rows = await db.withTenant(organizationId, (q) =>
-          q.query<{ line: string }>(
-            `SELECT line FROM console_commands WHERE session_id = $1 ORDER BY at`,
-            [view.id],
-          ),
-        );
-        return rows.length > 0 ? rows : null;
-      },
-      'the typed line to be recorded',
-    );
+    const lines = await until(async () => {
+      const rows = await db.withTenant(organizationId, (q) =>
+        q.query<{ line: string }>(
+          `SELECT line FROM console_commands WHERE session_id = $1 ORDER BY at`,
+          [view.id],
+        ),
+      );
+      return rows.length > 0 ? rows : null;
+    }, 'the typed line to be recorded');
 
     expect(lines.map((row) => row.line)).toEqual(['cat /etc/shadow']);
     // The whole point of ADR-0018's "no output" rule: copying the output of that command into the
@@ -389,18 +384,15 @@ describeConsole('console sessions, against a real PostgreSQL and a real socket',
     fake.latest().send({ t: 'error', message: 'idle' });
     fake.latest().send({ t: 'exit', code: 0 });
 
-    const reason = await until(
-      async () => {
-        const rows = await db.withTenant(organizationId, (q) =>
-          q.query<{ close_reason: string | null }>(
-            `SELECT close_reason FROM console_sessions WHERE id = $1 AND closed_at IS NOT NULL`,
-            [view.id],
-          ),
-        );
-        return rows[0]?.close_reason ?? null;
-      },
-      'the session to be closed with a reason',
-    );
+    const reason = await until(async () => {
+      const rows = await db.withTenant(organizationId, (q) =>
+        q.query<{ close_reason: string | null }>(
+          `SELECT close_reason FROM console_sessions WHERE id = $1 AND closed_at IS NOT NULL`,
+          [view.id],
+        ),
+      );
+      return rows[0]?.close_reason ?? null;
+    }, 'the session to be closed with a reason');
     expect(reason).toBe('idle');
 
     await expect(service.input(organizationId, adminA, view.id, 'aGk=')).rejects.toBeInstanceOf(
@@ -414,18 +406,15 @@ describeConsole('console sessions, against a real PostgreSQL and a real socket',
 
     fake.latest().end();
 
-    const reason = await until(
-      async () => {
-        const rows = await db.withTenant(organizationId, (q) =>
-          q.query<{ close_reason: string | null }>(
-            `SELECT close_reason FROM console_sessions WHERE id = $1 AND closed_at IS NOT NULL`,
-            [view.id],
-          ),
-        );
-        return rows[0]?.close_reason ?? null;
-      },
-      'the dropped session to be closed',
-    );
+    const reason = await until(async () => {
+      const rows = await db.withTenant(organizationId, (q) =>
+        q.query<{ close_reason: string | null }>(
+          `SELECT close_reason FROM console_sessions WHERE id = $1 AND closed_at IS NOT NULL`,
+          [view.id],
+        ),
+      );
+      return rows[0]?.close_reason ?? null;
+    }, 'the dropped session to be closed');
     expect(reason).toBe('shutdown');
   });
 
@@ -437,10 +426,11 @@ describeConsole('console sessions, against a real PostgreSQL and a real socket',
     // A row from a process that is gone: open in the table, no socket anywhere.
     const orphan = randomUUID();
     await owner.withoutTenant('migration-status', (q) =>
-      q.query(
-        `INSERT INTO console_sessions (id, organization_id, user_id) VALUES ($1, $2, $3)`,
-        [orphan, organizationId, adminB],
-      ),
+      q.query(`INSERT INTO console_sessions (id, organization_id, user_id) VALUES ($1, $2, $3)`, [
+        orphan,
+        organizationId,
+        adminB,
+      ]),
     );
 
     const page = await service.list(organizationId);

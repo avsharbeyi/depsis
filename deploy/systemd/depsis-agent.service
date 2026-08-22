@@ -141,6 +141,15 @@ SystemCallFilter=~@module
 # PrivateDevices= additionally would hide /dev/sd* and break smartctl, which needs SG_IO on the
 #   real block device.
 #
+# No ReadWritePaths= for /etc/samba either, and it is worth saying why rather than leaving the
+#   next reader to wonder. The agent writes /etc/samba/depsis.conf — atomically, via a temp file
+#   and a rename in that directory — and the obvious hardening would be ProtectSystem=strict with
+#   ReadWritePaths=/etc/samba. That pair is exactly the private-mount-namespace trap above: it
+#   would leave `zfs create` mounting datasets where nothing else can see them, and Samba serving
+#   empty directories with no error anywhere. There is no ProtectSystem= here, so /etc/samba is
+#   already writable; the narrowing would cost the product its storage and buy a root daemon
+#   almost nothing.
+#
 # SystemCallFilter= in its ALLOW-LIST form (e.g. =@system-service)
 #   @system-service excludes @mount, and `zfs create` calls mount(2). The filter is inherited by
 #   every child process, so a filter tight enough to be worth having is a filter that breaks the

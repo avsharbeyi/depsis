@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import type { OpenApi } from '@depsis/contracts';
+import { Fragment, useCallback, useEffect, useId, useRef, useState } from 'react';
 
+import { api } from './api.js';
 import { sfx } from './sfx.js';
 
 /**
@@ -369,8 +371,11 @@ export function ConfirmBox({
         <p id={bodyId}>{body}</p>
         {list !== undefined && list.length > 0 && (
           <div className="lst2">
-            {list.map((item) => (
-              <span key={item}>{item}</span>
+            {/* Keyed by position, not by text: a trash listing is flat across the whole share, so
+                two rows can legitimately read the same — same name, same size, different folder —
+                and the list is fixed for as long as the box is open. */}
+            {list.map((item, index) => (
+              <span key={index}>{item}</span>
             ))}
           </div>
         )}
@@ -456,6 +461,242 @@ export function PromptBox({
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/* ─── the folder picker ─────────────────────────────────────────────────────── */
+
+type PickEntry = OpenApi.components['schemas']['FileEntry'];
+
+/** One crumb of the picker's own trail. Ids, not names — same reason the file manager navigates
+ *  by id: a name is not what the server resolves against (ADR-0005). */
+interface PickCrumb {
+  id: string;
+  name: string;
+}
+
+/** The contract's ceiling for one page. The picker does not paginate, so a folder with more
+ *  children than this says so rather than drawing a truncated list as if it were complete. */
+const PICK_LIMIT = 200;
+
+/**
+ * Choose a destination folder.
+ *
+ * The tree is walked one listing at a time instead of expanded in advance: `GET /files` answers a
+ * page per folder, and a picker that preloaded the tree would ask the appliance for every folder
+ * on it in order to show the four the reader can actually see.
+ *
+ * `excludeIds` closes subtrees, not just rows. This picker is the only way down into a folder, so
+ * a folder that cannot be entered cannot have its children chosen either — which is exactly the
+ * rule that has to hold, because moving a folder inside itself is a cycle. It is a SET and not one
+ * id because a move is a batch: with two source folders selected, a single-id exclusion left the
+ * second one enterable and choosable, and the server's 409 then landed halfway through the batch —
+ * the other rows inside the source, the source itself still where it was. A disabled row says so
+ * before the click, and says it for every source.
+ *
+ * `null` from `onPick` is the share root: the trail starts empty, and `GET /files` with no
+ * `parentId` is what the contract calls "the caller's roots". The second argument is the
+ * destination as the reader saw it named, so the caller can put it in what it reports afterwards.
+ */
+export function FolderPicker({
+  title,
+  excludeIds,
+  confirmLabel,
+  onPick,
+  onCancel,
+}: {
+  title: string;
+  /** Bu girdiler ve alt ağaçları seçilemez — bir klasörü kendi içine taşımak döngü üretir. */
+  excludeIds?: ReadonlySet<string>;
+  confirmLabel: string;
+  onPick: (parentId: string | null, where: string) => void;
+  onCancel: () => void;
+}): React.JSX.Element {
+  const [trail, setTrail] = useState<PickCrumb[]>([]);
+  const [folders, setFolders] = useState<PickEntry[] | null>(null);
+  /** Told apart from "no subfolders": one is a fact about the folder, the other is a failed read,
+   *  and a picker that showed "boş" for a listing nobody managed to load would invite the reader
+   *  to drop a folder into a place they never saw. */
+  const [failed, setFailed] = useState(false);
+  const [more, setMore] = useState(false);
+
+  const ref = useRef<HTMLDivElement>(null);
+  const labelId = useId();
+  useEscape(onCancel);
+  useOverlayFocus(ref);
+
+  const here = trail[trail.length - 1];
+  const parentId = here?.id;
+
+  useEffect(() => {
+    let cancelled = false;
+    setFolders(null);
+    setFailed(false);
+    void (async () => {
+      const { data } = await api.GET('/files', {
+        params: {
+          query: parentId === undefined ? { limit: PICK_LIMIT } : { parentId, limit: PICK_LIMIT },
+        },
+      });
+      if (cancelled) return;
+      if (data === undefined) {
+        setFailed(true);
+        setMore(false);
+        return;
+      }
+      // Files are dropped rather than greyed out: this list answers one question — which folder —
+      // and every row that cannot answer it is noise between the reader and the row that can.
+      // Trashed entries never appear here at all; `trashed` defaults to false on the endpoint.
+      setFolders(
+        data.items
+          .filter((item) => item.kind === 'folder')
+          .sort((a, b) => a.name.localeCompare(b.name, 'tr')),
+      );
+      setMore(data.hasMore);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [parentId]);
+
+  const where = trail.length === 0 ? 'Paylaşım kökü' : trail.map((crumb) => crumb.name).join(' / ');
+
+  return (
+    <div className="ovl" onMouseDown={backdropCloser(onCancel)}>
+      <div
+        className="win"
+        ref={ref}
+        role="dialog"
+        aria-modal
+        aria-labelledby={labelId}
+        tabIndex={-1}
+      >
+        <div className="wh">
+          <Glyph tone="iris">⇄</Glyph>
+          <span className="tt" id={labelId}>
+            {title}
+          </span>
+          <button type="button" className="wx" onClick={onCancel} aria-label="Kapat">
+            ×
+          </button>
+        </div>
+        <div className="wb">
+          {/* `.addr` carries a 13px side margin for the file manager's own columns; inside a
+              window body that already has padding it would sit inset from everything else. */}
+          <div className="addr" style={{ margin: 0 }}>
+            <span className="nav">
+              <button
+                type="button"
+                title="Yukarı"
+                aria-label="Yukarı"
+                disabled={trail.length === 0}
+                onClick={() => setTrail((current) => current.slice(0, -1))}
+              >
+                ↑
+              </button>
+            </span>
+            <span className="path">
+              {trail.length === 0 ? (
+                <b>Paylaşım kökü</b>
+              ) : (
+                <button type="button" onClick={() => setTrail([])}>
+                  Paylaşım kökü
+                </button>
+              )}
+              {trail.map((crumb, index) => (
+                <Fragment key={crumb.id}>
+                  {' / '}
+                  {index === trail.length - 1 ? (
+                    <b>{crumb.name}</b>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setTrail((current) => current.slice(0, index + 1))}
+                    >
+                      {crumb.name}
+                    </button>
+                  )}
+                </Fragment>
+              ))}
+            </span>
+          </div>
+
+          {/* `.flist` owns the file manager's column inset and grows to fill its card; here it is
+              one panel among several in a window body, so it keeps only the scrolling. */}
+          <div className="flist" style={{ padding: 0, maxHeight: 300 }}>
+            {failed ? (
+              <Empty glyph="⚠" text="Klasörler okunamadı." />
+            ) : folders === null ? (
+              <Empty glyph="⋯" text="Yükleniyor…" />
+            ) : folders.length === 0 ? (
+              <Empty glyph="🗂" text="Burada alt klasör yok. Buraya taşıyabilirsiniz." />
+            ) : (
+              folders.map((folder) => {
+                const blocked = excludeIds?.has(folder.id) === true;
+                const enter = (): void =>
+                  setTrail((current) => [...current, { id: folder.id, name: folder.name }]);
+                return (
+                  <div
+                    key={folder.id}
+                    className="frow"
+                    role="button"
+                    tabIndex={blocked ? -1 : 0}
+                    aria-disabled={blocked}
+                    style={blocked ? { opacity: 0.45 } : { cursor: 'pointer' }}
+                    onClick={blocked ? undefined : enter}
+                    onKeyDown={
+                      blocked
+                        ? undefined
+                        : (event) => {
+                            // A div with a click handler is invisible to the keyboard, and Space
+                            // has to be swallowed or the list scrolls out from under the row.
+                            if (event.key !== 'Enter' && event.key !== ' ') return;
+                            event.preventDefault();
+                            enter();
+                          }
+                    }
+                  >
+                    {/* `.frow .g` is sized by its parent's rule, so it cannot be the shared
+                        `Glyph`, which owns its own dimensions. Only the tint is shared. */}
+                    <span
+                      className="g"
+                      style={{ background: toneTint('iris', 0.22), color: TONES.iris }}
+                      aria-hidden
+                    >
+                      📁
+                    </span>
+                    <span className="n" title={folder.name}>
+                      {folder.name}
+                    </span>
+                    <span className="sz">{blocked ? 'taşınan klasör' : '›'}</span>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="note">
+            Hedef: <b>{where}</b>
+            {more ? ' · Bu klasörde gösterilenden fazla alt klasör var.' : ''}
+          </div>
+
+          {/* The stylesheet's only button row is `.cf .row`, which belongs to the confirmation
+              box; a window body has no rule for one, so the alignment is written here. */}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button type="button" className="mk" onClick={onCancel}>
+              Vazgeç
+            </button>
+            <button
+              type="button"
+              className="mk up"
+              onClick={() => onPick(parentId ?? null, here?.name ?? where)}
+            >
+              {confirmLabel}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

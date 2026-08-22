@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { AgentService, expectStatus } from '../agent/agent.service.js';
-import { DbService } from '../db/db.service.js';
+import { DbService, type TenantQuery } from '../db/db.service.js';
 
 /**
  * A row in `file_entries`, as the database returns it.
@@ -55,6 +55,103 @@ export class NameTakenError extends Error {
 }
 
 /**
+ * A move whose destination is in another share.
+ *
+ * Refused rather than performed as a copy. Every DEPSIS share is its own ZFS dataset and
+ * `rename(2)` across datasets returns `EXDEV` (ADR-0008), so the only way to honour this request
+ * would be to copy the bytes and delete the original — a different operation with a different
+ * cost and a different failure mode, which therefore deserves its own endpoint rather than a
+ * surprise inside this one.
+ */
+export class CrossShareMoveError extends Error {
+  constructor() {
+    super('a move cannot cross shares; copy it instead');
+    this.name = 'CrossShareMoveError';
+  }
+}
+
+/**
+ * A folder moved into its own subtree.
+ *
+ * The cycle this makes is not a cosmetic problem. `parent_id` is the authority for the whole tree,
+ * so a folder that is its own ancestor turns every recursive walk — the path rebuild below, the
+ * search scope, `componentsOf` — into a query that never terminates. The database has no
+ * constraint that can see it, so this check is the only thing standing between a user's drag and a
+ * statement timeout on every subsequent listing.
+ */
+export class MoveIntoDescendantError extends Error {
+  constructor(readonly folderName: string) {
+    super(`'${folderName}' cannot be moved inside itself`);
+    this.name = 'MoveIntoDescendantError';
+  }
+}
+
+/** Permanent deletion works on the trash, and only on the trash. */
+export class NotTrashedError extends Error {
+  constructor(readonly entryName: string) {
+    super(`'${entryName}' is not in the trash; move it there first`);
+    this.name = 'NotTrashedError';
+  }
+}
+
+/**
+ * The row is here and the file is not.
+ *
+ * Deliberately NOT `EntryNotFoundError`. A 404 would tell the caller its id is wrong, and it is
+ * not — the entry exists, the tenant owns it, and the thing that is missing is on the other side
+ * of a boundary the caller cannot see. The two stores disagree, which is a state to report rather
+ * than an identity to deny.
+ */
+export class EntryMissingOnDiskError extends Error {
+  constructor(readonly agentReason: string) {
+    // The agent's own words stay on `agentReason` and out of the message. They are Rust error
+    // prose written for whoever reads the journal — `SeamError::PathEscape("alice/docs/x:
+    // Operation not permitted (os error 1)")`, or the classify_openat2 paragraph naming kernel
+    // versions — and a person looking at a file listing can act on none of it. `shares.service.ts`
+    // refuses to pass the same text through for exactly this reason; the controller logs the field
+    // beside the correlation id so the detail is one grep away rather than in an HTTP body.
+    super('the filesystem does not have this entry where the database says it is');
+    this.name = 'EntryMissingOnDiskError';
+  }
+}
+
+/**
+ * The move needs a directory that DEPSIS has never created.
+ *
+ * Not a corruption and not the caller's mistake. `createFolder` writes a row and stops, because
+ * the agent's operation set has no `mkdir` and §2.2 keeps that set closed to anything the API can
+ * decide on its own. So folders are records, files live flat at the share root, and the three
+ * moves that touch a folder — a file in, a file out, a folder anywhere — all fail inside the
+ * agent's `open_dir`. Reported as its own state so the 409 can say what is actually missing
+ * instead of accusing the database of being wrong about a file it is right about.
+ */
+export class FolderNotOnDiskError extends Error {
+  constructor(readonly agentReason: string) {
+    super(
+      'this folder exists as a record but not yet as a directory on disk, so an entry cannot be ' +
+        'moved into or out of it',
+    );
+    this.name = 'FolderNotOnDiskError';
+  }
+}
+
+/**
+ * A directory the agent refused to remove because it still has entries in it.
+ *
+ * Reachable only when the disk holds something the database does not know about — a file written
+ * over SMB, most likely — because the permanent delete walks the tree it stores from the leaves
+ * up. Reported rather than forced: the alternative is a recursive delete in the agent, and §2.2
+ * exists to keep that operation from existing at all.
+ */
+export class DirectoryNotEmptyError extends Error {
+  constructor(readonly agentReason: string) {
+    // Same as `EntryMissingOnDiskError` above: the reason travels on the field, not in the body.
+    super('the folder still has entries the database does not know about');
+    this.name = 'DirectoryNotEmptyError';
+  }
+}
+
+/**
  * A restore that would produce an entry nothing can reach.
  *
  * The trash is a column, not a folder (0008), so restoring a child clears only that child's
@@ -87,6 +184,19 @@ const ENTRY_COLUMNS = `id, share_id, parent_id, kind, name, path, size_bytes, co
                        trashed_at, created_at, updated_at`;
 
 /**
+ * The share this entry lives in, as the caller resolved it from the session.
+ *
+ * Both halves are needed and neither is optional: the id is what proves the entry belongs to the
+ * share the session is working in, and the name is what the agent resolves its root fd from. A
+ * call site holding only the name could send a privileged operation against the right share for
+ * the wrong entry.
+ */
+export interface ShareRef {
+  id: string;
+  name: string;
+}
+
+/**
  * Below this many characters a query is matched as a PREFIX rather than as a substring.
  *
  * pg_trgm indexes trigrams, so a one- or two-character pattern has no trigram to look up and
@@ -108,6 +218,45 @@ function page(rows: FileEntryRow[], limit: number): FileEntryPage {
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, limit) : rows;
   return { items, nextCursor: hasMore ? (items[items.length - 1]?.id ?? null) : null, hasMore };
+}
+
+/**
+ * Recompute `path` for everything under `rootId`, in the caller's transaction.
+ *
+ * ONE implementation, shared by `move` and `rename`, because they are two spellings of the same
+ * user-visible change and a cache the two disagreed about would be worse than no cache. Rebuilt
+ * from `parent_id` rather than by splicing a new prefix onto the old strings: same cost, and it
+ * REPAIRS a stale descendant instead of carrying it forward — a prefix splice on a row whose cache
+ * was already wrong produces a second wrong value that looks freshly computed.
+ *
+ * The root row itself is excluded because its caller has just written it and holds the returned
+ * copy; touching it again here would make that copy stale in the same statement.
+ */
+async function rebuildSubtreePaths(
+  db: TenantQuery,
+  organizationId: string,
+  rootId: string,
+): Promise<void> {
+  await db.query(
+    `WITH RECURSIVE subtree AS (
+       SELECT id, path
+         FROM public.file_entries
+        WHERE organization_id = $1 AND id = $2
+       UNION ALL
+       SELECT child.id, subtree.path || '/' || child.name
+         FROM public.file_entries child
+         JOIN subtree ON child.parent_id = subtree.id
+        WHERE child.organization_id = $1
+     )
+     UPDATE public.file_entries entry
+        SET path = subtree.path
+       FROM subtree
+      WHERE entry.organization_id = $1
+        AND entry.id = subtree.id
+        AND entry.id <> $2
+        AND entry.path IS DISTINCT FROM subtree.path`,
+    [organizationId, rootId],
+  );
 }
 
 /**
@@ -333,28 +482,403 @@ export class FilesService {
     }
   }
 
-  async rename(organizationId: string, id: string, name: string): Promise<FileEntryRow> {
+  /**
+   * Change an entry's name, keeping the bytes and the row in step.
+   *
+   * A FILE's rename is delegated to `move` — same parent, new name — and that is not tidiness, it
+   * is the fix for a divergence this method used to create on its own. It changed `name` and
+   * `path` and never told the agent, so the row said `b.txt` while the disk still held `a.txt`.
+   * Nothing noticed until the file was permanently deleted: `purge` asked the agent to remove
+   * `b.txt`, the agent answered `not_found`, the row went, and `a.txt` stayed on disk — readable
+   * over SMB, counting against the dataset's refquota, and unreachable through DEPSIS forever.
+   * The user had been told it was permanently deleted. One rename through the agent and one
+   * rename around it must not both be spellings of the same request.
+   *
+   * A FOLDER keeps the database-only rename, because a folder has no directory on disk to move:
+   * `createFolder` cannot make one, the agent has no `mkdir`, and asking it to rename something
+   * that was never created would fail every folder rename in the product. This is folders-only
+   * for exactly as long as that is true, and the day a directory-creating operation lands, this
+   * branch goes with it.
+   */
+  async rename(
+    organizationId: string,
+    id: string,
+    name: string,
+    share: ShareRef,
+    correlationId: string,
+    reason: string,
+  ): Promise<FileEntryRow> {
     assertValidName(name);
     const entry = await this.find(organizationId, id);
     if (entry.trashed_at !== null) throw new EntryNotFoundError();
 
+    if (entry.kind === 'file') {
+      return this.move(
+        organizationId,
+        id,
+        share,
+        { parentId: entry.parent_id, name },
+        correlationId,
+        reason,
+      );
+    }
+
     const parentPath = entry.path.slice(0, entry.path.lastIndexOf('/'));
     try {
-      const rows = await this.db.withTenant(organizationId, (db) =>
-        db.query<FileEntryRow>(
+      return await this.db.withTenant(organizationId, async (db) => {
+        const rows = await db.query<FileEntryRow>(
           `UPDATE public.file_entries
               SET name = $3, path = $4
             WHERE organization_id = $1 AND id = $2
             RETURNING ${ENTRY_COLUMNS}`,
           [organizationId, id, name, `${parentPath}/${name}`],
-        ),
-      );
-      const row = rows[0];
-      if (!row) throw new EntryNotFoundError();
-      return row;
+        );
+        const row = rows[0];
+        if (!row) throw new EntryNotFoundError();
+        // The same rebuild `move` does, in the same transaction as the row it follows from. Left
+        // out, a renamed folder's children kept a `path` naming the old folder — harmless only
+        // because ADR-0005 makes nothing authorise on `path`, and harmless is not a property to
+        // rest a cache on when the two routes to a rename would then disagree about it.
+        await rebuildSubtreePaths(db, organizationId, id);
+        return row;
+      });
     } catch (error) {
       throw this.asNameConflict(error, name);
     }
+  }
+
+  /**
+   * Move an entry into another folder — ON DISK FIRST, in the database SECOND.
+   *
+   * The order is the whole design and it is not reversible. If the row moved first and the agent
+   * then refused, the row would name a place the bytes are not: every download would resolve
+   * `componentsOf` to the new path, find nothing, and answer 404, while an SMB client kept showing
+   * the file in the old folder. That is the two-realities split this product does not accept, and
+   * it is unrecoverable without a reconciliation pass that does not exist yet. The other order
+   * fails safely: a successful rename followed by a failed `UPDATE` is a file the database still
+   * describes correctly enough to find, and the compensating move below closes even that.
+   *
+   * A rename is expressible here too — `name` alongside `parentId` — because on the filesystem the
+   * two are one `renameat2`. Splitting them into two agent calls would put a window between them in
+   * which the entry sits in the destination under its old name.
+   */
+  async move(
+    organizationId: string,
+    id: string,
+    share: ShareRef,
+    target: { parentId: string | null; name?: string | undefined },
+    correlationId: string,
+    reason: string,
+  ): Promise<FileEntryRow> {
+    const entry = await this.find(organizationId, id);
+    // A trashed entry has no place in the tree to move within, and the same 404 a rename gives is
+    // the honest answer: as far as every listing is concerned it is not there.
+    if (entry.trashed_at !== null || entry.share_id !== share.id) throw new EntryNotFoundError();
+
+    const name = target.name ?? entry.name;
+    assertValidName(name);
+
+    let parentPath = '';
+    if (target.parentId !== null) {
+      const parent = await this.find(organizationId, target.parentId);
+      if (parent.trashed_at !== null) throw new EntryNotFoundError();
+      if (parent.share_id !== entry.share_id) throw new CrossShareMoveError();
+      if (parent.kind !== 'folder') throw new InvalidNameError('the destination is not a folder');
+      // Only a folder can contain itself, and only a folder has descendants to be swallowed by
+      // the cycle — a file's move is always acyclic.
+      if (
+        entry.kind === 'folder' &&
+        (await this.isSelfOrDescendant(organizationId, parent.id, id))
+      ) {
+        throw new MoveIntoDescendantError(entry.name);
+      }
+      parentPath = parent.path;
+    }
+
+    if (entry.parent_id === target.parentId && name === entry.name) return entry;
+
+    // Asked of the database BEFORE the agent, even though the agent's `RENAME_NOREPLACE` refuses a
+    // taken destination anyway. Two reasons: a folder has no directory on disk yet (see
+    // `createFolder`), so the kernel's refusal cannot see a folder collision at all; and a row
+    // whose bytes are missing would let the rename succeed and the `UPDATE` then fail on the
+    // unique index — the one ordering that leaves the file moved and the row behind.
+    await this.requireNameFree(organizationId, entry.share_id, target.parentId, name, id);
+
+    const from = await this.componentsOf(organizationId, id);
+    const to =
+      target.parentId === null
+        ? [name]
+        : [...(await this.componentsOf(organizationId, target.parentId)), name];
+
+    await this.moveOnDisk(share.name, from, to, name, correlationId, reason).catch(
+      (error: unknown) => {
+        // `EntryMissingOnDiskError` says "the two stores disagree", which is the right thing to say
+        // when they do and a slander on the database when they do not. A folder is a row with no
+        // directory behind it (see `createFolder`), so the moment either end of this move runs
+        // through one, `open_dir` inside the agent's `publish` fails with ENOENT and the answer
+        // comes back `not_found` — not because anything is corrupt, but because the destination
+        // was never created. Whoever reads the first message goes looking for a broken database;
+        // whoever reads this one learns the feature is waiting on an agent operation.
+        //
+        // Three ways a folder gets into it: the entry being moved is one (nothing to rename), the
+        // source sits inside one, or the destination is one. The last two are what the component
+        // counts test — a path of length 1 is at the share root, where files actually live.
+        const touchesAFolder = entry.kind === 'folder' || from.length > 1 || to.length > 1;
+        if (error instanceof EntryMissingOnDiskError && touchesAFolder) {
+          throw new FolderNotOnDiskError(error.agentReason);
+        }
+        throw error;
+      },
+    );
+
+    const newPath = `${parentPath}/${name}`;
+    try {
+      return await this.db.withTenant(organizationId, async (db) => {
+        const rows = await db.query<FileEntryRow>(
+          `UPDATE public.file_entries
+              SET parent_id = $3, name = $4, path = $5
+            WHERE organization_id = $1 AND id = $2
+            RETURNING ${ENTRY_COLUMNS}`,
+          [organizationId, id, target.parentId, name, newPath],
+        );
+        const row = rows[0];
+        if (!row) throw new EntryNotFoundError();
+
+        await rebuildSubtreePaths(db, organizationId, id);
+        return row;
+      });
+    } catch (error) {
+      // The file is at its new name and the row is not. Put it back, because the alternative is
+      // exactly the divergence the ordering above exists to prevent — and this is the one window
+      // in which it can still be closed from here.
+      await this.moveOnDisk(
+        share.name,
+        to,
+        from,
+        entry.name,
+        correlationId,
+        `undo: ${reason}`,
+      ).catch((undoError: unknown) => {
+        this.logger.error(
+          `moved ${share.name}/${from.join('/')} to ${to.join('/')} on disk, then failed to ` +
+            `record it, and could not move it back: ${messageOf(undoError)}. The database still ` +
+            `describes the OLD location; the file is at the new one.`,
+        );
+      });
+      throw this.asNameConflict(error, name);
+    }
+  }
+
+  /**
+   * Delete an entry and everything under it, permanently: from the leaves up.
+   *
+   * One `RemoveEntry` per node, deepest first, and the row goes only after the agent says its
+   * entry is gone. The agent has no recursive delete and will not get one (ADR-0006, §2.2): an
+   * operation whose blast radius the caller chooses is `rm -rf` behind a typed name, and the API
+   * is the side that knows the tree because the API is the side that stores it.
+   *
+   * NOT atomic, and it cannot be — there is no transaction spanning a filesystem and a database.
+   * Each node is committed as it is removed, so an interruption leaves the removed ones removed
+   * and the rest still in the trash, and calling again continues from there. That is what the
+   * contract promises, and it is also why an agent answer of `not_found` counts as success below:
+   * a retry after a crash between the unlink and the `DELETE` must not deadlock on the row it is
+   * there to clean up.
+   *
+   * The whole subtree goes, including children whose own `trashed_at` is null. Trashing a folder
+   * sets one flag on one row, so its children are unreachable rather than trashed — and
+   * `parent_id`'s `ON DELETE RESTRICT` would refuse to leave them behind in any case.
+   */
+  async purge(
+    organizationId: string,
+    id: string,
+    share: ShareRef,
+    correlationId: string,
+    reason: string,
+  ): Promise<void> {
+    const entry = await this.find(organizationId, id);
+    if (entry.share_id !== share.id) throw new EntryNotFoundError();
+    // 409 rather than a silent deletion. The trash is the click between a user and permanent data
+    // loss; an endpoint that skipped it on request would make the trash optional, which is the
+    // same as not having one.
+    if (entry.trashed_at === null) throw new NotTrashedError(entry.name);
+
+    const root = await this.componentsOf(organizationId, id);
+    const nodes = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ id: string; kind: 'file' | 'folder'; parts: string[] }>(
+        `WITH RECURSIVE tree AS (
+           SELECT id, kind, 0 AS depth, $3::text[] AS parts
+             FROM public.file_entries
+            WHERE organization_id = $1 AND id = $2
+           UNION ALL
+           SELECT child.id, child.kind, tree.depth + 1, tree.parts || child.name
+             FROM public.file_entries child
+             JOIN tree ON child.parent_id = tree.id
+            WHERE child.organization_id = $1
+         )
+         SELECT id, kind, parts FROM tree ORDER BY depth DESC, id`,
+        [organizationId, id, root],
+      ),
+    );
+
+    for (const node of nodes) {
+      const response = await this.agent.call(
+        {
+          op: 'remove_entry',
+          share: share.name,
+          path: node.parts,
+          directory: node.kind === 'folder',
+        },
+        reason,
+        correlationId,
+      );
+      if (response.status === 'conflict') throw new DirectoryNotEmptyError(response.reason);
+      // `not_found` beside `removed`, and it is the line that makes a retry work: an entry that is
+      // already gone is the end state this call exists to produce, so the row goes too. Refusing
+      // here instead would leave a crash between the unlink and the DELETE as a row nothing can
+      // ever clean up.
+      if (response.status !== 'removed' && response.status !== 'not_found') {
+        expectStatus(response, 'removed');
+      }
+      if (response.status === 'not_found' && node.kind === 'file') {
+        // The one direction this endpoint can be wrong in that nobody would ever find out about.
+        // A folder has no directory on disk (see `createFolder`), so `not_found` for one is the
+        // expected answer; a FILE the agent cannot find means either a retry after a crash — the
+        // case the acceptance above exists for — or bytes sitting somewhere the database does not
+        // name, which this call is about to make unreachable by deleting the only row that knew
+        // about them. They stay readable over SMB and keep counting against the dataset's
+        // refquota. It is still accepted, because refusing would make a crashed purge permanently
+        // unretryable, but it is written down with enough to find the file by hand.
+        this.logger.error(
+          `permanently deleting ${share.name}/${node.parts.join('/')}: the agent reports no such ` +
+            `entry (${response.reason}). If this is not a retry of an interrupted delete, the ` +
+            'bytes are still on disk with no row left to reach them.',
+        );
+      }
+
+      // One transaction per node, deliberately. A single transaction around the loop would roll
+      // the rows back while leaving every unlink done — the database would then describe files
+      // that no longer exist, which is the divergence this endpoint is most able to cause.
+      await this.db.withTenant(organizationId, async (db) => {
+        // BEFORE the entry, in the same transaction, because `upload_sessions` references
+        // `file_entries` twice and both references block this delete rather than following it:
+        // `parent_id` is ON DELETE RESTRICT, and `file_id` is ON DELETE SET NULL guarded by
+        // `upload_sessions_completion_pair`, which refuses a null `file_id` beside a non-null
+        // `completed_at`. So every file that arrived through tus, and every folder that was ever
+        // named as an upload target, was unpurgeable — the agent unlinked the bytes and then the
+        // DELETE failed on the constraint, leaving a row in the trash that no retry could ever
+        // clear and whose data was already gone.
+        //
+        // Deleted rather than detached because there is no third option without a migration, and
+        // because a session is a record of a transfer INTO a file: once the file is permanently
+        // gone the session describes nothing. It disappears from the transfer list, which is the
+        // same thing the user asked for when they emptied the trash.
+        await db.query(
+          `DELETE FROM public.upload_sessions
+            WHERE organization_id = $1 AND (parent_id = $2 OR file_id = $2)`,
+          [organizationId, node.id],
+        );
+        await db.query(`DELETE FROM public.file_entries WHERE organization_id = $1 AND id = $2`, [
+          organizationId,
+          node.id,
+        ]);
+      });
+    }
+  }
+
+  /** Is the privileged agent reachable? Endpoints that need it answer 503 when it is not. */
+  agentAvailable(): boolean {
+    return this.agent.isAvailable();
+  }
+
+  /**
+   * Ask the agent to rename one entry, and turn its answer into this file's errors.
+   *
+   * `moved`, `not_found` and `conflict` are all ORDINARY answers on this wire — the agent reports
+   * them as outcomes, not faults — so each is mapped here rather than left to `expectStatus`,
+   * which would collapse the last two into a single unhelpful refusal.
+   */
+  private async moveOnDisk(
+    share: string,
+    from: string[],
+    to: string[],
+    name: string,
+    correlationId: string,
+    reason: string,
+  ): Promise<void> {
+    const response = await this.agent.call(
+      { op: 'move_entry', share, from, to },
+      reason,
+      correlationId,
+    );
+    switch (response.status) {
+      case 'moved':
+        return;
+      case 'not_found':
+        throw new EntryMissingOnDiskError(response.reason);
+      // `RENAME_NOREPLACE` refused: something is already at the destination and the source has not
+      // moved. The name is what the user has to change, which is what `NameTakenError` says.
+      case 'conflict':
+        throw new NameTakenError(name);
+      default:
+        expectStatus(response, 'moved');
+    }
+  }
+
+  /**
+   * Is `candidateId` the folder itself, or somewhere underneath it?
+   *
+   * Walked UP from the candidate rather than down from the folder: an upward walk visits one row
+   * per level and stops at the share root, while a downward one visits the whole subtree to prove
+   * a negative.
+   */
+  private async isSelfOrDescendant(
+    organizationId: string,
+    candidateId: string,
+    folderId: string,
+  ): Promise<boolean> {
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ hit: number }>(
+        `WITH RECURSIVE up AS (
+           SELECT id, parent_id
+             FROM public.file_entries
+            WHERE organization_id = $1 AND id = $2
+           UNION ALL
+           SELECT parent.id, parent.parent_id
+             FROM public.file_entries parent
+             JOIN up ON parent.id = up.parent_id
+            WHERE parent.organization_id = $1
+         )
+         SELECT 1 AS hit FROM up WHERE id = $3 LIMIT 1`,
+        [organizationId, candidateId, folderId],
+      ),
+    );
+    return rows.length > 0;
+  }
+
+  /** The destination sibling set, checked for the name before anything privileged happens. */
+  private async requireNameFree(
+    organizationId: string,
+    shareId: string,
+    parentId: string | null,
+    name: string,
+    exceptId: string,
+  ): Promise<void> {
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ id: string }>(
+        // `name_fold`, not `name`: uniqueness is case- and Turkish-i-folded, so a check on the raw
+        // name would pass here and then hit the unique index after the file had already moved.
+        `SELECT id FROM public.file_entries
+          WHERE organization_id = $1
+            AND share_id = $2
+            AND parent_id IS NOT DISTINCT FROM $3
+            AND name_fold = public.fold_identity($4)
+            AND trashed_at IS NULL
+            AND id <> $5
+          LIMIT 1`,
+        [organizationId, shareId, parentId, name, exceptId],
+      ),
+    );
+    if (rows.length > 0) throw new NameTakenError(name);
   }
 
   /**
@@ -633,4 +1157,9 @@ export class FilesService {
     );
     return expectStatus(response, 'publish').bytes;
   }
+}
+
+/** An unknown thrown value, as something a log line can carry. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

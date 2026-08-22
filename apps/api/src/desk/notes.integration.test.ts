@@ -139,7 +139,7 @@ describeDb('notes, against a real PostgreSQL', () => {
     expect(still.body).toBe('metin');
   });
 
-  it('lists an author\'s notes with the most recently edited first', async () => {
+  it("lists an author's notes with the most recently edited first", async () => {
     // Self-contained: its own author, so the ordering assertion cannot be disturbed by a note
     // another test in this file created.
     const solo = await seedUser(owner, orgA, 'notes-sira');
@@ -195,7 +195,11 @@ describeDb('notes, against a real PostgreSQL', () => {
 });
 
 /** A user of this test's own, so a test that needs a clean author does not borrow a shared one. */
-async function seedUser(owner: DbService, organizationId: string, username: string): Promise<string> {
+async function seedUser(
+  owner: DbService,
+  organizationId: string,
+  username: string,
+): Promise<string> {
   const rows = await owner.withoutTenant('migration-status', (q) =>
     q.query<{ id: string }>(
       `INSERT INTO users (organization_id, username, role, password_hash)

@@ -96,10 +96,7 @@ export class RemoteController {
 
   @Post('networks')
   @UseGuards(AdminGuard)
-  async join(
-    @Req() request: AuthenticatedRequest,
-    @Body() body: unknown,
-  ): Promise<RemoteNetwork> {
+  async join(@Req() request: AuthenticatedRequest, @Body() body: unknown): Promise<RemoteNetwork> {
     requireSameOrigin(request);
     const session = requireSession(request);
 

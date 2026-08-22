@@ -33,6 +33,22 @@ export const PODMAN_SOCKET_DEFAULT = '/run/podman/podman.sock';
 export const CONSOLE_SOCKET_DEFAULT = '/run/depsis/console.sock';
 
 /**
+ * The server name in the `\\server\share` address DEPSIS shows for an SMB share.
+ *
+ * NOT the box's hostname, and not derived from the request's Host header either. Which name
+ * resolves to this appliance from a Windows client is a fact about the network the appliance
+ * cannot see: it may be a NetBIOS name Samba announces, a DNS name an operator created, a
+ * `.local` name mDNS answers for, or a ZeroTier address on a machine that never sees the LAN.
+ * `gethostname()` agrees with none of those reliably.
+ *
+ * So it is configuration with a default, and the default is the product's own name because that is
+ * what the appliance ships announcing itself as. Getting it wrong shows a user an address that
+ * looks authoritative and does not answer — the exact failure `GET /shares` exists to prevent —
+ * which is why a deployment that renamed the box sets `DEPSIS_SMB_HOST`.
+ */
+export const SMB_HOST_DEFAULT = 'depsis';
+
+/**
  * ADR-0001 makes runtime validation mandatory at every boundary, and process.env is a boundary:
  * TypeScript will happily type `process.env.X` as `string | undefined` and then let a `!` silence
  * it. A missing DEPSIS_DATABASE_URL should stop the process at startup with a sentence someone can
@@ -153,6 +169,19 @@ const schema = z.object({
     .optional()
     .transform((value) => (value === undefined || value === '' ? null : value)),
 
+  // The server name in the UNC paths /shares reports. See SMB_HOST_DEFAULT.
+  //
+  // The pattern is not decoration. This value is concatenated into `\\host\share` and handed to a
+  // person to type into Explorer, so a value containing a backslash or a space would produce an
+  // address that names a different host, or no host at all, while looking like a DEPSIS bug. The
+  // shape below is the intersection of what NetBIOS and DNS will both carry: letters, digits, dot,
+  // dash, underscore, no leading punctuation, and short enough for a NetBIOS name.
+  DEPSIS_SMB_HOST: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/, 'must be a host name, not a path or an address')
+    .default(SMB_HOST_DEFAULT),
+
   // Which ZFS pools /system/telemetry reports on, comma-separated.
   //
   // Configuration rather than discovery: the agent's operation set is closed and has no "list
@@ -213,6 +242,10 @@ export interface AppConfig {
   // absent, and a test building an `AppConfig` literal for something else should not have to name
   // every socket the appliance has grown. See `CONSOLE_SOCKET_DEFAULT`.
   consoleSocket?: string;
+  // Optional in the interface for the reason the three above are: it has a usable answer when
+  // absent (`SMB_HOST_DEFAULT`), and a test building an `AppConfig` literal for something else
+  // should not have to name every setting the appliance has grown.
+  smbHost?: string;
   zfsPools: readonly string[];
   smartDisks: readonly string[];
 }
@@ -234,6 +267,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     podmanAllowRootful: parsed.data.DEPSIS_PODMAN_ALLOW_ROOTFUL,
     consoleSocket: parsed.data.DEPSIS_CONSOLE_SOCKET,
     sharesRoot: parsed.data.DEPSIS_SHARES_ROOT,
+    smbHost: parsed.data.DEPSIS_SMB_HOST,
     zfsPools: parsed.data.DEPSIS_ZFS_POOLS,
     smartDisks: parsed.data.DEPSIS_SMART_DISKS,
   };

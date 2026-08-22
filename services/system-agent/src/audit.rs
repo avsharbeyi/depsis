@@ -43,6 +43,8 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::PublishTransfer { .. } => "publish_transfer",
         Request::DiscardTransfer { .. } => "discard_transfer",
         Request::OpenDownload { .. } => "open_download",
+        Request::MoveEntry { .. } => "move_entry",
+        Request::RemoveEntry { .. } => "remove_entry",
         Request::ZeroTierStatus {} => "zerotier_status",
         Request::ZeroTierNetworks {} => "zerotier_networks",
         Request::ZeroTierJoin { .. } => "zerotier_join",

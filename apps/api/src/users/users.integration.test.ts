@@ -92,17 +92,15 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     await users.create(orgA, 'Ayse', 'member', 'hash');
     // Case and the Turkish i-family fold for uniqueness; accents do NOT. `fold_identity` is the
     // authority and this asserts the API sees its decision as a 409 rather than a 500.
-    await expect(
-      users.create(orgA, 'AYSE', 'member', 'h'),
-    ).rejects.toBeInstanceOf(UsernameTakenError);
+    await expect(users.create(orgA, 'AYSE', 'member', 'h')).rejects.toBeInstanceOf(
+      UsernameTakenError,
+    );
   });
 
   it('lets the same address exist in another organization', async () => {
     // A global UNIQUE(email) would leak across tenants: the uniqueness check bypasses RLS, so a
     // refusal here would tell tenant B that tenant A has that address (P0-C measured it).
-    await expect(
-      users.create(orgB, 'ikinci', 'member', 'hash'),
-    ).resolves.toBeTruthy();
+    await expect(users.create(orgB, 'ikinci', 'member', 'hash')).resolves.toBeTruthy();
   });
 
   it("does not let one tenant read or change another tenant's account", async () => {

@@ -350,7 +350,6 @@ export function Tasks({
             {group.canAdd && (
               <div className="jadd">
                 <input
-                  className="jnew"
                   value={drafts[group.key] ?? ''}
                   /* Deliberately never disabled: adding several tasks in a row means typing the
                      next one while the previous request is still open, and a field that greys out

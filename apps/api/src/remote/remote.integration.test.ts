@@ -175,7 +175,9 @@ describeDb('remote access, against a real PostgreSQL', () => {
   afterAll(async () => {
     if (owner !== undefined) {
       await owner.withoutTenant('migration-status', async (q) => {
-        await q.query(`DELETE FROM remote_networks WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        await q.query(`DELETE FROM remote_networks WHERE organization_id = ANY($1)`, [
+          [orgA, orgB],
+        ]);
         await q.query(`DELETE FROM users WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM organizations WHERE id = ANY($1)`, [[orgA, orgB]]);
       });

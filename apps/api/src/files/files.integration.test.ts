@@ -1,13 +1,24 @@
+import { randomUUID } from 'node:crypto';
+
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { AgentService } from '../agent/agent.service.js';
+import {
+  AgentRefusedError,
+  AgentUnavailableError,
+  type AgentService,
+} from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
 import {
+  EntryMissingOnDiskError,
   EntryNotFoundError,
   FilesService,
+  FolderNotOnDiskError,
   InvalidNameError,
+  MoveIntoDescendantError,
   NameTakenError,
+  NotTrashedError,
   TrashedParentError,
+  type ShareRef,
 } from './files.service.js';
 
 /**
@@ -29,14 +40,43 @@ const runnable =
   APP_URL !== undefined && APP_URL !== '' && OWNER_URL !== undefined && OWNER_URL !== '';
 const describeDb = runnable ? describe : describe.skip;
 
-/** The agent is not reached by any test here; every one of them is metadata only. */
+/** Most tests here are metadata only, and reaching the agent from one of them is a bug. */
 const noAgent = {
   isAvailable: () => false,
   call: () => Promise.reject(new Error('no test here should call the agent')),
 } as unknown as AgentService;
 
+/**
+ * An agent that answers from a script and remembers every request.
+ *
+ * A fake rather than a mock of the socket, because what these tests are about is the ORDER of two
+ * stores: the agent is asked first and the row is written second, so a refusal has to leave the
+ * database exactly as it was. `calls` is what proves the first half — a test that only checked the
+ * rows would pass just as happily against an implementation that never asked the agent at all.
+ */
+function withAgent(answer: (request: Record<string, unknown>) => Record<string, unknown>): {
+  files: FilesService;
+  calls: Record<string, unknown>[];
+} {
+  const calls: Record<string, unknown>[] = [];
+  const agent = {
+    isAvailable: () => true,
+    call: (request: Record<string, unknown>) => {
+      calls.push(request);
+      // `new Promise` rather than an async function, so that a script which THROWS produces a
+      // rejected promise — which is how an unreachable agent arrives at the caller.
+      return new Promise<unknown>((resolve) => {
+        resolve(answer(request));
+      });
+    },
+  } as unknown as AgentService;
+  return { files: new FilesService(db, agent), calls };
+}
+
+// Declared out here because `withAgent` above builds a second `FilesService` on the same pool.
+let db: DbService;
+
 describeDb('the file tree, against a real PostgreSQL', () => {
-  let db: DbService;
   let owner: DbService;
   let files: FilesService;
   let orgA = '';
@@ -192,9 +232,23 @@ describeDb('the file tree, against a real PostgreSQL', () => {
 
   it('renames and keeps the derived path in step', async () => {
     const folder = await files.createFolder(orgA, shareA, null, 'eski');
-    const renamed = await files.rename(orgA, folder.id, 'yeni');
+    const renamed = await files.rename(orgA, folder.id, 'yeni', shareRefA(), 'cid', 'test');
     expect(renamed.name).toBe('yeni');
     expect(renamed.path.endsWith('/yeni')).toBe(true);
+  });
+
+  it('rebuilds the path of everything under a renamed folder', async () => {
+    // `move` did this and `rename` did not, so the same user-visible change left the cache in two
+    // different states depending on which spelling the client used. Nothing authorises on `path`
+    // (ADR-0005), which is the only reason it was survivable rather than a bug with a victim.
+    const folder = await files.createFolder(orgA, shareA, null, 'ad-kok');
+    const child = await files.createFolder(orgA, shareA, folder.id, 'ad-alt');
+    const grandchild = await files.createFolder(orgA, shareA, child.id, 'ad-torun');
+
+    await files.rename(orgA, folder.id, 'ad-yeni', shareRefA(), 'cid', 'test');
+
+    expect((await files.find(orgA, child.id)).path).toBe('/ad-yeni/ad-alt');
+    expect((await files.find(orgA, grandchild.id)).path).toBe('/ad-yeni/ad-alt/ad-torun');
   });
 
   it('refuses a name the agent would refuse, before a row exists', async () => {
@@ -461,5 +515,442 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     await files.createFolder(orgA, shareA, null, 'kiracıya-özel-dosya');
     const theirs = await files.search(orgB, shareB, null, 'kiracıya-özel-dosya', null, 50);
     expect(theirs.items).toHaveLength(0);
+  });
+  // ─── move ───────────────────────────────────────────────────────────────────
+  //
+  // The filesystem first and the database second, always. Every test below is about that order:
+  // what the agent was asked, and what the rows look like when it says no.
+
+  /** The share every move and purge below works in. Assigned in `beforeAll`, so read lazily. */
+  const shareRefA = (): ShareRef => ({ id: shareA, name: 'files-a' });
+
+  it('moves an entry, and rebuilds the path of everything under it', async () => {
+    const moving = withAgent(() => ({ status: 'moved' }));
+    const source = await files.createFolder(orgA, shareA, null, 'tas-kaynak');
+    const middle = await files.createFolder(orgA, shareA, source.id, 'tas-orta');
+    const leaf = await files.createFolder(orgA, shareA, middle.id, 'tas-yaprak');
+    const destination = await files.createFolder(orgA, shareA, null, 'tas-hedef');
+
+    const moved = await moving.files.move(
+      orgA,
+      source.id,
+      shareRefA(),
+      { parentId: destination.id },
+      'cid-move',
+      'test',
+    );
+
+    expect(moved.parent_id).toBe(destination.id);
+    expect(moved.path).toBe('/tas-hedef/tas-kaynak');
+    // The subtree is the half a `parent_id` update alone would leave wrong, and a stale `path` is
+    // what SMB mapping and search read.
+    expect((await files.find(orgA, middle.id)).path).toBe('/tas-hedef/tas-kaynak/tas-orta');
+    expect((await files.find(orgA, leaf.id)).path).toBe(
+      '/tas-hedef/tas-kaynak/tas-orta/tas-yaprak',
+    );
+
+    const inside = await files.list(orgA, shareA, destination.id, null, 50);
+    expect(inside.items.map((i) => i.id)).toContain(source.id);
+    const atRoot = await files.list(orgA, shareA, null, null, 500);
+    expect(atRoot.items.map((i) => i.id)).not.toContain(source.id);
+
+    expect(moving.calls).toEqual([
+      { op: 'move_entry', share: 'files-a', from: ['tas-kaynak'], to: ['tas-hedef', 'tas-kaynak'] },
+    ]);
+  });
+
+  it('renames while moving in ONE call, so the entry is never in the new folder under the old name', async () => {
+    const moving = withAgent(() => ({ status: 'moved' }));
+    const source = await files.createFolder(orgA, shareA, null, 'tas-iki-isim');
+    const destination = await files.createFolder(orgA, shareA, null, 'tas-iki-hedef');
+
+    const moved = await moving.files.move(
+      orgA,
+      source.id,
+      shareRefA(),
+      { parentId: destination.id, name: 'yeni-isim' },
+      'cid-move2',
+      'test',
+    );
+
+    expect(moved.name).toBe('yeni-isim');
+    expect(moved.path).toBe('/tas-iki-hedef/yeni-isim');
+    expect(moving.calls).toHaveLength(1);
+    expect(moving.calls[0]).toMatchObject({ to: ['tas-iki-hedef', 'yeni-isim'] });
+  });
+
+  it('refuses to move a folder inside itself, and asks the agent nothing', async () => {
+    // A cycle in `parent_id` makes every recursive walk in this file non-terminating — the path
+    // rebuild, the search scope, `componentsOf`. No constraint in the schema can see it.
+    const moving = withAgent(() => ({ status: 'moved' }));
+    const outer = await files.createFolder(orgA, shareA, null, 'dongu-ust');
+    const inner = await files.createFolder(orgA, shareA, outer.id, 'dongu-orta');
+    const deepest = await files.createFolder(orgA, shareA, inner.id, 'dongu-alt');
+
+    for (const target of [outer.id, inner.id, deepest.id]) {
+      await expect(
+        moving.files.move(orgA, outer.id, shareRefA(), { parentId: target }, 'cid', 'test'),
+      ).rejects.toBeInstanceOf(MoveIntoDescendantError);
+    }
+
+    expect(moving.calls).toEqual([]);
+    const after = await files.find(orgA, outer.id);
+    expect(after.parent_id).toBeNull();
+    expect(after.path).toBe('/dongu-ust');
+    expect((await files.find(orgA, deepest.id)).path).toBe('/dongu-ust/dongu-orta/dongu-alt');
+  });
+
+  it('changes nothing in the database when the agent refuses', async () => {
+    // The order this suite exists for. If the row moved first, a refusal here would leave it
+    // naming a folder the bytes are not in, and every download of that file would 404.
+    const moving = withAgent(() => ({ status: 'refused', reason: 'storage is not set up' }));
+    const source = await files.createFolder(orgA, shareA, null, 'ret-kaynak');
+    const child = await files.createFolder(orgA, shareA, source.id, 'ret-alt');
+    const destination = await files.createFolder(orgA, shareA, null, 'ret-hedef');
+
+    await expect(
+      moving.files.move(orgA, source.id, shareRefA(), { parentId: destination.id }, 'cid', 'test'),
+    ).rejects.toBeInstanceOf(AgentRefusedError);
+
+    const after = await files.find(orgA, source.id);
+    expect(after.parent_id).toBeNull();
+    expect(after.path).toBe('/ret-kaynak');
+    expect((await files.find(orgA, child.id)).path).toBe('/ret-kaynak/ret-alt');
+    expect((await files.list(orgA, shareA, destination.id, null, 50)).items).toHaveLength(0);
+  });
+
+  it('reports a row whose file is not where the database says, without moving the row', async () => {
+    // A file at the share root renamed to another name at the share root: no folder anywhere in
+    // either path, so `not_found` cannot be explained by a directory DEPSIS never created. What is
+    // left is the genuine article — the two stores disagree — and that is the one case that has
+    // earned `EntryMissingOnDiskError`'s message. The folder cases answer `FolderNotOnDiskError`
+    // instead, and the two must not be confused: one is a corruption, the other is a feature that
+    // has not landed.
+    const moving = withAgent(() => ({ status: 'not_found', reason: 'kayip: no such entry' }));
+    const source = await files.recordPublishedFile(orgA, shareA, null, 'kayip-kaynak.txt', 3, null);
+
+    await expect(
+      moving.files.move(
+        orgA,
+        source.id,
+        shareRefA(),
+        { parentId: null, name: 'kayip-hedef.txt' },
+        'cid',
+        'test',
+      ),
+    ).rejects.toBeInstanceOf(EntryMissingOnDiskError);
+
+    expect((await files.find(orgA, source.id)).name).toBe('kayip-kaynak.txt');
+  });
+
+  it('refuses a name the destination already has, before anything privileged happens', async () => {
+    const moving = withAgent(() => ({ status: 'moved' }));
+    const destination = await files.createFolder(orgA, shareA, null, 'cakisma-hedef');
+    await files.createFolder(orgA, shareA, destination.id, 'ayni-ad');
+    const source = await files.createFolder(orgA, shareA, null, 'ayni-ad');
+
+    await expect(
+      moving.files.move(orgA, source.id, shareRefA(), { parentId: destination.id }, 'cid', 'test'),
+    ).rejects.toBeInstanceOf(NameTakenError);
+
+    // Not one call. The agent's RENAME_NOREPLACE would refuse too, but only for a name that
+    // exists ON DISK — and a folder has no directory there, so the kernel cannot see this
+    // collision at all.
+    expect(moving.calls).toEqual([]);
+    expect((await files.find(orgA, source.id)).parent_id).toBeNull();
+  });
+
+  it('is a no-op when the entry is already where it is being moved to', async () => {
+    // A retried request whose answer the client never saw must not be a second rename.
+    const moving = withAgent(() => ({ status: 'moved' }));
+    const entry = await files.createFolder(orgA, shareA, null, 'ayni-yer');
+    const same = await moving.files.move(orgA, entry.id, shareRefA(), { parentId: null }, 'c', 't');
+    expect(same.id).toBe(entry.id);
+    expect(moving.calls).toEqual([]);
+  });
+
+  it("will not move another tenant's entry", async () => {
+    const moving = withAgent(() => ({ status: 'moved' }));
+    const mine = await files.createFolder(orgA, shareA, null, 'tas-gizli');
+    await expect(
+      moving.files.move(
+        orgB,
+        mine.id,
+        { id: shareB, name: 'files-b' },
+        { parentId: null },
+        'cid',
+        'test',
+      ),
+    ).rejects.toBeInstanceOf(EntryNotFoundError);
+    expect(moving.calls).toEqual([]);
+  });
+
+  it('renaming a FILE moves its bytes, so the row and the disk cannot drift apart', async () => {
+    // The divergence that made a permanent delete leave the data behind. `rename` used to change
+    // `name` and `path` and never speak to the agent, so the row said `b.txt` while the disk still
+    // held `a.txt`. Nothing noticed until the purge: the agent was asked to remove `b.txt`,
+    // answered `not_found`, the row was deleted as a successful retry, and `a.txt` stayed on
+    // disk — readable over SMB, counted against the refquota, and unreachable through DEPSIS. The
+    // user had been told it was permanently deleted.
+    const renaming = withAgent(() => ({ status: 'moved' }));
+    const file = await files.recordPublishedFile(orgA, shareA, null, 'a.txt', 4, null);
+
+    const renamed = await renaming.files.rename(orgA, file.id, 'b.txt', shareRefA(), 'cid', 'test');
+
+    expect(renamed.name).toBe('b.txt');
+    expect(renaming.calls).toEqual([
+      { op: 'move_entry', share: 'files-a', from: ['a.txt'], to: ['b.txt'] },
+    ]);
+  });
+
+  it('leaves a file under its old name when the agent will not rename it', async () => {
+    // The other half: the agent is asked FIRST, so a refusal must leave the row exactly as it was.
+    // A row that renamed itself anyway would be the same divergence with the stores swapped.
+    const renaming = withAgent(() => ({ status: 'refused', reason: 'read-only filesystem' }));
+    const file = await files.recordPublishedFile(orgA, shareA, null, 'sabit.txt', 4, null);
+
+    await expect(
+      renaming.files.rename(orgA, file.id, 'degisti.txt', shareRefA(), 'cid', 'test'),
+    ).rejects.toBeInstanceOf(AgentRefusedError);
+
+    const after = await files.find(orgA, file.id);
+    expect(after.name).toBe('sabit.txt');
+    expect(after.path).toBe('/sabit.txt');
+  });
+
+  it('renames a FOLDER without the agent, because a folder has no directory to rename', async () => {
+    // The deliberate exception, and the reason it is safe: `createFolder` cannot make a directory
+    // (the agent has no `mkdir`), so there is nothing on disk for a rename to move. Routing this
+    // through the agent would fail every folder rename in the product.
+    const renaming = withAgent(() => ({ status: 'moved' }));
+    const folder = await files.createFolder(orgA, shareA, null, 'klasor-eski');
+
+    const renamed = await renaming.files.rename(
+      orgA,
+      folder.id,
+      'klasor-yeni',
+      shareRefA(),
+      'cid',
+      'test',
+    );
+
+    expect(renamed.name).toBe('klasor-yeni');
+    expect(renaming.calls).toEqual([]);
+  });
+
+  it('says the folder is not on disk yet, rather than accusing the database of being wrong', async () => {
+    // A folder is a row with no directory behind it, so `open_dir` inside the agent fails with
+    // ENOENT the moment either end of a move runs through one. The old answer was "the filesystem
+    // does not have this entry where the database says it is", which sends whoever reads it
+    // hunting a corrupted database that is in fact correct.
+    const moving = withAgent(() => ({ status: 'not_found', reason: 'hedef: no such entry' }));
+    const destination = await files.createFolder(orgA, shareA, null, 'disk-yok-hedef');
+    const file = await files.recordPublishedFile(orgA, shareA, null, 'tasinan.txt', 4, null);
+
+    await expect(
+      moving.files.move(orgA, file.id, shareRefA(), { parentId: destination.id }, 'cid', 'test'),
+    ).rejects.toBeInstanceOf(FolderNotOnDiskError);
+
+    // The row did not move. The agent is asked first precisely so that a failure here costs
+    // nothing but the answer.
+    expect((await files.find(orgA, file.id)).parent_id).toBeNull();
+  });
+
+  it('says the same about a folder moved at the share root, where no path names a folder', async () => {
+    // The case the component counts alone would miss: `from` and `to` are both one component, so
+    // nothing in the paths betrays a folder — the ENTRY is the folder, and it is the thing that
+    // was never created on disk. Reachable through `PATCH {parentId: null, name}`, which is the
+    // spelling `rename`'s folder branch does not cover.
+    const moving = withAgent(() => ({ status: 'not_found', reason: 'kok: no such entry' }));
+    const folder = await files.createFolder(orgA, shareA, null, 'kok-klasor');
+
+    await expect(
+      moving.files.move(
+        orgA,
+        folder.id,
+        shareRefA(),
+        { parentId: null, name: 'kok-klasor-yeni' },
+        'cid',
+        'test',
+      ),
+    ).rejects.toBeInstanceOf(FolderNotOnDiskError);
+
+    expect((await files.find(orgA, folder.id)).name).toBe('kok-klasor');
+  });
+
+  // ─── permanent deletion ─────────────────────────────────────────────────────
+
+  it('refuses to permanently delete something that is not in the trash', async () => {
+    const purging = withAgent(() => ({ status: 'removed' }));
+    const entry = await files.createFolder(orgA, shareA, null, 'copte-degil');
+
+    await expect(
+      purging.files.purge(orgA, entry.id, shareRefA(), 'cid', 'test'),
+    ).rejects.toBeInstanceOf(NotTrashedError);
+
+    expect(purging.calls).toEqual([]);
+    expect((await files.find(orgA, entry.id)).id).toBe(entry.id);
+  });
+
+  it('deletes a folder from the leaves up and leaves no row behind', async () => {
+    const purging = withAgent(() => ({ status: 'removed' }));
+    const root = await files.createFolder(orgA, shareA, null, 'kalici-kok');
+    const middle = await files.createFolder(orgA, shareA, root.id, 'kalici-orta');
+    const deep = await files.createFolder(orgA, shareA, middle.id, 'kalici-derin');
+    const sibling = await files.createFolder(orgA, shareA, root.id, 'kalici-kardes');
+    await files.trash(orgA, root.id, userA);
+
+    await purging.files.purge(orgA, root.id, shareRefA(), 'cid-purge', 'test');
+
+    for (const id of [deep.id, middle.id, sibling.id, root.id]) {
+      await expect(files.find(orgA, id)).rejects.toBeInstanceOf(EntryNotFoundError);
+    }
+
+    const paths = purging.calls.map((call) => (call['path'] as string[]).join('/'));
+    expect(new Set(paths).size).toBe(4);
+    // The property, not an exact order: a node is only ever removed after everything under it.
+    // `parent_id` is ON DELETE RESTRICT, so the wrong order would fail loudly — but relying on
+    // that is relying on the database to catch a bug this code is supposed not to have.
+    expect(paths.indexOf('kalici-kok/kalici-orta/kalici-derin')).toBeLessThan(
+      paths.indexOf('kalici-kok/kalici-orta'),
+    );
+    expect(paths.indexOf('kalici-kok/kalici-orta')).toBeLessThan(paths.indexOf('kalici-kok'));
+    expect(paths.indexOf('kalici-kok/kalici-kardes')).toBeLessThan(paths.indexOf('kalici-kok'));
+    expect(paths[paths.length - 1]).toBe('kalici-kok');
+    // Every node here is a folder, and the agent needs `AT_REMOVEDIR` for each: it refuses to
+    // guess, so a caller that got this wrong would be told rather than surprised.
+    expect(purging.calls.every((call) => call['directory'] === true)).toBe(true);
+  });
+
+  it('deletes nothing when the agent cannot be reached', async () => {
+    const purging = withAgent(() => {
+      throw new AgentUnavailableError('socket is gone');
+    });
+    const root = await files.createFolder(orgA, shareA, null, 'ulasilamaz-kok');
+    const child = await files.createFolder(orgA, shareA, root.id, 'ulasilamaz-alt');
+    await files.trash(orgA, root.id, userA);
+
+    await expect(
+      purging.files.purge(orgA, root.id, shareRefA(), 'cid', 'test'),
+    ).rejects.toBeInstanceOf(AgentUnavailableError);
+
+    expect((await files.find(orgA, root.id)).id).toBe(root.id);
+    expect((await files.find(orgA, child.id)).id).toBe(child.id);
+  });
+
+  it('resumes an interrupted delete, and treats an entry already gone as gone', async () => {
+    // There is no transaction across a filesystem and a database, so this operation is not atomic
+    // and the contract says so. What it promises instead is that the removed stay removed and a
+    // second call finishes the job — which only works if `not_found` from the agent counts as
+    // success, because that is exactly what a crash between the unlink and the DELETE leaves.
+    const root = await files.createFolder(orgA, shareA, null, 'yarim-kok');
+    const first = await files.createFolder(orgA, shareA, root.id, 'yarim-bir');
+    const second = await files.createFolder(orgA, shareA, root.id, 'yarim-iki');
+    await files.trash(orgA, root.id, userA);
+
+    let answered = 0;
+    const interrupted = withAgent(() => {
+      answered += 1;
+      if (answered > 1) throw new AgentUnavailableError('the agent went away mid-delete');
+      return { status: 'removed' };
+    });
+    await expect(
+      interrupted.files.purge(orgA, root.id, shareRefA(), 'cid', 'test'),
+    ).rejects.toBeInstanceOf(AgentUnavailableError);
+
+    const firstPath = ((interrupted.calls[0] ?? {})['path'] as string[]) ?? [];
+    const wentFirst = firstPath.join('/').endsWith('yarim-bir') ? first : second;
+    const survivor = wentFirst.id === first.id ? second : first;
+    await expect(files.find(orgA, wentFirst.id)).rejects.toBeInstanceOf(EntryNotFoundError);
+    expect((await files.find(orgA, survivor.id)).id).toBe(survivor.id);
+    expect((await files.find(orgA, root.id)).trashed_at).not.toBeNull();
+
+    // Second pass. The unlinks all happened before the agent went away, so it answers `not_found`
+    // for everything left — and the rows still have to go.
+    const resumed = withAgent(() => ({ status: 'not_found', reason: 'no such entry' }));
+    await resumed.files.purge(orgA, root.id, shareRefA(), 'cid', 'test');
+    for (const id of [root.id, first.id, second.id]) {
+      await expect(files.find(orgA, id)).rejects.toBeInstanceOf(EntryNotFoundError);
+    }
+  });
+
+  /**
+   * An upload session pointing into the tree, written the way `UploadsController` writes one.
+   *
+   * As the owner rather than through the controller because what these two tests need is the
+   * SHAPE of the row — a `parent_id` into a folder, or a completed session naming a file — and
+   * the controller can only produce one of those by driving a whole tus transfer through a live
+   * agent.
+   */
+  async function seedUploadSession(options: {
+    parentId: string | null;
+    fileId: string | null;
+  }): Promise<void> {
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO public.upload_sessions
+           (organization_id, share_id, parent_id, created_by, filename, staging_name,
+            length_bytes, offset_bytes, file_id, completed_at)
+         VALUES ($1, $2, $3, $4, 'yuklenen.bin', $5, 10, 10, $6::uuid,
+                 CASE WHEN $6::uuid IS NULL THEN NULL ELSE now() END)`,
+        [orgA, shareA, options.parentId, userA, `${randomUUID()}.part`, options.fileId],
+      ),
+    );
+  }
+
+  it('purges a folder that was once an upload target, instead of wedging on its sessions', async () => {
+    // The worst shape a bug in this endpoint can take, and it was reachable through the public
+    // API alone. `upload_sessions.parent_id` is ON DELETE RESTRICT and nothing ever removed those
+    // rows, so the purge unlinked every descendant from disk and then died on the LAST node's
+    // DELETE with a foreign-key violation — a 500. Retrying replayed it forever: the agent
+    // answered `not_found` (accepted as success) and the same constraint fired again. The folder
+    // sat in the trash permanently, its contents already gone.
+    const folder = await files.createFolder(orgA, shareA, null, 'yukleme-hedefi');
+    await seedUploadSession({ parentId: folder.id, fileId: null });
+    await files.trash(orgA, folder.id, userA);
+
+    const purging = withAgent(() => ({ status: 'removed' }));
+    await purging.files.purge(orgA, folder.id, shareRefA(), 'cid-fk', 'test');
+
+    await expect(files.find(orgA, folder.id)).rejects.toBeInstanceOf(EntryNotFoundError);
+    const left = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM public.upload_sessions WHERE parent_id = $1`,
+        [folder.id],
+      ),
+    );
+    expect(left[0]?.n).toBe('0');
+  });
+
+  it('purges a file that arrived through an upload, whose session still names it', async () => {
+    // The same wedge by the other reference, and the commoner one: `file_id` is ON DELETE SET
+    // NULL, but `upload_sessions_completion_pair` refuses a null `file_id` beside a non-null
+    // `completed_at`. So the cascade the schema promises cannot fire, and EVERY file that arrived
+    // through tus — which is every file in the product — was unpurgeable after its bytes were
+    // already unlinked.
+    const file = await files.recordPublishedFile(orgA, shareA, null, 'kalici.bin', 7, null);
+    await seedUploadSession({ parentId: null, fileId: file.id });
+    await files.trash(orgA, file.id, userA);
+
+    const purging = withAgent(() => ({ status: 'removed' }));
+    await purging.files.purge(orgA, file.id, shareRefA(), 'cid-fk2', 'test');
+
+    await expect(files.find(orgA, file.id)).rejects.toBeInstanceOf(EntryNotFoundError);
+    expect(purging.calls).toEqual([
+      { op: 'remove_entry', share: 'files-a', path: ['kalici.bin'], directory: false },
+    ]);
+  });
+
+  it("will not permanently delete another tenant's entry", async () => {
+    const purging = withAgent(() => ({ status: 'removed' }));
+    const mine = await files.createFolder(orgA, shareA, null, 'kalici-gizli');
+    await files.trash(orgA, mine.id, userA);
+
+    await expect(
+      purging.files.purge(orgB, mine.id, { id: shareB, name: 'files-b' }, 'cid', 'test'),
+    ).rejects.toBeInstanceOf(EntryNotFoundError);
+
+    expect(purging.calls).toEqual([]);
+    expect((await files.find(orgA, mine.id)).id).toBe(mine.id);
   });
 });

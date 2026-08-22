@@ -376,7 +376,9 @@ export class PodmanClient {
     try {
       return JSON.parse(body) as unknown;
     } catch {
-      throw new PodmanUnavailableError(`${method} ${path} answered with something that is not JSON`);
+      throw new PodmanUnavailableError(
+        `${method} ${path} answered with something that is not JSON`,
+      );
     }
   }
 

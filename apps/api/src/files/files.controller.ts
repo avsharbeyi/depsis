@@ -7,8 +7,8 @@ import {
   Delete,
   Get,
   HttpCode,
+  Logger,
   NotFoundException,
-  NotImplementedException,
   Param,
   Patch,
   Post,
@@ -25,13 +25,19 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 import { AgentDataService } from '../agent/agent-data.service.js';
-import { AgentRefusedError } from '../agent/agent.service.js';
+import { AgentRefusedError, AgentUnavailableError } from '../agent/agent.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import {
+  CrossShareMoveError,
+  DirectoryNotEmptyError,
+  EntryMissingOnDiskError,
   EntryNotFoundError,
   FilesService,
+  FolderNotOnDiskError,
   InvalidNameError,
+  MoveIntoDescendantError,
   NameTakenError,
+  NotTrashedError,
   TrashedParentError,
   type FileEntryRow,
 } from './files.service.js';
@@ -40,6 +46,32 @@ type Schemas = OpenApi.components['schemas'];
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
+
+/**
+ * What a tenant member can do with an entry, until §6.2's grant walk exists.
+ *
+ * `permissions` became required on `FileEntry` when 0015 landed the teams-and-grants schema, but
+ * the half that computes it — the per-page ancestor walk over `folder_grants` — is a later round.
+ * Until then this is not a placeholder: it is the true answer. Every endpoint under `/files` today
+ * admits any authenticated member of the tenant and narrows by RLS alone, so every row in a
+ * caller's listing really does carry exactly these seven.
+ *
+ * The four that are missing — `share`, `manage`, `versions`, `audit` — are missing because this
+ * server has no endpoint behind them. Claiming them would be worse than understating: the
+ * contract's own reason for putting permissions on the row is so the UI does not draw a button the
+ * server will refuse, and a `versions` here draws precisely that button.
+ *
+ * When the grant walk lands it replaces this constant, and the shape callers read does not change.
+ */
+const MEMBER_PERMISSIONS: readonly Schemas['FolderPermission'][] = [
+  'list',
+  'read',
+  'download',
+  'create',
+  'modify',
+  'move',
+  'delete',
+];
 
 const createFolderSchema = z.object({
   parentId: z.string().uuid().nullish(),
@@ -159,43 +191,27 @@ export class FilesController {
   }
 
   /**
-   * Rename, and — one day — move.
+   * Rename, move, or both.
    *
-   * The move half is answered 501, and that is a measurement rather than a shortcut. A move has to
-   * change two stores: the row's `parent_id` (plus the derived `path` of the whole subtree) and the
-   * bytes' location inside the share. The second one is the agent's, and the agent's operation set
-   * is closed by ADR-0006 — `services/system-agent/src/op.rs` has `PublishTransfer`, `OpenDownload`
-   * and `DiscardTransfer`, and nothing that renames or relinks an already-published file. There is
-   * no call this controller could make.
+   * A move is two stores: the row's `parent_id` (plus the derived `path` of the whole subtree) and
+   * the bytes' location inside the share. The second one belongs to the agent, and the order is
+   * fixed — `FilesService.move` asks the agent first and writes the row only after the rename has
+   * happened. Reversed, a refused rename would leave the row pointing at a place the file is not,
+   * and every download of that file would 404 while SMB still showed it in the old folder.
    *
-   * Doing the database half alone would leave the row saying `/a/b/x.txt` while the file sits at
-   * `/c/x.txt`, and `componentsOf` — which walks `parent_id` to build the path the agent resolves —
-   * would then hand `open_download` a path that does not exist. Every download of every moved file
-   * would 404, and an SMB client would still see it in the old folder. That is the "two realities"
-   * split this project refuses, and a 501 the client can show as "not yet" is strictly better than
-   * a 200 that breaks the file.
+   * A rename with no `parentId` reaches the agent too, whenever the entry is a FILE:
+   * `FilesService.rename` routes it through `move` with the parent it already has. It used to
+   * change the row alone, which made `{name}` and `{parentId, name}` two spellings of one request
+   * that produced two different truths — and the database-only one left the bytes under the old
+   * name, where a later permanent delete abandoned them on disk with no row to reach them by. A
+   * FOLDER still renames in the database alone, because it has no directory there to rename
+   * (`createFolder` explains why); that branch is unblocked by the same missing operation as the
+   * move-into-a-folder case, namely that the agent cannot create a directory.
    *
-   * What unblocks it: a `MoveEntry { share, from: Vec<SafeComponent>, to: Vec<SafeComponent> }`
-   * operation in the agent, using `renameat2` with `RENAME_NOREPLACE` so it cannot overwrite, and
-   * refusing across shares because ADR-0008 measured `rename(2)` returning `EXDEV` between
-   * datasets.
-   *
-   * UNDOCUMENTED STATUSES, and the contract is the half that is wrong. `depsis.yaml` publishes
-   * 200, 409 and 412 for this operation; this handler can also answer 501 (below), 400 (a body no
-   * schema branch accepts) and 404 (a malformed id, or an entry outside the tenant). Worse, the
-   * document contradicts itself about whether the move exists at all: the path description says
-   * "Taşıma burada değil, /file-operations üzerinden yapılır" while `UpdateFileRequest` describes
-   * `parentId: null` as a move to the share root and promises a 409 for a cross-share target. A
-   * generated client reads one half or the other and cannot be right either way. Editing the
-   * contract is not this file's decision — the owner picks: drop `parentId` from
-   * `UpdateFileRequest` until the agent has `MoveEntry`, or publish 501/400/404 here and align the
-   * description with the schema.
-   *
-   * With `MoveEntry` in place the checks this route still owes are: same share, target is a
-   * folder, target not trashed, target's ancestor chain does not contain the source (a folder moved
-   * under itself makes a cycle that turns a recursive listing into an infinite loop), name free in
-   * the destination, and a recursive `UPDATE` of `path` across the whole subtree in the same
-   * transaction as the `parent_id` change.
+   * 503 is not in the contract for this operation and is answered anyway. A move needs the agent,
+   * the agent can be absent on a box whose storage is not set up, and the alternatives are a 500
+   * — which says the server is broken when it is merely not ready — or a database-only move, which
+   * is the divergence above. The document should gain it; see the notes with this change.
    */
   @Patch(':id')
   async update(
@@ -210,22 +226,58 @@ export class FilesController {
       throw new BadRequestException('give a name, a parentId (uuid or null), or both');
     }
 
+    const name = parsed.data.name;
+
     if (parsed.data.parentId !== undefined) {
-      throw new NotImplementedException(
-        'moving an entry is not available yet: the system agent has no operation that relocates ' +
-          'published bytes, and changing only the database would leave the file unreadable',
-      );
+      const share = await this.share(request);
+      // Checked before anything is read or written. A move that discovers the agent is gone
+      // halfway through would already have answered the caller's question with a side effect.
+      if (!this.files.agentAvailable()) {
+        throw new ServiceUnavailableException(
+          'the system agent is not reachable; an entry cannot be moved without moving its bytes',
+        );
+      }
+      try {
+        return toEntry(
+          await this.files.move(
+            session.organizationId,
+            id,
+            share,
+            { parentId: parsed.data.parentId, ...(name === undefined ? {} : { name }) },
+            randomUUID(),
+            `PATCH /files/${id}`,
+          ),
+        );
+      } catch (error) {
+        throw translate(error);
+      }
     }
 
     // The schema's `minProperties: 1` refinement already guarantees this, but zod expresses that
     // as a runtime check and not in the inferred type, so `name` is still `string | undefined`
     // here. Narrowed rather than asserted, because `no-non-null-assertion` is on and — more to the
     // point — an assertion here would become a lie the day the refinement is edited.
-    const name = parsed.data.name;
     if (name === undefined) throw new BadRequestException('name is required');
 
+    // The share is resolved for a name-only rename too, because a file's rename IS a move: same
+    // parent, new name, one `renameat2` in the agent. `FilesService.rename` decides which kind it
+    // is and routes accordingly, and this route used to be the one that skipped the agent — the
+    // divergence that let a permanently deleted file leave its bytes behind. No `agentAvailable`
+    // pre-check to match the branch above: the agent is the FIRST thing a file rename touches, so
+    // an unreachable one fails before anything has changed, while a folder rename never needs it
+    // and must not start answering 503 because a daemon is down.
+    const share = await this.share(request);
     try {
-      return toEntry(await this.files.rename(session.organizationId, id, name));
+      return toEntry(
+        await this.files.rename(
+          session.organizationId,
+          id,
+          name,
+          share,
+          randomUUID(),
+          `PATCH /files/${id}`,
+        ),
+      );
     } catch (error) {
       throw translate(error);
     }
@@ -269,6 +321,49 @@ export class FilesController {
     requireUuid(id);
     try {
       return toEntry(await this.files.trash(session.organizationId, id, session.userId));
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  /**
+   * Delete the bytes. There is no undo behind this one.
+   *
+   * 204 and no body: the entry the caller named does not exist any more, so returning a
+   * representation of it would be describing something that is gone.
+   *
+   * Only from the trash. The trash is the click between a user and permanent data loss, and an
+   * endpoint that skipped it on request would make it optional — which is the same as not having
+   * one. An entry that is not in the bin gets 409 and not 404: it EXISTS, it is simply not in the
+   * state this operation works on, and "move it to the trash first" is something the caller can
+   * act on.
+   *
+   * Not atomic for a folder, and the contract says so. Each node is removed from the disk and then
+   * from the database, leaves first; an interruption leaves the removed ones removed and the rest
+   * in the trash, and calling again continues where it stopped.
+   */
+  @Delete(':id/permanent')
+  @HttpCode(204)
+  async purge(@Req() request: AuthenticatedRequest, @Param('id') id: string): Promise<void> {
+    const session = requireSession(request);
+    requireUuid(id);
+    const share = await this.share(request);
+    // Before the walk, so that an absent agent costs no rows. The alternative — discovering it on
+    // the first `RemoveEntry` — is the same answer to the caller with part of a tree deleted.
+    if (!this.files.agentAvailable()) {
+      throw new ServiceUnavailableException(
+        'the system agent is not reachable; nothing can be deleted from disk',
+      );
+    }
+
+    try {
+      await this.files.purge(
+        session.organizationId,
+        id,
+        share,
+        randomUUID(),
+        `DELETE /files/${id}/permanent`,
+      );
     } catch (error) {
       throw translate(error);
     }
@@ -491,6 +586,9 @@ function clampLimit(raw: string | undefined): number {
 
 export function toEntry(row: FileEntryRow): Schemas['FileEntry'] {
   return {
+    // Copied, not shared: the constant is this module's, and handing callers a reference to it
+    // makes one mutation anywhere rewrite every future response.
+    permissions: [...MEMBER_PERMISSIONS],
     id: row.id,
     parentId: row.parent_id,
     name: row.name,
@@ -530,5 +628,53 @@ export function translate(error: unknown): Error {
   }
   if (error instanceof TrashedParentError) return new ConflictException(error.message);
   if (error instanceof InvalidNameError) return new BadRequestException(error.message);
+  // Four ways a move or a permanent delete can be refused, all of them 409 and all of them
+  // carrying their own sentence. A bare 409 on this group would be indistinguishable to a user
+  // from the name collision above, and the four have four different remedies.
+  if (error instanceof CrossShareMoveError) return new ConflictException(error.message);
+  if (error instanceof MoveIntoDescendantError) return new ConflictException(error.message);
+  if (error instanceof NotTrashedError) return new ConflictException(error.message);
+  if (error instanceof FolderNotOnDiskError) {
+    return new ConflictException(logged(error.message, error.agentReason));
+  }
+  if (error instanceof EntryMissingOnDiskError) {
+    return new ConflictException(logged(error.message, error.agentReason));
+  }
+  if (error instanceof DirectoryNotEmptyError) {
+    return new ConflictException(logged(error.message, error.agentReason));
+  }
+  // The agent was reached and said no. 409 rather than 500: every refusal it can answer these
+  // operations with is a state the caller can do something about, and a 500 is what a client
+  // retries blindly. What the caller does NOT get is the agent's sentence: for these operations it
+  // can be `SeamError::Io("rmdir x: Directory not empty (os error 39)")` or a paragraph about
+  // openat2 and kernel versions, which is journal material and not an instruction to a user.
+  if (error instanceof AgentRefusedError) {
+    return new ConflictException(
+      logged('the storage agent refused this operation', error.agentReason),
+    );
+  }
+  // The agent was not reached. Nothing was necessarily done, and the box is not broken — its
+  // storage side is not answering, which is the condition 503 names.
+  if (error instanceof AgentUnavailableError) return new ServiceUnavailableException(error.message);
   return error instanceof Error ? error : new Error(String(error));
 }
+
+/**
+ * Keep the agent's prose out of the response and in the journal, and return the public sentence.
+ *
+ * Written as one function so the two halves cannot drift apart — a branch that returned a fixed
+ * message and forgot to log would make a refusal undiagnosable, which is worse than the disclosure
+ * this exists to prevent.
+ */
+function logged(publicMessage: string, agentReason: string): string {
+  translateLogger.warn(`${publicMessage}: ${agentReason}`);
+  return publicMessage;
+}
+
+/**
+ * A standalone logger because `translate` is a free function.
+ *
+ * It is called from the controller's catch blocks and from `SearchController`, so making it a
+ * method would mean either an instance per controller or threading one through every call site.
+ */
+const translateLogger = new Logger('FilesController');

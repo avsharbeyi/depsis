@@ -75,9 +75,9 @@ describe('SameOriginGuard', () => {
     // curl, the agent, a health probe. Nobody can make a non-browser client send somebody else's
     // cookie, so there is no CSRF to defend against — and refusing here would break every
     // scripted client for no gain.
-    expect(guard.canActivate(contextFor({ method: 'POST', headers: { host: 'depsis.local' } }))).toBe(
-      true,
-    );
+    expect(
+      guard.canActivate(contextFor({ method: 'POST', headers: { host: 'depsis.local' } })),
+    ).toBe(true);
   });
 
   it('falls back to the Referer when there is no Origin', () => {
