@@ -88,7 +88,6 @@ describeDb('system setup, against a real PostgreSQL', () => {
     organizationSlug: slug,
     organizationName: 'First Organisation',
     adminUsername: 'admin',
-    adminDisplayName: 'Administrator',
     adminPassword: 'a-sufficiently-long-password',
   });
 

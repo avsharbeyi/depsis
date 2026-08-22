@@ -68,13 +68,13 @@ describeDb('TOTP secrets at rest', () => {
       );
       orgId = org?.id ?? '';
       const hash = await passwords.hash('an-ordinary-password-here');
-      for (const email of ['alice', 'bob']) {
+      for (const name of ['alice', 'bob']) {
         const [user] = await q.query<{ id: string }>(
-          `INSERT INTO public.users (organization_id, email, display_name, password_hash)
-           VALUES ($1, $2, $3, $4) RETURNING id::text AS id`,
-          [orgId, email, email, hash],
+          `INSERT INTO public.users (organization_id, username, password_hash)
+           VALUES ($1, $2, $3) RETURNING id::text AS id`,
+          [orgId, name, hash],
         );
-        if (email.startsWith('alice')) alice = user?.id ?? '';
+        if (name === 'alice') alice = user?.id ?? '';
         else bob = user?.id ?? '';
       }
     });

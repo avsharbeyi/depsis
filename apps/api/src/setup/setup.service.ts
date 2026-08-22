@@ -9,7 +9,6 @@ export interface ClaimRequest {
   organizationSlug: string;
   organizationName: string;
   adminUsername: string;
-  adminDisplayName: string;
   adminPassword: string;
 }
 
@@ -102,12 +101,11 @@ export class SetupService implements OnModuleInit {
       const rows = await this.db.withoutTenant('setup-status', (q) =>
         q.query<{ organization_id: string; user_id: string }>(
           `SELECT organization_id::text AS organization_id, user_id::text AS user_id
-             FROM public.claim_system_setup($1, $2, $3, $4, $5)`,
+             FROM public.claim_system_setup($1, $2, $3, $4)`,
           [
             request.organizationSlug,
             request.organizationName,
             request.adminUsername,
-            request.adminDisplayName,
             hash,
           ],
         ),
@@ -163,7 +161,6 @@ function validate(request: ClaimRequest): string | null {
     return 'organizationSlug must be lowercase letters, digits and hyphens, and cannot start or end with a hyphen';
   }
   if (request.organizationName.trim().length === 0) return 'organizationName is required';
-  if (request.adminDisplayName.trim().length === 0) return 'adminDisplayName is required';
   // The same shape the database enforces (migration 0010): letters, digits, dot, dash and
   // underscore, and no '@'. A username that looks like an address is one a person or a future
   // parser can mistake for one.

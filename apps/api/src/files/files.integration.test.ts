@@ -63,8 +63,8 @@ describeDb('the file tree, against a real PostgreSQL', () => {
       // A user, because trashing records who did it.
       const users = await q.query<{ id: string }>(
         // `email_normalized` is GENERATED, so it is not written here — the schema derives it.
-        `INSERT INTO users (organization_id, username, display_name)
-         VALUES ($1, 'afiles', 'A')
+        `INSERT INTO users (organization_id, username)
+         VALUES ($1, 'afiles')
          ON CONFLICT DO NOTHING
          RETURNING id::text AS id`,
         [orgA],

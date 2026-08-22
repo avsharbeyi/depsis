@@ -96,8 +96,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
       );
       orgId = org[0]?.id ?? '';
       await q.query(
-        `INSERT INTO users (organization_id, username, display_name, password_hash)
-         VALUES ($1, $2, 'MFA User', $3)
+        `INSERT INTO users (organization_id, username, password_hash)
+         VALUES ($1, $2, $3)
            ON CONFLICT (organization_id, username_folded)
            DO UPDATE SET password_hash = EXCLUDED.password_hash`,
         [orgId, USERNAME, stored],

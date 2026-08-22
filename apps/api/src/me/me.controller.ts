@@ -42,7 +42,6 @@ interface UserRow {
   id: string;
   username: string;
   email: string | null;
-  display_name: string;
   password_hash: string | null;
   slug: string;
 }
@@ -121,7 +120,6 @@ export class MeController {
     return {
       id: user.id,
       username: user.username,
-      displayName: user.display_name,
       // From the SESSION, which read it in the same statement that resolved the cookie — not from
       // the row loaded here, which is a second read and therefore a second moment.
       role: request.depsis?.role ?? 'member',
@@ -232,7 +230,7 @@ export class MeController {
   private async load(organizationId: string, userId: string): Promise<UserRow> {
     const rows = await this.db.withTenant(organizationId, (q) =>
       q.query<UserRow>(
-        `SELECT u.id::text AS id, u.username, u.email, u.display_name, u.password_hash, o.slug
+        `SELECT u.id::text AS id, u.username, u.email, u.password_hash, o.slug
            FROM users u
            JOIN organizations o ON o.id = u.organization_id
           WHERE u.id = $1`,

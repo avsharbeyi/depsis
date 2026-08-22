@@ -838,7 +838,7 @@ components:
     SetupClaimRequest:
       type: object
       required:
-        [token, organizationSlug, organizationName, adminUsername, adminDisplayName, adminPassword]
+        [token, organizationSlug, organizationName, adminUsername, adminPassword]
       properties:
         token: { type: string, maxLength: 128 }
         organizationSlug:
@@ -850,7 +850,6 @@ components:
           type: string
           maxLength: 64
           pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
-        adminDisplayName: { type: string, maxLength: 200 }
         adminPassword:
           type: string
           minLength: 12
@@ -862,7 +861,7 @@ components:
 
     CurrentUser:
       type: object
-      required: [id, username, displayName, role, organizationSlug, mfaEnrolled, recoveryCodesRemaining]
+      required: [id, username, role, organizationSlug, mfaEnrolled, recoveryCodesRemaining]
       description: |
         `username` değil `email` — LoginRequest ile aynı düzeltme, aynı gerekçeyle.
 
@@ -878,7 +877,6 @@ components:
           description: |
             İSTEĞE BAĞLI ve kimlik doğrulamada KULLANILMIYOR. Yerel ağdaki bir NAS posta
             göndermiyor ve hiçbir adresi doğrulamıyor; giriş kullanıcı adıyla yapılıyor.
-        displayName: { type: string }
         role:
           type: string
           enum: [admin, member]
@@ -945,12 +943,11 @@ components:
 
     User:
       type: object
-      required: [id, username, displayName, role, disabled, createdAt]
+      required: [id, username, role, disabled, createdAt]
       properties:
         id: { type: string, format: uuid }
         username: { type: string }
         email: { type: [string, 'null'] }
-        displayName: { type: string }
         role:
           type: string
           enum: [admin, member]
@@ -967,7 +964,7 @@ components:
 
     CreateUserRequest:
       type: object
-      required: [username, displayName, password]
+      required: [username, password]
       properties:
         username:
           type: string
@@ -975,7 +972,6 @@ components:
           description: |
             Giriş kimliği. '@' içeremez — bir kullanıcı adının bir adresle karıştırılabilmesi,
             ne insan ne de gelecekteki bir ayrıştırıcı için iyi bir fikir.
-        displayName: { type: string }
         role:
           type: string
           enum: [admin, member]
@@ -991,7 +987,6 @@ components:
       type: object
       minProperties: 1
       properties:
-        displayName: { type: string }
         role:
           type: string
           enum: [admin, member]

@@ -611,12 +611,12 @@ fi
 ORG=$(_db -c "SET ROLE depsis_owner;
               INSERT INTO organizations (slug,name) VALUES ('p1a','P1A') RETURNING id;" | tail -1)
 _db -c "SET ROLE depsis_owner;
-        INSERT INTO users (organization_id,email,display_name)
-        VALUES ('$ORG','ismail@firma.test','Ismail');" >/dev/null 2>&1
+        INSERT INTO users (organization_id,email)
+        VALUES ('$ORG','ismail@firma.test');" >/dev/null 2>&1
 
 DUP_TR=$(_db_lax "SET ROLE depsis_owner;
-                  INSERT INTO users (organization_id,email,display_name)
-                  VALUES ('$ORG','İsmail@firma.test','Ismail 2');")
+                  INSERT INTO users (organization_id,email)
+                  VALUES ('$ORG','İsmail@firma.test');")
 if grep -qi 'duplicate key\|23505' <<<"$DUP_TR"; then
   pass 'the Turkish dotted capital I is folded: İsmail@ collides with ismail@ in one tenant'
 else
@@ -625,8 +625,8 @@ else
 fi
 
 DUP_ASCII=$(_db_lax "SET ROLE depsis_owner;
-                     INSERT INTO users (organization_id,email,display_name)
-                     VALUES ('$ORG','ISMAIL@FIRMA.TEST','Ismail 3');")
+                     INSERT INTO users (organization_id,email)
+                     VALUES ('$ORG','ISMAIL@FIRMA.TEST');")
 if grep -qi 'duplicate key\|23505' <<<"$DUP_ASCII"; then
   pass 'plain ASCII case folding still works'
 else
@@ -640,16 +640,16 @@ fi
 # when the fold worked and the insert was correctly refused, ON_ERROR_STOP aborted the whole run —
 # a passing behaviour presented as a crash.
 _db_lax "SET ROLE depsis_owner;
-         INSERT INTO users (organization_id,email,display_name)
-         VALUES ('$ORG','jose@firma.test','Jose plain');" >/dev/null
+         INSERT INTO users (organization_id,email)
+         VALUES ('$ORG','jose@firma.test');" >/dev/null
 
 _db_lax "SET ROLE depsis_owner;
-         INSERT INTO users (organization_id,email,display_name)
-         VALUES ('$ORG',U&'jos\00e9@firma.test','Jose NFC');" >/dev/null
+         INSERT INTO users (organization_id,email)
+         VALUES ('$ORG',U&'jos\00e9@firma.test');" >/dev/null
 
 DUP_NFD=$(_db_lax "SET ROLE depsis_owner;
-                   INSERT INTO users (organization_id,email,display_name)
-                   VALUES ('$ORG',U&'jose\0301@firma.test','Jose NFD');")
+                   INSERT INTO users (organization_id,email)
+                   VALUES ('$ORG',U&'jose\0301@firma.test');")
 if grep -qi 'duplicate key\|23505' <<<"$DUP_NFD"; then
   pass 'the decomposed (NFD) spelling collides with the precomposed (NFC) one'
 else
@@ -659,8 +659,8 @@ fi
 # And the negative control: folding must NOT merge genuinely different people. P0-H measured that
 # the SEARCH normaliser collides Çağrı with Cagri, which is correct for search and fatal here.
 DISTINCT=$(_db_lax "SET ROLE depsis_owner;
-                    INSERT INTO users (organization_id,email,display_name)
-                    VALUES ('$ORG','cagri@firma.test','Cagri'),('$ORG','çağrı@firma.test','Cagri accented');")
+                    INSERT INTO users (organization_id,email)
+                    VALUES ('$ORG','cagri@firma.test'),('$ORG','çağrı@firma.test');")
 if grep -qi 'duplicate key\|23505' <<<"$DISTINCT"; then
   unexpected 'fold_identity merged cagri@ with çağrı@' \
              'accent stripping in an identity key merges two different people into one account'

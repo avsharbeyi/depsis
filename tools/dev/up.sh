@@ -60,9 +60,27 @@ DEPSIS_MIGRATION_DATABASE_URL="postgresql://depsis_owner:ci-owner@$PGHOST:$PGPOR
   }
 
 echo '→ build'
-pnpm turbo run build --filter=@depsis/api --filter=@depsis/web >/dev/null 2>&1 || {
-  echo 'build failed — run `pnpm turbo run build` to see why'; exit 1;
+pnpm turbo run build --filter=@depsis/api >/dev/null 2>&1 || {
+  echo 'the API build failed — run `pnpm turbo run build --filter=@depsis/api` to see why'; exit 1;
 }
+
+# The web bundle is built separately and is allowed to fail, which needs explaining.
+#
+# `node_modules` here is installed from Windows, and vite's bundler ships as a NATIVE binding: the
+# tree has `rolldown-binding.win32-x64-msvc.node` and no Linux one, so `vite build` inside the VM
+# dies with "Cannot find native binding" no matter how correct the source is. Reinstalling would
+# fix the Linux side and break the Windows side, since the two share one directory.
+#
+# So: build if it can, and otherwise serve whatever `apps/web/dist` already holds — while saying
+# out loud that the browser is about to show an older interface than the source says.
+if pnpm turbo run build --filter=@depsis/web >/dev/null 2>&1; then
+  :
+elif [ -f apps/web/dist/index.html ]; then
+  echo '  ! the web bundle did not rebuild here; serving the existing apps/web/dist'
+  echo '    build it from Windows with: pnpm turbo run build --filter=@depsis/web'
+else
+  echo 'the web build failed and there is no previous bundle to serve'; exit 1;
+fi
 
 # A share root. There is no agent in this setup, so uploads answer 503 — the tree still lists,
 # folders still create, and everything that does not move bytes works.
@@ -86,12 +104,20 @@ systemd-run --unit=depsis-dev-api --collect \
   --property=StandardError=append:/tmp/depsis-dev-api.log \
   "$(command -v node)" "$REPO/apps/api/dist/main.js" >/dev/null 2>&1
 
-for _ in $(seq 1 60); do
+# Two minutes, not thirty seconds. Nest maps its routes by importing every module, and doing that
+# from /mnt/c — a Windows filesystem reached over 9p — takes twenty seconds and more on a loaded
+# machine. The earlier budget expired mid-boot and reported "the API did not come up" under an
+# empty log, which reads as a crash and is not one.
+for _ in $(seq 1 120); do
   curl -fsS "http://127.0.0.1:$API_PORT/api/v1/health" >/dev/null 2>&1 && break
-  sleep 0.5
+  sleep 1
 done
 curl -fsS "http://127.0.0.1:$API_PORT/api/v1/health" >/dev/null || {
-  echo 'the API did not come up:'; tail -20 /tmp/depsis-dev-api.log; exit 1;
+  echo 'the API did not come up.'
+  systemctl status depsis-dev-api --no-pager -l 2>&1 | head -6
+  echo '--- log ---'
+  tail -20 /tmp/depsis-dev-api.log 2>/dev/null || echo '(the log is empty: it never got as far as printing)'
+  exit 1
 }
 
 # A static server for the built bundle that also proxies /api, so the session cookie stays
@@ -170,7 +196,7 @@ if [ "$CLAIMED" = '"setupRequired":true' ]; then
   TOKEN=$(grep -oE '^ {6}[A-Za-z0-9_-]{20,}$' /tmp/depsis-dev-api.log | tail -1 | tr -d ' ')
   curl -sS -X POST "http://127.0.0.1:$API_PORT/api/v1/setup/claim" \
     -H 'content-type: application/json' \
-    -d "{\"token\":\"$TOKEN\",\"organizationName\":\"DEPSIS\",\"organizationSlug\":\"$ORG_SLUG\",\"adminUsername\":\"$ADMIN_USERNAME\",\"adminDisplayName\":\"Yonetici\",\"adminPassword\":\"$ADMIN_PASSWORD\"}" \
+    -d "{\"token\":\"$TOKEN\",\"organizationName\":\"DEPSIS\",\"organizationSlug\":\"$ORG_SLUG\",\"adminUsername\":\"$ADMIN_USERNAME\",\"adminPassword\":\"$ADMIN_PASSWORD\"}" \
     | grep -q '"status":"ok"' && echo '  claimed' || echo '  claim failed (already set up?)'
 else
   echo '  already claimed'
@@ -188,7 +214,7 @@ cat <<INFO
     Parola       : $ADMIN_PASSWORD
 
   Uploads answer 503: there is no privileged agent in this setup, so no bytes can reach a share.
-  Everything else — listing, folders, users, telemetry, MFA — works.
+  Everything else — listing, folders, renaming, the trash, accounts and telemetry — works.
 
   Stop it with:  bash tools/dev/up.sh --down
 INFO

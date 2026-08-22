@@ -1369,7 +1369,6 @@ export interface components {
             organizationSlug: string;
             organizationName: string;
             adminUsername: string;
-            adminDisplayName: string;
             /**
              * @description Yalnız uzunluk tabanı. Bileşim kuralı (bir büyük, bir rakam, bir sembol) arama
              *     uzayını genişletmekten çok daraltıyor ve NIST SP 800-63B tam bu yüzden tavsiyeyi
@@ -1394,7 +1393,6 @@ export interface components {
              *     göndermiyor ve hiçbir adresi doğrulamıyor; giriş kullanıcı adıyla yapılıyor.
              */
             email?: string | null;
-            displayName: string;
             /**
              * @description Arayüzün yönetici ekranlarını gösterip göstermeyeceğini bilmesi için. Bir YETKİ KARARI
              *     DEĞİL — sunucu her isteği kendi kontrol ediyor; bu yalnızca kullanıcıya çağıramayacağı
@@ -1439,7 +1437,6 @@ export interface components {
             id: string;
             username: string;
             email?: string | null;
-            displayName: string;
             /** @enum {string} */
             role: "admin" | "member";
             disabled: boolean;
@@ -1455,7 +1452,6 @@ export interface components {
              *     ne insan ne de gelecekteki bir ayrıştırıcı için iyi bir fikir.
              */
             username: string;
-            displayName: string;
             /**
              * @default member
              * @enum {string}
@@ -1468,7 +1464,6 @@ export interface components {
             password: string;
         };
         UpdateUserRequest: {
-            displayName?: string;
             /** @enum {string} */
             role?: "admin" | "member";
             disabled?: boolean;

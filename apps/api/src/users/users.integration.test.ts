@@ -58,8 +58,8 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
 
       // The founding administrator, seeded the way `claim_system_setup` would.
       const seeded = await q.query<{ id: string }>(
-        `INSERT INTO users (organization_id, username, display_name, role, password_hash)
-         VALUES ($1, 'kurucu', 'Kurucu', 'admin', 'x')
+        `INSERT INTO users (organization_id, username, role, password_hash)
+         VALUES ($1, 'kurucu', 'admin', 'x')
          RETURNING id::text AS id`,
         [orgA],
       );
@@ -80,7 +80,7 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
   });
 
   it('creates a second account, which the box could not do before', async () => {
-    const created = await users.create(orgA, 'ikinci', 'İkinci', 'member', 'hash');
+    const created = await users.create(orgA, 'ikinci', 'member', 'hash');
     expect(created.role).toBe('member');
     expect(created.disabled_at).toBeNull();
 
@@ -89,11 +89,11 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
   });
 
   it('refuses a duplicate address the way the folding rules say, not the way the string does', async () => {
-    await users.create(orgA, 'Ayse', 'Ayşe', 'member', 'hash');
+    await users.create(orgA, 'Ayse', 'member', 'hash');
     // Case and the Turkish i-family fold for uniqueness; accents do NOT. `fold_identity` is the
     // authority and this asserts the API sees its decision as a 409 rather than a 500.
     await expect(
-      users.create(orgA, 'AYSE', 'Ayşe again', 'member', 'h'),
+      users.create(orgA, 'AYSE', 'member', 'h'),
     ).rejects.toBeInstanceOf(UsernameTakenError);
   });
 
@@ -101,12 +101,12 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     // A global UNIQUE(email) would leak across tenants: the uniqueness check bypasses RLS, so a
     // refusal here would tell tenant B that tenant A has that address (P0-C measured it).
     await expect(
-      users.create(orgB, 'ikinci', 'Başka kiracı', 'member', 'hash'),
+      users.create(orgB, 'ikinci', 'member', 'hash'),
     ).resolves.toBeTruthy();
   });
 
   it("does not let one tenant read or change another tenant's account", async () => {
-    const theirs = await users.create(orgB, 'onlarin', 'Onlar', 'member', 'hash');
+    const theirs = await users.create(orgB, 'onlarin', 'member', 'hash');
     await expect(users.find(orgA, theirs.id)).rejects.toBeInstanceOf(UserNotFoundError);
     await expect(users.update(orgA, theirs.id, { role: 'admin' })).rejects.toBeInstanceOf(
       UserNotFoundError,
@@ -127,13 +127,7 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
 
     // With a second administrator the same change is allowed — the rule is about the count, not
     // about the founder.
-    const second = await users.create(
-      orgA,
-      'yonetici2',
-      'İkinci Yönetici',
-      'admin',
-      'h',
-    );
+    const second = await users.create(orgA, 'yonetici2', 'admin', 'h');
     const demoted = await users.update(orgA, adminA, { role: 'member' });
     expect(demoted.role).toBe('member');
 
@@ -149,7 +143,7 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
   it('counts only ENABLED administrators towards the rule', async () => {
     // A disabled administrator cannot sign in, so treating them as one of the remaining admins
     // would let an organisation reach zero usable administrators while the count said one.
-    const spare = await users.create(orgA, 'yedek', 'Yedek', 'admin', 'h');
+    const spare = await users.create(orgA, 'yedek', 'admin', 'h');
     await users.update(orgA, spare.id, { disabled: true });
 
     const another = await users.list(orgA);
@@ -168,7 +162,7 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
   });
 
   it('disables and re-enables an account', async () => {
-    const user = await users.create(orgA, 'kapanacak', 'Kapanacak', 'member', 'h');
+    const user = await users.create(orgA, 'kapanacak', 'member', 'h');
     const off = await users.update(orgA, user.id, { disabled: true });
     expect(off.disabled_at).not.toBeNull();
 
@@ -180,7 +174,7 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     // The hole this closes is a live cookie outliving the decision to disable an account. It is
     // shut inside `resolve_session` — which joins `users` and checks `disabled_at` — rather than by
     // the API remembering to revoke, so it holds for a session issued a second before the change.
-    const user = await users.create(orgA, 'oturumlu', 'Oturumlu', 'member', 'h');
+    const user = await users.create(orgA, 'oturumlu', 'member', 'h');
     const digest = Buffer.from('0'.repeat(64), 'hex');
     await owner.withoutTenant('migration-status', (q) =>
       q.query(
@@ -210,7 +204,7 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     // Self-contained on purpose. An earlier version asserted on the founding admin and failed
     // because the test above had legitimately demoted them — a test that depends on the order it
     // runs in is a test that will fail for a reason nobody is looking for.
-    const user = await users.create(orgA, 'rollu', 'Rollu', 'member', 'h');
+    const user = await users.create(orgA, 'rollu', 'member', 'h');
     const digest = Buffer.from('2'.repeat(64), 'hex');
     await owner.withoutTenant('migration-status', (q) =>
       q.query(

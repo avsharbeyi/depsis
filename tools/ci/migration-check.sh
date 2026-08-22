@@ -189,8 +189,8 @@ db -c "SET ROLE depsis_owner;
 A=$(db -c "SELECT id FROM organizations WHERE slug='acme'")
 B=$(db -c "SELECT id FROM organizations WHERE slug='globex'")
 db -c "SET ROLE depsis_owner;
-       INSERT INTO users (organization_id,username,email,display_name)
-       VALUES ('$A','ada','ada@acme.test','Ada'),('$B','bob','bob@globex.test','Bob');" >/dev/null
+       INSERT INTO users (organization_id,username,email)
+       VALUES ('$A','ada','ada@acme.test'),('$B','bob','bob@globex.test');" >/dev/null
 
 NOCTX=$(as_app "SELECT count(*) FROM users")
 [ "$NOCTX" = "0" ] && ok 'no tenant context returns zero rows (fail-closed)' \
@@ -205,8 +205,8 @@ SEEN_B=$(as_app "BEGIN; SET LOCAL depsis.organization_id='$B'; SELECT string_agg
                                   || bad 'tenant B saw the wrong set' "$SEEN_B"
 
 CROSS=$(as_app "BEGIN; SET LOCAL depsis.organization_id='$A';
-                INSERT INTO users (organization_id,username,email,display_name)
-                VALUES ('$B','sneak','sneak@x.test','S'); COMMIT;")
+                INSERT INTO users (organization_id,username,email)
+                VALUES ('$B','sneak','sneak@x.test'); COMMIT;")
 grep -qi 'row-level security' <<<"$CROSS" && ok 'writing into another tenant is refused by policy' \
                                           || bad 'a cross-tenant write was not refused' "$CROSS"
 
@@ -215,8 +215,8 @@ step 'uniqueness and identity folding'
 
 # Cross-tenant reuse must be ALLOWED — a refusal here is the existence oracle P0-C measured.
 REUSE=$(as_app "BEGIN; SET LOCAL depsis.organization_id='$A';
-                INSERT INTO users (organization_id,username,email,display_name)
-                VALUES ('$A','bob','bob@globex.test','Bob in A'); COMMIT;")
+                INSERT INTO users (organization_id,username,email)
+                VALUES ('$A','bob','bob@globex.test'); COMMIT;")
 grep -qi 'duplicate key' <<<"$REUSE" \
   && bad 'a cross-tenant duplicate email was refused' 'this tells one tenant that another holds the address' \
   || ok 'the same address may be used by two different tenants'
@@ -228,26 +228,26 @@ check_dup() {
   # nothing else, or this measures the wrong constraint.
   DUP_N=$((DUP_N + 1)) # label sql-literal
   OUT=$(db -c "SET ROLE depsis_owner;
-               INSERT INTO users (organization_id,username,email,display_name)
-               VALUES ('$A','dup'||'$DUP_N',$2,'dup');")
+               INSERT INTO users (organization_id,username,email)
+               VALUES ('$A','dup'||'$DUP_N',$2);")
   grep -qi 'duplicate key' <<<"$OUT" && ok "same-tenant duplicate refused: $1" \
                                      || bad "same-tenant duplicate ACCEPTED: $1" "${OUT:-no error at all}"
 }
 check_dup 'ASCII case'          "'ADA@ACME.TEST'"
 
 db -c "SET ROLE depsis_owner;
-       INSERT INTO users (organization_id,username,email,display_name)
-       VALUES ('$A','ismail','ismail@acme.test','Ismail');" >/dev/null 2>&1
+       INSERT INTO users (organization_id,username,email)
+       VALUES ('$A','ismail','ismail@acme.test');" >/dev/null 2>&1
 check_dup 'Turkish dotted I'    "'İsmail@acme.test'"
 db -c "SET ROLE depsis_owner;
-       INSERT INTO users (organization_id,username,email,display_name)
-       VALUES ('$A','jose',U&'jos\\00e9@acme.test','Jose NFC');" >/dev/null 2>&1
+       INSERT INTO users (organization_id,username,email)
+       VALUES ('$A','jose',U&'jos\\00e9@acme.test');" >/dev/null 2>&1
 check_dup 'NFD vs NFC'          "U&'jose\\0301@acme.test'"
 
 # The negative control. Accent stripping in an identity key merges two different people.
 DISTINCT=$(db -c "SET ROLE depsis_owner;
-                  INSERT INTO users (organization_id,username,email,display_name)
-                  VALUES ('$A','cagri','cagri@acme.test','C'),('$A','çağrı','çağrı@acme.test','Ç');")
+                  INSERT INTO users (organization_id,username,email)
+                  VALUES ('$A','cagri','cagri@acme.test'),('$A','çağrı','çağrı@acme.test');")
 grep -qi 'duplicate key' <<<"$DISTINCT" \
   && bad 'cagri@ and çağrı@ were folded together' 'an identity key must not strip accents' \
   || ok 'cagri@ and çağrı@ stay distinct'
@@ -322,8 +322,8 @@ DISABLED_HASH="\\x$(printf 'd%.0s' $(seq 1 64))"
 
 USER_A=$(db -c "SET ROLE depsis_owner; SELECT id FROM users WHERE organization_id='$A' LIMIT 1")
 db -c "SET ROLE depsis_owner;
-       INSERT INTO users (organization_id,username,email,display_name,disabled_at)
-       VALUES ('$A','disabled','disabled@acme.test','Disabled',now());" >/dev/null
+       INSERT INTO users (organization_id,username,email,disabled_at)
+       VALUES ('$A','disabled','disabled@acme.test',now());" >/dev/null
 USER_OFF=$(db -c "SET ROLE depsis_owner; SELECT id FROM users WHERE email='disabled@acme.test'")
 
 # The expired row needs an explicit older created_at, because `sessions_expires_after` requires

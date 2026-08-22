@@ -7,3 +7,26 @@ packages:
 minimumReleaseAgeExclude:
   - '@vitejs/plugin-react@6.1.0'
   - vite@8.2.2
+# Off because this repository is used from two operating systems at once: `node_modules` is
+# installed from Windows and the appliance is run from WSL against the same directory, which pnpm
+# reads as a stale install. Its response is to offer to DELETE `node_modules`, and with no TTY it
+# aborts the command instead — which is how `tools/dev/up.sh` came to report "migrations failed"
+# with nothing whatsoever wrong with the migrations.
+#
+# What is given up is the automatic install before a script whose lockfile has moved. Run
+# `pnpm install` yourself after changing a dependency.
+verifyDepsBeforeRun: false
+
+# Optional native bindings are fetched for Linux as well as the host.
+#
+# Several dependencies ship as compiled binaries chosen by platform — `@node-rs/argon2` hashes the
+# passwords, `rolldown` bundles the web app. Installing from Windows brings only the win32 ones, and
+# then the API and the bundler both die with "Cannot find native binding" the moment the appliance
+# is started inside WSL against this same directory. Asking for both costs a few megabytes and
+# removes the class of failure entirely.
+supportedArchitectures:
+  os:
+    - current
+    - linux
+  cpu:
+    - x64

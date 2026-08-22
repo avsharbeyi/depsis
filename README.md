@@ -44,7 +44,11 @@ yazıyor, ya da `hostname -I` verir.
 
 `tools/dev/up.sh` ayrıcalıklı ajanı **çalıştırmaz**. Ajan olmadan bir paylaşıma bayt yazılamaz, o
 yüzden yükleme ve indirme 503 döner. Listeleme, klasör oluşturma, yeniden adlandırma, çöp kutusu,
-kullanıcı yönetimi, MFA ve telemetri çalışır.
+kullanıcı yönetimi ve telemetri çalışır.
+
+Arayüzde iki adımlı doğrulama **yok**. Sunucu tarafı duruyor ve test ediliyor, ama hesabı olan
+kimsenin açamayacağı bir ekran bir özellik değil; yerel ağdaki bir NAS için istenen de bu değildi.
+Giriş kullanıcı adı ve parolayla yapılır — e-posta adresi ve ayrı bir "görünen ad" yoktur.
 
 Baytların gerçekten aktığı tam kurulum `deploy/systemd/` altındaki birim dosyalarıdır ve
 `tools/poc/p1-d-systemd-deployment.sh` onu uçtan uca ölçer — klasör aç, yükle, dosya sisteminden

@@ -7,7 +7,6 @@ export interface UserRow {
   id: string;
   username: string;
   email: string | null;
-  display_name: string;
   role: string;
   disabled_at: Date | null;
   created_at: Date;
@@ -57,7 +56,7 @@ export class UsersService {
   async list(organizationId: string): Promise<UserRow[]> {
     return this.db.withTenant(organizationId, (db) =>
       db.query<UserRow>(
-        `SELECT id::text AS id, username, email, display_name, role, disabled_at, created_at
+        `SELECT id::text AS id, username, email, role, disabled_at, created_at
            FROM public.users
           WHERE organization_id = $1
           ORDER BY created_at`,
@@ -69,7 +68,7 @@ export class UsersService {
   async find(organizationId: string, id: string): Promise<UserRow> {
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<UserRow>(
-        `SELECT id::text AS id, username, email, display_name, role, disabled_at, created_at
+        `SELECT id::text AS id, username, email, role, disabled_at, created_at
            FROM public.users
           WHERE organization_id = $1 AND id = $2`,
         [organizationId, id],
@@ -89,17 +88,16 @@ export class UsersService {
   async create(
     organizationId: string,
     username: string,
-    displayName: string,
     role: UserRole,
     passwordHash: string,
   ): Promise<UserRow> {
     try {
       const rows = await this.db.withTenant(organizationId, (db) =>
         db.query<UserRow>(
-          `INSERT INTO public.users (organization_id, username, display_name, role, password_hash)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id::text AS id, username, email, display_name, role, disabled_at, created_at`,
-          [organizationId, username, displayName, role, passwordHash],
+          `INSERT INTO public.users (organization_id, username, role, password_hash)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id::text AS id, username, email, role, disabled_at, created_at`,
+          [organizationId, username, role, passwordHash],
         ),
       );
       const row = rows[0];
@@ -124,7 +122,6 @@ export class UsersService {
     // `| undefined` on every field, because `exactOptionalPropertyTypes` distinguishes "absent"
     // from "present and undefined" — and zod's `.optional()` produces the second.
     changes: {
-      displayName?: string | undefined;
       role?: UserRole | undefined;
       disabled?: boolean | undefined;
     },
@@ -132,10 +129,6 @@ export class UsersService {
     const sets: string[] = [];
     const params: unknown[] = [organizationId, id];
 
-    if (changes.displayName !== undefined) {
-      params.push(changes.displayName);
-      sets.push(`display_name = $${params.length}`);
-    }
     if (changes.role !== undefined) {
       params.push(changes.role);
       sets.push(`role = $${params.length}`);
@@ -152,7 +145,7 @@ export class UsersService {
         db.query<UserRow>(
           `UPDATE public.users SET ${sets.join(', ')}
             WHERE organization_id = $1 AND id = $2
-            RETURNING id::text AS id, email, display_name, role, disabled_at, created_at`,
+            RETURNING id::text AS id, email, role, disabled_at, created_at`,
           params,
         ),
       );

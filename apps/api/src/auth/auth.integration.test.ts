@@ -73,15 +73,15 @@ describeDb('login, against a real PostgreSQL', () => {
       );
       const id = org[0]?.id ?? '';
       await q.query(
-        `INSERT INTO users (organization_id, username, display_name, password_hash)
-         VALUES ($1, 'ada', 'Ada', $2)
+        `INSERT INTO users (organization_id, username, password_hash)
+         VALUES ($1, 'ada', $2)
            ON CONFLICT (organization_id, username_folded)
            DO UPDATE SET password_hash = EXCLUDED.password_hash, disabled_at = NULL`,
         [id, stored],
       );
       await q.query(
-        `INSERT INTO users (organization_id, username, display_name, password_hash, disabled_at)
-         VALUES ($1, 'gone', 'Gone', $2, now())
+        `INSERT INTO users (organization_id, username, password_hash, disabled_at)
+         VALUES ($1, 'gone', $2, now())
            ON CONFLICT (organization_id, username_folded) DO NOTHING`,
         [id, stored],
       );

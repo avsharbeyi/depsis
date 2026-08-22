@@ -592,7 +592,7 @@ MEMBER_JAR="$WORK/member.jar"
 
 MADE=$(curl -sS -b "$JAR" -c "$JAR" -X POST "$USERS" \
   -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
-  -d "{\"username\":\"uye\",\"displayName\":\"Üye\",\"password\":\"$MEMBER_PW\"}" 2>&1)
+  -d "{\"username\":\"uye\",\"password\":\"$MEMBER_PW\"}" 2>&1)
 MEMBER_ID=$(printf '%s' "$MADE" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 [ -n "$MEMBER_ID" ] && ok 'an administrator created a second account' || bad "create failed: $MADE"
 case "$MADE" in
@@ -610,7 +610,7 @@ check 'a member is refused the user list (403, not 401 and not 200)' \
 check 'a member cannot create an account' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" -X POST "$USERS" \
      -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
-     -d '{"username":"x","displayName":"X","password":"aaaaaaaaaaaa"}')" '403'
+     -d '{"username":"x","password":"aaaaaaaaaaaa"}')" '403'
 check 'a member cannot promote themselves' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" -X PATCH "$USERS/$MEMBER_ID" \
      -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
@@ -627,7 +627,7 @@ check 'and read their own account' \
 check 'a cross-origin state change is refused' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" -X POST "$USERS" \
      -H 'content-type: application/json' -H 'origin: http://evil.example' \
-     -d '{"username":"csrf","displayName":"C","password":"aaaaaaaaaaaa"}')" '403'
+     -d '{"username":"csrf","password":"aaaaaaaaaaaa"}')" '403'
 check 'and so is one against the MFA route, which used to have no check at all' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" -X DELETE "$BASE/me/mfa" \
      -H 'content-type: application/json' -H 'origin: http://evil.example' -d '{"password":"x"}')" '403'

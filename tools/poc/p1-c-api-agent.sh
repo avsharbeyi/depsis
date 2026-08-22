@@ -256,8 +256,8 @@ check 'an anonymous caller gets 401' "$CODE" '401'
 
 # A second user in the same organization, sharing the administrator's hash so the password is known.
 # There is no user-management endpoint yet, so the fixture is seeded directly.
-psql -qd "$DB_NAME" -c "INSERT INTO public.users (organization_id, email, display_name, password_hash)
-                        SELECT organization_id, 'other@p1c.test', 'Other', password_hash
+psql -qd "$DB_NAME" -c "INSERT INTO public.users (organization_id, email, password_hash)
+                        SELECT organization_id, 'other@p1c.test', password_hash
                           FROM public.users WHERE email = 'admin@p1c.test'" > /dev/null 2>&1 \
   && ok 'seeded a non-administrator in the same organization' \
   || bad 'could not seed the second user'

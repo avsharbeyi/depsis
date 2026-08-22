@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 
 import { api, problemMessage } from './api.js';
+import { IconLogo } from './ui.js';
 
 interface Props {
   onComplete: () => void;
@@ -12,13 +13,17 @@ interface Props {
  * The token is asked for first and explained, because a person who has just installed DEPSIS has
  * no reason to know a token exists. The instruction names the exact command that shows it — an
  * instruction that says "check the logs" is an instruction that generates a support question.
+ *
+ * Four fields, down from six. The account used to want a username AND a display name, which on a
+ * box whose owner creates three accounts by hand is one question too many for no benefit; and the
+ * username field used to be labelled "Email", which made people type an address that the login
+ * form would then refuse.
  */
 export function SetupWizard({ onComplete }: Props): React.JSX.Element {
   const [token, setToken] = useState('');
-  const [organizationSlug, setSlug] = useState('');
   const [organizationName, setOrgName] = useState('');
-  const [adminUsername, setEmail] = useState('');
-  const [adminDisplayName, setDisplayName] = useState('');
+  const [organizationSlug, setSlug] = useState('');
+  const [adminUsername, setUsername] = useState('');
   const [adminPassword, setPassword] = useState('');
   const [confirmPassword, setConfirm] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -31,129 +36,127 @@ export function SetupWizard({ onComplete }: Props): React.JSX.Element {
     // Checked here as well as on the server, and the two are not redundant: the server cannot tell
     // a mistyped confirmation from a deliberate password, because it never sees the confirmation.
     if (adminPassword !== confirmPassword) {
-      setError('The two passwords do not match.');
+      setError('İki parola aynı değil.');
       return;
     }
 
     setBusy(true);
     const { error: failure } = await api.POST('/setup/claim', {
-      body: {
-        token,
-        organizationSlug,
-        organizationName,
-        adminUsername,
-        adminDisplayName,
-        adminPassword,
-      },
+      body: { token, organizationSlug, organizationName, adminUsername, adminPassword },
     });
     setBusy(false);
 
     if (failure !== undefined) {
-      setError(problemMessage(failure, 'Setup failed. Check the token and try again.'));
+      setError(problemMessage(failure, 'Kurulum tamamlanamadı. Anahtarı kontrol edip tekrar deneyin.'));
       return;
     }
     onComplete();
   }
 
   return (
-    <main className="card">
-      <h1>Set up DEPSIS</h1>
-      <p>
-        This server has not been claimed yet. To prove you are the person who installed it, enter
-        the one-time token it printed when it started:
-      </p>
-      <pre>journalctl -u depsis-api | grep -A4 &apos;not set up&apos;</pre>
-      <p className="muted">
-        The token changes every time the service restarts, so use the one from the current run.
-      </p>
+    <div className="centered">
+      <main className="card">
+        <div className="brand-mark">
+          <IconLogo />
+          <span>DEPSIS</span>
+        </div>
 
-      <form onSubmit={(e) => void submit(e)}>
-        <label>
-          Setup token
-          <input
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            autoComplete="off"
-            spellCheck={false}
-            required
-          />
-        </label>
+        <h1>Cihazı kur</h1>
+        <p className="muted">
+          Bu sunucu henüz sahiplenilmemiş. Kuran kişi olduğunuzu göstermek için, servis başlarken
+          yazdırdığı tek kullanımlık anahtarı girin:
+        </p>
+        <pre>journalctl -u depsis-api | grep -A4 &apos;not set up&apos;</pre>
+        <p className="faint">
+          Anahtar her yeniden başlatmada değişir; şu anki çalışmanınkini kullanın.
+        </p>
 
-        <h2>Your organisation</h2>
-        <label>
-          Name
-          <input value={organizationName} onChange={(e) => setOrgName(e.target.value)} required />
-        </label>
-        <label>
-          Short name
-          <input
-            value={organizationSlug}
-            onChange={(e) => setSlug(e.target.value.toLowerCase())}
-            pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-            placeholder="acme"
-            required
-          />
-          <small>
-            Lowercase letters, digits and hyphens. You will type this when signing in, so keep it
-            short.
-          </small>
-        </label>
+        <form onSubmit={(e) => void submit(e)}>
+          <label>
+            Kurulum anahtarı
+            <input
+              value={token}
+              onChange={(e) => setToken(e.target.value.trim())}
+              autoComplete="off"
+              spellCheck={false}
+              required
+            />
+          </label>
 
-        <h2>Your account</h2>
-        <label>
-          Your name
-          <input
-            value={adminDisplayName}
-            onChange={(e) => setDisplayName(e.target.value)}
-            autoComplete="name"
-            required
-          />
-        </label>
-        <label>
-          Email
-          <input
-            value={adminUsername}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="username"
-            required
-          />
-        </label>
-        <label>
-          Password
-          <input
-            type="password"
-            value={adminPassword}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="new-password"
-            minLength={12}
-            required
-          />
-          <small>
-            At least 12 characters. Length is what matters — there is no rule about symbols, because
-            those shrink the search space more often than they grow it.
-          </small>
-        </label>
-        <label>
-          Password again
-          <input
-            type="password"
-            value={confirmPassword}
-            onChange={(e) => setConfirm(e.target.value)}
-            autoComplete="new-password"
-            required
-          />
-        </label>
+          <h2>Cihaz</h2>
+          <label>
+            Ad
+            <input
+              value={organizationName}
+              onChange={(e) => setOrgName(e.target.value)}
+              placeholder="Ev"
+              required
+            />
+          </label>
+          <label>
+            Kısa ad
+            <input
+              value={organizationSlug}
+              onChange={(e) => setSlug(e.target.value.toLowerCase().trim())}
+              pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+              placeholder="ev"
+              required
+            />
+            <span className="muted">
+              Küçük harf, rakam ve tire. Tek cihaz varsa girişte bunu yazmanız gerekmez.
+            </span>
+          </label>
 
-        {error !== null && (
-          <p className="error" role="alert">
-            {error}
-          </p>
-        )}
+          <h2>Yönetici hesabı</h2>
+          <label>
+            Kullanıcı adı
+            <input
+              value={adminUsername}
+              onChange={(e) => setUsername(e.target.value.trim())}
+              autoComplete="username"
+              pattern="[A-Za-z0-9][A-Za-z0-9._\-]*"
+              placeholder="serkan"
+              required
+            />
+            <span className="muted">Girişte yazacağınız ad. E-posta değil.</span>
+          </label>
+          <label>
+            Parola
+            <input
+              type="password"
+              value={adminPassword}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="new-password"
+              minLength={12}
+              required
+            />
+            <span className="muted">
+              En az 12 karakter. Önemli olan uzunluk; simge zorunluluğu yok, çünkü çoğu zaman arama
+              uzayını genişletmek yerine daraltır.
+            </span>
+          </label>
+          <label>
+            Parola (tekrar)
+            <input
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => setConfirm(e.target.value)}
+              autoComplete="new-password"
+              required
+            />
+          </label>
 
-        <button type="submit" disabled={busy}>
-          {busy ? 'Setting up…' : 'Claim this server'}
-        </button>
-      </form>
-    </main>
+          {error !== null && (
+            <p className="notice error" role="alert">
+              {error}
+            </p>
+          )}
+
+          <button type="submit" className="primary" disabled={busy}>
+            {busy ? 'Kuruluyor…' : 'Cihazı sahiplen'}
+          </button>
+        </form>
+      </main>
+    </div>
   );
 }

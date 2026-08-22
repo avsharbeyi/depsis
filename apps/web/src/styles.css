@@ -1,368 +1,793 @@
 /*
- * Deliberately small and hand-written.
+ * DEPSIS — one stylesheet, hand-written.
  *
- * A CSS framework would be another pinned dependency and another thing to justify, for four forms.
- * When the file browser arrives and the interface stops being four forms, that is the point to
- * decide on one — with an ADR, like everything else.
+ * Still no CSS framework. What a framework would buy here is a component library nobody has
+ * designed against and a build step to strip the 95% unused; what it would cost is a pinned
+ * dependency in the one part of the product a person actually looks at. The tokens below are the
+ * whole system: a spacing scale, a type scale, four surfaces and one accent.
  */
+
 :root {
   color-scheme: light dark;
-  --fg: #1a1a1a;
-  --bg: #fafafa;
-  --card: #ffffff;
-  --line: #d8d8d8;
-  --accent: #1f5f9e;
-  --error: #a4262c;
-  --warning: #8a6100;
-  --muted: #666666;
+
+  /* Surfaces, from furthest back to nearest front. Four is enough to build depth without
+     inventing a shadow language. */
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --surface-2: #eceef1;
+  --surface-3: #e2e5ea;
+  --line: #d7dbe0;
+  --line-strong: #b9c0c8;
+
+  --fg: #14181d;
+  --fg-muted: #5b6672;
+  --fg-faint: #8a939d;
+
+  --accent: #1b6ec2;
+  --accent-fg: #ffffff;
+  --accent-soft: #e4eefa;
+
+  --ok: #146c2e;
+  --ok-soft: #e3f4e8;
+  --warn: #8a5a00;
+  --warn-soft: #fdf1dc;
+  --error: #a01b23;
+  --error-soft: #fbe6e7;
+
+  /* A 4px scale. Every margin and padding in this file is one of these, which is what keeps the
+     interface looking deliberate without anyone measuring anything. */
+  --s1: 0.25rem;
+  --s2: 0.5rem;
+  --s3: 0.75rem;
+  --s4: 1rem;
+  --s5: 1.5rem;
+  --s6: 2rem;
+  --s7: 3rem;
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --shadow: 0 1px 2px rgb(16 24 32 / 6%), 0 4px 12px rgb(16 24 32 / 6%);
+  --shadow-lg: 0 8px 32px rgb(16 24 32 / 18%);
+
   font-family:
     system-ui,
     -apple-system,
     'Segoe UI',
+    Roboto,
     sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --fg: #e8e8e8;
-    --bg: #16181c;
-    --card: #1f2227;
-    --line: #363b42;
-    --accent: #6aa9e0;
-    --error: #f1707b;
-    --warning: #e0b050;
-    --muted: #9aa0a6;
+    --bg: #101317;
+    --surface: #181c22;
+    --surface-2: #20252c;
+    --surface-3: #2a3038;
+    --line: #2e343d;
+    --line-strong: #454d58;
+
+    --fg: #e7ebef;
+    --fg-muted: #9aa4b0;
+    --fg-faint: #6d7783;
+
+    --accent: #5aa2ea;
+    --accent-fg: #0b1016;
+    --accent-soft: #17293c;
+
+    --ok: #5ac47a;
+    --ok-soft: #14291a;
+    --warn: #e0ab4f;
+    --warn-soft: #2b2314;
+    --error: #f0757f;
+    --error-soft: #2d1618;
+
+    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 4px 12px rgb(0 0 0 / 30%);
+    --shadow-lg: 0 8px 32px rgb(0 0 0 / 55%);
   }
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  display: grid;
-  place-items: center;
   background: var(--bg);
   color: var(--fg);
-  padding: 1.5rem;
+}
+
+/* ─── the centred single card, for sign-in and setup ───────────────────────── */
+
+.centered {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--s5);
 }
 
 .card {
-  width: min(34rem, 100%);
-  background: var(--card);
+  width: min(30rem, 100%);
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 1.75rem;
+  border-radius: var(--radius);
+  padding: var(--s6);
+  box-shadow: var(--shadow);
+}
+
+.brand-mark {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-bottom: var(--s5);
+}
+.brand-mark svg {
+  width: 2rem;
+  height: 2rem;
+}
+.brand-mark span {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
 }
 
 h1 {
-  margin-top: 0;
-  font-size: 1.4rem;
+  margin: 0 0 var(--s2);
+  font-size: 1.5rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
 }
 h2 {
-  font-size: 1rem;
-  margin: 1.5rem 0 0.5rem;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  margin: var(--s6) 0 var(--s3);
+  font-size: 1.05rem;
+  font-weight: 650;
+}
+h2:first-child {
+  margin-top: 0;
 }
 
-label {
-  display: block;
-  margin-bottom: 1rem;
-  font-weight: 600;
-}
-
-input {
-  display: block;
-  width: 100%;
-  margin-top: 0.35rem;
-  padding: 0.55rem 0.65rem;
-  font: inherit;
-  font-weight: 400;
-  color: var(--fg);
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  box-sizing: border-box;
-}
-
-input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-small {
-  display: block;
-  margin-top: 0.3rem;
-  font-weight: 400;
-  color: var(--muted);
-}
-
-pre {
-  padding: 0.6rem 0.75rem;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  overflow-x: auto;
-  font-size: 0.85rem;
-}
-
-button {
-  padding: 0.6rem 1.1rem;
-  font: inherit;
-  font-weight: 600;
-  color: #ffffff;
-  background: var(--accent);
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-button:disabled {
-  opacity: 0.6;
-  cursor: progress;
-}
-
-.error {
-  color: var(--error);
-}
-.warning {
-  color: var(--warning);
+p {
+  margin: 0 0 var(--s3);
 }
 .muted {
-  color: var(--muted);
+  color: var(--fg-muted);
+  font-size: 0.9rem;
 }
-
-/* Recovery codes are read off the screen and typed elsewhere, so they get a monospace face and
-   generous spacing — a mistyped code is indistinguishable from a wrong one. */
-.codes {
-  list-style: none;
-  padding: 0;
-  margin: 1rem 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
-  gap: 0.4rem;
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
-  letter-spacing: 0.05em;
-}
-
-.row {
-  display: flex;
-  gap: 0.6rem;
-  flex-wrap: wrap;
+.faint {
+  color: var(--fg-faint);
 }
 
 hr {
   border: none;
   border-top: 1px solid var(--line);
-  margin: 1.75rem 0;
+  margin: var(--s5) 0;
 }
 
-img {
-  display: block;
+pre {
+  background: var(--surface-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #ffffff;
-}
-
-/* ─── the application shell ───────────────────────────────────────────────────
- *
- * Everything above this line was written for four centred forms, and `body { place-items: center }`
- * is right for those. The shell has to override it: a file table centred in the viewport with a
- * 34rem cap is a file table nobody can read a filename in.
- */
-body:has(.shell) {
-  display: block;
-  padding: 0;
-}
-
-.shell {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-
-.shell-bar {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  flex-wrap: wrap;
-  padding: 0.75rem 1.25rem;
-  background: var(--card);
-  border-bottom: 1px solid var(--line);
-  position: sticky;
-  top: 0;
-  z-index: 1;
-}
-
-.brand {
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-
-.shell-bar nav {
-  display: flex;
-  gap: 0.25rem;
-  flex-wrap: wrap;
-}
-
-.nav-item {
-  padding: 0.35rem 0.7rem;
-  border-radius: 6px;
-  color: var(--fg);
-  text-decoration: none;
-}
-.nav-item:hover {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-.nav-item.current {
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
-  font-weight: 600;
-}
-
-/* `margin-left: auto` rather than `justify-content: space-between` on the bar: the nav must sit
- * next to the brand, not be spread across the width, and this keeps that true when the bar wraps. */
-.shell-who {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.shell-main {
-  padding: 1.25rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.card.wide {
-  width: 100%;
-  max-width: 72rem;
-  margin: 0 auto;
-}
-
-.row-between {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-
-.actions {
-  display: flex;
-  gap: 0.4rem;
-  flex-wrap: wrap;
-}
-
-.tiles {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-  gap: 0.75rem;
-  margin: 1rem 0 1.5rem;
-}
-
-.tile {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.85rem 1rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-}
-.tile-label {
-  font-size: 0.8rem;
-  color: var(--muted);
-}
-.tile-value {
-  font-size: 1.25rem;
-  font-variant-numeric: tabular-nums;
-}
-.tile-hint {
-  font-size: 0.8rem;
-  color: var(--muted);
-}
-
-/* A table is the right shape for a file listing and the wrong shape for a narrow screen. Rather
- * than reflowing it into cards — which loses the column alignment that makes a listing scannable —
- * it scrolls inside its own box, so the PAGE never scrolls sideways. */
-.table-scroll {
+  border-radius: var(--radius-sm);
+  padding: var(--s3);
   overflow-x: auto;
+  font-size: 0.85rem;
+  margin: 0 0 var(--s3);
 }
 
-table {
+code {
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 0.9em;
+}
+
+/* ─── forms ────────────────────────────────────────────────────────────────── */
+
+label {
+  display: block;
+  margin-bottom: var(--s4);
+  font-size: 0.875rem;
+  font-weight: 550;
+  color: var(--fg-muted);
+}
+
+input,
+select,
+textarea {
+  display: block;
   width: 100%;
-  border-collapse: collapse;
-  font-size: 0.95rem;
+  margin-top: var(--s2);
+  padding: 0.6rem 0.7rem;
+  font: inherit;
+  font-weight: 400;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
 }
-th,
-td {
-  text-align: left;
-  padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid var(--line);
-  white-space: nowrap;
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
-th {
-  font-size: 0.8rem;
-  color: var(--muted);
-  font-weight: 600;
-}
-tr.dimmed td {
-  opacity: 0.55;
+label .muted,
+label small {
+  display: block;
+  margin-top: var(--s1);
+  font-weight: 400;
 }
 
+button {
+  font: inherit;
+  font-weight: 550;
+  padding: 0.5rem 0.9rem;
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+button.primary {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: transparent;
+}
+button.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+button.danger {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 40%, transparent);
+}
+button.quiet {
+  background: none;
+  border-color: transparent;
+}
+button.quiet:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+/* ─── messages ─────────────────────────────────────────────────────────────── */
+
+.notice {
+  border-radius: var(--radius-sm);
+  padding: var(--s3) var(--s4);
+  margin-bottom: var(--s4);
+  font-size: 0.9rem;
+  border: 1px solid transparent;
+}
+.notice.error {
+  background: var(--error-soft);
+  border-color: color-mix(in srgb, var(--error) 30%, transparent);
+  color: var(--error);
+}
+.notice.warning {
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+  color: var(--warn);
+}
+.notice.ok {
+  background: var(--ok-soft);
+  border-color: color-mix(in srgb, var(--ok) 30%, transparent);
+  color: var(--ok);
+}
+
+/* Legacy single-word classes, kept because several screens still use them directly. */
+.error {
+  color: var(--error);
+}
+.warning {
+  color: var(--warn);
+}
 .ok {
-  color: #1a7f37;
+  color: var(--ok);
 }
 .bad {
   color: var(--error);
   font-weight: 600;
 }
-@media (prefers-color-scheme: dark) {
-  .ok {
-    color: #4ac26b;
-  }
+
+/* ─── the application shell ────────────────────────────────────────────────── */
+
+.shell {
+  display: grid;
+  grid-template-columns: 15rem 1fr;
+  min-height: 100vh;
 }
 
-.crumbs {
-  margin: 0.5rem 0 1rem;
-  font-size: 0.95rem;
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s5) var(--s4);
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  height: 100vh;
 }
-.crumb,
+
+.sidebar .brand-mark {
+  margin-bottom: var(--s5);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: 0.55rem var(--s3);
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  text-decoration: none;
+  font-weight: 550;
+  font-size: 0.925rem;
+}
+.nav-item:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+.nav-item.current {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.nav-item svg {
+  width: 1.15rem;
+  height: 1.15rem;
+  flex: none;
+}
+
+.sidebar-foot {
+  margin-top: auto;
+  padding-top: var(--s4);
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.who {
+  font-size: 0.875rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.main {
+  padding: var(--s6);
+  max-width: 78rem;
+  width: 100%;
+}
+
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s4);
+  flex-wrap: wrap;
+  margin-bottom: var(--s5);
+}
+.page-head h1 {
+  margin: 0;
+}
+.page-head .muted {
+  margin: var(--s1) 0 0;
+}
+
+.actions {
+  display: flex;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--s5);
+  box-shadow: var(--shadow);
+  margin-bottom: var(--s4);
+}
+
+/* ─── dashboard ────────────────────────────────────────────────────────────── */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: var(--s4);
+  margin-bottom: var(--s4);
+}
+
+.tile {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--s4) var(--s5);
+  box-shadow: var(--shadow);
+}
+.tile-label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+.tile-value {
+  display: block;
+  margin-top: var(--s2);
+  font-size: 1.75rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.tile-hint {
+  display: block;
+  margin-top: var(--s1);
+  font-size: 0.85rem;
+  color: var(--fg-muted);
+}
+
+/* A capacity bar. The number above it is the fact; this is what makes "nearly full" visible from
+   across the room, which is the only reason a dashboard exists. */
+.meter {
+  height: 8px;
+  margin-top: var(--s3);
+  border-radius: 99px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: var(--accent);
+}
+.meter-fill.warn {
+  background: var(--warn);
+}
+.meter-fill.bad {
+  background: var(--error);
+}
+
+.pill {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 99px;
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.pill.ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.pill.bad {
+  background: var(--error-soft);
+  color: var(--error);
+}
+.pill.neutral {
+  background: var(--surface-3);
+  color: var(--fg-muted);
+}
+
+/* ─── tables ───────────────────────────────────────────────────────────────── */
+
+.table-scroll {
+  overflow-x: auto;
+  margin: 0 calc(-1 * var(--s5));
+  padding: 0 var(--s5);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.925rem;
+}
+th,
+td {
+  text-align: left;
+  padding: 0.65rem var(--s3);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+th {
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  border-bottom-color: var(--line-strong);
+}
+tbody tr:hover {
+  background: var(--surface-2);
+}
+tbody tr:last-child td {
+  border-bottom: none;
+}
+tr.dimmed td {
+  opacity: 0.5;
+}
+td.right,
+th.right {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+td.shrink,
+th.shrink {
+  width: 1%;
+}
+
+.name-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+.name-cell svg {
+  width: 1.15rem;
+  height: 1.15rem;
+  flex: none;
+  color: var(--fg-faint);
+}
+.name-cell .folder {
+  color: var(--accent);
+}
+
 .linklike {
   background: none;
   border: none;
   padding: 0;
   font: inherit;
-  color: var(--accent);
+  font-weight: 550;
+  color: inherit;
   cursor: pointer;
+  text-align: left;
+}
+.linklike:hover {
   text-decoration: underline;
 }
 
-.button-like {
-  display: inline-block;
-  padding: 0.35rem 0.7rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--fg);
+/* Row actions appear on hover on a pointer device and are always present on touch, where there is
+   no hover to reveal them. */
+.row-actions {
+  display: flex;
+  gap: var(--s1);
+  justify-content: flex-end;
+  opacity: 0;
+}
+tr:hover .row-actions,
+tr:focus-within .row-actions {
+  opacity: 1;
+}
+@media (hover: none) {
+  .row-actions {
+    opacity: 1;
+  }
+}
+.row-actions button,
+.row-actions a {
+  padding: 0.3rem 0.5rem;
+  font-size: 0.85rem;
+  background: none;
+  border-color: transparent;
+  color: var(--fg-muted);
   text-decoration: none;
-  font-size: 0.9rem;
+  border-radius: var(--radius-sm);
+}
+.row-actions button:hover,
+.row-actions a:hover {
+  background: var(--surface-3);
+  color: var(--fg);
 }
 
-/* Below this width the secondary columns cost more than they inform: a phone showing a filename,
- * a size and the two buttons that act on it is usable, and one showing six truncated columns is
- * not. */
-@media (max-width: 40rem) {
+/* ─── breadcrumbs ──────────────────────────────────────────────────────────── */
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  flex-wrap: wrap;
+  margin-bottom: var(--s4);
+  font-size: 0.925rem;
+}
+.crumbs button {
+  background: none;
+  border: none;
+  padding: 0.2rem var(--s2);
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-weight: 550;
+}
+.crumbs button:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+.crumbs button:last-child {
+  color: var(--fg);
+}
+.crumbs .sep {
+  color: var(--fg-faint);
+}
+
+/* ─── drop zone and empty states ───────────────────────────────────────────── */
+
+.dropzone {
+  position: relative;
+  border-radius: var(--radius);
+  transition: outline-color 120ms ease;
+  outline: 2px dashed transparent;
+  outline-offset: -2px;
+}
+.dropzone.over {
+  outline-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.empty {
+  text-align: center;
+  padding: var(--s7) var(--s4);
+  color: var(--fg-muted);
+}
+.empty svg {
+  width: 2.5rem;
+  height: 2.5rem;
+  color: var(--fg-faint);
+  margin-bottom: var(--s3);
+}
+.empty p {
+  margin: 0 0 var(--s4);
+}
+
+/* ─── progress ─────────────────────────────────────────────────────────────── */
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--s4);
+  font-size: 0.9rem;
+}
+.progress .bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  overflow: hidden;
+}
+.progress .bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+/* ─── dialog ───────────────────────────────────────────────────────────────── */
+
+dialog {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--s5);
+  width: min(26rem, calc(100vw - 2rem));
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: var(--shadow-lg);
+}
+dialog::backdrop {
+  background: rgb(8 12 16 / 45%);
+}
+dialog h2 {
+  margin: 0 0 var(--s3);
+  font-size: 1.1rem;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s2);
+  margin-top: var(--s5);
+}
+
+/* ─── toasts ───────────────────────────────────────────────────────────────── */
+
+.toasts {
+  position: fixed;
+  right: var(--s5);
+  bottom: var(--s5);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  max-width: min(24rem, calc(100vw - 2rem));
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  font-size: 0.9rem;
+}
+.toast.error {
+  border-color: color-mix(in srgb, var(--error) 45%, transparent);
+  background: var(--error-soft);
+  color: var(--error);
+}
+.toast.ok {
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.toast button {
+  margin-left: auto;
+  padding: 0 var(--s1);
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.7;
+}
+
+/* ─── narrow screens ───────────────────────────────────────────────────────── */
+
+/* The sidebar becomes a horizontal strip rather than a drawer. A drawer needs a hamburger, a
+   focus trap and an escape key; a strip with four items needs none of that and hides nothing. */
+@media (max-width: 52rem) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    position: static;
+    height: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--s1);
+    overflow-x: auto;
+    padding: var(--s3) var(--s4);
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+  .sidebar .brand-mark {
+    margin: 0 var(--s3) 0 0;
+  }
+  .sidebar .brand-mark span {
+    display: none;
+  }
+  .sidebar-foot {
+    margin: 0 0 0 auto;
+    padding: 0;
+    border: none;
+    flex-direction: row;
+    align-items: center;
+  }
+  .who {
+    display: none;
+  }
+  .nav-item span {
+    display: none;
+  }
+  .main {
+    padding: var(--s4);
+  }
   .hide-narrow {
     display: none;
   }
-  .shell-who .muted {
-    display: none;
+  .panel {
+    padding: var(--s4);
   }
-  .shell-main {
-    padding: 0.75rem;
-  }
-  .card {
-    padding: 1rem;
+  .table-scroll {
+    margin: 0 calc(-1 * var(--s4));
+    padding: 0 var(--s4);
   }
 }

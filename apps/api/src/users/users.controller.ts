@@ -42,14 +42,12 @@ const MAX_PASSWORD = 1024;
 
 const createSchema = z.object({
   username: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
-  displayName: z.string().trim().min(1).max(200),
   role: z.enum(['admin', 'member']).default('member'),
   password: z.string().min(MIN_PASSWORD).max(MAX_PASSWORD),
 });
 
 const updateSchema = z
   .object({
-    displayName: z.string().trim().min(1).max(200).optional(),
     role: z.enum(['admin', 'member']).optional(),
     disabled: z.boolean().optional(),
   })
@@ -88,7 +86,7 @@ export class UsersController {
     const parsed = createSchema.safeParse(body);
     if (!parsed.success) {
       throw new BadRequestException(
-        `username, displayName and a password of at least ${MIN_PASSWORD} characters are required`,
+        `username and a password of at least ${MIN_PASSWORD} characters are required`,
       );
     }
 
@@ -97,7 +95,6 @@ export class UsersController {
       const row = await this.users.create(
         session.organizationId,
         parsed.data.username,
-        parsed.data.displayName,
         parsed.data.role,
         hash,
       );
@@ -147,7 +144,6 @@ export function toUser(row: UserRow): Schemas['User'] {
   return {
     id: row.id,
     username: row.username,
-    displayName: row.display_name,
     role: row.role === 'admin' ? 'admin' : 'member',
     disabled: row.disabled_at !== null,
     createdAt: row.created_at.toISOString(),

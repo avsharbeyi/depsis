@@ -1,12 +1,21 @@
 import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
+import { Account } from './Account.js';
 import { api } from './api.js';
-import { Files } from './Files.js';
 import { Dashboard } from './Dashboard.js';
+import { Files } from './Files.js';
 import { SetupWizard } from './SetupWizard.js';
-import { Security } from './Security.js';
 import { SignIn } from './SignIn.js';
+import {
+  IconAccount,
+  IconDashboard,
+  IconFiles,
+  IconLogo,
+  IconUsers,
+  Toasts,
+  useToasts,
+} from './ui.js';
 import { Users } from './Users.js';
 
 /** Straight from the contract, so a field renamed in the YAML breaks this file. */
@@ -17,17 +26,8 @@ type Screen =
   | { name: 'unreachable' }
   | { name: 'setup' }
   | { name: 'sign-in'; note: string | null }
-  | { name: 'signed-in'; note: string | null };
+  | { name: 'signed-in' };
 
-/**
- * Four panes and a hash router.
- *
- * Still no routing library. What changed since there were three screens is that the panes are now
- * addressable — a file browser that cannot be linked to, reloaded or navigated back through is not
- * a file browser — and `location.hash` gives that for nothing. A library would bring URL history,
- * nested layouts and code splitting, none of which this needs and all of which would have to be
- * pinned and justified.
- */
 export function App(): React.JSX.Element {
   const [screen, setScreen] = useState<Screen>({ name: 'loading' });
 
@@ -48,47 +48,56 @@ export function App(): React.JSX.Element {
       // A live cookie means the app should come up signed in rather than at the login form. Asking
       // `/me` is what decides it, because the cookie is HttpOnly and this code cannot read it.
       const me = await api.GET('/me', {});
-      setScreen(
-        me.data === undefined ? { name: 'sign-in', note: null } : { name: 'signed-in', note: null },
-      );
+      setScreen(me.data === undefined ? { name: 'sign-in', note: null } : { name: 'signed-in' });
     })();
   }, []);
 
   switch (screen.name) {
     case 'loading':
-      return <main className="card">Yükleniyor…</main>;
+      return (
+        <div className="centered">
+          <p className="muted">Yükleniyor…</p>
+        </div>
+      );
 
     case 'unreachable':
       return (
-        <main className="card">
-          <h1>Sunucuya ulaşılamıyor</h1>
-          <p>DEPSIS API yanıt vermedi. Servisin çalıştığını doğrulayın:</p>
-          <pre>systemctl status depsis-api</pre>
-        </main>
+        <div className="centered">
+          <main className="card">
+            <div className="brand-mark">
+              <IconLogo />
+              <span>DEPSIS</span>
+            </div>
+            <h1>Sunucuya ulaşılamıyor</h1>
+            <p className="muted">DEPSIS API yanıt vermedi. Servisin çalıştığını doğrulayın:</p>
+            <pre>systemctl status depsis-api</pre>
+          </main>
+        </div>
       );
 
     case 'setup':
       return <SetupWizard onComplete={() => setScreen({ name: 'sign-in', note: null })} />;
 
     case 'sign-in':
-      return (
-        <SignIn note={screen.note} onSignedIn={(note) => setScreen({ name: 'signed-in', note })} />
-      );
+      return <SignIn note={screen.note} onSignedIn={() => setScreen({ name: 'signed-in' })} />;
 
     case 'signed-in':
-      return (
-        <SignedIn note={screen.note} onSignedOut={(note) => setScreen({ name: 'sign-in', note })} />
-      );
+      return <SignedIn onSignedOut={(note) => setScreen({ name: 'sign-in', note })} />;
   }
 }
 
-type Pane = 'dashboard' | 'files' | 'security' | 'users';
+type Pane = 'dashboard' | 'files' | 'users' | 'account';
 
-const PANES: ReadonlyArray<{ id: Pane; label: string; adminOnly: boolean }> = [
-  { id: 'dashboard', label: 'Panel', adminOnly: false },
-  { id: 'files', label: 'Dosyalar', adminOnly: false },
-  { id: 'security', label: 'Güvenlik', adminOnly: false },
-  { id: 'users', label: 'Kullanıcılar', adminOnly: true },
+const PANES: ReadonlyArray<{
+  id: Pane;
+  label: string;
+  adminOnly: boolean;
+  Icon: (p: { className?: string }) => React.JSX.Element;
+}> = [
+  { id: 'dashboard', label: 'Panel', adminOnly: false, Icon: IconDashboard },
+  { id: 'files', label: 'Dosyalar', adminOnly: false, Icon: IconFiles },
+  { id: 'users', label: 'Kullanıcılar', adminOnly: true, Icon: IconUsers },
+  { id: 'account', label: 'Hesabım', adminOnly: false, Icon: IconAccount },
 ];
 
 function paneFromHash(): Pane {
@@ -96,22 +105,21 @@ function paneFromHash(): Pane {
   return PANES.some((p) => p.id === raw) ? (raw as Pane) : 'dashboard';
 }
 
-interface SignedInProps {
-  note: string | null;
-  onSignedOut: (note: string | null) => void;
-}
-
 /**
  * The application, once there is a session.
  *
- * It reads `/me` rather than carrying anything over from the sign-in screen: the session is the
- * cookie, and the server is the only thing that knows what it means.
+ * Still no routing library — `location.hash` gives addressable panes for nothing, and four panes
+ * need neither nested layouts nor code splitting.
  */
-function SignedIn({ note, onSignedOut }: SignedInProps): React.JSX.Element {
+function SignedIn({
+  onSignedOut,
+}: {
+  onSignedOut: (note: string | null) => void;
+}): React.JSX.Element {
   const [me, setMe] = useState<CurrentUser | null>(null);
   const [failed, setFailed] = useState(false);
   const [pane, setPane] = useState<Pane>(paneFromHash);
-  const [reloadKey, setReloadKey] = useState(0);
+  const { toasts, push, dismiss } = useToasts();
 
   useEffect(() => {
     const onHashChange = (): void => setPane(paneFromHash());
@@ -123,8 +131,8 @@ function SignedIn({ note, onSignedOut }: SignedInProps): React.JSX.Element {
    * A 401 anywhere means the session ended — expired, revoked, or the account disabled — and the
    * only correct response is to go back to the sign-in form and say why.
    *
-   * This exists because the previous version turned every `/me` failure into `null` and rendered
-   * an unconditional "Loading…", so a session that ended while the tab was open left the product
+   * This exists because an earlier version turned every `/me` failure into `null` and rendered an
+   * unconditional "Loading…", so a session that ended while the tab was open left the product
    * apparently frozen with no error and no way forward.
    */
   const onUnauthenticated = useCallback(() => {
@@ -144,84 +152,82 @@ function SignedIn({ note, onSignedOut }: SignedInProps): React.JSX.Element {
       }
       setMe(data);
     })();
-  }, [reloadKey, onUnauthenticated]);
+  }, [onUnauthenticated]);
 
   if (failed) {
     return (
-      <main className="card">
-        <h1>Hesabınız okunamadı</h1>
-        <p className="error" role="alert">
-          Sunucu yanıt verdi ama hesap bilgisi gelmedi. Sayfayı yenilemek çoğu zaman yeter.
-        </p>
-        <button type="button" onClick={() => window.location.reload()}>
-          Yenile
-        </button>
-      </main>
+      <div className="centered">
+        <main className="card">
+          <h1>Hesabınız okunamadı</h1>
+          <p className="notice error" role="alert">
+            Sunucu yanıt verdi ama hesap bilgisi gelmedi. Sayfayı yenilemek çoğu zaman yeter.
+          </p>
+          <button type="button" className="primary" onClick={() => window.location.reload()}>
+            Yenile
+          </button>
+        </main>
+      </div>
     );
   }
-  if (me === null) return <main className="card">Yükleniyor…</main>;
+  if (me === null) {
+    return (
+      <div className="centered">
+        <p className="muted">Yükleniyor…</p>
+      </div>
+    );
+  }
 
-  const visible = PANES.filter((p) => !p.adminOnly || me.role === 'admin');
+  const isAdmin = me.role === 'admin';
+  const visible = PANES.filter((p) => !p.adminOnly || isAdmin);
 
   return (
     <div className="shell">
-      <header className="shell-bar">
-        <span className="brand">DEPSIS</span>
-        <nav aria-label="Ana gezinme">
-          {visible.map((p) => (
-            <a
-              key={p.id}
-              href={`#/${p.id}`}
-              className={p.id === pane ? 'nav-item current' : 'nav-item'}
-              aria-current={p.id === pane ? 'page' : undefined}
-            >
-              {p.label}
-            </a>
-          ))}
-        </nav>
-        <div className="shell-who">
-          <span className="muted">
-            {me.displayName} · {me.organizationSlug}
+      <nav className="sidebar" aria-label="Ana gezinme">
+        <div className="brand-mark">
+          <IconLogo />
+          <span>DEPSIS</span>
+        </div>
+
+        {visible.map(({ id, label, Icon }) => (
+          <a
+            key={id}
+            href={`#/${id}`}
+            className={id === pane ? 'nav-item current' : 'nav-item'}
+            aria-current={id === pane ? 'page' : undefined}
+          >
+            <Icon />
+            <span>{label}</span>
+          </a>
+        ))}
+
+        <div className="sidebar-foot">
+          <span className="who" title={me.username}>
+            {me.username}
           </span>
           <button
             type="button"
+            className="quiet"
             onClick={() => {
               void api.POST('/auth/logout', {}).then(() => onSignedOut(null));
             }}
           >
-            Çıkış
+            Çıkış yap
           </button>
         </div>
-      </header>
+      </nav>
 
-      <main className="shell-main">
-        {note !== null && (
-          <p className="warning" role="alert">
-            {note}
-          </p>
-        )}
-
+      <main className="main">
         {pane === 'dashboard' && (
-          <Dashboard onUnauthenticated={onUnauthenticated} isAdmin={me.role === 'admin'} />
+          <Dashboard onUnauthenticated={onUnauthenticated} isAdmin={isAdmin} />
         )}
-        {pane === 'files' && <Files onUnauthenticated={onUnauthenticated} />}
-        {pane === 'security' && (
-          <section className="card">
-            <h1>Güvenlik</h1>
-            <p className="muted">
-              {me.username} · {me.organizationSlug}
-            </p>
-            <Security
-              mfaEnrolled={me.mfaEnrolled}
-              recoveryCodesRemaining={me.recoveryCodesRemaining}
-              onChanged={() => setReloadKey((k) => k + 1)}
-            />
-          </section>
+        {pane === 'files' && <Files onUnauthenticated={onUnauthenticated} notify={push} />}
+        {pane === 'users' && isAdmin && (
+          <Users currentUserId={me.id} onUnauthenticated={onUnauthenticated} notify={push} />
         )}
-        {pane === 'users' && me.role === 'admin' && (
-          <Users currentUserId={me.id} onUnauthenticated={onUnauthenticated} />
-        )}
+        {pane === 'account' && <Account me={me} notify={push} />}
       </main>
+
+      <Toasts toasts={toasts} dismiss={dismiss} />
     </div>
   );
 }

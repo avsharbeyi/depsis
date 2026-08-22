@@ -2,12 +2,14 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api, API_BASE_URL, problemMessage } from './api.js';
-import { formatBytes } from './Dashboard.js';
+import { formatBytes, formatWhen } from './Dashboard.js';
+import { ConfirmDialog, IconFile, IconFiles, IconUpload, PromptDialog } from './ui.js';
 
 type FileEntry = OpenApi.components['schemas']['FileEntry'];
 
 interface Props {
   onUnauthenticated: () => void;
+  notify: (kind: 'ok' | 'error', text: string) => void;
 }
 
 /** Where we are in the tree. The root is an empty trail. */
@@ -16,30 +18,35 @@ interface Crumb {
   name: string;
 }
 
+type Modal =
+  | { kind: 'none' }
+  | { kind: 'new-folder' }
+  | { kind: 'rename'; entry: FileEntry }
+  | { kind: 'trash'; entry: FileEntry };
+
 /**
  * The file browser.
  *
  * Navigation is by `parentId`, never by a path string. That is ADR-0005's rule and it is not
  * pedantry here: the server resolves an entry by id and derives the path from `parent_id`, so a
- * client that navigated by path would be asking about a different thing than the one it displayed
- * — and during a rename of a large subtree, briefly a different thing entirely.
+ * client that navigated by path would be asking about a different thing than the one it displayed —
+ * and during a rename of a large subtree, briefly a different thing entirely.
  */
-export function Files({ onUnauthenticated }: Props): React.JSX.Element {
+export function Files({ onUnauthenticated, notify }: Props): React.JSX.Element {
   const [trail, setTrail] = useState<Crumb[]>([]);
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [modal, setModal] = useState<Modal>({ kind: 'none' });
+  const [progress, setProgress] = useState<{ name: string; percent: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const parentId = trail.length === 0 ? undefined : trail[trail.length - 1]?.id;
-
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      setError(null);
       const { data, response } = await api.GET('/files', {
         params: { query: parentId === undefined ? {} : { parentId } },
       });
@@ -49,12 +56,10 @@ export function Files({ onUnauthenticated }: Props): React.JSX.Element {
         return;
       }
       if (data === undefined) {
-        setError('Klasör okunamadı.');
+        notify('error', 'Klasör okunamadı.');
         setEntries([]);
         return;
       }
-      // Folders first, then files, each by name. The server already orders by (kind, name_fold);
-      // this is not a second opinion, it is what keeps the list stable if that ever changes.
       setEntries(
         [...data.items].sort((a, b) => {
           // Folders before files, then by name in the Turkish collation — `İ` sorts with `I` and
@@ -67,196 +72,276 @@ export function Files({ onUnauthenticated }: Props): React.JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [parentId, reloadKey, onUnauthenticated]);
+  }, [parentId, reloadKey, onUnauthenticated, notify]);
 
-  async function createFolder(): Promise<void> {
-    const name = window.prompt('Klasör adı');
-    if (name === null || name.trim() === '') return;
-    setBusy('Klasör oluşturuluyor…');
-    const { error: problem } = await api.POST('/files/folders', {
+  async function createFolder(name: string): Promise<void> {
+    setModal({ kind: 'none' });
+    const { error } = await api.POST('/files/folders', {
       body: parentId === undefined ? { name } : { name, parentId },
     });
-    setBusy(null);
-    if (problem !== undefined) {
-      setError(problemMessage(problem, 'Klasör oluşturulamadı.'));
+    if (error !== undefined) {
+      notify('error', problemMessage(error, 'Klasör oluşturulamadı.'));
       return;
     }
+    notify('ok', `"${name}" oluşturuldu.`);
     reload();
   }
 
-  async function rename(entry: FileEntry): Promise<void> {
-    const name = window.prompt('Yeni ad', entry.name);
-    if (name === null || name.trim() === '' || name === entry.name) return;
-    setBusy('Yeniden adlandırılıyor…');
-    const { error: problem } = await api.PATCH('/files/{id}', {
+  async function rename(entry: FileEntry, name: string): Promise<void> {
+    setModal({ kind: 'none' });
+    const { error } = await api.PATCH('/files/{id}', {
       params: { path: { id: entry.id } },
       body: { name },
     });
-    setBusy(null);
-    if (problem !== undefined) {
-      setError(problemMessage(problem, 'Yeniden adlandırılamadı.'));
+    if (error !== undefined) {
+      notify('error', problemMessage(error, 'Yeniden adlandırılamadı.'));
       return;
     }
+    notify('ok', `"${entry.name}" → "${name}"`);
     reload();
   }
 
   async function trash(entry: FileEntry): Promise<void> {
-    // A confirmation, because the trash is not yet visible anywhere: until there is a screen that
-    // lists it, "moved to the trash" and "gone" look the same to the person who clicked.
-    if (!window.confirm(`"${entry.name}" çöp kutusuna taşınsın mı?`)) return;
-    setBusy('Çöp kutusuna taşınıyor…');
-    const { error: problem } = await api.DELETE('/files/{id}', {
-      params: { path: { id: entry.id } },
-    });
-    setBusy(null);
-    if (problem !== undefined) {
-      setError(problemMessage(problem, 'Taşınamadı.'));
+    setModal({ kind: 'none' });
+    const { error } = await api.DELETE('/files/{id}', { params: { path: { id: entry.id } } });
+    if (error !== undefined) {
+      notify('error', problemMessage(error, 'Taşınamadı.'));
       return;
     }
+    notify('ok', `"${entry.name}" çöp kutusuna taşındı.`);
     reload();
   }
 
-  async function upload(file: File): Promise<void> {
-    setError(null);
-    try {
-      for await (const progress of uploadFile(file, parentId)) {
-        setBusy(`${file.name} — ${progress}%`);
+  async function upload(files: FileList | File[]): Promise<void> {
+    for (const file of Array.from(files)) {
+      try {
+        setProgress({ name: file.name, percent: 0 });
+        for await (const percent of uploadFile(file, parentId)) {
+          setProgress({ name: file.name, percent });
+        }
+        notify('ok', `"${file.name}" yüklendi.`);
+      } catch (problem) {
+        notify('error', problemMessage(problem, `"${file.name}" yüklenemedi.`));
       }
-      setBusy(null);
-      reload();
-    } catch (problem) {
-      setBusy(null);
-      setError(problemMessage(problem, `${file.name} yüklenemedi.`));
     }
+    setProgress(null);
+    reload();
   }
 
+  const busy = progress !== null;
+
   return (
-    <section className="card wide">
-      <div className="row-between">
-        <h1>Dosyalar</h1>
+    <>
+      <div className="page-head">
+        <div>
+          <h1>Dosyalar</h1>
+          <Crumbs trail={trail} onNavigate={setTrail} />
+        </div>
         <div className="actions">
-          <button type="button" onClick={() => void createFolder()} disabled={busy !== null}>
+          <button type="button" onClick={() => setModal({ kind: 'new-folder' })} disabled={busy}>
             Yeni klasör
           </button>
-          <button type="button" onClick={() => fileInput.current?.click()} disabled={busy !== null}>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => fileInput.current?.click()}
+            disabled={busy}
+          >
             Yükle
           </button>
           <input
             ref={fileInput}
             type="file"
+            multiple
             hidden
             onChange={(e) => {
-              const chosen = e.target.files?.[0];
+              const chosen = e.target.files;
               // Cleared immediately so choosing the SAME file twice fires `change` the second time.
               e.target.value = '';
-              if (chosen !== undefined) void upload(chosen);
+              if (chosen !== null && chosen.length > 0) void upload(chosen);
             }}
           />
         </div>
       </div>
 
-      <nav className="crumbs" aria-label="Konum">
-        <button type="button" className="crumb" onClick={() => setTrail([])}>
-          Kök
-        </button>
-        {trail.map((crumb, index) => (
-          <span key={crumb.id}>
-            {' / '}
-            <button
-              type="button"
-              className="crumb"
-              onClick={() => setTrail(trail.slice(0, index + 1))}
-            >
-              {crumb.name}
-            </button>
-          </span>
-        ))}
-      </nav>
-
-      {busy !== null && (
-        <p className="muted" role="status">
-          {busy}
-        </p>
-      )}
-      {error !== null && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
-
-      {entries === null ? (
-        <p className="muted">Yükleniyor…</p>
-      ) : entries.length === 0 ? (
-        <p className="muted">Bu klasör boş.</p>
-      ) : (
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Ad</th>
-                <th>Boyut</th>
-                <th>Değiştirilme</th>
-                <th aria-label="İşlemler" />
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((entry) => (
-                <tr key={entry.id}>
-                  <td>
-                    {entry.kind === 'folder' ? (
-                      <button
-                        type="button"
-                        className="linklike"
-                        onClick={() => setTrail([...trail, { id: entry.id, name: entry.name }])}
-                      >
-                        📁 {entry.name}
-                      </button>
-                    ) : (
-                      <span>📄 {entry.name}</span>
-                    )}
-                  </td>
-                  <td>{entry.kind === 'folder' ? '—' : formatBytes(entry.size)}</td>
-                  <td className="hide-narrow">{formatWhen(entry.modifiedAt)}</td>
-                  <td className="actions">
-                    {entry.kind === 'file' && (
-                      // A plain link, not a fetch into memory. The session is a same-origin cookie,
-                      // so the browser sends it; the server answers with Content-Disposition:
-                      // attachment, and a multi-gigabyte file never touches this tab's heap.
-                      <a
-                        className="button-like"
-                        href={`${API_BASE_URL}/files/${entry.id}/content`}
-                        download={entry.name}
-                      >
-                        İndir
-                      </a>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => void rename(entry)}
-                      disabled={busy !== null}
-                    >
-                      Ad değiştir
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void trash(entry)}
-                      disabled={busy !== null}
-                    >
-                      Çöpe at
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {progress !== null && (
+        <div className="progress" role="status">
+          <span>{progress.name}</span>
+          <div className="bar">
+            <span style={{ width: `${progress.percent}%` }} />
+          </div>
+          <span>{progress.percent}%</span>
         </div>
       )}
-    </section>
+
+      {/* The whole panel is the drop target, not a separate strip. A dedicated zone is a second
+          place to aim at and is invisible until you already know it is there. */}
+      <div
+        className={dragging ? 'panel dropzone over' : 'panel dropzone'}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          // `relatedTarget` outside the panel: without this, dragging over a child row fires
+          // dragleave on the parent and the highlight flickers off under the cursor.
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          if (e.dataTransfer.files.length > 0) void upload(e.dataTransfer.files);
+        }}
+      >
+        {entries === null ? (
+          <p className="muted">Yükleniyor…</p>
+        ) : entries.length === 0 ? (
+          <div className="empty">
+            <IconUpload />
+            <p>Bu klasör boş. Dosyaları buraya sürükleyin.</p>
+            <button type="button" className="primary" onClick={() => fileInput.current?.click()}>
+              Dosya seç
+            </button>
+          </div>
+        ) : (
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Ad</th>
+                  <th className="right">Boyut</th>
+                  <th className="hide-narrow">Değiştirilme</th>
+                  <th className="shrink" aria-label="İşlemler" />
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map((entry) => (
+                  <tr key={entry.id}>
+                    <td>
+                      <span className="name-cell">
+                        {entry.kind === 'folder' ? <IconFiles className="folder" /> : <IconFile />}
+                        {entry.kind === 'folder' ? (
+                          <button
+                            type="button"
+                            className="linklike"
+                            onClick={() =>
+                              setTrail([...trail, { id: entry.id, name: entry.name }])
+                            }
+                          >
+                            {entry.name}
+                          </button>
+                        ) : (
+                          <span>{entry.name}</span>
+                        )}
+                      </span>
+                    </td>
+                    <td className="right">
+                      {entry.kind === 'folder' ? '—' : formatBytes(entry.size)}
+                    </td>
+                    <td className="hide-narrow">{formatWhen(entry.modifiedAt)}</td>
+                    <td className="shrink">
+                      <div className="row-actions">
+                        {entry.kind === 'file' && (
+                          // A plain link, not a fetch into memory. The session is a same-origin
+                          // cookie so the browser sends it, the server answers with
+                          // Content-Disposition: attachment, and a multi-gigabyte file never
+                          // touches this tab's heap.
+                          <a
+                            href={`${API_BASE_URL}/files/${entry.id}/content`}
+                            download={entry.name}
+                          >
+                            İndir
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setModal({ kind: 'rename', entry })}
+                          disabled={busy}
+                        >
+                          Ad değiştir
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setModal({ kind: 'trash', entry })}
+                          disabled={busy}
+                        >
+                          Çöpe at
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {modal.kind === 'new-folder' && (
+        <PromptDialog
+          title="Yeni klasör"
+          label="Klasör adı"
+          confirmLabel="Oluştur"
+          onSubmit={(name) => void createFolder(name)}
+          onCancel={() => setModal({ kind: 'none' })}
+        />
+      )}
+      {modal.kind === 'rename' && (
+        <PromptDialog
+          title="Yeniden adlandır"
+          label="Yeni ad"
+          initial={modal.entry.name}
+          confirmLabel="Kaydet"
+          onSubmit={(name) => void rename(modal.entry, name)}
+          onCancel={() => setModal({ kind: 'none' })}
+        />
+      )}
+      {modal.kind === 'trash' && (
+        <ConfirmDialog
+          title="Çöp kutusuna taşı"
+          // The trash has no screen yet, so "moved to the trash" and "gone" look the same to the
+          // person who clicked. Saying what actually happens is the least this can do until it does.
+          body={`"${modal.entry.name}" listeden kalkacak. Baytlar silinmiyor — çöp kutusunu boşaltmak ayrı bir işlem.`}
+          confirmLabel="Taşı"
+          danger
+          onConfirm={() => void trash(modal.entry)}
+          onCancel={() => setModal({ kind: 'none' })}
+        />
+      )}
+    </>
   );
 }
 
-/** Five mebibytes. Small enough that a dropped connection loses little, large enough that a
- * gigabyte is two hundred requests rather than two thousand. */
+function Crumbs({
+  trail,
+  onNavigate,
+}: {
+  trail: Crumb[];
+  onNavigate: (next: Crumb[]) => void;
+}): React.JSX.Element {
+  return (
+    <nav className="crumbs" aria-label="Konum">
+      <button type="button" onClick={() => onNavigate([])}>
+        Kök
+      </button>
+      {trail.map((crumb, index) => (
+        <span key={crumb.id} style={{ display: 'contents' }}>
+          <span className="sep" aria-hidden>
+            ›
+          </span>
+          <button type="button" onClick={() => onNavigate(trail.slice(0, index + 1))}>
+            {crumb.name}
+          </button>
+        </span>
+      ))}
+    </nav>
+  );
+}
+
+/**
+ * Five mebibytes. Small enough that a dropped connection loses little, large enough that a gigabyte
+ * is two hundred requests rather than two thousand.
+ */
 const CHUNK_BYTES = 5 * 1024 * 1024;
 
 /**
@@ -278,10 +363,7 @@ async function* uploadFile(file: File, parentId: string | undefined): AsyncGener
   const created = await fetch(`${API_BASE_URL}/uploads`, {
     method: 'POST',
     credentials: 'same-origin',
-    headers: {
-      'upload-length': String(file.size),
-      'upload-metadata': metadata,
-    },
+    headers: { 'upload-length': String(file.size), 'upload-metadata': metadata },
   });
   if (!created.ok) throw await problemOf(created);
   const location = created.headers.get('location');
@@ -290,7 +372,6 @@ async function* uploadFile(file: File, parentId: string | undefined): AsyncGener
   let offset = 0;
   while (offset < file.size) {
     const end = Math.min(offset + CHUNK_BYTES, file.size);
-    const chunk = file.slice(offset, end);
     const sent = await fetch(location, {
       method: 'PATCH',
       credentials: 'same-origin',
@@ -298,7 +379,7 @@ async function* uploadFile(file: File, parentId: string | undefined): AsyncGener
         'content-type': 'application/offset+octet-stream',
         'upload-offset': String(offset),
       },
-      body: chunk,
+      body: file.slice(offset, end),
     });
 
     if (sent.status === 409) {
@@ -318,8 +399,10 @@ async function* uploadFile(file: File, parentId: string | undefined): AsyncGener
   }
 }
 
-/** tus metadata is base64, and `btoa` cannot take a non-Latin-1 string — a Turkish filename would
- * throw before it ever reached the network. */
+/**
+ * tus metadata is base64, and `btoa` cannot take a non-Latin-1 string — a Turkish filename would
+ * throw before it ever reached the network.
+ */
 function base64(value: string): string {
   const bytes = new TextEncoder().encode(value);
   let binary = '';
@@ -328,15 +411,12 @@ function base64(value: string): string {
 }
 
 async function problemOf(response: Response): Promise<unknown> {
+  if (response.status === 503) {
+    return new Error('Depolama ajanı çalışmıyor, bu kurulumda yükleme yapılamaz.');
+  }
   try {
     return await response.json();
   } catch {
     return new Error(`Sunucu ${response.status} döndü.`);
   }
-}
-
-function formatWhen(iso: string): string {
-  const when = new Date(iso);
-  if (Number.isNaN(when.getTime())) return '—';
-  return when.toLocaleString('tr-TR', { dateStyle: 'short', timeStyle: 'short' });
 }
