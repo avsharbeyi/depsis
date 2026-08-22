@@ -348,13 +348,19 @@ paths:
     delete:
       tags: [files]
       summary: Çöp kutusuna taşı
+      description: |
+        Bu bir JOB DEĞİL. Önceki hâli 202 + JobRef diyordu, çünkü büyük bir alt ağacı silmek
+        uzun iş gibi görünüyordu; çöpe atmak tek satırda tek bayrak çıktı. Bayt silinmiyor —
+        çöpü boşaltmak ajandan `unlink` isteyen ayrı bir karar. Var olmayan bir işe referans
+        döndürmek, istemcinin sorgulayamayacağı bir kuyruk girdisi uydurmak olurdu.
       responses:
-        '202':
-          description: İş kuyruğa alındı
+        '200':
+          description: Çöp kutusuna taşındı
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/JobRef' }
+              schema: { $ref: '#/components/schemas/FileEntry' }
         '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
 
   /files/{id}/content:
     parameters:

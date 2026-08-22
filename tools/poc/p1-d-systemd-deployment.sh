@@ -181,6 +181,14 @@ else
 fi
 
 head1 'a database for it'
+# The roles are CLUSTER-wide and their passwords are not this probe's to inherit.
+# tools/ci/migration-check.sh sets a fresh random password on depsis_app and depsis_owner every
+# run, which is harmless in a throwaway CI container and breaks every later run on a persistent
+# test box — measured: this probe failed with "password authentication failed for user depsis_app"
+# after a migration-check run, and nothing in either script said why. Setting what we are about to
+# write into /etc/depsis/db-url removes the coupling in the direction that can be fixed here.
+psql -qd postgres -c "ALTER ROLE depsis_app   PASSWORD '${DEPSIS_APP_PASSWORD:-ci-app}'"     >/dev/null 2>&1
+psql -qd postgres -c "ALTER ROLE depsis_owner PASSWORD '${DEPSIS_OWNER_PASSWORD:-ci-owner}'" >/dev/null 2>&1
 psql -qd postgres -c "DROP DATABASE IF EXISTS $DB_NAME" >/dev/null 2>&1
 psql -qd postgres -v db_name="$DB_NAME" -f packages/db/bootstrap.sql > "$WORK/boot.log" 2>&1 \
   && ok "$DB_NAME bootstrapped" || { bad 'bootstrap failed'; tail -10 "$WORK/boot.log"; }
@@ -572,6 +580,96 @@ check 'the agent was started by the connection, not by the boot order' \
 # merely that a file was delivered.
 ENROL=$(curl -sS -b "$JAR" -o "$WORK/enrol.json" -w '%{http_code}' -X POST "$BASE/me/mfa/enrolment")
 check 'MFA enrolment succeeds, so the delivered key is usable' "$ENROL" '200'
+
+head1 'a file goes in through HTTP and comes back in a listing'
+# The API names its default share after the organisation slug. The directory has to exist before
+# the agent can resolve into it — there is no mkdir operation in the agent's closed op set yet, so
+# the installer's job of laying out the share tree is done here by hand, exactly as it is for the
+# 'alice' fixture above. This is the next real gap, and it is named rather than papered over.
+ORG_SLUG=p1d
+install -d -m 0755 "$SHARES/$ORG_SLUG" "$SHARES/$ORG_SLUG/.depsis" "$SHARES/$ORG_SLUG/.depsis/staging"
+install -d -m 0755 "$SHARES/$ORG_SLUG/Belgeler"
+# The whole point of the appliance, and the first time it has been possible. Until this section
+# existed no HTTP endpoint accepted file bytes at all: the agent could stage and publish, and
+# nothing above it could ask.
+FILES="$BASE/files"
+BODY='DEPSIS ilk dosya. Çağrı Işık.'
+# BYTES, not characters. `${#BODY}` counts characters, and the Turkish letters here are two bytes
+# each in UTF-8 — declaring the character count made the API refuse the chunk for exceeding the
+# length the upload was created with, which is exactly what it should do.
+LEN=$(printf '%s' "$BODY" | wc -c)
+
+# A folder first, so the upload lands somewhere a user chose.
+MKDIR=$(curl -sS -b "$JAR" -c "$JAR" -X POST "$FILES/folders" \
+  -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
+  -d '{"name":"Belgeler"}' 2>&1)
+FOLDER_ID=$(printf '%s' "$MKDIR" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+if [ -n "$FOLDER_ID" ]; then
+  ok 'POST /files/folders created a folder'
+else
+  bad "could not create a folder: $MKDIR"
+fi
+
+# tus creation. The metadata header is base64 per the tus spec, filename included, so a name with
+# Turkish letters survives a header that is ASCII-only.
+META="filename $(printf '%s' 'rapor.txt' | base64 -w0),parentId $(printf '%s' "$FOLDER_ID" | base64 -w0)"
+LOCATION=$(curl -sS -D - -o /dev/null -b "$JAR" -c "$JAR" -X POST "$BASE/uploads" \
+  -H "origin: http://127.0.0.1:$PORT" \
+  -H "upload-length: $LEN" -H "upload-metadata: $META" 2>&1 | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')
+UPLOAD_ID=$(basename "$LOCATION")
+if [ -n "$UPLOAD_ID" ] && [ "$UPLOAD_ID" != "/" ]; then
+  ok "POST /uploads created a session ($UPLOAD_ID)"
+else
+  bad 'POST /uploads returned no Location'
+fi
+
+# The bytes. `--data-binary` with the tus content type; the API must not parse this body.
+PATCH_CODE=$(printf '%s' "$BODY" | curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" \
+  -X PATCH "$BASE/uploads/$UPLOAD_ID" -H "origin: http://127.0.0.1:$PORT" \
+  -H 'content-type: application/offset+octet-stream' -H 'upload-offset: 0' \
+  --data-binary @- 2>&1)
+check 'PATCH /uploads/{id} accepted the chunk' "$PATCH_CODE" '204'
+
+# And the bytes are where a user would look for them — read off the filesystem, not off the API,
+# so this cannot pass on a metadata row alone.
+LANDED=$(cat "$SHARES/$ORG_SLUG/Belgeler/rapor.txt" 2>/dev/null || cat "$SHARES/$ORG_SLUG/rapor.txt" 2>/dev/null)
+check 'the bytes are in the share, byte for byte' "$LANDED" "$BODY"
+
+LISTING=$(curl -sS -b "$JAR" -c "$JAR" "$FILES?parentId=$FOLDER_ID" 2>&1)
+case "$LISTING" in
+  *'"name":"rapor.txt"'*) ok 'GET /files lists the uploaded file' ;;
+  *) bad "the listing did not contain it: $LISTING" ;;
+esac
+case "$LISTING" in
+  *"\"size\":$LEN"*) ok 'and reports the size the agent actually stored' ;;
+  *) bad "the listed size is wrong: $LISTING" ;;
+esac
+
+# The file id, for rename and trash.
+FILE_ID=$(printf '%s' "$LISTING" | sed -n 's/.*"id":"\([^"]*\)","parentId".*/\1/p' | head -1)
+REN=$(curl -sS -b "$JAR" -c "$JAR" -X PATCH "$FILES/$FILE_ID" \
+  -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
+  -d '{"name":"Çağrı raporu.txt"}' 2>&1)
+case "$REN" in
+  *'raporu.txt'*) ok 'PATCH /files/{id} renamed it, Turkish letters intact' ;;
+  *) bad "rename failed: $REN" ;;
+esac
+
+DEL=$(curl -sS -b "$JAR" -c "$JAR" -X DELETE "$FILES/$FILE_ID" \
+  -H "origin: http://127.0.0.1:$PORT" 2>&1)
+case "$DEL" in
+  *'"id"'*) ok 'DELETE /files/{id} moved it to the trash' ;;
+  *) bad "trash failed: $DEL" ;;
+esac
+AFTER=$(curl -sS -b "$JAR" -c "$JAR" "$FILES?parentId=$FOLDER_ID" 2>&1)
+case "$AFTER" in
+  *rapor*) bad 'a trashed file is still listed' ;;
+  *) ok 'and it is gone from the listing' ;;
+esac
+
+# Tenant isolation at the HTTP layer, not just in SQL: an anonymous caller must not reach any of it.
+ANON=$(curl -sS -o /dev/null -w '%{http_code}' "$FILES" 2>&1)
+check 'an unauthenticated caller cannot list files' "$ANON" '401'
 
 head1 'what systemd thinks of the result'
 # Recorded, not asserted. The number moves between systemd versions and a threshold here would
