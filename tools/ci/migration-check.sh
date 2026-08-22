@@ -476,6 +476,13 @@ BAD=$(db -c "
                            -- Aynı gerekçe: podman'ın isim alanı cihaz genelinde tek. Ad zaten
                            -- kiracı ekini taşıyor, bu indeks onu veritabanında da garanti ediyor.
                            'app_instances_container_unique',
+                           -- POSIX kimlikleri cihaz genelinde tek olmak ZORUNDA (ADR-0004,
+                           -- migration 0015). Kiracı kapsamlı bir uid ya da gid, iki kiracının
+                           -- dosya sisteminde aynı sahibi paylaşması demek — uygulama katmanı
+                           -- ne derse desin. Buradaki bir 23505 bir kimlik değil, cihazın
+                           -- kullanıcı/grup numarası uzayındaki bir çakışmayı bildiriyor.
+                           'users_posix_uid_unique',
+                           'teams_posix_gid_unique',
                            -- Denetim kaydının kimlik kolonu: bigint GENERATED ALWAYS AS IDENTITY
                            -- (migration 0013). Buradaki muafiyet uuid muafiyetiyle aynı gerekçeye
                            -- dayanır ve onun daha güçlü hâlidir: çakışma yaratmak var olan bir
