@@ -1300,14 +1300,28 @@ export interface components {
          */
         FileName: string;
         /**
-         * @description `username` değil. DEPSIS çok kiracılı ve kiracı, kullanıcıdan ÖNCE çözülmek zorunda:
-         *     `organizations` üzerindeki politika kiracıyı bilmeyi gerektiriyor, dolayısıyla giriş
-         *     slug ile başlıyor (ADR-0015 §5). Bu şema planlama sırasında tek kiracılı yazılmıştı ve
-         *     uygulama sırasında düzeltildi.
+         * @description Kullanıcı adı ve parola. İki alan da bir zamanlar başka bir şeydi ve ikisi de gerçek bir
+         *     giriş hatasından sonra değişti.
+         *
+         *     `organizationSlug` KALDIRILDI. Şema "kiracı, kullanıcıdan önce çözülmek zorunda" diyordu ve
+         *     bu doğru — ama `system_setup` bir singleton, yani bir DEPSIS kutusunda tam olarak bir
+         *     organizasyon var ve hep olacak. Tek cevabı olan bir soruyu sormanın tek etkisi, yanlış
+         *     cevaplanabilmesiydi: sonunda tek boşluk olan bir slug sunucunun biçim kontrolünü geçemiyor
+         *     ve yanlış paroladan ayırt edilemeyen bir retle dönüyor. Sunucu artık kutunun kendi
+         *     organizasyonunu çözüyor (`resolve_sole_organization`) ve birden fazla olursa reddediyor.
+         *
+         *     `email` yerine `username`. Yerel ağdaki bir NAS posta göndermiyor ve hiçbir adresi
+         *     doğrulamıyor; adres, yazılacak ve yanlış yazılacak ikinci bir şeydi. Adres alanı duruyor
+         *     ama isteğe bağlı ve kimlik doğrulamada kullanılmıyor.
          */
         LoginRequest: {
-            organizationSlug: string;
-            email: string;
+            username: string;
+            /**
+             * @description İSTEĞE BAĞLI ve arayüz bunu hiç göndermiyor. Yalnız kutuda birden fazla organizasyon
+             *     varsa gerekiyor — sahiplenilmiş bir cihazda asla olmayan bir durum. Alan silinmedi
+             *     çünkü kapsadığı varsayımın çökerek değil, zarifçe bozulması gerekiyor.
+             */
+            organizationSlug?: string;
             password: string;
         };
         /** @description `challengeId` taşımıyor — meydan okuma çerezde (bkz. LoginResult). */
@@ -1354,7 +1368,7 @@ export interface components {
             token: string;
             organizationSlug: string;
             organizationName: string;
-            adminEmail: string;
+            adminUsername: string;
             adminDisplayName: string;
             /**
              * @description Yalnız uzunluk tabanı. Bileşim kuralı (bir büyük, bir rakam, bir sembol) arama
@@ -1374,7 +1388,12 @@ export interface components {
         CurrentUser: {
             /** Format: uuid */
             id: string;
-            email: string;
+            username: string;
+            /**
+             * @description İSTEĞE BAĞLI ve kimlik doğrulamada KULLANILMIYOR. Yerel ağdaki bir NAS posta
+             *     göndermiyor ve hiçbir adresi doğrulamıyor; giriş kullanıcı adıyla yapılıyor.
+             */
+            email?: string | null;
             displayName: string;
             /**
              * @description Arayüzün yönetici ekranlarını gösterip göstermeyeceğini bilmesi için. Bir YETKİ KARARI
@@ -1418,7 +1437,8 @@ export interface components {
         User: {
             /** Format: uuid */
             id: string;
-            email: string;
+            username: string;
+            email?: string | null;
             displayName: string;
             /** @enum {string} */
             role: "admin" | "member";
@@ -1430,7 +1450,11 @@ export interface components {
             items: components["schemas"]["User"][];
         };
         CreateUserRequest: {
-            email: string;
+            /**
+             * @description Giriş kimliği. '@' içeremez — bir kullanıcı adının bir adresle karıştırılabilmesi,
+             *     ne insan ne de gelecekteki bir ayrıştırıcı için iyi bir fikir.
+             */
+            username: string;
             displayName: string;
             /**
              * @default member

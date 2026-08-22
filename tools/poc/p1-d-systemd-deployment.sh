@@ -563,11 +563,11 @@ TOKEN=$(journalctl -u depsis-api.service -o cat --no-pager | grep -oE '^ {6}[A-Z
 [ -n "$TOKEN" ] && ok 'the setup token reached the journal' || bad 'no setup token in the journal'
 
 curl -sS -X POST "$BASE/setup/claim" -H 'content-type: application/json' \
-  -d "{\"token\":\"$TOKEN\",\"organizationName\":\"P1D\",\"organizationSlug\":\"p1d\",\"adminEmail\":\"admin@p1d.test\",\"adminDisplayName\":\"Admin\",\"adminPassword\":\"$PW\"}" \
+  -d "{\"token\":\"$TOKEN\",\"organizationName\":\"P1D\",\"organizationSlug\":\"p1d\",\"adminUsername\":\"admin\",\"adminDisplayName\":\"Admin\",\"adminPassword\":\"$PW\"}" \
   | grep -q '"status":"ok"' && ok 'the box was claimed' || bad 'claim failed'
 
 curl -sS -c "$JAR" -X POST "$BASE/auth/login" -H 'content-type: application/json' \
-  -d "{\"organizationSlug\":\"p1d\",\"email\":\"admin@p1d.test\",\"password\":\"$PW\"}" \
+  -d "{\"username\":\"admin\",\"password\":\"$PW\"}" \
   | grep -q '"status":"ok"' && ok 'signed in' || bad 'login failed'
 
 CODE=$(curl -sS -b "$JAR" -o "$WORK/telemetry.json" -w '%{http_code}' "$BASE/system/telemetry")
@@ -592,7 +592,7 @@ MEMBER_JAR="$WORK/member.jar"
 
 MADE=$(curl -sS -b "$JAR" -c "$JAR" -X POST "$USERS" \
   -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
-  -d "{\"email\":\"uye@p1d.test\",\"displayName\":\"Üye\",\"password\":\"$MEMBER_PW\"}" 2>&1)
+  -d "{\"username\":\"uye\",\"displayName\":\"Üye\",\"password\":\"$MEMBER_PW\"}" 2>&1)
 MEMBER_ID=$(printf '%s' "$MADE" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 [ -n "$MEMBER_ID" ] && ok 'an administrator created a second account' || bad "create failed: $MADE"
 case "$MADE" in
@@ -601,7 +601,7 @@ case "$MADE" in
 esac
 
 curl -sS -c "$MEMBER_JAR" -X POST "$BASE/auth/login" -H 'content-type: application/json' \
-  -d "{\"organizationSlug\":\"p1d\",\"email\":\"uye@p1d.test\",\"password\":\"$MEMBER_PW\"}" \
+  -d "{\"username\":\"uye\",\"password\":\"$MEMBER_PW\"}" \
   | grep -q '"status":"ok"' && ok 'the second account can sign in' || bad 'the member could not sign in'
 
 # THE GATE. A signed-in member is authenticated and NOT authorised for administration.
@@ -610,7 +610,7 @@ check 'a member is refused the user list (403, not 401 and not 200)' \
 check 'a member cannot create an account' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" -X POST "$USERS" \
      -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
-     -d '{"email":"x@p1d.test","displayName":"X","password":"aaaaaaaaaaaa"}')" '403'
+     -d '{"username":"x","displayName":"X","password":"aaaaaaaaaaaa"}')" '403'
 check 'a member cannot promote themselves' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" -X PATCH "$USERS/$MEMBER_ID" \
      -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
@@ -627,7 +627,7 @@ check 'and read their own account' \
 check 'a cross-origin state change is refused' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" -X POST "$USERS" \
      -H 'content-type: application/json' -H 'origin: http://evil.example' \
-     -d '{"email":"csrf@p1d.test","displayName":"C","password":"aaaaaaaaaaaa"}')" '403'
+     -d '{"username":"csrf","displayName":"C","password":"aaaaaaaaaaaa"}')" '403'
 check 'and so is one against the MFA route, which used to have no check at all' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" -X DELETE "$BASE/me/mfa" \
      -H 'content-type: application/json' -H 'origin: http://evil.example' -d '{"password":"x"}')" '403'
@@ -636,14 +636,14 @@ head1 'ACCESS CONTROL — the box cannot be locked out of itself'
 # Once an organisation has no usable administrator, nothing inside DEPSIS can restore one: creating
 # accounts needs an administrator and the claim runs exactly once. The rule is a database trigger
 # because two administrators demoting each other concurrently both read "there are two of us".
-LAST=$(curl -sS -b "$JAR" -X PATCH "$USERS/$(curl -sS -b "$JAR" "$USERS" | sed -n 's/.*"id":"\([^"]*\)","email":"admin@p1d.test".*/\1/p')" \
+LAST=$(curl -sS -b "$JAR" -X PATCH "$USERS/$(curl -sS -b "$JAR" "$USERS" | sed -n 's/.*"id":"\([^"]*\)","username":"admin".*/\1/p')" \
   -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" -d '{"role":"member"}' 2>&1)
 case "$LAST" in
   *'at least one enabled administrator'*) ok 'the last administrator cannot be demoted' ;;
   *) bad "demoting the last administrator was allowed: $LAST" ;;
 esac
 
-ADMIN_ID=$(curl -sS -b "$JAR" "$USERS" | sed -n 's/.*"id":"\([^"]*\)","email":"admin@p1d.test".*/\1/p')
+ADMIN_ID=$(curl -sS -b "$JAR" "$USERS" | sed -n 's/.*"id":"\([^"]*\)","username":"admin".*/\1/p')
 SELF=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" -X PATCH "$USERS/$ADMIN_ID" \
   -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" -d '{"disabled":true}')
 check 'an administrator cannot disable their own account' "$SELF" '403'
@@ -653,7 +653,7 @@ head1 'ACCESS CONTROL — a password change, and what it revokes'
 # asserted from a count the server reported about itself.
 SECOND_JAR="$WORK/member2.jar"
 curl -sS -c "$SECOND_JAR" -X POST "$BASE/auth/login" -H 'content-type: application/json' \
-  -d "{\"organizationSlug\":\"p1d\",\"email\":\"uye@p1d.test\",\"password\":\"$MEMBER_PW\"}" >/dev/null
+  -d "{\"username\":\"uye\",\"password\":\"$MEMBER_PW\"}" >/dev/null
 check 'the member holds two live sessions' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -b "$SECOND_JAR" "$BASE/me")" '200'
 
@@ -675,7 +675,7 @@ check 'and the session that made the change still works' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" "$BASE/me")" '200'
 check 'the old password no longer signs in' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" -H 'content-type: application/json' \
-     -d "{\"organizationSlug\":\"p1d\",\"email\":\"uye@p1d.test\",\"password\":\"$MEMBER_PW\"}")" '401'
+     -d "{\"username\":\"uye\",\"password\":\"$MEMBER_PW\"}")" '401'
 
 head1 'ACCESS CONTROL — disabling an account ends it now, not at expiry'
 curl -sS -b "$JAR" -X PATCH "$USERS/$MEMBER_ID" -H 'content-type: application/json' \
@@ -684,7 +684,7 @@ check 'a disabled account\'"'"'s live session stops working immediately' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -b "$MEMBER_JAR" "$BASE/me")" '401'
 check 'and it cannot sign in again' \
   "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" -H 'content-type: application/json' \
-     -d '{"organizationSlug":"p1d","email":"uye@p1d.test","password":"new-correct-horse-42"}')" '401'
+     -d '{"username":"uye","password":"new-correct-horse-42"}')" '401'
 
 head1 'a file goes in through HTTP and comes back in a listing'
 # The API names its default share after the organisation slug. The directory has to exist before

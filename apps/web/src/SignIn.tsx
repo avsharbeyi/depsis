@@ -23,8 +23,7 @@ type Step = 'password' | 'second-factor';
  */
 export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
   const [step, setStep] = useState<Step>('password');
-  const [organizationSlug, setSlug] = useState('');
-  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +39,7 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
       error: failure,
       response,
     } = await api.POST('/auth/login', {
-      body: { organizationSlug, email, password },
+      body: { username, password },
     });
     setBusy(false);
 
@@ -50,8 +49,8 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
       // address and an unknown organisation — repeating that here rather than guessing.
       setError(
         response.status === 429
-          ? 'Too many attempts from this address. Wait a minute and try again.'
-          : 'Those details were not accepted.',
+          ? 'Bu adresten çok fazla deneme yapıldı. Bir dakika bekleyip tekrar deneyin.'
+          : 'Kullanıcı adı veya parola hatalı.',
       );
       return;
     }
@@ -75,7 +74,7 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
     setBusy(false);
 
     if (failure !== undefined || data === undefined) {
-      setError('That code was not accepted.');
+      setError('Kod kabul edilmedi.');
       setCode('');
       return;
     }
@@ -124,7 +123,7 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
 
   return (
     <main className="card">
-      <h1>Sign in to DEPSIS</h1>
+      <h1>DEPSIS</h1>
       {note !== null && (
         <p className="warning" role="alert">
           {note}
@@ -132,31 +131,20 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
       )}
       <form onSubmit={(e) => void submitPassword(e)}>
         <label>
-          Organisation
+          Kullanıcı adı
           <input
-            value={organizationSlug}
-            // Trimmed as well as lower-cased. A slug with a trailing space fails the server's format
-            // check and comes back as the same indistinguishable refusal as a wrong password —
-            // measured: a real sign-in failed this way and the journal said "organization not
-            // found" for a slug that was correct apart from one character nobody can see.
-            onChange={(e) => setSlug(e.target.value.trim().toLowerCase())}
-            autoComplete="organization"
-            placeholder="acme"
-            required
-          />
-        </label>
-        <label>
-          Email
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value.trim())}
+            value={username}
+            // Trimmed. A name with a trailing space fails the server's format check and comes back
+            // as the same refusal as a wrong password — measured on a real sign-in, where the
+            // invisible character cost three rounds of instrumentation to find.
+            onChange={(e) => setUsername(e.target.value.trim())}
             autoComplete="username"
+            autoFocus
             required
           />
         </label>
         <label>
-          Password
+          Parola
           <input
             type="password"
             value={password}
@@ -173,7 +161,7 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
         )}
 
         <button type="submit" disabled={busy}>
-          {busy ? 'Signing in…' : 'Sign in'}
+          {busy ? 'Giriş yapılıyor…' : 'Giriş yap'}
         </button>
       </form>
     </main>

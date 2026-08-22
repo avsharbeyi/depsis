@@ -21,9 +21,8 @@ birimi olarak başlatır ve ilk yöneticiyi yaratır. Bitince adresi ve giriş b
 ```
   http://<ip>:3200
 
-  Organizasyon : depsis
-  E-posta      : admin@depsis.local
-  Parola       : depsis-dev-parola-42
+  Kullanıcı adı : admin
+  Parola        : depsis-dev-parola-42
 ```
 
 Durdurmak için `bash tools/dev/up.sh --down`.
@@ -67,6 +66,7 @@ sudo PGHOST=127.0.0.1 PGUSER=postgres PGPASSWORD=... bash tools/poc/p1-d-systemd
 - Samba paylaşımı gerçekten yazılmıyor: `publish_samba_config` yalnız `testparm` koşuyor.
 - Kullanıcı → POSIX uid eşlemesi (ADR-0004). Yayımlanan dosyalar şimdilik API'nin servis hesabına
   ait.
+- ZeroTier / uzaktan bağlantı. Faz 3 (§20); bu depoda hiçbir parçası yok.
 - Tarayıcı (e2e) testleri. CI'da `echo` yapan bir iş olarak duruyor.
 
 ## Depo düzeni

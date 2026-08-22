@@ -87,7 +87,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
     token,
     organizationSlug: slug,
     organizationName: 'First Organisation',
-    adminEmail: 'admin@firstorg.example',
+    adminUsername: 'admin',
     adminDisplayName: 'Administrator',
     adminPassword: 'a-sufficiently-long-password',
   });
@@ -130,8 +130,8 @@ describeDb('system setup, against a real PostgreSQL', () => {
     expect(await service.isComplete()).toBe(true);
 
     const rows = await owner.withoutTenant('setup-status', (q) =>
-      q.query<{ slug: string; email: string }>(
-        `SELECT o.slug, u.email
+      q.query<{ slug: string; username: string }>(
+        `SELECT o.slug, u.username
            FROM system_setup s
            JOIN organizations o ON o.id = s.organization_id
            JOIN users u ON u.id = s.admin_user_id`,
@@ -139,7 +139,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]?.slug).toBe('firstorg');
-    expect(rows[0]?.email).toBe('admin@firstorg.example');
+    expect(rows[0]?.username).toBe('admin');
   });
 
   it('the administrator it created can actually log in', async () => {
@@ -160,8 +160,8 @@ describeDb('system setup, against a real PostgreSQL', () => {
     );
 
     const login = await auth.login({
+      username: 'admin',
       organizationSlug: 'firstorg',
-      email: 'admin@firstorg.example',
       password: 'a-sufficiently-long-password',
       userAgent: null,
       ip: '192.0.2.10',

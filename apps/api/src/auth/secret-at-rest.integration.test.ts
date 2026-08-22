@@ -68,7 +68,7 @@ describeDb('TOTP secrets at rest', () => {
       );
       orgId = org?.id ?? '';
       const hash = await passwords.hash('an-ordinary-password-here');
-      for (const email of ['alice@atrest.example', 'bob@atrest.example']) {
+      for (const email of ['alice', 'bob']) {
         const [user] = await q.query<{ id: string }>(
           `INSERT INTO public.users (organization_id, email, display_name, password_hash)
            VALUES ($1, $2, $3, $4) RETURNING id::text AS id`,
@@ -92,7 +92,7 @@ describeDb('TOTP secrets at rest', () => {
 
   it('does not store the secret it hands to the authenticator', async () => {
     const mfa = new MfaService(db, new SecretBox(key));
-    const enrolment = await mfa.beginEnrolment(orgId, alice, 'alice@atrest.example');
+    const enrolment = await mfa.beginEnrolment(orgId, alice, 'alice');
     const secret = base32Decode(enrolment.secretBase32);
 
     const row = await storedRow(alice);
@@ -157,7 +157,7 @@ describeDb('TOTP secrets at rest', () => {
     // and sign in as Bob with Alice's phone. The associated data is what stops it, and this is the
     // only place the whole path can be checked.
     const mfa = new MfaService(db, new SecretBox(key));
-    const enrolment = await mfa.beginEnrolment(orgId, alice, 'alice@atrest.example');
+    const enrolment = await mfa.beginEnrolment(orgId, alice, 'alice');
     const aliceSecret = base32Decode(enrolment.secretBase32);
     const now = Math.floor(Date.now() / 1000);
     await mfa.confirmEnrolment(orgId, alice, totp(aliceSecret, now));
@@ -179,7 +179,7 @@ describeDb('TOTP secrets at rest', () => {
     // Refused, not degraded. Silently writing a raw secret would give an operator who configured
     // encryption exactly the exposure they think they closed.
     const keyless = new MfaService(db, null);
-    await expect(keyless.beginEnrolment(orgId, bob, 'bob@atrest.example')).rejects.toBeInstanceOf(
+    await expect(keyless.beginEnrolment(orgId, bob, 'bob')).rejects.toBeInstanceOf(
       SecretKeyUnavailableError,
     );
   });

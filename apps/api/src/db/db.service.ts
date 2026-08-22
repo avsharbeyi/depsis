@@ -27,6 +27,11 @@ export type UntenantedJustification =
   | 'migration-status'
   // Both of these run BEFORE a tenant is known, which is the only reason they are here.
   | 'resolve-organization-by-slug'
+  // The narrowest of the lot: it returns the id of the box's ONE organisation and nothing else,
+  // and returns nothing at all if there is ever more than one. Sign-in needs a tenant before it
+  // can look up an account, and `system_setup` being a singleton means there is only one answer —
+  // so asking the person to type it was friction with a failure mode (migration 0010).
+  | 'resolve-sole-organization'
   | 'resolve-session'
   // Login throttling counts attempts against an address that may belong to no tenant at all, and
   // has to bite before the tenant is resolved. Migration 0003 explains why the table carries no

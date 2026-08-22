@@ -15,7 +15,7 @@ const claimSchema = z.object({
   token: z.string().min(1).max(128),
   organizationSlug: z.string().min(1).max(63),
   organizationName: z.string().min(1).max(200),
-  adminEmail: z.string().min(3).max(320),
+  adminUsername: z.string().trim().min(1).max(64),
   adminDisplayName: z.string().min(1).max(200),
   adminPassword: z.string().min(1).max(1024),
 });

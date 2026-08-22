@@ -9,8 +9,21 @@ import { PendingLoginService, type PendingChallenge } from './pending-login.serv
 import { SessionService, type IssuedSession } from './session.service.js';
 
 export interface LoginRequest {
-  organizationSlug: string;
-  email: string;
+  username: string;
+  /**
+   * Which organisation, when the box holds more than one.
+   *
+   * OPTIONAL, and omitted by the interface. `system_setup` is a singleton, so a claimed appliance
+   * has exactly one organisation and the server resolves it — asking a person to name it was a
+   * question with one possible answer and a real failure mode (migration 0010).
+   *
+   * The field survives rather than being deleted because the assumption it covers is one this
+   * codebase should degrade from gracefully, not crash into: with two organisations present,
+   * `resolve_sole_organization` returns nothing and every sign-in would fail with no way to say
+   * which tenant was meant. That is not hypothetical — it is exactly what the integration suites
+   * look like, because they seed several tenants into one database.
+   */
+  organizationSlug?: string | undefined;
   password: string;
   userAgent: string | null;
   ip: string;
@@ -74,33 +87,35 @@ export class AuthService {
     // Folded the same way the database folds it, so that varying case or Unicode spelling cannot
     // buy a fresh throttling bucket for the same account. `fold_identity` is the authority; asking
     // it rather than reimplementing it in TypeScript is what keeps the two from drifting.
-    const emailNormalized = await this.fold(request.email);
+    const usernameFolded = await this.fold(request.username);
 
-    if (!(await this.throttle.gate(emailNormalized, request.ip))) {
+    if (!(await this.throttle.gate(usernameFolded, request.ip))) {
       return { outcome: 'throttled' };
     }
 
-    const organizationId = await this.organizations.resolveIdBySlug(request.organizationSlug);
+    // The box's own organisation unless the caller named one. See `resolveSoleId`.
+    const organizationId =
+      request.organizationSlug === undefined || request.organizationSlug === ''
+        ? await this.organizations.resolveSoleId()
+        : await this.organizations.resolveIdBySlug(request.organizationSlug);
 
     // An unknown tenant still pays for a password verification. Returning here without one would
     // make tenant enumeration a matter of timing the response.
     const user =
-      organizationId === null ? null : await this.findUser(organizationId, emailNormalized);
+      organizationId === null ? null : await this.findUser(organizationId, usernameFolded);
 
     const ok = await this.passwords.verify(user?.password_hash ?? null, request.password);
 
     if (!ok || user === null || organizationId === null) {
-      await this.throttle.record(emailNormalized, request.ip, false);
-      // The CLIENT is told one thing — `rejected` — for all three causes, and that stays true: any
-      // difference visible to a caller is an oracle for which organisations and addresses exist.
-      //
-      // The OPERATOR is told which one. §16 asks that what happened on this box be explicable
-      // afterwards, and "someone could not sign in" without saying whether the tenant, the account
-      // or the password was wrong is the least useful line a journal can carry. This was written
-      // after a real sign-in failure that took three rounds of guessing to place — the answer was
-      // in the server and the server had not written it down.
+      await this.throttle.record(usernameFolded, request.ip, false);
+      // Which of the three failed, in the journal only. The CLIENT is told one thing for all of
+      // them and that stays true: any difference visible to a caller is an oracle for which
+      // accounts exist. The OPERATOR is told, because §16 asks that what happened on this box be
+      // explicable afterwards and "someone could not sign in" is the least useful line a journal
+      // can carry — written after a real failure that took three rounds of instrumentation to
+      // place.
       this.logger.warn(
-        `login rejected: organization ${organizationId === null ? 'not found' : 'ok'}, ` +
+        `login rejected: organization ${organizationId === null ? 'not resolvable' : 'ok'}, ` +
           `account ${user === null ? 'not found' : 'ok'}, ` +
           `password ${user === null ? 'not checked' : ok ? 'ok' : 'wrong'}`,
       );
@@ -113,7 +128,7 @@ export class AuthService {
       // Recorded as a success: the PASSWORD was correct, and the throttle exists to bound password
       // guessing. Counting it as a failure would let a correct password be used to throttle its own
       // owner, and the second factor has its own, tighter attempt budget.
-      await this.throttle.record(emailNormalized, request.ip, true);
+      await this.throttle.record(usernameFolded, request.ip, true);
       return { outcome: 'mfa-required', challenge };
     }
 
@@ -122,7 +137,7 @@ export class AuthService {
       ip: request.ip,
     });
 
-    await this.throttle.record(emailNormalized, request.ip, true);
+    await this.throttle.record(usernameFolded, request.ip, true);
     this.logger.log(`session issued for user ${user.id}`);
 
     return { outcome: 'ok', session, userId: user.id, organizationId };
@@ -183,14 +198,14 @@ export class AuthService {
     return rows[0]?.folded ?? email.toLowerCase();
   }
 
-  private async findUser(organizationId: string, emailNormalized: string): Promise<UserRow | null> {
+  private async findUser(organizationId: string, usernameFolded: string): Promise<UserRow | null> {
     const rows = await this.db.withTenant(organizationId, (q) =>
       q.query<UserRow>(
         `SELECT id::text AS id, password_hash
            FROM users
-          WHERE email_normalized = $1
+          WHERE username_folded = $1
             AND disabled_at IS NULL`,
-        [emailNormalized],
+        [usernameFolded],
       ),
     );
     return rows[0] ?? null;

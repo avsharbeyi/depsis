@@ -22,7 +22,7 @@ export function Users({ currentUserId, onUnauthenticated }: Props): React.JSX.El
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const [form, setForm] = useState({ email: '', displayName: '', password: '', role: 'member' });
+  const [form, setForm] = useState({ username: '', displayName: '', password: '', role: 'member' });
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
 
@@ -53,7 +53,7 @@ export function Users({ currentUserId, onUnauthenticated }: Props): React.JSX.El
     setError(null);
     const { error: problem } = await api.POST('/users', {
       body: {
-        email: form.email,
+        username: form.username,
         displayName: form.displayName,
         password: form.password,
         role: form.role === 'admin' ? 'admin' : 'member',
@@ -66,7 +66,7 @@ export function Users({ currentUserId, onUnauthenticated }: Props): React.JSX.El
     }
     // Cleared on success only. A failed submission that wipes the form makes the person retype an
     // address they had already got right.
-    setForm({ email: '', displayName: '', password: '', role: 'member' });
+    setForm({ username: '', displayName: '', password: '', role: 'member' });
     reload();
   }
 
@@ -103,7 +103,7 @@ export function Users({ currentUserId, onUnauthenticated }: Props): React.JSX.El
             <thead>
               <tr>
                 <th>Ad</th>
-                <th>E-posta</th>
+                <th>Kullanıcı adı</th>
                 <th>Rol</th>
                 <th>Durum</th>
                 <th aria-label="İşlemler" />
@@ -113,7 +113,7 @@ export function Users({ currentUserId, onUnauthenticated }: Props): React.JSX.El
               {users.map((user) => (
                 <tr key={user.id} className={user.disabled ? 'dimmed' : undefined}>
                   <td>{user.displayName}</td>
-                  <td className="hide-narrow">{user.email}</td>
+                  <td className="hide-narrow">{user.username}</td>
                   <td>{user.role === 'admin' ? 'Yönetici' : 'Üye'}</td>
                   <td>
                     <span className={user.disabled ? 'bad' : 'ok'}>
@@ -156,13 +156,14 @@ export function Users({ currentUserId, onUnauthenticated }: Props): React.JSX.El
       <h2>Yeni hesap</h2>
       <form onSubmit={(e) => void create(e)}>
         <label>
-          E-posta
+          Kullanıcı adı
           <input
-            type="email"
             required
-            value={form.email}
-            onChange={(e) => setForm({ ...form, email: e.target.value })}
+            pattern="[A-Za-z0-9][A-Za-z0-9._\-]*"
+            value={form.username}
+            onChange={(e) => setForm({ ...form, username: e.target.value.trim() })}
           />
+          <span className="muted">Harf, rakam, nokta, tire ve alt çizgi. '@' olamaz.</span>
         </label>
         <label>
           Görünen ad

@@ -5,18 +5,19 @@ import type { UserRole } from '../auth/session.service.js';
 
 export interface UserRow {
   id: string;
-  email: string;
+  username: string;
+  email: string | null;
   display_name: string;
   role: string;
   disabled_at: Date | null;
   created_at: Date;
 }
 
-/** The address is already taken inside this organisation. */
-export class EmailTakenError extends Error {
+/** The username is already taken inside this organisation. */
+export class UsernameTakenError extends Error {
   constructor() {
-    super('that address already has an account here');
-    this.name = 'EmailTakenError';
+    super('that username is already in use here');
+    this.name = 'UsernameTakenError';
   }
 }
 
@@ -56,7 +57,7 @@ export class UsersService {
   async list(organizationId: string): Promise<UserRow[]> {
     return this.db.withTenant(organizationId, (db) =>
       db.query<UserRow>(
-        `SELECT id::text AS id, email, display_name, role, disabled_at, created_at
+        `SELECT id::text AS id, username, email, display_name, role, disabled_at, created_at
            FROM public.users
           WHERE organization_id = $1
           ORDER BY created_at`,
@@ -68,7 +69,7 @@ export class UsersService {
   async find(organizationId: string, id: string): Promise<UserRow> {
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<UserRow>(
-        `SELECT id::text AS id, email, display_name, role, disabled_at, created_at
+        `SELECT id::text AS id, username, email, display_name, role, disabled_at, created_at
            FROM public.users
           WHERE organization_id = $1 AND id = $2`,
         [organizationId, id],
@@ -87,7 +88,7 @@ export class UsersService {
    */
   async create(
     organizationId: string,
-    email: string,
+    username: string,
     displayName: string,
     role: UserRole,
     passwordHash: string,
@@ -95,10 +96,10 @@ export class UsersService {
     try {
       const rows = await this.db.withTenant(organizationId, (db) =>
         db.query<UserRow>(
-          `INSERT INTO public.users (organization_id, email, display_name, role, password_hash)
+          `INSERT INTO public.users (organization_id, username, display_name, role, password_hash)
            VALUES ($1, $2, $3, $4, $5)
-           RETURNING id::text AS id, email, display_name, role, disabled_at, created_at`,
-          [organizationId, email, displayName, role, passwordHash],
+           RETURNING id::text AS id, username, email, display_name, role, disabled_at, created_at`,
+          [organizationId, username, displayName, role, passwordHash],
         ),
       );
       const row = rows[0];
@@ -184,7 +185,7 @@ export class UsersService {
 function translateDbError(error: unknown): Error {
   if (typeof error === 'object' && error !== null && 'code' in error) {
     const code = (error as { code?: string }).code;
-    if (code === '23505') return new EmailTakenError();
+    if (code === '23505') return new UsernameTakenError();
     // `restrict_violation`, raised by the `users_keep_one_admin` trigger in migration 0009.
     if (code === '23001') return new LastAdminError();
   }

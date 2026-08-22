@@ -22,7 +22,7 @@ cd "$REPO" || exit 1
 API_PORT="${DEPSIS_DEV_API_PORT:-3100}"
 WEB_PORT="${DEPSIS_DEV_WEB_PORT:-3200}"
 DB="${DEPSIS_DEV_DB:-depsis_dev}"
-ADMIN_EMAIL='admin@depsis.local'
+ADMIN_USERNAME='admin'
 ADMIN_PASSWORD='depsis-dev-parola-42'
 ORG_SLUG='depsis'
 
@@ -170,7 +170,7 @@ if [ "$CLAIMED" = '"setupRequired":true' ]; then
   TOKEN=$(grep -oE '^ {6}[A-Za-z0-9_-]{20,}$' /tmp/depsis-dev-api.log | tail -1 | tr -d ' ')
   curl -sS -X POST "http://127.0.0.1:$API_PORT/api/v1/setup/claim" \
     -H 'content-type: application/json' \
-    -d "{\"token\":\"$TOKEN\",\"organizationName\":\"DEPSIS\",\"organizationSlug\":\"$ORG_SLUG\",\"adminEmail\":\"$ADMIN_EMAIL\",\"adminDisplayName\":\"Yonetici\",\"adminPassword\":\"$ADMIN_PASSWORD\"}" \
+    -d "{\"token\":\"$TOKEN\",\"organizationName\":\"DEPSIS\",\"organizationSlug\":\"$ORG_SLUG\",\"adminUsername\":\"$ADMIN_USERNAME\",\"adminDisplayName\":\"Yonetici\",\"adminPassword\":\"$ADMIN_PASSWORD\"}" \
     | grep -q '"status":"ok"' && echo '  claimed' || echo '  claim failed (already set up?)'
 else
   echo '  already claimed'
@@ -184,8 +184,7 @@ cat <<INFO
     http://$IP:$WEB_PORT          (from Windows)
     http://127.0.0.1:$WEB_PORT          (from inside this VM)
 
-    Organizasyon : $ORG_SLUG
-    E-posta      : $ADMIN_EMAIL
+    Kullanıcı adı : $ADMIN_USERNAME
     Parola       : $ADMIN_PASSWORD
 
   Uploads answer 503: there is no privileged agent in this setup, so no bytes can reach a share.

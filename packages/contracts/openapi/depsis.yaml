@@ -754,18 +754,34 @@ components:
 
     LoginRequest:
       type: object
-      required: [organizationSlug, email, password]
+      required: [username, password]
       description: |
-        `username` değil. DEPSIS çok kiracılı ve kiracı, kullanıcıdan ÖNCE çözülmek zorunda:
-        `organizations` üzerindeki politika kiracıyı bilmeyi gerektiriyor, dolayısıyla giriş
-        slug ile başlıyor (ADR-0015 §5). Bu şema planlama sırasında tek kiracılı yazılmıştı ve
-        uygulama sırasında düzeltildi.
+        Kullanıcı adı ve parola. İki alan da bir zamanlar başka bir şeydi ve ikisi de gerçek bir
+        giriş hatasından sonra değişti.
+
+        `organizationSlug` KALDIRILDI. Şema "kiracı, kullanıcıdan önce çözülmek zorunda" diyordu ve
+        bu doğru — ama `system_setup` bir singleton, yani bir DEPSIS kutusunda tam olarak bir
+        organizasyon var ve hep olacak. Tek cevabı olan bir soruyu sormanın tek etkisi, yanlış
+        cevaplanabilmesiydi: sonunda tek boşluk olan bir slug sunucunun biçim kontrolünü geçemiyor
+        ve yanlış paroladan ayırt edilemeyen bir retle dönüyor. Sunucu artık kutunun kendi
+        organizasyonunu çözüyor (`resolve_sole_organization`) ve birden fazla olursa reddediyor.
+
+        `email` yerine `username`. Yerel ağdaki bir NAS posta göndermiyor ve hiçbir adresi
+        doğrulamıyor; adres, yazılacak ve yanlış yazılacak ikinci bir şeydi. Adres alanı duruyor
+        ama isteğe bağlı ve kimlik doğrulamada kullanılmıyor.
       properties:
+        username:
+          type: string
+          maxLength: 64
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
         organizationSlug:
           type: string
           maxLength: 63
           pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
-        email: { type: string, maxLength: 320 }
+          description: |
+            İSTEĞE BAĞLI ve arayüz bunu hiç göndermiyor. Yalnız kutuda birden fazla organizasyon
+            varsa gerekiyor — sahiplenilmiş bir cihazda asla olmayan bir durum. Alan silinmedi
+            çünkü kapsadığı varsayımın çökerek değil, zarifçe bozulması gerekiyor.
         password: { type: string, maxLength: 1024 }
 
     MfaVerifyRequest:
@@ -822,7 +838,7 @@ components:
     SetupClaimRequest:
       type: object
       required:
-        [token, organizationSlug, organizationName, adminEmail, adminDisplayName, adminPassword]
+        [token, organizationSlug, organizationName, adminUsername, adminDisplayName, adminPassword]
       properties:
         token: { type: string, maxLength: 128 }
         organizationSlug:
@@ -830,7 +846,10 @@ components:
           maxLength: 63
           pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
         organizationName: { type: string, maxLength: 200 }
-        adminEmail: { type: string, maxLength: 320 }
+        adminUsername:
+          type: string
+          maxLength: 64
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
         adminDisplayName: { type: string, maxLength: 200 }
         adminPassword:
           type: string
@@ -843,7 +862,7 @@ components:
 
     CurrentUser:
       type: object
-      required: [id, email, displayName, role, organizationSlug, mfaEnrolled, recoveryCodesRemaining]
+      required: [id, username, displayName, role, organizationSlug, mfaEnrolled, recoveryCodesRemaining]
       description: |
         `username` değil `email` — LoginRequest ile aynı düzeltme, aynı gerekçeyle.
 
@@ -853,7 +872,12 @@ components:
         geldiğinde alan da geri gelir; o zamana kadar yokluğu, yalan söylemesinden iyi.
       properties:
         id: { type: string, format: uuid }
-        email: { type: string }
+        username: { type: string }
+        email:
+          type: [string, 'null']
+          description: |
+            İSTEĞE BAĞLI ve kimlik doğrulamada KULLANILMIYOR. Yerel ağdaki bir NAS posta
+            göndermiyor ve hiçbir adresi doğrulamıyor; giriş kullanıcı adıyla yapılıyor.
         displayName: { type: string }
         role:
           type: string
@@ -921,10 +945,11 @@ components:
 
     User:
       type: object
-      required: [id, email, displayName, role, disabled, createdAt]
+      required: [id, username, displayName, role, disabled, createdAt]
       properties:
         id: { type: string, format: uuid }
-        email: { type: string }
+        username: { type: string }
+        email: { type: [string, 'null'] }
         displayName: { type: string }
         role:
           type: string
@@ -942,9 +967,14 @@ components:
 
     CreateUserRequest:
       type: object
-      required: [email, displayName, password]
+      required: [username, displayName, password]
       properties:
-        email: { type: string }
+        username:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+          description: |
+            Giriş kimliği. '@' içeremez — bir kullanıcı adının bir adresle karıştırılabilmesi,
+            ne insan ne de gelecekteki bir ayrıştırıcı için iyi bir fikir.
         displayName: { type: string }
         role:
           type: string

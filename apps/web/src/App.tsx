@@ -209,7 +209,7 @@ function SignedIn({ note, onSignedOut }: SignedInProps): React.JSX.Element {
           <section className="card">
             <h1>Güvenlik</h1>
             <p className="muted">
-              {me.email} · {me.organizationSlug}
+              {me.username} · {me.organizationSlug}
             </p>
             <Security
               mfaEnrolled={me.mfaEnrolled}

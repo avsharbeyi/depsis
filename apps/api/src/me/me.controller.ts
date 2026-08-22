@@ -40,7 +40,8 @@ const changePasswordSchema = z.object({
 
 interface UserRow {
   id: string;
-  email: string;
+  username: string;
+  email: string | null;
   display_name: string;
   password_hash: string | null;
   slug: string;
@@ -119,7 +120,7 @@ export class MeController {
 
     return {
       id: user.id,
-      email: user.email,
+      username: user.username,
       displayName: user.display_name,
       // From the SESSION, which read it in the same statement that resolved the cookie — not from
       // the row loaded here, which is a second read and therefore a second moment.
@@ -147,7 +148,9 @@ export class MeController {
     }
 
     const user = await this.load(session.organizationId, session.userId);
-    return this.mfa.beginEnrolment(session.organizationId, session.userId, user.email);
+    // The label an authenticator app shows. The address is optional now, so the username is
+    // what names the account — and it is the thing the person actually signs in with.
+    return this.mfa.beginEnrolment(session.organizationId, session.userId, user.username);
   }
 
   @Post('mfa/enrolment/confirm')
@@ -229,7 +232,7 @@ export class MeController {
   private async load(organizationId: string, userId: string): Promise<UserRow> {
     const rows = await this.db.withTenant(organizationId, (q) =>
       q.query<UserRow>(
-        `SELECT u.id::text AS id, u.email, u.display_name, u.password_hash, o.slug
+        `SELECT u.id::text AS id, u.username, u.email, u.display_name, u.password_hash, o.slug
            FROM users u
            JOIN organizations o ON o.id = u.organization_id
           WHERE u.id = $1`,

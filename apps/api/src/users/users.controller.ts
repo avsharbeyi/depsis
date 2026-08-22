@@ -21,7 +21,7 @@ import { PasswordService } from '../auth/password.service.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { SessionService } from '../auth/session.service.js';
 import {
-  EmailTakenError,
+  UsernameTakenError,
   LastAdminError,
   UserNotFoundError,
   UsersService,
@@ -41,7 +41,7 @@ const MIN_PASSWORD = 12;
 const MAX_PASSWORD = 1024;
 
 const createSchema = z.object({
-  email: z.string().trim().min(3).max(320).includes('@'),
+  username: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
   displayName: z.string().trim().min(1).max(200),
   role: z.enum(['admin', 'member']).default('member'),
   password: z.string().min(MIN_PASSWORD).max(MAX_PASSWORD),
@@ -88,7 +88,7 @@ export class UsersController {
     const parsed = createSchema.safeParse(body);
     if (!parsed.success) {
       throw new BadRequestException(
-        `email, displayName and a password of at least ${MIN_PASSWORD} characters are required`,
+        `username, displayName and a password of at least ${MIN_PASSWORD} characters are required`,
       );
     }
 
@@ -96,7 +96,7 @@ export class UsersController {
     try {
       const row = await this.users.create(
         session.organizationId,
-        parsed.data.email,
+        parsed.data.username,
         parsed.data.displayName,
         parsed.data.role,
         hash,
@@ -146,7 +146,7 @@ export class UsersController {
 export function toUser(row: UserRow): Schemas['User'] {
   return {
     id: row.id,
-    email: row.email,
+    username: row.username,
     displayName: row.display_name,
     role: row.role === 'admin' ? 'admin' : 'member',
     disabled: row.disabled_at !== null,
@@ -165,7 +165,7 @@ function requireSession(request: AuthenticatedRequest): {
 
 function translate(error: unknown): Error {
   if (error instanceof UserNotFoundError) return new NotFoundException();
-  if (error instanceof EmailTakenError) return new ConflictException(error.message);
+  if (error instanceof UsernameTakenError) return new ConflictException(error.message);
   // 409, not 400: the request is well formed and would be legal at almost any other moment. What
   // refuses it is the state of the organisation.
   if (error instanceof LastAdminError) return new ConflictException(error.message);

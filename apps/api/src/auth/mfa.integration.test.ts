@@ -29,7 +29,8 @@ const describeDb =
 
 const SLUG = 'mfatest';
 const PASSWORD = 'another-ordinary-password';
-const EMAIL = 'mfa@mfatest.example';
+// The sign-in identifier since migration 0010; the address is optional and unused for auth.
+const USERNAME = 'mfa';
 
 describeDb('second factor, against a real PostgreSQL', () => {
   let db: DbService;
@@ -52,7 +53,7 @@ describeDb('second factor, against a real PostgreSQL', () => {
    * which is also what a phone running slightly behind produces in real life.
    */
   async function enrol(): Promise<{ secret: Buffer; codes: string[] }> {
-    const enrolment = await mfa.beginEnrolment(orgId, userId, EMAIL);
+    const enrolment = await mfa.beginEnrolment(orgId, userId, USERNAME);
     const secret = base32Decode(enrolment.secretBase32);
     const codes = await mfa.confirmEnrolment(
       orgId,
@@ -95,16 +96,16 @@ describeDb('second factor, against a real PostgreSQL', () => {
       );
       orgId = org[0]?.id ?? '';
       await q.query(
-        `INSERT INTO users (organization_id, email, display_name, password_hash)
+        `INSERT INTO users (organization_id, username, display_name, password_hash)
          VALUES ($1, $2, 'MFA User', $3)
-           ON CONFLICT (organization_id, email_normalized)
+           ON CONFLICT (organization_id, username_folded)
            DO UPDATE SET password_hash = EXCLUDED.password_hash`,
-        [orgId, EMAIL, stored],
+        [orgId, USERNAME, stored],
       );
       const user = await q.query<{ id: string }>(
         `SELECT id::text AS id FROM users
-          WHERE organization_id = $1 AND email_normalized = public.fold_identity($2)`,
-        [orgId, EMAIL],
+          WHERE organization_id = $1 AND username_folded = public.fold_identity($2)`,
+        [orgId, USERNAME],
       );
       userId = user[0]?.id ?? '';
       // Residue from an earlier run would make the throttle and the enrolment state unpredictable.
@@ -124,12 +125,12 @@ describeDb('second factor, against a real PostgreSQL', () => {
     await db.withTenant(orgId, (q) =>
       q.query(`DELETE FROM user_totp_secrets WHERE user_id = $1`, [userId]),
     );
-    await mfa.beginEnrolment(orgId, userId, EMAIL);
+    await mfa.beginEnrolment(orgId, userId, USERNAME);
 
     expect(await mfa.isEnrolled(orgId, userId)).toBe(false);
     const result = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(10),
@@ -148,8 +149,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
 
   it('the password alone now yields a challenge and no session', async () => {
     const result = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(11),
@@ -165,8 +166,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
     const { secret } = await enrol();
 
     const first = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(12),
@@ -187,8 +188,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
     // The replay. A fresh challenge, the SAME code — still inside its ninety-second window, which
     // is exactly the window a shoulder-surfer or a phishing proxy operates in.
     const second = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(13),
@@ -208,14 +209,14 @@ describeDb('second factor, against a real PostgreSQL', () => {
     // The consequence a user will meet: confirm, then sign in again inside the same window, and the
     // code on screen does not work. Correct — it was spent — but it has to be deliberate rather
     // than accidental, so it is pinned here.
-    const enrolment = await mfa.beginEnrolment(orgId, userId, EMAIL);
+    const enrolment = await mfa.beginEnrolment(orgId, userId, USERNAME);
     const secret = base32Decode(enrolment.secretBase32);
     const confirmationCode = totp(secret, nowSeconds());
     expect(await mfa.confirmEnrolment(orgId, userId, confirmationCode)).not.toBeNull();
 
     const challenge = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(21),
@@ -234,8 +235,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
   it('accepts a code from the previous step but never one from two steps ago', async () => {
     const { secret } = await enrol();
     const challenge = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(14),
@@ -260,8 +261,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
     const code = codes[0] as string;
 
     const first = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(15),
@@ -279,8 +280,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
     expect(await mfa.remainingRecoveryCodes(orgId, userId)).toBe(9);
 
     const second = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(16),
@@ -302,8 +303,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
     const grouped = (code.match(/.{1,5}/g) ?? []).join('-').toLowerCase();
 
     const challenge = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(17),
@@ -322,8 +323,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
   it('ends the challenge after six wrong codes', async () => {
     const { secret } = await enrol();
     const challenge = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(18),
@@ -356,8 +357,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
   it('a challenge is single-use even with the right code', async () => {
     const { secret } = await enrol();
     const challenge = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(19),
@@ -387,8 +388,8 @@ describeDb('second factor, against a real PostgreSQL', () => {
     expect(first.codes[0]).not.toBe(second.codes[0]);
 
     const challenge = await auth.login({
+      username: USERNAME,
       organizationSlug: SLUG,
-      email: EMAIL,
       password: PASSWORD,
       userAgent: null,
       ip: from(20),

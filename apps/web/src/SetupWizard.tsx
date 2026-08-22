@@ -17,7 +17,7 @@ export function SetupWizard({ onComplete }: Props): React.JSX.Element {
   const [token, setToken] = useState('');
   const [organizationSlug, setSlug] = useState('');
   const [organizationName, setOrgName] = useState('');
-  const [adminEmail, setEmail] = useState('');
+  const [adminUsername, setEmail] = useState('');
   const [adminDisplayName, setDisplayName] = useState('');
   const [adminPassword, setPassword] = useState('');
   const [confirmPassword, setConfirm] = useState('');
@@ -41,7 +41,7 @@ export function SetupWizard({ onComplete }: Props): React.JSX.Element {
         token,
         organizationSlug,
         organizationName,
-        adminEmail,
+        adminUsername,
         adminDisplayName,
         adminPassword,
       },
@@ -112,8 +112,7 @@ export function SetupWizard({ onComplete }: Props): React.JSX.Element {
         <label>
           Email
           <input
-            type="email"
-            value={adminEmail}
+            value={adminUsername}
             onChange={(e) => setEmail(e.target.value)}
             autoComplete="username"
             required

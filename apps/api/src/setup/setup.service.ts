@@ -8,7 +8,7 @@ export interface ClaimRequest {
   token: string;
   organizationSlug: string;
   organizationName: string;
-  adminEmail: string;
+  adminUsername: string;
   adminDisplayName: string;
   adminPassword: string;
 }
@@ -106,7 +106,7 @@ export class SetupService implements OnModuleInit {
           [
             request.organizationSlug,
             request.organizationName,
-            request.adminEmail,
+            request.adminUsername,
             request.adminDisplayName,
             hash,
           ],
@@ -164,7 +164,12 @@ function validate(request: ClaimRequest): string | null {
   }
   if (request.organizationName.trim().length === 0) return 'organizationName is required';
   if (request.adminDisplayName.trim().length === 0) return 'adminDisplayName is required';
-  if (request.adminEmail.indexOf('@') < 1) return 'adminEmail must contain @';
+  // The same shape the database enforces (migration 0010): letters, digits, dot, dash and
+  // underscore, and no '@'. A username that looks like an address is one a person or a future
+  // parser can mistake for one.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(request.adminUsername)) {
+    return 'adminUsername may contain letters, digits, dot, dash and underscore only';
+  }
 
   // A length floor and nothing else. A composition rule ("one uppercase, one digit, one symbol")
   // shrinks the search space more often than it grows it, and NIST SP 800-63B dropped the advice

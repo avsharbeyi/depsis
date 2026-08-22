@@ -73,21 +73,21 @@ describeDb('login, against a real PostgreSQL', () => {
       );
       const id = org[0]?.id ?? '';
       await q.query(
-        `INSERT INTO users (organization_id, email, display_name, password_hash)
-         VALUES ($1, 'ada@authtest.example', 'Ada', $2)
-           ON CONFLICT (organization_id, email_normalized)
+        `INSERT INTO users (organization_id, username, display_name, password_hash)
+         VALUES ($1, 'ada', 'Ada', $2)
+           ON CONFLICT (organization_id, username_folded)
            DO UPDATE SET password_hash = EXCLUDED.password_hash, disabled_at = NULL`,
         [id, stored],
       );
       await q.query(
-        `INSERT INTO users (organization_id, email, display_name, password_hash, disabled_at)
-         VALUES ($1, 'gone@authtest.example', 'Gone', $2, now())
-           ON CONFLICT (organization_id, email_normalized) DO NOTHING`,
+        `INSERT INTO users (organization_id, username, display_name, password_hash, disabled_at)
+         VALUES ($1, 'gone', 'Gone', $2, now())
+           ON CONFLICT (organization_id, username_folded) DO NOTHING`,
         [id, stored],
       );
       return q.query<{ id: string }>(
         `SELECT id::text AS id FROM users WHERE organization_id = $1
-           AND email_normalized = public.fold_identity('ada@authtest.example')`,
+           AND username_folded = public.fold_identity('ada')`,
         [id],
       );
     });
@@ -119,8 +119,8 @@ describeDb('login, against a real PostgreSQL', () => {
 
   it('accepts the right credentials and issues a session', async () => {
     const result = await auth.login({
+      username: 'ada',
       organizationSlug: SLUG,
-      email: 'ada@authtest.example',
       password: PASSWORD,
       userAgent: 'vitest',
       ip: from(10),
@@ -137,8 +137,8 @@ describeDb('login, against a real PostgreSQL', () => {
     // The lookup runs against `email_normalized`, so it has to fold the same way the uniqueness key
     // does. If it did not, the account would exist and be unreachable — a lockout with no error.
     const result = await auth.login({
+      username: 'ADA',
       organizationSlug: SLUG,
-      email: 'ADA@AUTHTEST.EXAMPLE',
       password: PASSWORD,
       userAgent: null,
       ip: from(11),
@@ -150,18 +150,18 @@ describeDb('login, against a real PostgreSQL', () => {
     // The enumeration defence at the flow level. A caller must not be able to tell a nonexistent
     // tenant from a nonexistent address from a disabled account from a wrong password.
     const attempts = [
-      { label: 'wrong password', slug: SLUG, email: 'ada@authtest.example', password: 'nope' },
+      { label: 'wrong password', slug: SLUG, username: 'ada', password: 'nope' },
       {
         label: 'unknown address',
         slug: SLUG,
-        email: 'nobody@authtest.example',
+        username: 'nobody',
         password: PASSWORD,
       },
-      { label: 'disabled account', slug: SLUG, email: 'gone@authtest.example', password: PASSWORD },
+      { label: 'disabled account', slug: SLUG, username: 'gone', password: PASSWORD },
       {
         label: 'unknown tenant',
         slug: 'no-such-tenant',
-        email: 'ada@authtest.example',
+        username: 'ada',
         password: PASSWORD,
       },
     ];
@@ -169,8 +169,8 @@ describeDb('login, against a real PostgreSQL', () => {
     let ip = 20;
     for (const attempt of attempts) {
       const result = await auth.login({
+        username: attempt.username,
         organizationSlug: attempt.slug,
-        email: attempt.email,
         password: attempt.password,
         userAgent: null,
         ip: from(ip++),
@@ -182,8 +182,8 @@ describeDb('login, against a real PostgreSQL', () => {
   it('records every attempt, folded, so case cannot buy a fresh bucket', async () => {
     const ip = from(30);
     await auth.login({
+      username: 'AdA',
       organizationSlug: SLUG,
-      email: 'AdA@AuthTest.Example',
       password: 'wrong',
       userAgent: null,
       ip,
@@ -196,7 +196,10 @@ describeDb('login, against a real PostgreSQL', () => {
       ),
     );
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.email_normalized).toBe('ada@authtest.example');
+    // The throttle bucket is keyed by the SIGN-IN IDENTIFIER, which is the username since
+    // migration 0010. The column keeps its old name; renaming it would rewrite a table whose only
+    // reader is the throttle, for no behaviour.
+    expect(rows[0]?.email_normalized).toBe('ada');
     expect(rows[0]?.succeeded).toBe(false);
   });
 
@@ -204,8 +207,8 @@ describeDb('login, against a real PostgreSQL', () => {
     const ip = from(40);
     const fail = (): Promise<{ outcome: string }> =>
       auth.login({
+        username: 'ada',
         organizationSlug: SLUG,
-        email: 'ada@authtest.example',
         password: 'wrong',
         userAgent: null,
         ip,
@@ -223,8 +226,8 @@ describeDb('login, against a real PostgreSQL', () => {
     // This is the property ADR-0009 asks for by name — a throttle that locks the account globally
     // hands an attacker a denial of service against its owner.
     const elsewhere = await auth.login({
+      username: 'ada',
       organizationSlug: SLUG,
-      email: 'ada@authtest.example',
       password: PASSWORD,
       userAgent: null,
       ip: from(41),
@@ -237,8 +240,8 @@ describeDb('login, against a real PostgreSQL', () => {
 
   it('resolves an issued session, and stops once it is revoked', async () => {
     const result = await auth.login({
+      username: 'ada',
       organizationSlug: SLUG,
-      email: 'ada@authtest.example',
       password: PASSWORD,
       userAgent: 'vitest',
       ip: from(50),
@@ -258,8 +261,8 @@ describeDb('login, against a real PostgreSQL', () => {
     const tokens: string[] = [];
     for (let i = 0; i < 3; i += 1) {
       const r = await auth.login({
+        username: 'ada',
         organizationSlug: SLUG,
-        email: 'ada@authtest.example',
         password: PASSWORD,
         userAgent: null,
         ip: from(60 + i),
@@ -276,8 +279,8 @@ describeDb('login, against a real PostgreSQL', () => {
 
   it('stores no raw token anywhere in the sessions table', async () => {
     const result = await auth.login({
+      username: 'ada',
       organizationSlug: SLUG,
-      email: 'ada@authtest.example',
       password: PASSWORD,
       userAgent: null,
       ip: from(70),
