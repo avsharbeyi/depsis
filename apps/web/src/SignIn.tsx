@@ -135,7 +135,11 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
           Organisation
           <input
             value={organizationSlug}
-            onChange={(e) => setSlug(e.target.value.toLowerCase())}
+            // Trimmed as well as lower-cased. A slug with a trailing space fails the server's format
+            // check and comes back as the same indistinguishable refusal as a wrong password —
+            // measured: a real sign-in failed this way and the journal said "organization not
+            // found" for a slug that was correct apart from one character nobody can see.
+            onChange={(e) => setSlug(e.target.value.trim().toLowerCase())}
             autoComplete="organization"
             placeholder="acme"
             required
@@ -146,7 +150,7 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
           <input
             type="email"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => setEmail(e.target.value.trim())}
             autoComplete="username"
             required
           />

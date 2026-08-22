@@ -91,6 +91,19 @@ export class AuthService {
 
     if (!ok || user === null || organizationId === null) {
       await this.throttle.record(emailNormalized, request.ip, false);
+      // The CLIENT is told one thing — `rejected` — for all three causes, and that stays true: any
+      // difference visible to a caller is an oracle for which organisations and addresses exist.
+      //
+      // The OPERATOR is told which one. §16 asks that what happened on this box be explicable
+      // afterwards, and "someone could not sign in" without saying whether the tenant, the account
+      // or the password was wrong is the least useful line a journal can carry. This was written
+      // after a real sign-in failure that took three rounds of guessing to place — the answer was
+      // in the server and the server had not written it down.
+      this.logger.warn(
+        `login rejected: organization ${organizationId === null ? 'not found' : 'ok'}, ` +
+          `account ${user === null ? 'not found' : 'ok'}, ` +
+          `password ${user === null ? 'not checked' : ok ? 'ok' : 'wrong'}`,
+      );
       return { outcome: 'rejected' };
     }
 
