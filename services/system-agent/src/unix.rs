@@ -204,6 +204,9 @@ impl Openat2SafePath {
 /// line in a unit file. It took a directive-by-directive bisection to find, and the misleading
 /// message is what made the bisection necessary.
 fn classify_openat2(joined: &str, e: rustix::io::Errno) -> SeamError {
+    if e == rustix::io::Errno::NOENT {
+        return SeamError::NotFound(joined.to_string());
+    }
     if e == rustix::io::Errno::NOSYS {
         return SeamError::Io(format!(
             "openat2 is unavailable ({joined}): the kernel is older than 5.6, or a seccomp filter \

@@ -374,6 +374,60 @@ export class FilesService {
     return error instanceof Error ? error : new Error(String(error));
   }
 
+  /**
+   * The entry's location inside its share, as validated components.
+   *
+   * Walked up `parent_id` rather than split out of the `path` column, and the difference is not
+   * cosmetic. ADR-0005 makes `parent_id` the authority and `path` a derived cache that a rename
+   * updates afterwards — for a large subtree, in a job. Splitting the cache would mean that during
+   * that job a download resolves to where the file USED to be: a 404 at best, and at worst a read
+   * of whatever now occupies the old name.
+   *
+   * One recursive query rather than a loop of them, so the answer is a single consistent snapshot.
+   */
+  async componentsOf(organizationId: string, id: string): Promise<string[]> {
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ name: string; depth: number }>(
+        `WITH RECURSIVE up AS (
+           SELECT id, parent_id, name, 0 AS depth
+             FROM public.file_entries
+            WHERE organization_id = $1 AND id = $2
+           UNION ALL
+           SELECT parent.id, parent.parent_id, parent.name, up.depth + 1
+             FROM public.file_entries parent
+             JOIN up ON parent.id = up.parent_id
+            WHERE parent.organization_id = $1
+         )
+         SELECT name, depth FROM up ORDER BY depth DESC`,
+        [organizationId, id],
+      ),
+    );
+    if (rows.length === 0) throw new EntryNotFoundError();
+    return rows.map((r) => r.name);
+  }
+
+  /**
+   * Open a published file for reading and get a one-time token for the data socket.
+   *
+   * `size` comes back from the agent's own descriptor. The caller should prefer it over the
+   * `size_bytes` column when validating a Range: the column is what DEPSIS last recorded, and a
+   * file changed over SMB is precisely the case where the two differ.
+   */
+  async openDownload(
+    share: string,
+    components: string[],
+    correlationId: string,
+    reason: string,
+  ): Promise<{ token: string; size: number }> {
+    const response = await this.agent.call(
+      { op: 'open_download', share, path: components },
+      reason,
+      correlationId,
+    );
+    const opened = expectStatus(response, 'download');
+    return { token: opened.token, size: opened.size };
+  }
+
   /** Ask the agent to publish a staged file into the tree. */
   async publish(
     share: string,

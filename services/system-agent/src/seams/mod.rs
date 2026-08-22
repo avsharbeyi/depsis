@@ -31,6 +31,15 @@ pub enum SeamError {
     NoPeerCred(String),
     #[error("path escapes the share root: {0}")]
     PathEscape(String),
+    /// The path resolved cleanly and nothing is there.
+    ///
+    /// Its own variant because the alternative was measured to be actively misleading: every
+    /// `openat2` errno used to become `PathEscape`, so a download of a file that simply is not
+    /// there reported "path escapes the share root" — a containment violation, which is what a
+    /// caller trying to break out looks like. The same collapse hid an ENOSYS for a whole
+    /// bisection (ADR-0017).
+    #[error("no such file: {0}")]
+    NotFound(String),
     #[error("io: {0}")]
     Io(String),
     #[error("command {program} failed with status {status}: {stderr}")]

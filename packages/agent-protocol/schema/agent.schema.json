@@ -227,6 +227,32 @@
       ]
     },
     {
+      "description": "Open a published file for reading, and hand back a one-time token for the data socket.\n\nThe mirror of `OpenTransfer`, and it exists for the same reason: the unprivileged API cannot\nopen a file inside a share. It has no descriptor and the file is not readable by its uid in\nthe general case — a tenant's file belongs to the tenant — so the bytes have to come back\nthrough the agent, on the same socket they went out on.\n\nThe token names an ALREADY-RESOLVED descriptor. Nothing on the data wire names a path, so a\ncaller cannot widen a download into a file the control call did not confine, and the range\nit asks for is checked against the file the agent itself opened.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "open_download"
+        },
+        "path": {
+          "description": "Where the file is, relative to the share root. Components are validated individually,\nso no element can be `..`, a separator or an absolute-looking string.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "path"
+      ]
+    },
+    {
       "description": "Throw a staging file away.\n\nThe missing half of the upload path, and its absence was a dead end rather than a gap:\n`.depsis/staging` counts against the user's `refquota`, Samba vetoes `/.depsis/` and the API\nfilters the prefix server-side, so abandoned chunks are invisible to the user, undeletable\nby the user, undeletable by the API — which cannot write inside a share at all — and, until\nnow, undeletable by the agent. Every failed checksum, every cancelled upload and every\n`EDQUOT` was permanent.\n\nRefused while a data connection is streaming. Unlinking a file a worker is still appending\nto leaves the worker writing to an unlinked inode and reporting success.",
       "type": "object",
       "properties": {
@@ -474,6 +500,29 @@
       "required": [
         "status",
         "bytes"
+      ]
+    },
+    {
+      "description": "A file is open for reading. `size` is the file's own length, read from the descriptor the\nagent holds rather than from anything the caller supplied — so a Range can be validated\nagainst the object that will actually be read.",
+      "type": "object",
+      "properties": {
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "const": "download"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "token",
+        "size"
       ]
     },
     {

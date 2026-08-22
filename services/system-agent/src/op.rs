@@ -288,6 +288,23 @@ pub enum Request {
         owner_gid: u32,
     },
 
+    /// Open a published file for reading, and hand back a one-time token for the data socket.
+    ///
+    /// The mirror of `OpenTransfer`, and it exists for the same reason: the unprivileged API cannot
+    /// open a file inside a share. It has no descriptor and the file is not readable by its uid in
+    /// the general case — a tenant's file belongs to the tenant — so the bytes have to come back
+    /// through the agent, on the same socket they went out on.
+    ///
+    /// The token names an ALREADY-RESOLVED descriptor. Nothing on the data wire names a path, so a
+    /// caller cannot widen a download into a file the control call did not confine, and the range
+    /// it asks for is checked against the file the agent itself opened.
+    OpenDownload {
+        share: SafeComponent,
+        /// Where the file is, relative to the share root. Components are validated individually,
+        /// so no element can be `..`, a separator or an absolute-looking string.
+        path: Vec<SafeComponent>,
+    },
+
     /// Throw a staging file away.
     ///
     /// The missing half of the upload path, and its absence was a dead end rather than a gap:
@@ -349,6 +366,13 @@ pub enum Response {
     /// The staged file is in place and the destination directory has been fsynced.
     Publish {
         bytes: u64,
+    },
+    /// A file is open for reading. `size` is the file's own length, read from the descriptor the
+    /// agent holds rather than from anything the caller supplied — so a Range can be validated
+    /// against the object that will actually be read.
+    Download {
+        token: String,
+        size: u64,
     },
     /// A staging file was thrown away. `existed` is false when there was nothing there, which is a
     /// success: a caller retrying a discard must not have to tell "already clean" apart from a

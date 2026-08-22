@@ -182,7 +182,7 @@ mod tests {
     use super::*;
     use crate::audit::MemorySink;
     use crate::seams::mock::MockSafePath;
-    use crate::transfer::PendingTransfer;
+    use crate::transfer::{Direction, PendingTransfer};
     use std::sync::Mutex;
     use std::time::Instant;
 
@@ -247,6 +247,7 @@ mod tests {
                 "tok".to_string(),
                 PendingTransfer {
                     file,
+                    direction: Direction::Receive,
                     share: "alice".to_string(),
                     staging_name: "held.part".to_string(),
                     opened_by: API,

@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createConnection, type Socket } from 'node:net';
 import { pipeline } from 'node:stream/promises';
-import { Transform, type Readable } from 'node:stream';
+import { Transform, type Readable, type Writable } from 'node:stream';
 
 import { AgentUnavailableError } from './agent.service.js';
 
@@ -98,6 +98,64 @@ export class AgentDataService {
       socket.destroy();
     }
   }
+
+  /**
+   * Read `length` bytes from `offset` of an already-opened file into `sink`.
+   *
+   * The mirror of `send`, and the same shape for the same reasons: the agent announces exactly how
+   * many bytes it is about to write, and this side stops after exactly that many. Without the
+   * declared count a short answer and a complete one are indistinguishable, and the caller would
+   * serve a truncated file with a 200.
+   *
+   * The bytes are piped rather than collected: a download's peak memory must not be a function of
+   * the file's size.
+   */
+  async receive(token: string, offset: number, length: number, sink: Writable): Promise<number> {
+    const path = this.socketPath;
+    if (path === null) {
+      throw new AgentUnavailableError('DEPSIS_AGENT_DATA_SOCKET is not configured');
+    }
+
+    const socket = createConnection({ path });
+    const reader = new LineReader(socket);
+    try {
+      await once(socket, 'connect');
+      socket.setTimeout(AgentDataService.IDLE_TIMEOUT_MS);
+      socket.on('timeout', () => {
+        socket.destroy(new AgentUnavailableError('the agent went quiet mid-transfer'));
+      });
+
+      socket.write(`${JSON.stringify({ token, offset, length })}\n`);
+      const announced = await reader.next();
+      if (announced.status !== 'sending') throw toError(announced);
+      if (announced.bytes !== length) {
+        throw new AgentTransferFailedError(
+          `asked for ${length} bytes, the agent announced ${announced.bytes}`,
+          'refused',
+        );
+      }
+
+      // The leftover FIRST, and then the socket. These bytes are already out of the kernel; the
+      // agent writes its header and the head of the file in one go, so this is the ordinary case.
+      const leftover = reader.takeLeftover();
+      reader.dispose();
+
+      const exact = new TakeExactly(length);
+      if (leftover.length > 0) exact.write(leftover.subarray(0, Math.min(leftover.length, length)));
+
+      await pipeline(socket, exact, sink);
+      if (exact.seen < length) {
+        throw new AgentTransferFailedError(
+          `the agent sent ${exact.seen} of the ${length} bytes it announced`,
+          'io',
+        );
+      }
+      return exact.seen;
+    } finally {
+      reader.dispose();
+      socket.destroy();
+    }
+  }
 }
 
 /** The tenant's dataset is full. Distinct because ADR-0008 needs a 507, not a 500. */
@@ -126,12 +184,16 @@ interface StoredReply {
   status: 'stored';
   bytes: number;
 }
+interface SendingReply {
+  status: 'sending';
+  bytes: number;
+}
 interface FailedReply {
   status: 'failed';
   reason: string;
   kind: 'out_of_space' | 'io' | 'refused';
 }
-type DataReply = ReadyReply | StoredReply | FailedReply;
+type DataReply = ReadyReply | StoredReply | SendingReply | FailedReply;
 
 function toError(reply: DataReply): Error {
   if (reply.status !== 'failed') {
@@ -181,6 +243,38 @@ class ExactLength extends Transform {
 }
 
 /**
+ * Pass through at most `wanted` bytes, then end.
+ *
+ * The socket does not close when a download finishes — the agent keeps it open until this side
+ * destroys it — so a plain pipe would never end and the request would hang until the idle timeout.
+ * The declared length is what says the file is complete, and this is where that is enforced.
+ */
+class TakeExactly extends Transform {
+  seen = 0;
+
+  constructor(private readonly wanted: number) {
+    super();
+  }
+
+  override _transform(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    done: (error?: Error) => void,
+  ): void {
+    const room = this.wanted - this.seen;
+    if (room <= 0) {
+      done();
+      return;
+    }
+    const take = chunk.subarray(0, Math.min(room, chunk.length));
+    this.seen += take.length;
+    this.push(take);
+    if (this.seen >= this.wanted) this.push(null);
+    done();
+  }
+}
+
+/**
  * Newline-delimited JSON off a socket, one line at a time.
  *
  * A class rather than a promise per reply because the two replies are read at different points in
@@ -188,9 +282,14 @@ class ExactLength extends Transform {
  * would miss a line that arrived while the body was still being written.
  */
 class LineReader {
-  private buffered = '';
+  // A Buffer, NOT a string. The download direction is raw bytes immediately after a JSON line, and
+  // `chunk.toString('utf8')` on a binary tail replaces every invalid sequence with U+FFFD — a
+  // corruption that is invisible on a text file and silent on every other kind.
+  private buffered: Buffer = Buffer.alloc(0);
   private readonly queued: DataReply[] = [];
   private waiting: ((reply: DataReply) => void) | null = null;
+  /** Set by `takeLeftover`: no further line parsing, the rest of the socket is payload. */
+  private stopped = false;
   private failure: Error | null = null;
   private failWaiting: ((error: Error) => void) | null = null;
 
@@ -201,10 +300,14 @@ class LineReader {
   }
 
   private readonly onData = (chunk: Buffer): void => {
-    this.buffered += chunk.toString('utf8');
-    for (let at = this.buffered.indexOf('\n'); at >= 0; at = this.buffered.indexOf('\n')) {
-      const line = this.buffered.slice(0, at);
-      this.buffered = this.buffered.slice(at + 1);
+    this.buffered = Buffer.concat([this.buffered, chunk]);
+    // Stops at the first line once `stopped` is set. Everything after that newline belongs to the
+    // body of a download and must not be parsed, scanned or decoded — `takeLeftover` hands it on.
+    while (!this.stopped) {
+      const at = this.buffered.indexOf(0x0a);
+      if (at < 0) break;
+      const line = this.buffered.subarray(0, at).toString('utf8');
+      this.buffered = this.buffered.subarray(at + 1);
       if (line.trim() === '') continue;
       let parsed: DataReply;
       try {
@@ -250,6 +353,22 @@ class LineReader {
       this.waiting = resolve;
       this.failWaiting = reject;
     });
+  }
+
+  /**
+   * Stop parsing lines and hand back whatever has already been read past the last one.
+   *
+   * The mirror of the agent's own preamble reader, and it exists for the mirror-image reason: the
+   * agent writes its `sending` header and the first bytes of the file into the same socket, so
+   * they routinely arrive in one packet. A reader that dropped this tail would lose the head of
+   * every fast download — and the file would still be the right LENGTH, because the copy loop
+   * simply reads further, so nothing downstream would notice.
+   */
+  takeLeftover(): Buffer {
+    this.stopped = true;
+    const rest = this.buffered;
+    this.buffered = Buffer.alloc(0);
+    return rest;
   }
 
   dispose(): void {

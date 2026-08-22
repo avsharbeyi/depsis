@@ -42,6 +42,7 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::OpenTransfer { .. } => "open_transfer",
         Request::PublishTransfer { .. } => "publish_transfer",
         Request::DiscardTransfer { .. } => "discard_transfer",
+        Request::OpenDownload { .. } => "open_download",
     }
 }
 

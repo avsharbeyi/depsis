@@ -59,9 +59,31 @@ pub const TOKEN_BYTES: usize = 32;
 pub const MAX_PENDING_TRANSFERS: usize = 64;
 
 /// The file a token names, plus everything the data connection will need to audit itself.
+/// Which way the bytes go once a data connection presents the token.
+///
+/// One registry for both directions rather than two, because everything around it is the same
+/// question: which already-resolved descriptor does this token name, who is allowed to use it, and
+/// is anyone using it right now. Splitting them would duplicate the one-time-ness, the uid check
+/// and the in-flight interlock — and a second copy of an interlock is a second chance to get it
+/// wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// The client sends; the agent appends to a staging file.
+    Receive,
+    /// The agent sends; the client reads a published file.
+    Send,
+}
+
 pub struct PendingTransfer {
     pub file: std::fs::File,
+    pub direction: Direction,
     pub share: String,
+    /// The registry key inside the share.
+    ///
+    /// For `Receive` this is the staging file's own name, one component under `.depsis/staging/`.
+    /// For `Send` it is the published file's path relative to the share root, joined with `/` —
+    /// a download has no staging file, and its natural key is the thing being read. The two can
+    /// never collide: a staging name is a single component and therefore contains no separator.
     pub staging_name: String,
     /// Who opened it. The data connection must present the same uid: without this, a token seen in
     /// a log line or a traced response becomes a transferable bearer write into a tenant's share.
@@ -155,13 +177,29 @@ impl TransferRegistry {
     pub fn insert(&mut self, token: String, transfer: PendingTransfer) -> Result<(), InsertError> {
         self.expire_old();
         let key = (transfer.share.clone(), transfer.staging_name.clone());
-        if self.by_name.contains_key(&key) || self.in_flight.contains_key(&key) {
+        let reserves = transfer.direction == Direction::Receive;
+
+        // A READ takes no reservation, and that is a correction rather than an omission. The first
+        // version reserved for both directions and produced two wrong behaviours at once: two
+        // people could not download one file at the same time, and any request that opened a
+        // download and then declined to use the token — an unsatisfiable Range answers 416 without
+        // ever connecting to the data socket — left the file locked for the whole TRANSFER_TTL.
+        // Measured in P1-D: the 416 case made the next download of that file fail with "this file
+        // already has a reader" for five minutes.
+        //
+        // The interlock exists to stop a publish renaming over a file being WRITTEN. A reader needs
+        // nothing from it: a rename into an occupied name is refused by RENAME_NOREPLACE anyway,
+        // and an open descriptor keeps its inode alive regardless of what happens to the name. The
+        // token alone still gives one-time-ness and binds the transfer to the uid that opened it.
+        if reserves && (self.by_name.contains_key(&key) || self.in_flight.contains_key(&key)) {
             return Err(InsertError::Occupied);
         }
         if self.pending.len() >= MAX_PENDING_TRANSFERS {
             return Err(InsertError::Full);
         }
-        self.by_name.insert(key, token.clone());
+        if reserves {
+            self.by_name.insert(key, token.clone());
+        }
         self.pending.insert(token, transfer);
         Ok(())
     }
@@ -201,13 +239,18 @@ impl TransferRegistry {
 
         // The name moves from "reserved by a token" to "being written". It is never unreserved in
         // between, so a PublishTransfer cannot slip through the gap.
-        self.by_name.remove(&key);
-        self.in_flight.insert(
-            key.clone(),
-            InFlight {
-                since: Instant::now(),
-            },
-        );
+        //
+        // A read marks nothing, for the reason given on `insert`: it never reserved the name, and
+        // marking it in flight here would block a publish for the length of a download.
+        if transfer.direction == Direction::Receive {
+            self.by_name.remove(&key);
+            self.in_flight.insert(
+                key.clone(),
+                InFlight {
+                    since: Instant::now(),
+                },
+            );
+        }
         Ok((transfer, key))
     }
 
@@ -312,6 +355,7 @@ mod tests {
     fn pending_named(share: &str, name: &str, age: Duration) -> PendingTransfer {
         PendingTransfer {
             file: tempfile::tempfile().expect("tempfile"),
+            direction: Direction::Receive,
             share: share.into(),
             staging_name: name.into(),
             opened_by: API,
@@ -365,6 +409,59 @@ mod tests {
         // Distinct from Unknown on purpose: this one is reachable by an honest slow client, and
         // "your upload window closed" is a different thing to tell them than "no such token".
         assert!(matches!(r.claim("old", API), Err(ClaimError::Expired)));
+    }
+
+    fn readable_named(share: &str, name: &str) -> PendingTransfer {
+        let mut t = pending_named(share, name, Duration::from_secs(0));
+        t.direction = Direction::Send;
+        t
+    }
+
+    #[test]
+    fn two_readers_of_one_file_are_both_allowed() {
+        // Reading is not exclusive, and treating it as though it were is not a harmless extra
+        // safeguard: two people opening the same document at once is ordinary use of a NAS.
+        let mut registry = TransferRegistry::new();
+        registry
+            .insert("r1".into(), readable_named("alice", "Belgeler/rapor.txt"))
+            .expect("the first reader");
+        registry
+            .insert("r2".into(), readable_named("alice", "Belgeler/rapor.txt"))
+            .expect("the second reader must not be refused");
+        assert_eq!(registry.pending_count(), 2);
+    }
+
+    #[test]
+    fn an_unused_download_token_does_not_lock_the_file() {
+        // The failure this prevents was measured in P1-D. An unsatisfiable Range answers 416
+        // without ever opening a data connection, so its token is never claimed — and while the
+        // read still took a reservation, the next download of that file was refused as "already
+        // has a reader" for the whole TRANSFER_TTL.
+        let mut registry = TransferRegistry::new();
+        registry
+            .insert("abandoned".into(), readable_named("alice", "rapor.txt"))
+            .expect("insert");
+        assert!(
+            !registry.is_busy("alice", "rapor.txt"),
+            "an open read must not make the name busy"
+        );
+        registry
+            .insert("next".into(), readable_named("alice", "rapor.txt"))
+            .expect("a later reader must not be blocked by an abandoned token");
+    }
+
+    #[test]
+    fn a_read_never_blocks_a_publish() {
+        // The in-flight mark exists to stop a rename landing on a file being APPENDED to. A reader
+        // does not need it: an open descriptor keeps its inode whatever happens to the name, and
+        // RENAME_NOREPLACE refuses an occupied destination on its own.
+        let mut registry = TransferRegistry::new();
+        registry
+            .insert("r".into(), readable_named("alice", "rapor.txt"))
+            .expect("insert");
+        let (_transfer, _key) = registry.claim("r", API).expect("claim");
+        assert!(!registry.is_busy("alice", "rapor.txt"));
+        assert_eq!(registry.in_flight_count(), 0);
     }
 
     #[test]

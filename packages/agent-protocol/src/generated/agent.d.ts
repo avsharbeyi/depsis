@@ -110,6 +110,15 @@ export type AgentRequest =
       staging_name: SafeComponent;
     }
   | {
+      op: 'open_download';
+      /**
+       * Where the file is, relative to the share root. Components are validated individually,
+       * so no element can be `..`, a separator or an absolute-looking string.
+       */
+      path: SafeComponent[];
+      share: SafeComponent;
+    }
+  | {
       op: 'discard_transfer';
       share: SafeComponent;
       staging_name: SafeComponent;
@@ -179,6 +188,11 @@ export type AgentResponse =
   | {
       bytes: number;
       status: 'publish';
+    }
+  | {
+      size: number;
+      status: 'download';
+      token: string;
     }
   | {
       existed: boolean;

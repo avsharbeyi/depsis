@@ -216,10 +216,22 @@ export class UploadsController {
     // Complete. Publish moves the staging file into the tree with RENAME_NOREPLACE and fsyncs the
     // destination directory (ADR-0008 steps 4 and 5), and the agent checks the size itself rather
     // than trusting this process's belief that the upload finished.
+    // The parent's components, then the name. An earlier version published `[filename]` alone,
+    // which put every upload at the share root no matter which folder the user chose — and the
+    // probe missed it because its check fell back to the root path with a `||`. The file landed,
+    // the listing looked right, and the download 404'd.
+    const destination =
+      upload.parent_id === null
+        ? [upload.filename]
+        : [
+            ...(await this.files.componentsOf(session.organizationId, upload.parent_id)),
+            upload.filename,
+          ];
+
     const bytes = await this.files.publish(
       share.name,
       upload.staging_name,
-      destinationOf(upload),
+      destination,
       Number(upload.length_bytes),
       ownerUid(),
       ownerGid(),
@@ -305,16 +317,6 @@ class InsufficientStorageException extends ConflictException {
   override getStatus(): number {
     return 507;
   }
-}
-
-/**
- * The published file's path inside the share.
- *
- * Only the leaf is needed today because every upload lands directly under its parent, and the
- * agent takes the destination as validated components rather than a joined string.
- */
-function destinationOf(upload: SessionRow): string[] {
-  return [upload.filename];
 }
 
 /**

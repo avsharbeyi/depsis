@@ -632,7 +632,10 @@ check 'PATCH /uploads/{id} accepted the chunk' "$PATCH_CODE" '204'
 
 # And the bytes are where a user would look for them — read off the filesystem, not off the API,
 # so this cannot pass on a metadata row alone.
-LANDED=$(cat "$SHARES/$ORG_SLUG/Belgeler/rapor.txt" 2>/dev/null || cat "$SHARES/$ORG_SLUG/rapor.txt" 2>/dev/null)
+# EXACTLY where the user asked for it. The `||` fallback this line used to carry hid a real
+# defect: publish ignored the parent folder and put every upload at the share root, and the
+# fallback read it from there and called the test passed.
+LANDED=$(cat "$SHARES/$ORG_SLUG/Belgeler/rapor.txt" 2>/dev/null)
 check 'the bytes are in the share, byte for byte' "$LANDED" "$BODY"
 
 LISTING=$(curl -sS -b "$JAR" -c "$JAR" "$FILES?parentId=$FOLDER_ID" 2>&1)
@@ -647,6 +650,52 @@ esac
 
 # The file id, for rename and trash.
 FILE_ID=$(printf '%s' "$LISTING" | sed -n 's/.*"id":"\([^"]*\)","parentId".*/\1/p' | head -1)
+
+# ── the bytes come back ───────────────────────────────────────────────────────
+# The reverse direction on the data socket. The API cannot read the file itself — it holds no
+# descriptor and, once user-to-uid mapping exists, no permission — so a download is the agent
+# streaming back over the same socket the upload went out on.
+GOT=$(curl -sS -b "$JAR" "$FILES/$FILE_ID/content" 2>&1)
+check 'GET /files/{id}/content returns the bytes that were uploaded' "$GOT" "$BODY"
+
+HEADERS=$(curl -sS -D - -o /dev/null -b "$JAR" "$FILES/$FILE_ID/content" 2>&1 | tr -d '\r')
+case "$HEADERS" in
+  *"Content-Length: $LEN"*) ok 'and a Content-Length equal to the file, in bytes' ;;
+  *) bad "Content-Length is wrong: $(printf '%s' "$HEADERS" | grep -i content-length)" ;;
+esac
+case "$HEADERS" in
+  *'Accept-Ranges: bytes'*) ok 'and advertises Range support' ;;
+  *) bad 'no Accept-Ranges header' ;;
+esac
+# `attachment`, not inline. A tenant-supplied HTML file served inline on the API's own origin is a
+# stored XSS against every other tenant's session.
+case "$HEADERS" in
+  *'Content-Disposition: attachment'*) ok 'and serves as an attachment rather than inline' ;;
+  *) bad 'the file would render inline on the API origin' ;;
+esac
+ETAG=$(printf '%s' "$HEADERS" | sed -n 's/^ETag: //p')
+[ -n "$ETAG" ] && ok "a strong validator is present ($ETAG)" || bad 'no ETag'
+
+# A range from the middle. The first six bytes of the body are ASCII, so this is byte-exact
+# regardless of how the Turkish letters later in the string are encoded.
+RANGE_BODY=$(curl -sS -b "$JAR" -H 'range: bytes=0-5' "$FILES/$FILE_ID/content" 2>&1)
+check 'a Range request returns exactly that range' "$RANGE_BODY" 'DEPSIS'
+RANGE_CODE=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" -H 'range: bytes=0-5' "$FILES/$FILE_ID/content" 2>&1)
+check 'and answers 206 rather than 200' "$RANGE_CODE" '206'
+
+# Past the end. Answering 200 with a full body here is how a resumed download silently restarts.
+OVER=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" -H "range: bytes=$((LEN + 10))-" "$FILES/$FILE_ID/content" 2>&1)
+check 'a range past the end is 416, not a silent full body' "$OVER" '416'
+
+# If-Range with a stale validator must NOT splice: the client holds bytes from the old file, and a
+# 206 of the new one produces a file that is corrupt in a way neither side can detect.
+STALE=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" \
+  -H 'range: bytes=0-5' -H 'if-range: "not-the-etag"' "$FILES/$FILE_ID/content" 2>&1)
+check 'If-Range with a stale validator falls back to the whole file' "$STALE" '200'
+
+DL_ANON=$(curl -sS -o /dev/null -w '%{http_code}' "$FILES/$FILE_ID/content" 2>&1)
+check 'an unauthenticated caller cannot download' "$DL_ANON" '401'
+
 REN=$(curl -sS -b "$JAR" -c "$JAR" -X PATCH "$FILES/$FILE_ID" \
   -H 'content-type: application/json' -H "origin: http://127.0.0.1:$PORT" \
   -d '{"name":"Çağrı raporu.txt"}' 2>&1)

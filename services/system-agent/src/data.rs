@@ -5,14 +5,25 @@
 //! passes the descriptor back over `SCM_RIGHTS`) is unreachable because Node's `net` has no
 //! ancillary data, and so the bytes travel instead — over a socket separate from the control one.
 //!
-//! The wire, in full:
+//! The wire, in full. One preamble, two directions — which one applies is decided by the token,
+//! not by anything the client says, because the control call already fixed it:
 //!
 //! ```text
+//!   UPLOAD (the token names a staging file opened for append)
 //!   client → {"token":"…","offset":N,"length":M}\n
 //!   agent  → {"status":"ready"}\n
 //!   client → exactly M bytes
 //!   agent  → {"status":"stored","bytes":M}\n     (or {"status":"failed","kind":…})
+//!
+//!   DOWNLOAD (the token names a published file opened for reading)
+//!   client → {"token":"…","offset":N,"length":M}\n
+//!   agent  → {"status":"sending","bytes":M}\n    (or {"status":"failed","kind":…})
+//!   agent  → exactly M bytes
 //! ```
+//!
+//! The preamble is IDENTICAL, and that is worth more than the symmetry: `offset` and `length` are
+//! exactly what an HTTP Range request carries, so range support on the download side needs no new
+//! field, no second parser and no second place where a bounds check could be forgotten.
 //!
 //! Three properties of that shape are load-bearing and none is obvious:
 //!
@@ -31,7 +42,7 @@ use std::time::{Duration, Instant};
 use crate::audit::{Entry, Outcome, Sink};
 use crate::authz::{Decision, Policy};
 use crate::seams::{PeerIdentity, SeamError};
-use crate::transfer::{guard_in_flight, ClaimError, PendingTransfer, TransferRegistry};
+use crate::transfer::{guard_in_flight, ClaimError, Direction, PendingTransfer, TransferRegistry};
 
 /// The preamble must arrive quickly; it is one short line the client already has in hand.
 pub const PREAMBLE_BUDGET: Duration = Duration::from_secs(10);
@@ -83,8 +94,19 @@ pub struct Preamble {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DataReply {
     Ready,
-    Stored { bytes: u64 },
-    Failed { reason: String, kind: FailureKind },
+    Stored {
+        bytes: u64,
+    },
+    /// The agent is about to write exactly `bytes` raw bytes. A distinct status from `ready`
+    /// because the two mean opposite things about who talks next, and a client that confused them
+    /// would sit waiting while the agent sat waiting.
+    Sending {
+        bytes: u64,
+    },
+    Failed {
+        reason: String,
+        kind: FailureKind,
+    },
 }
 
 /// Why a data transfer failed, in a form the API can branch on.
@@ -247,8 +269,29 @@ impl<S: Sink> DataChannel<'_, S> {
         // including by panic. `PublishTransfer` is refused for as long as it lives.
         let _guard = guard_in_flight(self.transfers, key);
 
-        let attempt = self.attempt(stream, &mut arm_read, &mut transfer, &preamble, &leftover);
+        let attempt = match transfer.direction {
+            Direction::Receive => {
+                self.attempt(stream, &mut arm_read, &mut transfer, &preamble, &leftover)
+            }
+            // Nothing follows a download's preamble, so a leftover here is a client that sent
+            // bytes it was never invited to send. Refused rather than discarded: the only ways to
+            // produce it are a broken client and a request smuggled behind a legitimate one.
+            Direction::Send if !leftover.is_empty() => {
+                Attempt::refused("a download preamble must not be followed by data".to_string())
+            }
+            Direction::Send => self.send(stream, &mut transfer, &preamble),
+        };
         self.record(peer, &transfer, &attempt);
+
+        // A successful download has already written its header AND its body. Writing the reply
+        // again here would append a second JSON line to the end of the user's file as the client
+        // sees it — the bytes would be right on disk and wrong on the wire, which is the kind of
+        // corruption that survives every test that only checks the file.
+        let already_answered =
+            transfer.direction == Direction::Send && attempt.outcome == Outcome::Allowed;
+        if already_answered {
+            return Ok(());
+        }
         reply(stream, &attempt.reply)
     }
 
@@ -303,6 +346,109 @@ impl<S: Sink> DataChannel<'_, S> {
                 self.rollback(&mut transfer.file, start);
                 Attempt::refused(format!("the stream ended after {got} of {want} bytes"))
             }
+        }
+    }
+
+    /// Write exactly `length` bytes from `offset` back to the client.
+    ///
+    /// The range is checked against the FILE, not against anything the caller sent. The API has its
+    /// own copy of the size in `file_entries`, and that copy can be stale — a file replaced outside
+    /// DEPSIS is exactly the case reconciliation exists for — so a range validated there and not
+    /// here would let a caller read past the end of a shorter file into whatever the kernel
+    /// returns, or be refused for a file that has since grown.
+    fn send<T: Read + Write>(
+        &self,
+        stream: &mut T,
+        transfer: &mut PendingTransfer,
+        preamble: &Preamble,
+    ) -> Attempt {
+        let size = match transfer.file.metadata() {
+            Ok(meta) => meta.len(),
+            Err(e) => return Attempt::from_io(&e, 0),
+        };
+
+        // `checked_add`, because `offset + length` on two caller-supplied u64s is where a wrapping
+        // sum turns "past the end" into "well inside the file".
+        let end = match preamble.offset.checked_add(preamble.length) {
+            Some(end) => end,
+            None => return Attempt::refused("the requested range overflows".to_string()),
+        };
+        if end > size {
+            return Attempt::refused(format!(
+                "the requested range ends at {end}, the file is {size} bytes"
+            ));
+        }
+
+        if let Err(e) = transfer
+            .file
+            .seek(std::io::SeekFrom::Start(preamble.offset))
+        {
+            return Attempt::from_io(&e, 0);
+        }
+
+        // The header goes out BEFORE the bytes and is not batched with them. A client that has to
+        // guess how many bytes are coming cannot tell a complete short file from a connection that
+        // died halfway — which is the same mistake the upload side avoids with a declared length.
+        if let Err(e) = reply(
+            stream,
+            &DataReply::Sending {
+                bytes: preamble.length,
+            },
+        ) {
+            return Attempt::refused(format!("could not announce the transfer: {e}"));
+        }
+
+        let mut written: u64 = 0;
+        let mut buf = [0u8; COPY_BUFFER];
+        while written < preamble.length {
+            let remaining = preamble.length.saturating_sub(written);
+            let take = usize::try_from(remaining)
+                .unwrap_or(COPY_BUFFER)
+                .min(COPY_BUFFER);
+            let window = match buf.get_mut(..take) {
+                Some(window) => window,
+                None => return Attempt::refused("read window out of range".to_string()),
+            };
+
+            let read = match transfer.file.read(window) {
+                Ok(0) => {
+                    // The file shrank between the size check and here. Nothing can be done for the
+                    // bytes already on the wire — the length was announced — so the connection is
+                    // failed rather than padded, and the client sees a short read instead of a file
+                    // silently filled with something else.
+                    return Attempt::refused(format!(
+                        "the file ended after {written} of {} bytes",
+                        preamble.length
+                    ));
+                }
+                Ok(n) => n,
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Attempt::from_io(&e, 0),
+            };
+
+            let data = match window.get(..read) {
+                Some(data) => data,
+                None => return Attempt::refused("short read out of range".to_string()),
+            };
+            if let Err(e) = stream.write_all(data) {
+                return Attempt::from_io(&e, 0);
+            }
+            written = written.saturating_add(read as u64);
+        }
+
+        if let Err(e) = stream.flush() {
+            return Attempt::from_io(&e, 0);
+        }
+
+        Attempt {
+            // Already sent, before the body. Reusing it here would put a second header AFTER the
+            // bytes and corrupt the download, so the reply this attempt carries is the one already
+            // on the wire and `serve` must not write it again.
+            reply: DataReply::Sending {
+                bytes: preamble.length,
+            },
+            outcome: Outcome::Allowed,
+            detail: format!("{written} bytes from offset {}", preamble.offset),
         }
     }
 
@@ -594,6 +740,7 @@ mod tests {
                 "tok".to_string(),
                 PendingTransfer {
                     file,
+                    direction: Direction::Receive,
                     share: "alice".to_string(),
                     staging_name: "chunk.part".to_string(),
                     opened_by,
@@ -907,6 +1054,206 @@ mod tests {
             4,
             "one arming per payload read, not one for the whole connection"
         );
+    }
+
+    // ── the send direction ───────────────────────────────────────────────────────────────────
+
+    /// A registry holding one READABLE file under a token.
+    fn readable(contents: &[u8], opened_by: PeerIdentity) -> Fixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rapor.txt");
+        std::fs::write(&path, contents).expect("seed the published file");
+        let file = std::fs::File::open(&path).expect("open for reading");
+
+        let mut registry = TransferRegistry::new();
+        registry
+            .insert(
+                "tok".to_string(),
+                PendingTransfer {
+                    file,
+                    direction: Direction::Send,
+                    share: "alice".to_string(),
+                    staging_name: "Belgeler/rapor.txt".to_string(),
+                    opened_by,
+                    correlation_id: "req-9".to_string(),
+                    reason: "GET /files/{id}/content".to_string(),
+                    opened_at: Instant::now(),
+                },
+            )
+            .expect("insert");
+
+        Fixture {
+            _dir: dir,
+            path,
+            registry: Mutex::new(registry),
+            audit: MemorySink::default(),
+        }
+    }
+
+    /// Split a download connection's output into its header line and the raw bytes after it.
+    fn split_download(wire: &Wire) -> (serde_json::Value, Vec<u8>) {
+        let at = wire
+            .outbound
+            .iter()
+            .position(|b| *b == b'\n')
+            .expect("the agent must announce the transfer before sending");
+        let header = serde_json::from_slice(&wire.outbound[..at]).expect("a JSON header");
+        (header, wire.outbound[at + 1..].to_vec())
+    }
+
+    #[test]
+    fn a_download_announces_its_length_and_then_sends_exactly_that() {
+        let f = readable(b"hello world", API);
+        let mut wire = Wire::new(&[&preamble_line(0, 11)]);
+
+        f.channel()
+            .serve(&mut wire, API, never_fails)
+            .expect("serve");
+
+        let (header, body) = split_download(&wire);
+        assert_eq!(
+            header,
+            serde_json::json!({"status": "sending", "bytes": 11})
+        );
+        assert_eq!(body, b"hello world");
+    }
+
+    #[test]
+    fn a_range_reads_from_the_middle_of_the_file() {
+        // The preamble's `offset` and `length` ARE an HTTP Range. Getting this wrong in either
+        // direction produces a file that downloads without error and is wrong in the middle.
+        let f = readable(b"0123456789", API);
+        let mut wire = Wire::new(&[&preamble_line(3, 4)]);
+
+        f.channel()
+            .serve(&mut wire, API, never_fails)
+            .expect("serve");
+
+        let (header, body) = split_download(&wire);
+        assert_eq!(header["bytes"], 4);
+        assert_eq!(body, b"3456");
+    }
+
+    #[test]
+    fn nothing_is_sent_after_the_body() {
+        // `serve` writes the attempt's reply at the end for every other kind of connection. On a
+        // successful download the header is already on the wire and the body after it, so writing
+        // it again would append a JSON line to the end of the user's file as the client sees it —
+        // right on disk, wrong on the wire, and invisible to any test that only checks the file.
+        let f = readable(b"abc", API);
+        let mut wire = Wire::new(&[&preamble_line(0, 3)]);
+
+        f.channel()
+            .serve(&mut wire, API, never_fails)
+            .expect("serve");
+
+        let (_, body) = split_download(&wire);
+        assert_eq!(body, b"abc", "exactly the file, with nothing appended");
+    }
+
+    #[test]
+    fn a_range_past_the_end_is_refused_before_a_byte_is_sent() {
+        // Checked against the FILE, not against the caller's arithmetic. The API keeps its own copy
+        // of the size in `file_entries` and that copy can be stale, so a range validated only there
+        // would read past the end of a file that has since been replaced by a shorter one.
+        let f = readable(b"short", API);
+        let mut wire = Wire::new(&[&preamble_line(0, 500)]);
+
+        f.channel()
+            .serve(&mut wire, API, never_fails)
+            .expect("serve");
+
+        let reply = wire.last_reply();
+        assert_eq!(reply["status"], "failed");
+        assert_eq!(reply["kind"], "refused");
+        assert!(
+            wire.replies().iter().all(|r| r["status"] != "sending"),
+            "a refused range must never announce a transfer"
+        );
+    }
+
+    #[test]
+    fn a_range_whose_end_overflows_is_refused_rather_than_wrapping() {
+        // `offset + length` on two caller-supplied u64s is where a wrapping sum turns "far past the
+        // end" into "well inside the file", and the bounds check then passes.
+        let f = readable(b"short", API);
+        let mut wire = Wire::new(&[&preamble_line(u64::MAX, 8)]);
+
+        f.channel()
+            .serve(&mut wire, API, never_fails)
+            .expect("serve");
+
+        assert_eq!(wire.last_reply()["status"], "failed");
+        assert!(
+            wire.replies().iter().all(|r| r["status"] != "sending"),
+            "an overflowing range must never announce a transfer"
+        );
+    }
+
+    #[test]
+    fn a_zero_length_download_is_a_valid_empty_answer() {
+        // An empty file is a file. Refusing it would make every zero-byte upload undownloadable.
+        let f = readable(b"", API);
+        let mut wire = Wire::new(&[&preamble_line(0, 0)]);
+
+        f.channel()
+            .serve(&mut wire, API, never_fails)
+            .expect("serve");
+
+        let (header, body) = split_download(&wire);
+        assert_eq!(header["bytes"], 0);
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn a_download_preamble_followed_by_data_is_refused() {
+        // Nothing follows a download's preamble. Bytes here are a broken client at best and a
+        // second request smuggled behind a legitimate one at worst.
+        let f = readable(b"hello", API);
+        let mut wire = Wire::new(&[b"{\"token\":\"tok\",\"offset\":0,\"length\":5}\nEXTRA"]);
+
+        f.channel()
+            .serve(&mut wire, API, never_fails)
+            .expect("serve");
+
+        assert_eq!(wire.last_reply()["status"], "failed");
+    }
+
+    #[test]
+    fn a_download_is_audited_like_every_other_privileged_read() {
+        // §16 does not distinguish reading a tenant's file from writing one: both are the agent
+        // touching user data as root, and both have to be explicable afterwards.
+        let f = readable(b"hello", API);
+        let mut wire = Wire::new(&[&preamble_line(1, 3)]);
+
+        f.channel()
+            .serve(&mut wire, API, never_fails)
+            .expect("serve");
+
+        let entries = f.audit.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].outcome, Outcome::Allowed);
+        assert_eq!(entries[0].correlation_id, "req-9");
+        assert!(
+            entries[0].reason.contains("Belgeler/rapor.txt"),
+            "the journal must name what was read: {}",
+            entries[0].reason
+        );
+    }
+
+    #[test]
+    fn a_downloads_token_belongs_to_the_uid_that_opened_it() {
+        // The same rule as an upload, and it matters more here: a leaked download token is a read
+        // of another tenant's file rather than a write into one's own.
+        let f = readable(b"secret", STRANGER);
+        let mut wire = Wire::new(&[&preamble_line(0, 6)]);
+
+        f.channel()
+            .serve(&mut wire, API, never_fails)
+            .expect("serve");
+
+        assert_eq!(wire.last_reply()["reason"], "no such transfer");
+        assert!(wire.replies().iter().all(|r| r["status"] != "sending"));
     }
 
     // ── failure classification ───────────────────────────────────────────────────────────────

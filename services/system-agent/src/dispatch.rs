@@ -13,7 +13,7 @@ use crate::authz::{Decision, Policy};
 use crate::op::{AclType, Request, Response, SCHEMA_VERSION};
 use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource};
 use crate::transfer::{
-    Abandoned, InsertError, PendingTransfer, TransferRegistry, MAX_PENDING_TRANSFERS,
+    Abandoned, Direction, InsertError, PendingTransfer, TransferRegistry, MAX_PENDING_TRANSFERS,
 };
 use std::io::Seek;
 use std::sync::Mutex;
@@ -133,6 +133,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             token.clone(),
             PendingTransfer {
                 file,
+                direction: Direction::Receive,
                 share: share.to_string(),
                 staging_name: staging_name.to_string(),
                 // The peer the CONTROL connection authenticated. The data connection must present
@@ -165,6 +166,89 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// ADR-0008 steps 4 and 5. The directory fsync is the one people skip, and skipping it means
     /// a power cut can leave the data on disk with nothing pointing at it — the file survived and
     /// the rename did not.
+    /// Open a published file for reading and register a one-time token for it.
+    ///
+    /// The mirror of `open_transfer`, and deliberately built from the same pieces: the same
+    /// `openat2(RESOLVE_BENEATH)` resolution, the same registry, the same one-time token bound to
+    /// the same uid. What differs is one field, and everything that follows from it lives in the
+    /// data channel rather than here.
+    fn open_download(
+        &self,
+        share: &str,
+        path: &[&str],
+        peer: PeerIdentity,
+        correlation_id: &str,
+        reason: &str,
+    ) -> Result<Response, SeamError> {
+        let Some(paths) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+        if path.is_empty() {
+            return Ok(Response::Refused {
+                reason: "a download needs a path".to_string(),
+            });
+        }
+
+        let mut relative: Vec<&str> = Vec::with_capacity(path.len() + 1);
+        relative.push(share);
+        relative.extend_from_slice(path);
+        let file = match paths.open(&relative, OpenIntent::Read) {
+            Ok(file) => file,
+            // A refusal, not an error. The file being gone is an ordinary answer to a download —
+            // it was deleted, or renamed over SMB since the listing the caller is working from —
+            // and an error here becomes a 500 for something the client can act on.
+            Err(SeamError::NotFound(_)) => {
+                return Ok(Response::Refused {
+                    reason: "no such file".to_string(),
+                })
+            }
+            Err(other) => return Err(other),
+        };
+
+        // The size comes from the descriptor the agent just opened, never from the caller. A Range
+        // validated against a number the caller supplied is not validated at all.
+        let size = file
+            .metadata()
+            .map_err(|e| SeamError::Io(format!("stat the file to be read: {e}")))?
+            .len();
+
+        let key = path.join("/");
+        let token = self.tokens.token();
+        let mut registry = self
+            .transfers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let inserted = registry.insert(
+            token.clone(),
+            PendingTransfer {
+                file,
+                direction: Direction::Send,
+                share: share.to_string(),
+                staging_name: key,
+                opened_by: peer,
+                correlation_id: correlation_id.to_string(),
+                reason: reason.to_string(),
+                opened_at: std::time::Instant::now(),
+            },
+        );
+        drop(registry);
+
+        match inserted {
+            Ok(()) => Ok(Response::Download { token, size }),
+            // A second reader while one is still open. Refused rather than queued: the interlock
+            // exists so a publish cannot rename a file out from under an open descriptor, and one
+            // reader at a time is a price a download can pay by retrying.
+            Err(InsertError::Occupied) => Ok(Response::Refused {
+                reason: "this file already has a reader".to_string(),
+            }),
+            Err(InsertError::Full) => Ok(Response::Refused {
+                reason: format!("too many transfers are open (limit {MAX_PENDING_TRANSFERS})"),
+            }),
+        }
+    }
+
     /// Throw a staging file away.
     ///
     /// Two steps that must happen in this order: release the registry entry, then unlink. Doing it
@@ -515,6 +599,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 share,
                 staging_name,
             } => self.discard_transfer(share.as_str(), staging_name.as_str()),
+
+            Request::OpenDownload { share, path } => {
+                let parts: Vec<&str> = path.iter().map(|c| c.as_str()).collect();
+                self.open_download(share.as_str(), &parts, peer, correlation_id, reason)
+            }
 
             Request::PublishSambaConfig { shares } => {
                 // testparm is necessary but NOT sufficient. P0-B measured an invalid

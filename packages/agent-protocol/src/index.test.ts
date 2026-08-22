@@ -53,6 +53,10 @@ describe('the emitted agent schema', () => {
       // receive an SCM_RIGHTS descriptor and so the cleanest design — the agent passing the fd —
       // is unreachable. `publish_transfer` is the durable move: rename, then fsync the
       // destination directory (ADR-0008 steps 4 and 5).
+      // The reverse direction, added when GET /files/{id}/content was built: the unprivileged API
+      // cannot open a file inside a share — it has no descriptor and, in the general case, no
+      // permission — so the bytes come back through the agent on the same socket they went out on.
+      'open_download',
       'open_transfer',
       'ping',
       'pool_status',

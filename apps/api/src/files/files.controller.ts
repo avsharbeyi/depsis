@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  Headers,
   Body,
   ConflictException,
   Controller,
@@ -11,12 +12,18 @@ import {
   Post,
   Query,
   Req,
+  Res,
+  ServiceUnavailableException,
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import type { OpenApi } from '@depsis/contracts';
+import type { Response } from 'express';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
+import { AgentDataService } from '../agent/agent-data.service.js';
+import { AgentRefusedError } from '../agent/agent.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { DbService } from '../db/db.service.js';
 import {
@@ -52,6 +59,7 @@ export class FilesController {
   constructor(
     private readonly files: FilesService,
     private readonly db: DbService,
+    private readonly data: AgentDataService,
   ) {}
 
   @Get()
@@ -157,6 +165,88 @@ export class FilesController {
     }
   }
 
+  /**
+   * The bytes.
+   *
+   * Supports RFC 9110 Range, and does not read the file into memory: the agent streams it back
+   * over the data socket and this pipes it straight to the response.
+   *
+   * The size used for the range check is the AGENT's, not the `size_bytes` column. The column is
+   * what DEPSIS last recorded and a file changed over SMB is exactly where the two diverge — a
+   * range validated against a stale number is a range validated against nothing.
+   */
+  @Get(':id/content')
+  async content(
+    @Req() request: AuthenticatedRequest,
+    @Res({ passthrough: false }) response: Response,
+    @Param('id') id: string,
+    @Headers('range') range?: string,
+    @Headers('if-range') ifRange?: string,
+  ): Promise<void> {
+    const session = requireSession(request);
+    const entry = await this.load(session.organizationId, id);
+    if (entry.kind !== 'file' || entry.trashed_at !== null) throw new NotFoundException();
+    if (!this.data.isAvailable()) {
+      throw new ServiceUnavailableException('the system agent is not reachable');
+    }
+
+    const share = await this.share(request);
+    const components = await this.files
+      .componentsOf(session.organizationId, id)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
+    const correlationId = randomUUID();
+    // The agent's refusals for a download are a closed set of two, and both are answers the client
+    // can act on rather than faults: the file is no longer there (it was deleted or renamed over
+    // SMB since the listing the caller is working from), or another reader holds it. Letting them
+    // reach the default handler would turn both into a 500, which a client retries.
+    const opened = await this.files
+      .openDownload(share.name, components, correlationId, `GET /files/${id}/content`)
+      .catch((error: unknown) => {
+        if (error instanceof AgentRefusedError) {
+          throw error.agentReason.includes('reader')
+            ? new ConflictException(error.agentReason)
+            : new NotFoundException();
+        }
+        throw error;
+      });
+
+    const etag = etagOf(entry, opened.size);
+    // If-Range with a tag that no longer matches means the file changed since the client saw it.
+    // Answering 206 then would splice a range of the NEW file into a buffer holding the old one,
+    // and the result is a file that is corrupt in a way neither side can detect. 200 instead.
+    const rangeApplies = ifRange === undefined || ifRange === etag;
+    const wanted = rangeApplies ? parseRange(range, opened.size) : null;
+
+    if (wanted === 'unsatisfiable') {
+      response.setHeader('Content-Range', `bytes */${opened.size}`);
+      response.status(416).end();
+      return;
+    }
+
+    const start = wanted?.start ?? 0;
+    const length = wanted === null ? opened.size : wanted.end - wanted.start + 1;
+
+    response.setHeader('Accept-Ranges', 'bytes');
+    response.setHeader('ETag', etag);
+    response.setHeader('Content-Length', String(length));
+    response.setHeader('Content-Type', entry.content_type ?? 'application/octet-stream');
+    // `attachment` is not a nicety. Serving a tenant-supplied file inline on the API's own origin
+    // makes an uploaded HTML file a stored XSS against every other tenant's session.
+    response.setHeader(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(entry.name)}`,
+    );
+    if (wanted !== null) {
+      response.status(206);
+      response.setHeader('Content-Range', `bytes ${start}-${wanted.end}/${opened.size}`);
+    }
+
+    await this.data.receive(opened.token, start, length, response);
+  }
+
   private async load(organizationId: string, id: string): Promise<FileEntryRow> {
     try {
       return await this.files.find(organizationId, id);
@@ -177,6 +267,55 @@ export class FilesController {
     if (slug === undefined) throw new NotFoundException();
     return this.files.defaultShare(session.organizationId, slug);
   }
+}
+
+/**
+ * A STRONG validator, because `If-Range` is only useful with one.
+ *
+ * Built from the id, the modification time and the size the agent just measured. A weak tag would
+ * make every conditional range request fall back to a full download, which on a NAS is the case
+ * that matters most.
+ */
+function etagOf(entry: FileEntryRow, size: number): string {
+  return `"${entry.id}-${entry.updated_at.getTime().toString(36)}-${size.toString(36)}"`;
+}
+
+/**
+ * `bytes=a-b`, `bytes=a-` and `bytes=-n`, and nothing else.
+ *
+ * A multi-range request is answered as a full body rather than as `multipart/byteranges`: no
+ * browser needs it for a download, and a partial implementation of it is a source of
+ * misassembled files. Returning `null` means "send the whole thing", which is what RFC 9110
+ * permits for a range a server chooses not to honour.
+ */
+function parseRange(
+  header: string | undefined,
+  size: number,
+): { start: number; end: number } | 'unsatisfiable' | null {
+  if (header === undefined) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (match === null) return null;
+
+  const [, rawStart, rawEnd] = match;
+  if (rawStart === '' && rawEnd === '') return null;
+
+  if (rawStart === '') {
+    // A suffix range: the LAST n bytes. `bytes=-0` asks for nothing, which is unsatisfiable
+    // rather than an empty success — the difference matters because a client that gets 200 with
+    // no body will believe the file is empty.
+    const suffix = Number(rawEnd);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) return 'unsatisfiable';
+    const start = Math.max(0, size - suffix);
+    return size === 0 ? 'unsatisfiable' : { start, end: size - 1 };
+  }
+
+  const start = Number(rawStart);
+  if (!Number.isSafeInteger(start) || start < 0 || start >= size) return 'unsatisfiable';
+  // An absent end means "to the end of the file"; an end past it is CLAMPED rather than refused,
+  // which is what RFC 9110 §14.1.1 requires.
+  const end = rawEnd === '' ? size - 1 : Math.min(Number(rawEnd), size - 1);
+  if (!Number.isSafeInteger(end) || end < start) return 'unsatisfiable';
+  return { start, end };
 }
 
 function clampLimit(raw: string | undefined): number {
