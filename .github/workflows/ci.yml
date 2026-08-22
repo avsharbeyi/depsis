@@ -52,6 +52,22 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm lint
+
+      - name: The workflow files themselves
+        # actionlint implements GitHub's own workflow schema, which is stricter than YAML in ways
+        # that matter: a `runner.temp` in a job-level `env:` parses fine and makes GitHub reject
+        # the ENTIRE FILE before a single job starts.
+        #
+        # That is not hypothetical. Every push for a day produced a `startup_failure` of zero
+        # seconds and nobody saw it, because a workflow that cannot start also cannot report. The
+        # API even names such a workflow after its own path, having failed to read `name:`.
+        #
+        # This step cannot catch the fatal case — if ci.yml is invalid, this job never runs — so
+        # it is a backstop, not the guard. The guard is `pnpm lint:workflows` before pushing, and
+        # looking at the run afterwards.
+        uses: rhysd/actionlint@main
+        with:
+          fail-on-error: true
       - run: pnpm typecheck
 
       - name: OpenAPI types are in sync with the spec
@@ -159,6 +175,13 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v5
+
+      - name: Where the JSON report goes
+        # A step, because this is the first place a shell exists to expand `$RUNNER_TEMP`. The
+        # `runner` CONTEXT would work in a step-level `env:` too, but writing it once into
+        # $GITHUB_ENV keeps the two steps that read it from having to agree on a path.
+        run: echo "DEPSIS_E2E_JSON_REPORT=$RUNNER_TEMP/playwright-report.json" >> "$GITHUB_ENV"
+
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
@@ -405,7 +428,19 @@ jobs:
       # Outside the working tree. A JSON report written into the repository is an untracked file
       # that `pnpm format:check` then reports as unformatted — the same trap the migrations job's
       # vitest report fell into.
-      DEPSIS_E2E_JSON_REPORT: ${{ runner.temp }}/playwright-report.json
+      #
+      # `$RUNNER_TEMP`, not `${{ runner.temp }}`. The `runner` CONTEXT does not exist at job level
+      # — it is only populated once a runner has been assigned — and using it here does not fail
+      # the step, it makes GitHub reject THE WHOLE FILE before a single job starts. Measured:
+      # every push since this job was added produced a `startup_failure` of zero seconds, and the
+      # workflow's name in the API was its own path, which is what GitHub shows when it cannot
+      # parse the file far enough to read `name:`.
+      #
+      # It is not simply written as `$RUNNER_TEMP` here either: a job-level `env:` value is a
+      # literal string, so the variable would hold the eight characters `$RUNNER_TEMP` and
+      # Playwright would create a directory by that name in the working tree — the very thing
+      # this comment exists to prevent. It is exported by a step below instead, where a shell
+      # expands it.
       # No silent fallback to an agent-less stack. Without an agent this job used to run with
       # eighteen of its tests gating themselves out with test.fixme — every mutation on the file
       # manager, which is the screen the appliance exists for — behind a green tick. The stack

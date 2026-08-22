@@ -5,6 +5,7 @@ import {
   ConflictException,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   HttpCode,
   Logger,
@@ -19,6 +20,7 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { sortPermissions, type Permission } from '@depsis/authz';
 import type { OpenApi } from '@depsis/contracts';
 import type { Response } from 'express';
 import { randomUUID } from 'node:crypto';
@@ -44,7 +46,11 @@ import {
   NameTakenError,
   NameTakenOnDiskError,
   NotTrashedError,
+  permissionsOf,
+  SubtreeForbiddenError,
   TrashedParentError,
+  type Caller,
+  type FileEntryPage,
   type FileEntryRow,
 } from './files.service.js';
 
@@ -52,32 +58,6 @@ type Schemas = OpenApi.components['schemas'];
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
-
-/**
- * What a tenant member can do with an entry, until §6.2's grant walk exists.
- *
- * `permissions` became required on `FileEntry` when 0015 landed the teams-and-grants schema, but
- * the half that computes it — the per-page ancestor walk over `folder_grants` — is a later round.
- * Until then this is not a placeholder: it is the true answer. Every endpoint under `/files` today
- * admits any authenticated member of the tenant and narrows by RLS alone, so every row in a
- * caller's listing really does carry exactly these seven.
- *
- * The four that are missing — `share`, `manage`, `versions`, `audit` — are missing because this
- * server has no endpoint behind them. Claiming them would be worse than understating: the
- * contract's own reason for putting permissions on the row is so the UI does not draw a button the
- * server will refuse, and a `versions` here draws precisely that button.
- *
- * When the grant walk lands it replaces this constant, and the shape callers read does not change.
- */
-const MEMBER_PERMISSIONS: readonly Schemas['FolderPermission'][] = [
-  'list',
-  'read',
-  'download',
-  'create',
-  'modify',
-  'move',
-  'delete',
-];
 
 const createFolderSchema = z.object({
   parentId: z.string().uuid().nullish(),
@@ -107,6 +87,19 @@ const updateFileSchema = z
  * request (ADR-0015 §6). No route accepts an organisation id, a share name or a path — a caller
  * names an entry by its `id` and nothing else, because ADR-0005 forbids a path from ever being an
  * authorisation input.
+ *
+ * Every route also asks §6.2's question, and each asks it for the permission its own operation
+ * needs: reading a folder is `list`, fetching bytes is `download`, moving is `move` at the source
+ * AND `create` at the destination. Until this round the answer was "any member of the tenant, and
+ * RLS decides the rest", which meant a NAS on which a folder could not be opened to one team and
+ * closed to another — the most basic job of a multi-user appliance, missing.
+ *
+ * 404 AND 403 ARE BOTH USED, AND THE LINE BETWEEN THEM IS `list`. A caller who cannot `list` an
+ * entry does not see it in any listing, so telling them 403 on a direct request would hand back
+ * exactly the fact the listing withheld — that a row with this id exists. They get 404. A caller
+ * who CAN see the entry and is missing the permission for this particular operation gets 403,
+ * because they already know it exists and 404 would be a lie they could disprove by listing its
+ * folder. `requirePermission` is the one place that decision is made.
  */
 @Controller('files')
 @UseGuards(SessionGuard)
@@ -124,6 +117,20 @@ export class FilesController {
    * it is asked for, `parentId` is ignored rather than combined — a trashed folder's children keep
    * pointing at it, so "the trash under folder X" would list rows whose own parent is not in the
    * trash at all, which is not a set any user asked about.
+   *
+   * ROWS THE CALLER CANNOT `list` ARE NOT IN THE ANSWER. Not greyed out and not returned with an
+   * empty permission array: absent. A file name is information on its own — `Q3 layoffs.xlsx` in a
+   * folder somebody cannot open still says what it says — so hiding the row is the only version of
+   * this that means anything.
+   *
+   * The named `parentId` itself is refused with 404 when the caller cannot `list` it, which is the
+   * same answer the two checks below it already give for a parent in another share or in the bin.
+   * A caller whose only grant is on a deep subfolder therefore reaches it by its id and not by
+   * walking down from a root they cannot read, and the intermediate folders never appear.
+   *
+   * The ROOT listing takes no such check: there is no id in the request to conceal, and filtering
+   * its rows already reduces it to what the caller may see — for somebody with one deep grant,
+   * nothing.
    */
   @Get()
   async list(
@@ -133,13 +140,15 @@ export class FilesController {
     @Query('limit') limit?: string,
     @Query('trashed') trashed?: string,
   ): Promise<Schemas['FileEntryPage']> {
-    const session = requireSession(request);
+    const caller = requireSession(request);
     const after = cleanCursor(cursor);
     const share = await this.share(request);
 
     if (isTrue(trashed)) {
-      return toPage(
-        await this.files.listTrash(session.organizationId, share.id, after, clampLimit(limit)),
+      return this.visible(
+        caller,
+        share.id,
+        await this.files.listTrash(caller.organizationId, share.id, after, clampLimit(limit)),
       );
     }
 
@@ -147,13 +156,16 @@ export class FilesController {
     // empty page would tell the caller the folder exists.
     if (parentId !== undefined) {
       requireUuid(parentId);
-      const parent = await this.load(session.organizationId, parentId);
+      const parent = await this.load(caller.organizationId, parentId);
       if (parent.share_id !== share.id || parent.trashed_at !== null) throw new NotFoundException();
+      await this.permit(caller, share.id, parentId, 'list');
     }
 
-    return toPage(
+    return this.visible(
+      caller,
+      share.id,
       await this.files.list(
-        session.organizationId,
+        caller.organizationId,
         share.id,
         parentId ?? null,
         after,
@@ -192,10 +204,15 @@ export class FilesController {
     @Req() request: AuthenticatedRequest,
     @Body() body: unknown,
   ): Promise<Schemas['FileEntry']> {
-    const session = requireSession(request);
+    const caller = requireSession(request);
     const share = await this.share(request);
     const parsed = createFolderSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('parentId must be a uuid and name a string');
+
+    // `create` belongs to the DESTINATION, so it is asked of the parent and not of the new folder,
+    // which does not exist yet and could not carry a grant if it did.
+    const parentId = parsed.data.parentId ?? null;
+    await this.permit(caller, share.id, parentId, 'create');
 
     if (!this.files.agentAvailable()) {
       throw new ServiceUnavailableException(
@@ -205,15 +222,15 @@ export class FilesController {
 
     try {
       const row = await this.files.createFolder(
-        session.organizationId,
+        caller.organizationId,
         share,
-        parsed.data.parentId ?? null,
+        parentId,
         parsed.data.name,
-        session.userId,
+        caller.userId,
         randomUUID(),
         'POST /files/folders',
       );
-      return toEntry(row);
+      return toEntry(row, await this.files.effectiveAt(caller, share.id, row.id));
     } catch (error) {
       throw translate(error);
     }
@@ -224,10 +241,12 @@ export class FilesController {
     @Req() request: AuthenticatedRequest,
     @Param('id') id: string,
   ): Promise<Schemas['FileEntryDetail']> {
-    const session = requireSession(request);
+    const caller = requireSession(request);
     requireUuid(id);
-    const row = await this.load(session.organizationId, id);
-    return { ...toEntry(row), createdAt: row.created_at.toISOString() };
+    const share = await this.share(request);
+    const row = await this.load(caller.organizationId, id);
+    const effective = await this.permit(caller, share.id, id, 'list');
+    return { ...toEntry(row, effective), createdAt: row.created_at.toISOString() };
   }
 
   /**
@@ -252,6 +271,12 @@ export class FilesController {
    * the agent can be absent on a box whose storage is not set up, and the alternatives are a 500
    * — which says the server is broken when it is merely not ready — or a database-only move, which
    * is the divergence above. The document should gain it; see the notes with this change.
+   *
+   * A MOVE IS CHECKED AT BOTH ENDS, which §6.2 states outright and `canMove` in `packages/authz`
+   * exists so that no call site can express half of. `move` on the entry is permission to take it
+   * out of where it is; `create` in the destination is permission to put it there. Checking only
+   * the source would let anyone who may tidy their own folder drop a file into a folder they have
+   * never been given; checking only the destination would let them empty somebody else's.
    */
   @Patch(':id')
   async update(
@@ -259,7 +284,7 @@ export class FilesController {
     @Param('id') id: string,
     @Body() body: unknown,
   ): Promise<Schemas['FileEntry']> {
-    const session = requireSession(request);
+    const caller = requireSession(request);
     requireUuid(id);
     const parsed = updateFileSchema.safeParse(body);
     if (!parsed.success) {
@@ -270,6 +295,23 @@ export class FilesController {
 
     if (parsed.data.parentId !== undefined) {
       const share = await this.share(request);
+      const destinationId = parsed.data.parentId;
+      const move = await this.files.accessForMove(caller, share.id, id, destinationId);
+      // Invisible at either end is 404 at both, and the destination is the interesting half: a
+      // caller who may move their file but cannot see the folder they aimed it at must not learn
+      // from a 403 that the folder is there.
+      if (!move.source.has('list')) throw new NotFoundException();
+      if (destinationId !== null && !move.destination.has('list')) throw new NotFoundException();
+      if (!move.allowed) {
+        throw new ForbiddenException(
+          "a move needs 'move' where the entry is and 'create' where it is going",
+        );
+      }
+      // A move that also renames is still a rename, and `modify` is what a rename costs. Without
+      // this, `{parentId, name}` would be a way to rename an entry that `{name}` alone refuses.
+      if (name !== undefined && !move.source.has('modify')) {
+        throw new ForbiddenException("renaming needs 'modify'");
+      }
       // Checked before anything is read or written. A move that discovers the agent is gone
       // halfway through would already have answered the caller's question with a side effect.
       if (!this.files.agentAvailable()) {
@@ -278,17 +320,19 @@ export class FilesController {
         );
       }
       try {
-        return toEntry(
-          await this.files.move(
-            session.organizationId,
-            id,
-            share,
-            { parentId: parsed.data.parentId, ...(name === undefined ? {} : { name }) },
-            session.userId,
-            randomUUID(),
-            `PATCH /files/${id}`,
-          ),
+        const row = await this.files.move(
+          caller.organizationId,
+          id,
+          share,
+          { parentId: destinationId, ...(name === undefined ? {} : { name }) },
+          caller.userId,
+          randomUUID(),
+          `PATCH /files/${id}`,
         );
+        // Resolved AGAIN, at the new location: the entry has new ancestors, so the set it inherits
+        // is a different question from the one asked a moment ago. Returning the pre-move answer
+        // would tell the client it can still do things the destination does not allow.
+        return toEntry(row, await this.files.effectiveAt(caller, share.id, row.id));
       } catch (error) {
         throw translate(error);
       }
@@ -307,17 +351,21 @@ export class FilesController {
     // touches, so an unreachable one fails before anything has changed and `translate` turns it
     // into the same 503 by a shorter road.
     const share = await this.share(request);
+    const effective = await this.permit(caller, share.id, id, 'modify');
     try {
       return toEntry(
         await this.files.rename(
-          session.organizationId,
+          caller.organizationId,
           id,
           name,
           share,
-          session.userId,
+          caller.userId,
           randomUUID(),
           `PATCH /files/${id}`,
         ),
+        // A rename does not move the entry, so its ancestors — and therefore its permissions — are
+        // the ones just resolved.
+        effective,
       );
     } catch (error) {
       throw translate(error);
@@ -329,6 +377,12 @@ export class FilesController {
    *
    * 200 rather than 201: nothing is created, an existing row's `trashed_at` is cleared and the id
    * the caller already holds keeps working. Nest defaults `@Post` to 201, hence the explicit code.
+   *
+   * The permission is `create`, and it is asked of the FOLDER THE ENTRY GOES BACK INTO rather than
+   * of the entry. Restoring puts a name back into a directory, which is the same act `POST
+   * /files/folders` and a completed upload perform, and asking it of the entry instead would let
+   * somebody with rights over one deleted file re-populate a folder that has since been closed to
+   * them. `list` on the entry itself is still required, so a bin row the caller cannot see is 404.
    */
   @Post(':id/restore')
   @HttpCode(200)
@@ -336,10 +390,22 @@ export class FilesController {
     @Req() request: AuthenticatedRequest,
     @Param('id') id: string,
   ): Promise<Schemas['FileEntry']> {
-    const session = requireSession(request);
+    const caller = requireSession(request);
     requireUuid(id);
+    const share = await this.share(request);
+    const entry = await this.load(caller.organizationId, id);
+
+    // Both nodes in one walk: the entry, to decide whether it is visible at all, and its parent,
+    // which is where the restore actually lands.
+    const access = await this.files.accessFor(caller, share.id, [id, entry.parent_id]);
+    const effective = permissionsOf(access, id);
+    if (!effective.has('list')) throw new NotFoundException();
+    if (!permissionsOf(access, entry.parent_id).has('create')) {
+      throw new ForbiddenException("restoring needs 'create' in the folder it goes back into");
+    }
+
     try {
-      return toEntry(await this.files.restore(session.organizationId, id));
+      return toEntry(await this.files.restore(caller.organizationId, id), effective);
     } catch (error) {
       throw translate(error);
     }
@@ -358,10 +424,21 @@ export class FilesController {
     @Req() request: AuthenticatedRequest,
     @Param('id') id: string,
   ): Promise<Schemas['FileEntry']> {
-    const session = requireSession(request);
+    const caller = requireSession(request);
     requireUuid(id);
+    const share = await this.share(request);
+    const effective = await this.permit(caller, share.id, id, 'delete');
+    // AND on everything under it. Trashing a folder sets one flag on one row, but `list` filters on
+    // `trashed_at IS NULL`, so every descendant vanishes from every listing for everybody —
+    // including descendants somebody narrowed this caller out of with a grant of their own. One
+    // node's `delete` is not authority over a subtree, and the permanent delete below acts on the
+    // same set of rows with no undo.
+    await this.files.assertSubtreeAccess(caller, share.id, id, 'delete').catch((error: unknown) => {
+      throw translate(error);
+    });
     try {
-      return toEntry(await this.files.trash(session.organizationId, id, session.userId));
+      // Trashing changes a flag, not a parent, so the set resolved above is still the entry's.
+      return toEntry(await this.files.trash(caller.organizationId, id, caller.userId), effective);
     } catch (error) {
       throw translate(error);
     }
@@ -386,9 +463,21 @@ export class FilesController {
   @Delete(':id/permanent')
   @HttpCode(204)
   async purge(@Req() request: AuthenticatedRequest, @Param('id') id: string): Promise<void> {
-    const session = requireSession(request);
+    const caller = requireSession(request);
     requireUuid(id);
     const share = await this.share(request);
+    // The same permission the reversible delete asks for. A separate, stronger one would be a
+    // fourth §6.2 permission the contract does not have — and the trash is already the gate
+    // between a user and permanent loss, which is the protection this operation needs.
+    await this.permit(caller, share.id, id, 'delete');
+    // And on every descendant that carries a grant of its own, BEFORE the first `RemoveEntry`.
+    // `FilesService.purge` walks the subtree and unlinks the bytes node by node; a check on the
+    // named entry alone would let a caller who was deliberately narrowed out of one subfolder
+    // destroy it by trashing its parent and emptying the bin. That is the exact grant ADR-0021
+    // offers in place of a deny, and it is the one operation with no undo.
+    await this.files.assertSubtreeAccess(caller, share.id, id, 'delete').catch((error: unknown) => {
+      throw translate(error);
+    });
     // Before the walk, so that an absent agent costs no rows. The alternative — discovering it on
     // the first `RemoveEntry` — is the same answer to the caller with part of a tree deleted.
     if (!this.files.agentAvailable()) {
@@ -399,7 +488,7 @@ export class FilesController {
 
     try {
       await this.files.purge(
-        session.organizationId,
+        caller.organizationId,
         id,
         share,
         randomUUID(),
@@ -428,17 +517,22 @@ export class FilesController {
     @Headers('range') range?: string,
     @Headers('if-range') ifRange?: string,
   ): Promise<void> {
-    const session = requireSession(request);
+    const caller = requireSession(request);
     requireUuid(id);
-    const entry = await this.load(session.organizationId, id);
+    const entry = await this.load(caller.organizationId, id);
     if (entry.kind !== 'file' || entry.trashed_at !== null) throw new NotFoundException();
+
+    const share = await this.share(request);
+    // Before the agent is consulted, so that an unauthorised caller cannot use the 503 to learn
+    // whether the appliance's storage is up.
+    await this.permit(caller, share.id, id, 'download');
+
     if (!this.data.isAvailable()) {
       throw new ServiceUnavailableException('the system agent is not reachable');
     }
 
-    const share = await this.share(request);
     const components = await this.files
-      .componentsOf(session.organizationId, id)
+      .componentsOf(caller.organizationId, id)
       .catch((error: unknown) => {
         throw translate(error);
       });
@@ -501,6 +595,34 @@ export class FilesController {
     }
   }
 
+  /**
+   * Resolve §6.2 at one node and refuse unless `permission` is in the answer.
+   *
+   * Returns the whole effective set rather than nothing, because the handler that just checked one
+   * permission is usually the handler that has to report all of them on the row it is about to
+   * return — and resolving twice would mean a response whose `permissions` came from a different
+   * moment than the check that let the request through.
+   */
+  private async permit(
+    caller: Caller,
+    shareId: string,
+    node: string | null,
+    permission: Permission,
+  ): Promise<ReadonlySet<Permission>> {
+    const effective = await this.files.effectiveAt(caller, shareId, node);
+    requirePermission(effective, permission, node !== null);
+    return effective;
+  }
+
+  /** A page with the invisible rows removed and every survivor carrying its own permissions. */
+  private async visible(
+    caller: Caller,
+    shareId: string,
+    source: FileEntryPage,
+  ): Promise<Schemas['FileEntryPage']> {
+    return toPage(source, await this.files.effectiveForRows(caller, shareId, source.items));
+  }
+
   /** The tenant's share. One for now; see `FilesService.defaultShare`. */
   private async share(request: AuthenticatedRequest): Promise<{ id: string; name: string }> {
     const session = requireSession(request);
@@ -509,6 +631,31 @@ export class FilesController {
     } catch (error) {
       throw translate(error);
     }
+  }
+}
+
+/**
+ * The one place 404 and 403 are told apart.
+ *
+ * `list` is what makes an entry exist for a caller: a listing hides the rows they cannot list, so
+ * a direct request for one of them has to give the same answer the listing gave — nothing. A 403
+ * there would confirm the id, the folder it is in, and that somebody is keeping something from
+ * them, which is the whole of what hiding the row was for.
+ *
+ * Once they CAN list it, concealment is over and 403 is the honest answer: they can see the entry
+ * in its folder, so a 404 would be a lie they could disprove in one request, and "you may not
+ * download this" is something a person can act on where "it is not there" is not.
+ *
+ * `concealable` is false for the share root, which is named by no id and hidden from nobody.
+ */
+export function requirePermission(
+  effective: ReadonlySet<Permission>,
+  permission: Permission,
+  concealable: boolean,
+): void {
+  if (concealable && !effective.has('list')) throw new NotFoundException();
+  if (!effective.has(permission)) {
+    throw new ForbiddenException(`this needs '${permission}', which you do not have here`);
   }
 }
 
@@ -562,19 +709,37 @@ function parseRange(
 }
 
 /**
- * A service page as the contract's `FileEntryPage`.
+ * A service page as the contract's `FileEntryPage`, WITH THE ROWS THE CALLER MAY NOT LIST REMOVED.
  *
  * `nextCursor` is omitted rather than sent as null when there is no next page. `exactOptionalPropertyTypes`
  * forbids assigning `undefined` to an optional property, and the schema does not make the field
  * nullable — so a client that checks `'nextCursor' in page` gets the right answer.
+ *
+ * `nextCursor` and `hasMore` come from the UNFILTERED page and are deliberately left alone. They
+ * describe the query's progress through the folder, not the caller's view of it: recomputing the
+ * cursor from the surviving rows would make a page whose every row was hidden end the listing
+ * early and silently drop everything after it. The visible consequence is that a page can come
+ * back short, or empty, with `hasMore` true — the client keeps following the cursor, which is what
+ * cursor pagination is for.
+ *
+ * What that costs is one opaque id: the cursor names a row the caller may not see. It carries no
+ * name, kind or size, and fetching it answers 404 like any other invisible entry, so what leaks is
+ * "some row exists in this folder" — which the folder's own presence already implies. Removing
+ * even that would mean resolving permissions inside the SQL, and then ADR-0021's rule would live
+ * in two places written in two languages.
  */
-export function toPage(source: {
-  items: FileEntryRow[];
-  nextCursor: string | null;
-  hasMore: boolean;
-}): Schemas['FileEntryPage'] {
+export function toPage(
+  source: FileEntryPage,
+  permissions: ReadonlyMap<string, ReadonlySet<Permission>>,
+): Schemas['FileEntryPage'] {
+  const items: Schemas['FileEntry'][] = [];
+  for (const row of source.items) {
+    const effective = permissions.get(row.id) ?? new Set<Permission>();
+    if (!effective.has('list')) continue;
+    items.push(toEntry(row, effective));
+  }
   return {
-    items: source.items.map(toEntry),
+    items,
     ...(source.nextCursor === null ? {} : { nextCursor: source.nextCursor }),
     hasMore: source.hasMore,
   };
@@ -625,11 +790,15 @@ function clampLimit(raw: string | undefined): number {
   return Math.min(parsed, MAX_LIMIT);
 }
 
-export function toEntry(row: FileEntryRow): Schemas['FileEntry'] {
+export function toEntry(
+  row: FileEntryRow,
+  effective: ReadonlySet<Permission>,
+): Schemas['FileEntry'] {
   return {
-    // Copied, not shared: the constant is this module's, and handing callers a reference to it
-    // makes one mutation anywhere rewrite every future response.
-    permissions: [...MEMBER_PERMISSIONS],
+    // Canonically ordered rather than in whatever order the grants happened to be visited in. Two
+    // requests that agree on the answer have to agree on the array as well: clients diff these,
+    // and a set that reshuffles itself between two identical requests looks like a change.
+    permissions: [...sortPermissions(effective)],
     id: row.id,
     parentId: row.parent_id,
     name: row.name,
@@ -644,13 +813,22 @@ export function toEntry(row: FileEntryRow): Schemas['FileEntry'] {
   };
 }
 
-export function requireSession(request: AuthenticatedRequest): {
-  organizationId: string;
-  userId: string;
-} {
+/**
+ * The session as the grant walk needs it.
+ *
+ * The role is read here and nowhere else, and it is carried as a plain boolean rather than as the
+ * role string so that no call site can invent a second meaning for `admin`. ADR-0021 §5 gives the
+ * organisation administrator everything; that is §6.1's hierarchy and not a shortcut, and there is
+ * no other exception for anyone.
+ */
+export function requireSession(request: AuthenticatedRequest): Caller {
   const session = request.depsis;
   if (session === undefined) throw new UnauthorizedException();
-  return { organizationId: session.organizationId, userId: session.userId };
+  return {
+    organizationId: session.organizationId,
+    userId: session.userId,
+    isOrganizationAdmin: session.role === 'admin',
+  };
 }
 
 /**
@@ -683,6 +861,10 @@ export function translate(error: unknown): Error {
     return new ConflictException(logged(error.message, error.agentReason));
   }
   if (error instanceof TrashedParentError) return new ConflictException(error.message);
+  // 403 and not 404: the caller can see the entry they named — they hold `delete` on it, which is
+  // what got them this far — so concealment is already over. The message counts the folders and
+  // does not name them, because naming them would be the leak the narrowing existed to prevent.
+  if (error instanceof SubtreeForbiddenError) return new ForbiddenException(error.message);
   if (error instanceof InvalidNameError) return new BadRequestException(error.message);
   // The session names an account that is not there any more — deleted between sign-in and this
   // request. 401 rather than 500: there is nothing wrong with the server and nothing the caller

@@ -37,4 +37,24 @@ export {
   type JobStatus,
 } from './jobs/jobs.service.js';
 
+export { PosixIdentityModule } from './identity/posix.module.js';
+export { PosixIdentityService } from './identity/posix.service.js';
+
+/**
+ * §6.2's POSIX side. `permissions.apply` is enqueued by the API and executed by the worker, and
+ * the walk it needs — ADR-0021's inheritance rule over `file_entries` and `folder_grants` — lives
+ * here because a copy in the worker would be a second implementation of the permission model.
+ */
+export { AclApplyModule } from './permissions/apply-acl.module.js';
+export { AclApplyService, type ApplyAclPayload } from './permissions/apply-acl.service.js';
+export { APPLY_ACL_KIND } from './permissions/permissions.service.js';
+
 export { loadConfig, type AppConfig } from './config.js';
+
+/**
+ * The environment as an injectable value, and the worker needs it as a MODULE and not only as a
+ * function. `DbModule`'s factory injects `APP_CONFIG`, so a process that imports `DbModule` without
+ * this one cannot construct `DbService` at all — the worker could not boot, and `loadConfig` being
+ * exported here made it look as though it could.
+ */
+export { ConfigModule, APP_CONFIG } from './config.module.js';

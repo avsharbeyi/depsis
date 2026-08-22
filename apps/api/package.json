@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@depsis/agent-protocol": "workspace:*",
+    "@depsis/authz": "workspace:*",
     "@depsis/contracts": "workspace:*",
     "@nestjs/common": "11.2.1",
     "@nestjs/core": "11.2.1",

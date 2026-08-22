@@ -1,8 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
+import {
+  canMove,
+  isPermission,
+  PERMISSIONS,
+  resolveEffective,
+  type AclNode,
+  type Grant,
+  type Permission,
+  type Principal,
+  type ResolveInput,
+  type Subject,
+} from '@depsis/authz';
 
 import { AgentService, expectStatus } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
+import { LEGACY_OPEN_SHARE } from '../permissions/legacy-open-share.js';
 
 /**
  * A row in `file_entries`, as the database returns it.
@@ -245,6 +258,26 @@ export class DirectoryNotEmptyError extends Error {
  * restored row appears in no folder listing and in no trash listing either. It exists, it is
  * reachable by id, and no screen in the product can show it. Refusing beats manufacturing that.
  */
+/**
+ * The operation reaches descendants the caller does not hold the permission on.
+ *
+ * The COUNT and never the names. ADR-0021's only way to say "less here" is a narrower grant on a
+ * descendant, so a refusal like this one is, by construction, about folders somebody deliberately
+ * hid — and a refusal that listed them would hand over exactly what the narrowing was for.
+ */
+export class SubtreeForbiddenError extends Error {
+  constructor(
+    readonly permission: Permission,
+    readonly count: number,
+  ) {
+    super(
+      `this reaches ${count} folder${count === 1 ? '' : 's'} inside it that you do not have ` +
+        `'${permission}' on`,
+    );
+    this.name = 'SubtreeForbiddenError';
+  }
+}
+
 export class TrashedParentError extends Error {
   constructor(readonly parentName: string) {
     super(`'${parentName}' is still in the trash; restore it first`);
@@ -383,6 +416,140 @@ export function assertValidName(name: string): void {
   if (name === '.depsis') throw new InvalidNameError("'.depsis' is reserved");
 }
 
+/* ─── §6.2 access control ──────────────────────────────────────────────────────────────────── */
+
+/**
+ * Who is asking, as far as the grant walk is concerned.
+ *
+ * `isOrganizationAdmin` is a fact about the SESSION and not about the tree, which is why
+ * `@depsis/authz` deliberately has no room for it in `Subject` and this layer carries it instead.
+ * ADR-0021 §5: an organisation administrator reaches everything, and nobody else has an exception.
+ */
+export interface Caller {
+  readonly organizationId: string;
+  readonly userId: string;
+  readonly isOrganizationAdmin: boolean;
+}
+
+/**
+ * One resolvable chain per node asked about. `null` is the share root; an absent key means the
+ * node could not be placed in this share's tree at all.
+ */
+export type AccessMap = ReadonlyMap<string | null, ResolveInput>;
+
+/**
+ * The key the share root's grants are filed under inside `accessFor`.
+ *
+ * A `Map<string, …>` cannot hold the `null` that `folder_grants.entry_id` uses for the root, and
+ * every other key in that map comes from `entry_id::text` — a UUID. This is not one, so it cannot
+ * collide with an entry however the ids fall.
+ */
+const ROOT = 'share-root';
+
+interface GrantRow {
+  entry_id: string | null;
+  user_id: string | null;
+  team_id: string | null;
+  permissions: string[];
+}
+
+/** A grant row's target. `folder_grants_one_principal` makes exactly one of the two columns set. */
+function principalOf(row: GrantRow): Principal | null {
+  if (row.user_id !== null) return { kind: 'user', id: row.user_id };
+  if (row.team_id !== null) return { kind: 'team', id: row.team_id };
+  return null;
+}
+
+/**
+ * The grants this caller carries at a node over and above the rows in the database.
+ *
+ * Both exceptions are expressed as grants rather than as short circuits so that ADR-0021's rule
+ * stays the only rule: one resolver decides every question, and `canMove` keeps working for an
+ * administrator without a second code path that could disagree with the first.
+ *
+ * The administrator's synthetic grant is attached to the TARGET node, not to the root. Nearest
+ * ancestor wins per principal, so a root grant would lose to any narrower row written for that
+ * same account further down — and an administrator who had also been given a narrow grant on a
+ * subfolder would find §6.1's hierarchy quietly cancelled by it. It is also placed BEFORE the real
+ * rows in the node's list, because two grants for one principal on one node cannot both apply and
+ * `resolve` takes the first: the database's uniqueness makes that impossible for real rows, and
+ * this is the one place a second one is manufactured.
+ *
+ * The legacy grant is attached to the ROOT, because it stands in for the share-wide default that a
+ * migration would have written there. It exists only while `governed` is false — that is, while
+ * the share has no grant rows at all — so there is never anything below it to lose to.
+ */
+function syntheticGrants(
+  caller: Caller,
+  governed: boolean,
+  isTarget: boolean,
+  isRoot: boolean,
+): Grant[] {
+  const principal: Principal = { kind: 'user', id: caller.userId };
+  if (caller.isOrganizationAdmin) return isTarget ? [{ principal, permissions: PERMISSIONS }] : [];
+  if (governed) return [];
+  return isRoot ? [{ principal, permissions: LEGACY_OPEN_SHARE }] : [];
+}
+
+/**
+ * The chain from the share root down to `target`, root first, as `resolve` requires it.
+ *
+ * Built from `parent_id` alone. The share root is synthesised — it has no `file_entries` row — and
+ * every top-level entry is re-pointed at it, which is what makes a grant with `entry_id IS NULL`
+ * an ordinary ancestor instead of a second inheritance rule.
+ *
+ * `null` when a link is missing: the target is in another share, or a row disappeared between the
+ * two statements. Not an empty chain and not a chain starting halfway down — `resolve` would
+ * happily answer a question about a different tree, and answering the wrong permission question
+ * confidently is the failure this whole file exists to avoid.
+ */
+function chainTo(
+  target: string | null,
+  shareId: string,
+  parentOf: ReadonlyMap<string, string | null>,
+  granted: ReadonlyMap<string, Grant[]>,
+  caller: Caller,
+  governed: boolean,
+): AclNode[] | null {
+  const root: AclNode = {
+    id: shareId,
+    parentId: null,
+    grants: [
+      ...syntheticGrants(caller, governed, target === null, true),
+      ...(granted.get(ROOT) ?? []),
+    ],
+  };
+  if (target === null) return [root];
+
+  const descending: AclNode[] = [];
+  let cursor: string | null = target;
+  // Bounded by the number of nodes the walk returned. `file_entries` cannot hold a cycle —
+  // `MoveIntoDescendantError` is what stops one being made — but a loop that trusts that would
+  // hang the request rather than fail it if the guarantee ever slipped.
+  for (let step = 0; cursor !== null && step <= parentOf.size; step += 1) {
+    const parentId: string | null | undefined = parentOf.get(cursor);
+    if (parentId === undefined) return null;
+    descending.push({
+      id: cursor,
+      parentId: parentId ?? shareId,
+      grants: [
+        ...syntheticGrants(caller, governed, cursor === target, false),
+        ...(granted.get(cursor) ?? []),
+      ],
+    });
+    cursor = parentId;
+  }
+  if (cursor !== null) return null;
+
+  return [root, ...descending.reverse()];
+}
+
+/** One node's effective set, with an absent chain reading as "nothing". */
+export function permissionsOf(access: AccessMap, node: string | null): ReadonlySet<Permission> {
+  const input = access.get(node);
+  return input === undefined ? new Set<Permission>() : resolveEffective(input);
+}
+
 /**
  * Everything the file tree does, apart from moving bytes.
  *
@@ -494,6 +661,229 @@ export class FilesService {
     const row = rows[0];
     if (!row) throw new EntryNotFoundError();
     return row;
+  }
+
+  /**
+   * What `caller` may do at each of `nodes`, as resolvable inputs rather than as answers.
+   *
+   * ONE ancestor walk for the whole call, which is what the contract promises for `FileEntry.
+   * permissions`: the rows of a page share their ancestors, so the recursive term below dedupes
+   * (`UNION`, not `UNION ALL`) and a hundred siblings cost one walk plus one grant lookup. A
+   * per-row query here would be the N+1 the contract names and refuses.
+   *
+   * `null` names the SHARE ROOT — the node `folder_grants.entry_id IS NULL` attaches to, and the
+   * node a top-level entry inherits from. It is a real node in ADR-0021's tree and not a special
+   * case, which is why it is a key here like any other.
+   *
+   * Returns `ResolveInput`s and not sets, because a move has to be judged with `canMove` over both
+   * sides at once, and because the resolver in `@depsis/authz` is the ONLY place ADR-0021's rule is
+   * written down. A node with no chain — another share's entry, or one that vanished between two
+   * queries — is ABSENT from the map rather than present with an empty set: "I could not place this
+   * node in the tree" and "the tree grants you nothing here" are different facts, and `access()`
+   * turns both into the same refusal at the point where refusing is the right answer.
+   */
+  async accessFor(
+    caller: Caller,
+    shareId: string,
+    nodes: readonly (string | null)[],
+  ): Promise<AccessMap> {
+    const targets = [...new Set(nodes.filter((node): node is string => node !== null))];
+    const wantsRoot = nodes.some((node) => node === null);
+
+    return this.db.withTenant(caller.organizationId, async (db) => {
+      const subject: Subject = {
+        userId: caller.userId,
+        teamIds: (
+          await db.query<{ team_id: string }>(
+            `SELECT team_id::text AS team_id
+               FROM public.team_members
+              WHERE organization_id = $1 AND user_id = $2`,
+            [caller.organizationId, caller.userId],
+          )
+        ).map((row) => row.team_id),
+      };
+
+      // The whole share's grant count, asked as an existence test. See `LEGACY_OPEN_SHARE`.
+      const governed =
+        (
+          await db.query<{ one: number }>(
+            `SELECT 1 AS one
+               FROM public.folder_grants
+              WHERE organization_id = $1 AND share_id = $2
+              LIMIT 1`,
+            [caller.organizationId, shareId],
+          )
+        ).length > 0;
+
+      // Every ancestor of every target, in one statement, from `parent_id` and never from `path`
+      // (ADR-0005). Bounded to the share so that a target in another one produces no chain at all
+      // rather than a chain rooted at the wrong share.
+      const rows =
+        targets.length === 0
+          ? []
+          : await db.query<{ id: string; parent_id: string | null }>(
+              `WITH RECURSIVE ancestry AS (
+                 SELECT id, parent_id
+                   FROM public.file_entries
+                  WHERE organization_id = $1 AND share_id = $2 AND id = ANY($3::uuid[])
+                 UNION
+                 SELECT parent.id, parent.parent_id
+                   FROM public.file_entries parent
+                   JOIN ancestry ON parent.id = ancestry.parent_id
+                  WHERE parent.organization_id = $1 AND parent.share_id = $2
+               )
+               SELECT id::text AS id, parent_id::text AS parent_id FROM ancestry`,
+              [caller.organizationId, shareId, targets],
+            );
+
+      const parentOf = new Map<string, string | null>(rows.map((row) => [row.id, row.parent_id]));
+
+      // Only the caller's OWN grants. Reading every principal's rows would be a bigger result for
+      // no gain here — who else can reach a folder is a separate question, behind `manage`.
+      const grantRows = governed
+        ? await db.query<GrantRow>(
+            // `permissions::text[]`: node-postgres has no parser for a custom enum's array type
+            // and hands back the raw `{list,read}` literal, which every consumer would then have
+            // to unpick. The cast makes it an ordinary text array the driver already knows.
+            `SELECT entry_id::text AS entry_id,
+                    user_id::text  AS user_id,
+                    team_id::text  AS team_id,
+                    permissions::text[] AS permissions
+               FROM public.folder_grants
+              WHERE organization_id = $1
+                AND share_id = $2
+                AND (entry_id IS NULL OR entry_id = ANY($3::uuid[]))
+                AND (user_id = $4 OR team_id = ANY($5::uuid[]))`,
+            [caller.organizationId, shareId, [...parentOf.keys()], caller.userId, subject.teamIds],
+          )
+        : [];
+
+      const granted = new Map<string, Grant[]>();
+      for (const row of grantRows) {
+        const principal = principalOf(row);
+        if (principal === null) continue;
+        const permissions = row.permissions.filter(isPermission);
+        if (permissions.length === 0) continue;
+        const key = row.entry_id ?? ROOT;
+        const existing = granted.get(key);
+        if (existing === undefined) granted.set(key, [{ principal, permissions }]);
+        else existing.push({ principal, permissions });
+      }
+
+      const access = new Map<string | null, ResolveInput>();
+      const build = (target: string | null): void => {
+        const chain = chainTo(target, shareId, parentOf, granted, caller, governed);
+        if (chain !== null) access.set(target, { chain, subject });
+      };
+      if (wantsRoot) build(null);
+      for (const target of targets) build(target);
+      return access;
+    });
+  }
+
+  /** One node, as an answer. The set is empty when the node has no chain in this share. */
+  async effectiveAt(
+    caller: Caller,
+    shareId: string,
+    node: string | null,
+  ): Promise<ReadonlySet<Permission>> {
+    return permissionsOf(await this.accessFor(caller, shareId, [node]), node);
+  }
+
+  /**
+   * Both ends of a move, in ONE call.
+   *
+   * §6.2 requires rights on the source AND the destination, and `canMove` exists so that no call
+   * site can express half of it. Resolving both here — rather than handing the caller two sets to
+   * combine — keeps the two ends inside the same ancestor walk and the same transaction, so a
+   * grant written between them cannot make the pair agree on a tree that never existed.
+   *
+   * The two sets come back as well as the verdict, because the CALLER decides between 404 and 403
+   * and needs `list` on each end to do it.
+   */
+  async accessForMove(
+    caller: Caller,
+    shareId: string,
+    entryId: string,
+    destination: string | null,
+  ): Promise<{
+    allowed: boolean;
+    source: ReadonlySet<Permission>;
+    destination: ReadonlySet<Permission>;
+  }> {
+    const access = await this.accessFor(caller, shareId, [entryId, destination]);
+    const from = access.get(entryId);
+    const to = access.get(destination);
+    return {
+      allowed: from !== undefined && to !== undefined && canMove(from, to),
+      source: permissionsOf(access, entryId),
+      destination: permissionsOf(access, destination),
+    };
+  }
+
+  /**
+   * Refuse unless the caller holds `permission` on `rootId` AND on everything under it.
+   *
+   * WHY THIS EXISTS: trashing and permanently deleting a folder act on a whole subtree after one
+   * authorization call on the named entry. Under ADR-0021 a descendant can carry a NARROWER grant —
+   * that is the only way the model can say "less here", since there is no deny — so a caller with
+   * `delete` at the top could reach folders whose own row says they may not delete them. For the
+   * permanent delete that is irreversible: the agent unlinks the bytes and the rows go.
+   *
+   * WHY IT DOES NOT RESOLVE EVERY DESCENDANT, and why that is exact rather than a shortcut: under
+   * nearest-ancestor-per-principal, a node's effective set is decided by the nearest node at or
+   * above it that carries a grant for one of the caller's principals. Every descendant with no
+   * grant-carrying node between it and `rootId` therefore resolves to exactly what `rootId`
+   * resolves to. So the distinct answers in the subtree are `rootId`'s plus one per descendant that
+   * carries a grant row — and those are the only nodes worth asking about. A share with ten grant
+   * rows costs eleven, not ten thousand.
+   *
+   * Grant rows for OTHER principals are included too. They cost nothing to resolve and filtering
+   * them out here would mean re-implementing the matching rule that `packages/authz` owns.
+   */
+  async assertSubtreeAccess(
+    caller: Caller,
+    shareId: string,
+    rootId: string,
+    permission: Permission,
+  ): Promise<void> {
+    const carriers = await this.db.withTenant(caller.organizationId, (db) =>
+      db.query<{ id: string }>(
+        // Trashed rows are NOT filtered: a permanent delete acts on the bin, and a trashed folder
+        // still carries whatever grant narrowed it.
+        `WITH RECURSIVE tree AS (
+           SELECT id FROM public.file_entries
+            WHERE organization_id = $1 AND share_id = $2 AND id = $3
+           UNION ALL
+           SELECT child.id
+             FROM public.file_entries child
+             JOIN tree ON child.parent_id = tree.id
+            WHERE child.organization_id = $1
+         )
+         SELECT DISTINCT g.entry_id::text AS id
+           FROM public.folder_grants g
+           JOIN tree ON tree.id = g.entry_id
+          WHERE g.organization_id = $1 AND g.share_id = $2 AND g.entry_id <> $3`,
+        [caller.organizationId, shareId, rootId],
+      ),
+    );
+    if (carriers.length === 0) return;
+
+    const ids = carriers.map((row) => row.id);
+    const access = await this.accessFor(caller, shareId, ids);
+    const refused = ids.filter((id) => !permissionsOf(access, id).has(permission)).length;
+    if (refused > 0) throw new SubtreeForbiddenError(permission, refused);
+  }
+
+  /** A page of rows, each with its own set, from one walk. Keyed by entry id. */
+  async effectiveForRows(
+    caller: Caller,
+    shareId: string,
+    rows: readonly FileEntryRow[],
+  ): Promise<ReadonlyMap<string, ReadonlySet<Permission>>> {
+    const ids = rows.map((row) => row.id);
+    const access = await this.accessFor(caller, shareId, ids);
+    return new Map(ids.map((id) => [id, permissionsOf(access, id)]));
   }
 
   /**

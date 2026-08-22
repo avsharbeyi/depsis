@@ -112,9 +112,32 @@ imzalı apt deposundan kurar.
   `FileEntry.permissions` bugün herkese aynı yedi izni döndürüyor; bu bir yer tutucu değil,
   bugünün doğru cevabı — her `/files` ucu kiracının her üyesini kabul ediyor ve yalnız RLS
   daraltıyor.
-- Tarayıcı (e2e) testleri. CI'da `echo` yapan bir iş olarak duruyor.
+- Ajanlı bir yığında e2e. Paket gerçek (46 test, desktop + mobile-360, `pnpm test:e2e`) ama
+  `tools/dev/e2e-stack.sh` ayrıcalıklı ajanı başlatmıyor, o yüzden bayt taşıyan 18 test kendini
+  kapatıyor. Bir etikete değil, klasör isteğinin gerçek durum koduna bakan bir probla kapılılar —
+  ajanı olan bir cihazda kendiliğinden açılıyorlar.
 - Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`
   yalnız DEPSIS'in kendi aldıklarını gösterir ve yanıtta `complete: false` ile bunu söyler.
+
+## CI dosyasını değiştirdiysen
+
+```bash
+pnpm lint:workflows
+```
+
+`actionlint` gerekiyor (`winget install rhysd.actionlint`, ya da dağıtımın paketi).
+
+Bu adım isteğe bağlı görünüyor ve değil. GitHub'ın workflow şeması YAML'dan katı: iş düzeyindeki
+bir `env:` içinde `${{ runner.temp }}` sorunsuz ayrıştırılır ve GitHub **bütün dosyayı** reddeder.
+Reddedilen bir workflow hiç başlamaz, hiç başlamayan bir workflow rapor da veremez — bu depoda
+bir gün boyunca her push sıfır saniyelik `startup_failure` üretti ve kimse görmedi.
+
+Belirtisi şu: `gh run list` çıktısında süre `0s` ve durum `startup_failure`, ve
+`gh api .../actions/workflows` çıktısında workflow'un adı yerine kendi yolu görünüyor — GitHub
+`name:` alanını okuyacak kadar bile ayrıştıramadığı için.
+
+CI'ın kendi içinde de bir actionlint adımı var ama o yalnızca ölümcül olmayan sınıfı yakalar:
+dosya geçersizse o adım da çalışmaz.
 
 ## Depo düzeni
 

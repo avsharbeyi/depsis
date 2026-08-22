@@ -15,10 +15,12 @@ import { PosixIdentityModule } from './identity/posix.module.js';
 import { JobsModule } from './jobs/jobs.module.js';
 import { MeModule } from './me/me.module.js';
 import { OrganizationsModule } from './organizations/organizations.module.js';
+import { PermissionsModule } from './permissions/permissions.module.js';
 import { RemoteModule } from './remote/remote.module.js';
 import { SetupModule } from './setup/setup.module.js';
 import { SharesModule } from './shares/shares.module.js';
 import { SystemModule } from './system/system.module.js';
+import { TeamsModule } from './teams/teams.module.js';
 import { UsersModule } from './users/users.module.js';
 
 @Module({
@@ -36,10 +38,12 @@ import { UsersModule } from './users/users.module.js';
     PosixIdentityModule,
     MeModule,
     OrganizationsModule,
+    PermissionsModule,
     RemoteModule,
     SetupModule,
     SharesModule,
     SystemModule,
+    TeamsModule,
     UsersModule,
   ],
   // Global, so a controller added next month is covered without anyone remembering. The

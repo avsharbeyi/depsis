@@ -77,59 +77,14 @@ const DESCRIBED_BUT_NOT_SERVED: ReadonlyMap<string, string> = new Map([
     'subtree copy; the privileged agent has no matching typed operation yet',
   ],
 
-  // ─── §6.2: teams and folder permissions ─────────────────────────────────────────────────────
+  // ─── §6.2: folder permissions ─────────────────────────────────────────────
   //
-  // The schema half of §6.2 landed first, on purpose: migration 0015 says so in its own header —
-  // the tables hold the "DEPSIS is the authority" side of ADR-0004, and the side that writes real
-  // POSIX ACLs is the privileged agent's work and a separate round. The API sits between those two
-  // halves and cannot be built against only the first: an endpoint that grants a team `modify` and
-  // writes a row, while the kernel on the ZFS dataset still refuses that team, is the two
-  // realities this project forbids — and it is worse here than elsewhere, because the reality the
-  // web layer would be inventing is a permission.
-  //
-  // So these eleven stay described and unserved until the agent can set an ACL. The contract is
-  // ahead deliberately; the generated client will carry methods that 404 until then.
-  [
-    'GET /teams',
-    'teams read back the rows 0015 created; served once the agent can reflect a team as a POSIX group',
-  ],
-  [
-    'POST /teams',
-    'creating a team must allocate the posix_gid the agent owns; 0015 leaves the column nullable for exactly this gap',
-  ],
-  [
-    'PATCH /teams/{id}',
-    'renaming a team is also a group rename on the appliance; both halves land together',
-  ],
-  [
-    'DELETE /teams/{id}',
-    'deleting a team must remove its POSIX group and every ACL entry naming it, or the grant outlives the row',
-  ],
-  ['GET /teams/{id}/members', 'membership is the group roster; served with the rest of §6.2'],
-  [
-    'PUT /teams/{id}/members',
-    'adding a member is a supplementary-group change on the appliance, which is the agent’s to make',
-  ],
-  [
-    'DELETE /teams/{id}/members/{userId}',
-    'removing a member must revoke filesystem access, not merely the row that describes it',
-  ],
-  [
-    'GET /files/{id}/permissions',
-    'reading a folder grant is cheap, but shipping the read alone invites a UI that shows permissions nothing enforces',
-  ],
-  [
-    'PUT /files/{id}/permissions',
-    'setting a folder grant is a POSIX ACL write; ADR-0004 makes the ACL the substrate, not a mirror of the row',
-  ],
-  [
-    'GET /shares/{id}/permissions',
-    'a share root’s grant is the same walk as a folder’s, and waits on the same agent operation',
-  ],
-  [
-    'PUT /shares/{id}/permissions',
-    'the share root is where an ACL is inherited from; writing it before the agent can is the widest version of the mistake',
-  ],
+  // Nothing is left here. The team endpoints went first, and the four permission ones followed
+  // once the grant walk, the dry-run and the queued POSIX re-application existed — which was the
+  // condition this section stated: the write is served only where a row and the kernel can be made
+  // to say the same thing. They do not say it at the same INSTANT, and the contract is explicit
+  // about that: `PermissionWriteResult.applyingJobId` names the job that rewrites the ACLs, and is
+  // null when the agent is unreachable, so the gap is reported rather than hidden.
 ]);
 
 /**

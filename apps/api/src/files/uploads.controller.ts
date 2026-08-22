@@ -23,7 +23,7 @@ import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.j
 import { DbService } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import { assertValidName, FilesService } from './files.service.js';
-import { requireSession, translate } from './files.controller.js';
+import { requirePermission, requireSession, requireUuid, translate } from './files.controller.js';
 
 interface SessionRow {
   id: string;
@@ -86,6 +86,12 @@ export class UploadsController {
     }
 
     const parentId = metadata.get('parentId') ?? null;
+    // The tus metadata header is caller-supplied text, so this id gets the same treatment every
+    // path parameter gets. Without it a `parentId` that is not a uuid reaches `id = $2` against a
+    // `uuid` column, comes back as SQLSTATE 22P02 that nothing maps, and surfaces as a 500 — an
+    // answer that also distinguishes a malformed id from a well-formed one naming another tenant's
+    // folder, which is the distinction RLS exists to erase.
+    if (parentId !== null) requireUuid(parentId);
     const share = await this.shareFor(session.organizationId);
     if (parentId !== null) {
       const parent = await this.files.find(session.organizationId, parentId).catch((e: unknown) => {
@@ -93,6 +99,17 @@ export class UploadsController {
       });
       if (parent.kind !== 'folder' || parent.trashed_at !== null) throw new NotFoundException();
     }
+
+    // §6.2 is checked HERE and not on each chunk. This is where the destination is chosen and
+    // where nothing has been transferred yet, so a refusal costs the client one request; a check
+    // on the final PATCH would kill an upload after its last byte had already crossed the wire.
+    // What that trades away is the case of a grant revoked mid-upload, which lands the file and
+    // leaves it to be removed afterwards — the same window every long-running write has.
+    requirePermission(
+      await this.files.effectiveAt(session, share.id, parentId),
+      'create',
+      parentId !== null,
+    );
 
     // The staging name comes from a fresh uuid, not from the filename. Two people uploading
     // `report.pdf` into different folders share one staging directory, and a name collision there
@@ -123,7 +140,7 @@ export class UploadsController {
     @Param('uploadId') uploadId: string,
   ): Promise<void> {
     const session = requireSession(request);
-    const upload = await this.loadSession(session.organizationId, uploadId);
+    const upload = await this.loadSession(session.organizationId, session.userId, uploadId);
     response.setHeader('Upload-Offset', upload.offset_bytes);
     response.setHeader('Upload-Length', upload.length_bytes);
     // tus requires this on every response, and a client that does not see it falls back to a
@@ -142,7 +159,7 @@ export class UploadsController {
   ): Promise<void> {
     const session = requireSession(request);
     this.requireAgent();
-    const upload = await this.loadSession(session.organizationId, uploadId);
+    const upload = await this.loadSession(session.organizationId, session.userId, uploadId);
     if (upload.file_id !== null) throw new ConflictException('this upload is already complete');
 
     const offset = Number.parseInt(uploadOffset ?? '', 10);
@@ -290,14 +307,36 @@ export class UploadsController {
     );
   }
 
-  private async loadSession(organizationId: string, id: string): Promise<SessionRow> {
-    if (!/^[0-9a-f-]{36}$/i.test(id)) throw new NotFoundException();
+  /**
+   * One upload session, belonging to THIS caller.
+   *
+   * `created_by` is in the predicate, and that is the authorization for both routes that take an
+   * upload id. §6.2 is resolved once, at POST, against the folder the session names — a trade the
+   * comment on `create` explains — and that trade only holds if the account driving the chunks is
+   * the account the check was made for. Without this clause any member of the tenant holding an
+   * upload id could finish somebody else's transfer: `sendChunk` publishes into `upload.parent_id`,
+   * a folder they may have no `create` on, and stamps the file with THEIR posix uid. The ids are
+   * uuidv7 and not guessable, but `GET /transfers` hands an organisation administrator every
+   * session in the tenant, so "unguessable" was never the whole answer.
+   *
+   * A session belonging to someone else is therefore 404 rather than 403 — the same answer as one
+   * that does not exist, because an upload id is not something one member should be able to
+   * confirm about another.
+   */
+  private async loadSession(
+    organizationId: string,
+    userId: string,
+    id: string,
+  ): Promise<SessionRow> {
+    // The same validator every other id path uses, rather than a hand-rolled shape test. The old
+    // one accepted thirty-six hyphens and passed them to the same `uuid` cast.
+    requireUuid(id);
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<SessionRow>(
         `SELECT id, share_id, parent_id, filename, staging_name, length_bytes, offset_bytes, file_id
            FROM public.upload_sessions
-          WHERE organization_id = $1 AND id = $2`,
-        [organizationId, id],
+          WHERE organization_id = $1 AND id = $2 AND created_by = $3`,
+        [organizationId, id, userId],
       ),
     );
     const row = rows[0];

@@ -10,7 +10,14 @@ import {
 import type { OpenApi } from '@depsis/contracts';
 
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
-import { cleanCursor, requireSession, requireUuid, toPage, translate } from './files.controller.js';
+import {
+  cleanCursor,
+  requirePermission,
+  requireSession,
+  requireUuid,
+  toPage,
+  translate,
+} from './files.controller.js';
 import { FilesService } from './files.service.js';
 
 type Schemas = OpenApi.components['schemas'];
@@ -47,6 +54,11 @@ export class SearchController {
    * every name in the share would be an expensive way to answer a question nobody asked; the
    * check runs after trimming, because a query of three spaces is empty in every sense that
    * matters and `depsis_norm` does not trim.
+   *
+   * §6.2 applies here exactly as it does to a listing, and search is the place where forgetting it
+   * would hurt most: a name search reaches the whole share at once, so a result set that ignored
+   * grants would be a way to read the name of every file on the appliance in one request. The rows
+   * go through the same `toPage` the tree uses, so the hiding is the same code and cannot drift.
    */
   @Get()
   async search(
@@ -56,7 +68,7 @@ export class SearchController {
     @Query('cursor') cursor?: string,
     @Query('limit') limit?: string,
   ): Promise<Schemas['FileEntryPage']> {
-    const session = requireSession(request);
+    const caller = requireSession(request);
     const after = cleanCursor(cursor);
     const query = (q ?? '').trim();
     if (query.length === 0) throw new UnprocessableEntityException('q must not be empty');
@@ -66,35 +78,35 @@ export class SearchController {
       throw new UnprocessableEntityException(`q may not exceed ${MAX_QUERY_LENGTH} characters`);
     }
 
-    const share = await this.files.shareOf(session.organizationId).catch((error: unknown) => {
+    const share = await this.files.shareOf(caller.organizationId).catch((error: unknown) => {
       throw translate(error);
     });
 
     // A scope from another share, or one in the trash, reads as absent rather than as an empty
     // result set — the same rule the listing route follows, and for the same reason: an empty page
-    // for a folder that exists somewhere else confirms that it exists.
+    // for a folder that exists somewhere else confirms that it exists. A scope the caller cannot
+    // `list` joins that set: 404, from the same helper the tree uses.
     if (scope !== undefined) {
       requireUuid(scope);
-      const folder = await this.files
-        .find(session.organizationId, scope)
-        .catch((error: unknown) => {
-          throw translate(error);
-        });
+      const folder = await this.files.find(caller.organizationId, scope).catch((error: unknown) => {
+        throw translate(error);
+      });
       if (folder.share_id !== share.id || folder.trashed_at !== null || folder.kind !== 'folder') {
         throw new NotFoundException();
       }
+      requirePermission(await this.files.effectiveAt(caller, share.id, scope), 'list', true);
     }
 
-    return toPage(
-      await this.files.search(
-        session.organizationId,
-        share.id,
-        scope ?? null,
-        query,
-        after,
-        clampLimit(limit),
-      ),
+    const hits = await this.files.search(
+      caller.organizationId,
+      share.id,
+      scope ?? null,
+      query,
+      after,
+      clampLimit(limit),
     );
+
+    return toPage(hits, await this.files.effectiveForRows(caller, share.id, hits.items));
   }
 }
 

@@ -1,14 +1,20 @@
 import { randomUUID } from 'node:crypto';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import type { Permission } from '@depsis/authz';
+import type { Response } from 'express';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import type { AgentDataService } from '../agent/agent-data.service.js';
 import {
   AgentRefusedError,
   AgentUnavailableError,
   type AgentService,
 } from '../agent/agent.service.js';
+import type { AuthenticatedRequest } from '../auth/session.guard.js';
 import { DbService } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
+import { FilesController } from './files.controller.js';
 import {
   EntryMissingOnDiskError,
   EntryNotFoundError,
@@ -21,9 +27,12 @@ import {
   NameTakenOnDiskError,
   NotTrashedError,
   TrashedParentError,
+  type Caller,
   type FileEntryRow,
   type ShareRef,
 } from './files.service.js';
+import { SearchController } from './search.controller.js';
+import { UploadsController } from './uploads.controller.js';
 
 /**
  * The file tree, against a real PostgreSQL.
@@ -1405,3 +1414,631 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     expect((await files.find(orgA, mine.id)).id).toBe(mine.id);
   });
 });
+
+/**
+ * §6.2, enforced — against a real PostgreSQL and through the real handlers.
+ *
+ * The controllers are constructed directly rather than driven over HTTP, which is deliberate:
+ * what has to be proved here is that EVERY endpoint asks the question, and the way that breaks is
+ * a handler somebody forgot to change. A test of `FilesService.effectiveAt` alone would pass
+ * against a controller that never called it — which is exactly the state this round found the
+ * code in, with a hard-coded seven-permission constant in every response.
+ *
+ * Everything runs in its own organisation, and `beforeEach` empties its grants. Two of the facts
+ * below are about a share with NO grant rows at all — the compatibility fallback in
+ * `files.service.ts` — and a row left behind by an earlier test would silently make them assert
+ * the opposite of what they say.
+ */
+describeDb('§6.2 permissions, enforced by the file endpoints', () => {
+  let pdb: DbService;
+  let powner: DbService;
+  let pfiles: FilesService;
+  let controller: FilesController;
+  let search: SearchController;
+  let uploads: UploadsController;
+  let agentCalls: Record<string, unknown>[] = [];
+
+  let org = '';
+  let share = '';
+  let admin = '';
+  let alice = '';
+  let bob = '';
+  let team = '';
+  let sequence = 0;
+
+  /** The three operations these tests provoke, recorded so a refusal can be shown to precede them. */
+  const permissionsAgent = {
+    isAvailable: () => true,
+    call: (request: Record<string, unknown>) => {
+      agentCalls.push(request);
+      switch (request['op']) {
+        case 'create_directory':
+          return Promise.resolve({ status: 'directory_created' });
+        case 'move_entry':
+          return Promise.resolve({ status: 'moved' });
+        case 'remove_entry':
+          return Promise.resolve({ status: 'removed' });
+        default:
+          return Promise.reject(new Error(`no fixture answers '${String(request['op'])}'`));
+      }
+    },
+  } as unknown as AgentService;
+
+  const callerFor = (userId: string, isOrganizationAdmin = false): Caller => ({
+    organizationId: org,
+    userId,
+    isOrganizationAdmin,
+  });
+
+  beforeAll(async () => {
+    pdb = new DbService(APP_URL as string);
+    await pdb.onModuleInit();
+    powner = new DbService(OWNER_URL as string);
+
+    await powner.withoutTenant('migration-status', async (q) => {
+      await q.query(
+        `INSERT INTO organizations (slug, name) VALUES ('files-p','Files P')
+         ON CONFLICT (slug) DO NOTHING`,
+      );
+      org =
+        (
+          await q.query<{ id: string }>(
+            `SELECT id::text AS id FROM organizations WHERE slug = 'files-p'`,
+          )
+        )[0]?.id ?? '';
+
+      await q.query(
+        `INSERT INTO users (organization_id, username, role, password_hash)
+         VALUES ($1,'pyonetici','admin','x'), ($1,'pali','member','x'), ($1,'pbora','member','x')
+         ON CONFLICT DO NOTHING`,
+        [org],
+      );
+      const found = await q.query<{ id: string; username: string }>(
+        `SELECT id::text AS id, username FROM users WHERE organization_id = $1`,
+        [org],
+      );
+      admin = found.find((u) => u.username === 'pyonetici')?.id ?? '';
+      alice = found.find((u) => u.username === 'pali')?.id ?? '';
+      bob = found.find((u) => u.username === 'pbora')?.id ?? '';
+
+      team =
+        (
+          await q.query<{ id: string }>(
+            `INSERT INTO teams (organization_id, name) VALUES ($1, 'Muhasebe')
+             RETURNING id::text AS id`,
+            [org],
+          )
+        )[0]?.id ?? '';
+      await q.query(
+        `INSERT INTO team_members (organization_id, team_id, user_id) VALUES ($1, $2, $3)`,
+        [org, team, alice],
+      );
+    });
+
+    pfiles = new FilesService(pdb, permissionsAgent, new PosixIdentityService(pdb));
+    share = (await pfiles.defaultShare(org, 'files-p')).id;
+    controller = new FilesController(pfiles, stubData);
+    search = new SearchController(pfiles);
+    uploads = new UploadsController(
+      pdb,
+      pfiles,
+      permissionsAgent,
+      stubUploadData,
+      new PosixIdentityService(pdb),
+    );
+  });
+
+  beforeEach(async () => {
+    agentCalls = [];
+    await powner.withoutTenant('migration-status', (q) =>
+      q.query(`DELETE FROM folder_grants WHERE organization_id = $1`, [org]),
+    );
+  });
+
+  afterAll(async () => {
+    if (powner !== undefined) {
+      await powner.withoutTenant('migration-status', async (q) => {
+        await q.query(`DELETE FROM upload_sessions WHERE organization_id = $1`, [org]);
+        await q.query(`DELETE FROM folder_grants WHERE organization_id = $1`, [org]);
+        await q.query(`DELETE FROM team_members WHERE organization_id = $1`, [org]);
+        await q.query(`DELETE FROM teams WHERE organization_id = $1`, [org]);
+        await q.query(
+          `DELETE FROM file_entries WHERE organization_id = $1 AND parent_id IS NOT NULL`,
+          [org],
+        );
+        await q.query(`DELETE FROM file_entries WHERE organization_id = $1`, [org]);
+        await q.query(`DELETE FROM shares WHERE organization_id = $1`, [org]);
+        await q.query(`DELETE FROM users WHERE organization_id = $1`, [org]);
+        await q.query(`DELETE FROM organizations WHERE id = $1`, [org]);
+      });
+      await powner.onModuleDestroy();
+    }
+    await pdb?.onModuleDestroy();
+  });
+
+  const shareRef = (): ShareRef => ({ id: share, name: 'files-p' });
+
+  /** A session, as `SessionGuard` would have left it on the request. */
+  const as = (userId: string, role: 'admin' | 'member' = 'member'): AuthenticatedRequest =>
+    ({
+      depsis: {
+        sessionId: randomUUID(),
+        organizationId: org,
+        userId,
+        role,
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    }) as unknown as AuthenticatedRequest;
+
+  const folder = (parentId: string | null, name?: string): Promise<FileEntryRow> =>
+    pfiles.createFolder(
+      org,
+      shareRef(),
+      parentId,
+      name ?? `k${(sequence += 1)}`,
+      admin,
+      'cid-perm',
+      'fixture',
+    );
+
+  /**
+   * One grant row, written through the tenant connection so that RLS has to admit it too.
+   *
+   * `entryId` null is the share root, exactly as the column means it. Delete-then-insert because
+   * the uniqueness that stops a second row for the same principal is a pair of partial expression
+   * indexes, which `ON CONFLICT` cannot infer from a column list.
+   */
+  const grantTo = async (
+    principal: { user?: string; team?: string },
+    entryId: string | null,
+    permissions: readonly string[],
+  ): Promise<void> => {
+    await pdb.withTenant(org, async (q) => {
+      await q.query(
+        `DELETE FROM public.folder_grants
+          WHERE organization_id = $1 AND share_id = $2
+            AND COALESCE(entry_id, share_id) = COALESCE($3::uuid, $2::uuid)
+            AND user_id IS NOT DISTINCT FROM $4::uuid
+            AND team_id IS NOT DISTINCT FROM $5::uuid`,
+        [org, share, entryId, principal.user ?? null, principal.team ?? null],
+      );
+      await q.query(
+        `INSERT INTO public.folder_grants
+           (organization_id, share_id, entry_id, user_id, team_id, permissions)
+         VALUES ($1, $2, $3::uuid, $4::uuid, $5::uuid, $6::text[]::public.folder_permission[])`,
+        [org, share, entryId, principal.user ?? null, principal.team ?? null, permissions],
+      );
+    });
+  };
+
+  const names = async (request: AuthenticatedRequest, parentId?: string): Promise<string[]> =>
+    (await controller.list(request, parentId, undefined, '100', undefined)).items.map(
+      (item) => item.name,
+    );
+
+  const sorted = (permissions: ReadonlySet<Permission>): string[] => [...permissions].sort();
+
+  // ─── the compatibility fallback, and the day it stops applying ──────────────
+  //
+  // ADR-0021 applied to a share with no grant rows would leave everyone with nothing, and there
+  // are no grant rows anywhere yet. `LEGACY_OPEN_SHARE` in `files.service.ts` says what happens
+  // instead; these two tests are what has to be deleted with it.
+
+  it('gives every member the pre-§6.2 seven while a share has no grants at all', async () => {
+    const made = await folder(null, 'eski-davranis');
+
+    const page = await controller.list(as(bob), undefined, undefined, '100', undefined);
+    const row = page.items.find((item) => item.id === made.id);
+    expect(row?.permissions).toEqual([
+      'list',
+      'read',
+      'download',
+      'create',
+      'modify',
+      'move',
+      'delete',
+    ]);
+    // Not `manage`, and that is the point: nobody inherits the right to write the first grant of
+    // a share from the fallback. An administrator writes it (ADR-0021 §5).
+    expect(row?.permissions).not.toContain('manage');
+  });
+
+  it('distinguishes "no grant at all" from a root grant that happens to name everyone', async () => {
+    const made = await folder(null, 'ilk-grant');
+    expect(await names(as(alice))).toContain('ilk-grant');
+    expect(await names(as(bob))).toContain('ilk-grant');
+
+    // ONE root grant, naming Alice. The fallback is gone for the whole share the instant it
+    // exists — which is the observable difference between the two states, and the reason the
+    // fallback is share-wide rather than "no grant above this folder".
+    await grantTo({ user: alice }, null, ['list', 'read']);
+
+    expect(await names(as(alice))).toContain('ilk-grant');
+    expect(await names(as(bob))).toEqual([]);
+    await expect(controller.detail(as(bob), made.id)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  // ─── the inheritance rule ───────────────────────────────────────────────────
+
+  it('lets the nearest grant narrow an ancestor, for that principal only', async () => {
+    const top = await folder(null, 'genis');
+    const sub = await folder(top.id, 'dar');
+
+    await grantTo({ user: alice }, null, ['list', 'read', 'download', 'modify', 'delete']);
+    await grantTo({ user: alice }, sub.id, ['list', 'read']);
+
+    expect(sorted(await pfiles.effectiveAt(callerFor(alice), share, top.id))).toEqual([
+      'delete',
+      'download',
+      'list',
+      'modify',
+      'read',
+    ]);
+    expect(sorted(await pfiles.effectiveAt(callerFor(alice), share, sub.id))).toEqual([
+      'list',
+      'read',
+    ]);
+
+    // And the narrowing is real at the endpoint, not merely in the reported set.
+    await expect(controller.update(as(alice), sub.id, { name: 'yeni' })).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+  });
+
+  it('unions across principals, so a narrow personal grant cannot clip a wide team one', async () => {
+    const top = await folder(null, 'ekip-genis');
+    const sub = await folder(top.id, 'kisi-dar');
+
+    await grantTo({ team }, null, ['list', 'read', 'download', 'modify']);
+    await grantTo({ user: alice }, sub.id, ['list']);
+
+    // Alice's own nearest grant at `sub` is the narrow one; her team's nearest is still the root.
+    // ADR-0021 unions them, because being put in a second team must never take anything away.
+    expect(sorted(await pfiles.effectiveAt(callerFor(alice), share, sub.id))).toEqual([
+      'download',
+      'list',
+      'modify',
+      'read',
+    ]);
+    // Bora is in no team and has no grant anywhere.
+    expect(sorted(await pfiles.effectiveAt(callerFor(bob), share, sub.id))).toEqual([]);
+  });
+
+  // ─── hiding, and 404 versus 403 ─────────────────────────────────────────────
+
+  it('hides the rows a caller cannot list, names and all', async () => {
+    const open = await folder(null, 'acik-klasor');
+    const closed = await folder(null, 'gizli-maas-bilgileri');
+    await grantTo({ user: alice }, open.id, ['list', 'read']);
+
+    const listed = await names(as(alice));
+    expect(listed).toContain('acik-klasor');
+    expect(listed).not.toContain('gizli-maas-bilgileri');
+    // The id is not a way round it either: a name is information on its own.
+    await expect(controller.detail(as(alice), closed.id)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('answers 404 for an entry the listing hid, and 403 for one it showed', async () => {
+    const readable = await pfiles.recordPublishedFile(org, share, null, 'gorunur.bin', 4, null);
+    const hidden = await pfiles.recordPublishedFile(org, share, null, 'gorunmez.bin', 4, null);
+    await grantTo({ user: alice }, readable.id, ['list', 'read']);
+
+    // Visible, but `download` was not granted: 403 is the honest answer, and a 404 would be one
+    // the caller could disprove by listing the folder.
+    await expect(
+      controller.content(as(alice), stubResponse(), readable.id, undefined, undefined),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    // Not visible at all: 403 here would hand back exactly the fact the listing withheld.
+    await expect(
+      controller.content(as(alice), stubResponse(), hidden.id, undefined, undefined),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('refuses to list inside a folder the caller cannot see', async () => {
+    const parent = await folder(null, 'kapali-ust');
+    await folder(parent.id, 'icerik');
+    await grantTo({ user: bob }, null, ['list']);
+    // Narrowed AT the parent, so the root grant no longer reaches it for him.
+    await grantTo({ user: bob }, parent.id, ['read']);
+
+    await expect(
+      controller.list(as(bob), parent.id, undefined, '50', undefined),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  // ─── one permission per endpoint ────────────────────────────────────────────
+
+  it('needs create in the parent to make a folder there', async () => {
+    const parent = await folder(null, 'olustur-hedef');
+    await grantTo({ user: alice }, parent.id, ['list', 'read']);
+    await grantTo({ user: bob }, parent.id, ['list', 'read', 'create']);
+
+    await expect(
+      controller.createFolder(as(alice), { parentId: parent.id, name: 'olmaz' }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    const made = await controller.createFolder(as(bob), { parentId: parent.id, name: 'olur' });
+    expect(made.name).toBe('olur');
+    // The new folder inherits its parent's grant, and the response says so rather than guessing.
+    expect(made.permissions).toEqual(['list', 'read', 'create']);
+  });
+
+  it('needs modify to rename and delete to trash', async () => {
+    const entry = await folder(null, 'yeniden-adlandir');
+    await grantTo({ user: alice }, entry.id, ['list', 'read']);
+
+    await expect(controller.update(as(alice), entry.id, { name: 'olmaz' })).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    await expect(controller.trash(as(alice), entry.id)).rejects.toBeInstanceOf(ForbiddenException);
+
+    await grantTo({ user: alice }, entry.id, ['list', 'read', 'modify', 'delete']);
+    expect((await controller.update(as(alice), entry.id, { name: 'olur' })).name).toBe('olur');
+    expect((await controller.trash(as(alice), entry.id)).id).toBe(entry.id);
+  });
+
+  it('checks BOTH ends of a move', async () => {
+    const from = await folder(null, 'kaynak');
+    const to = await folder(null, 'hedef');
+    const moving = await folder(from.id, 'tasinan');
+
+    // `move` where it is, nothing where it is going.
+    await grantTo({ user: alice }, null, ['list']);
+    await grantTo({ user: alice }, moving.id, ['list', 'move']);
+    await grantTo({ user: alice }, to.id, ['list', 'read']);
+    await expect(
+      controller.update(as(alice), moving.id, { parentId: to.id }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    // `create` where it is going, no `move` where it is.
+    await grantTo({ user: alice }, moving.id, ['list', 'read']);
+    await grantTo({ user: alice }, to.id, ['list', 'create']);
+    await expect(
+      controller.update(as(alice), moving.id, { parentId: to.id }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    // Neither refusal reached the agent, so neither of them moved anything.
+    expect(agentCalls.filter((call) => call['op'] === 'move_entry')).toEqual([]);
+
+    await grantTo({ user: alice }, moving.id, ['list', 'move']);
+    const moved = await controller.update(as(alice), moving.id, { parentId: to.id });
+    expect(moved.parentId).toBe(to.id);
+    expect(agentCalls.filter((call) => call['op'] === 'move_entry')).toHaveLength(1);
+  });
+
+  it('answers 404, not 403, when the destination of a move is invisible', async () => {
+    const to = await folder(null, 'gizli-hedef');
+    const moving = await folder(null, 'tasinacak');
+    await grantTo({ user: alice }, moving.id, ['list', 'move']);
+
+    // A 403 here would say "that folder exists and you may not put things in it", which is more
+    // than the listing was willing to say about it.
+    await expect(
+      controller.update(as(alice), moving.id, { parentId: to.id }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('needs download for the bytes even when the row is readable', async () => {
+    const file = await pfiles.recordPublishedFile(org, share, null, 'indirilebilir.bin', 9, null);
+    await grantTo({ user: alice }, file.id, ['list', 'read', 'download']);
+    // The permission passes and the request then fails on the ABSENT data socket, which is what
+    // shows the check is not what stopped it.
+    await expect(
+      controller.content(as(alice), stubResponse(), file.id, undefined, undefined),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
+  it('needs create in the parent to restore, and delete to purge', async () => {
+    const parent = await folder(null, 'geri-al-ust');
+    const entry = await folder(parent.id, 'geri-alinan');
+    await pfiles.trash(org, entry.id, admin);
+
+    await grantTo({ user: alice }, parent.id, ['list', 'read']);
+    await grantTo({ user: alice }, entry.id, ['list', 'read', 'delete']);
+    await expect(controller.restore(as(alice), entry.id)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+
+    await grantTo({ user: alice }, parent.id, ['list', 'read', 'create']);
+    expect((await controller.restore(as(alice), entry.id)).id).toBe(entry.id);
+
+    await pfiles.trash(org, entry.id, admin);
+    await grantTo({ user: alice }, entry.id, ['list', 'read']);
+    await expect(controller.purge(as(alice), entry.id)).rejects.toBeInstanceOf(ForbiddenException);
+    // Refused before the agent was asked, so nothing left the disk.
+    expect(agentCalls.filter((call) => call['op'] === 'remove_entry')).toEqual([]);
+
+    await grantTo({ user: alice }, entry.id, ['list', 'read', 'delete']);
+    await controller.purge(as(alice), entry.id);
+    expect(agentCalls.filter((call) => call['op'] === 'remove_entry')).toHaveLength(1);
+  });
+
+  // ─── an operation on a subtree is not an operation on one node ──────────────
+  //
+  // ADR-0021 has no deny, so the ONLY way to say "less here" is a narrower grant on a descendant.
+  // Trash and permanent delete both act on a whole subtree, and both used to be authorized by one
+  // resolution on the entry the caller named — which is exactly the grant the model was extended
+  // to make writable, ignored.
+
+  it('refuses a permanent delete that reaches a folder narrowed out from under the caller', async () => {
+    const top = await folder(null, 'silinecek-ust');
+    const secret = await folder(top.id, 'daraltilmis');
+    await grantTo({ user: alice }, top.id, ['list', 'read', 'delete']);
+    // Alice's nearest grant AT `secret` is this one, so her `delete` from `top` does not reach it.
+    await grantTo({ user: alice }, secret.id, ['list', 'read']);
+
+    // Named directly, the refusal already worked.
+    await pfiles.trash(org, secret.id, admin);
+    await expect(controller.purge(as(alice), secret.id)).rejects.toBeInstanceOf(ForbiddenException);
+    await pfiles.restore(org, secret.id);
+
+    // Through the parent it did not: `delete` resolved at `top`, the walk picked up `secret`, and
+    // the bytes went. Irreversibly.
+    await pfiles.trash(org, top.id, admin);
+    await expect(controller.purge(as(alice), top.id)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(agentCalls.filter((call) => call['op'] === 'remove_entry')).toEqual([]);
+
+    // The message counts what it refused and does not name it — a refusal that listed the hidden
+    // folders would hand back what the narrowing was for.
+    await expect(controller.purge(as(alice), top.id)).rejects.toThrow(/1 folder/);
+
+    // Widen the descendant and the same call goes through, so it is the grant that is refusing and
+    // not the shape of the tree.
+    await grantTo({ user: alice }, secret.id, ['list', 'read', 'delete']);
+    await controller.purge(as(alice), top.id);
+    expect(agentCalls.filter((call) => call['op'] === 'remove_entry')).toHaveLength(2);
+  });
+
+  it('refuses trashing a folder whose descendant the caller may not delete', async () => {
+    const top = await folder(null, 'cope-gidecek');
+    const secret = await folder(top.id, 'cope-gitmeyecek');
+    await grantTo({ user: alice }, top.id, ['list', 'read', 'delete']);
+    await grantTo({ user: alice }, secret.id, ['list', 'read']);
+
+    // Reversible, but not harmless: trashing sets one flag and `list` filters on it, so every
+    // descendant disappears from every listing for EVERYBODY — including the one Alice was
+    // deliberately narrowed out of.
+    await expect(controller.trash(as(alice), top.id)).rejects.toBeInstanceOf(ForbiddenException);
+    expect((await pfiles.find(org, top.id)).trashed_at).toBeNull();
+
+    await grantTo({ user: alice }, secret.id, ['list', 'read', 'delete']);
+    expect((await controller.trash(as(alice), top.id)).id).toBe(top.id);
+  });
+
+  it('lets an untouched subtree through, so the check costs nothing where nothing was narrowed', async () => {
+    const top = await folder(null, 'duz-agac');
+    await folder(top.id, 'alt-bir');
+    await folder(top.id, 'alt-iki');
+    await grantTo({ user: alice }, null, ['list', 'read', 'delete']);
+
+    // No descendant carries a grant of its own, so every one of them resolves to exactly what
+    // `top` resolves to and there is nothing to refuse.
+    expect((await controller.trash(as(alice), top.id)).id).toBe(top.id);
+  });
+
+  it('needs create in the destination folder to begin an upload', async () => {
+    const parent = await folder(null, 'yukleme-hedefi-p');
+    await grantTo({ user: alice }, parent.id, ['list', 'read']);
+
+    const metadata = `filename ${b64('rapor.pdf')},parentId ${b64(parent.id)}`;
+    await expect(uploads.create(as(alice), stubResponse(), '10', metadata)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+
+    await grantTo({ user: alice }, parent.id, ['list', 'read', 'create']);
+    await expect(
+      uploads.create(as(alice), stubResponse(), '10', metadata),
+    ).resolves.toBeUndefined();
+  });
+
+  it("will not let one member drive another member's upload session", async () => {
+    const parent = await folder(null, 'benim-yuklemem');
+    await grantTo({ user: alice }, parent.id, ['list', 'read', 'create']);
+    // Bora has no `create` here at all, which is the point: the §6.2 check happens once, at POST,
+    // so whoever sends the chunks has to be the account that check was made for.
+    await grantTo({ user: bob }, parent.id, ['list', 'read']);
+
+    const recorded = recordingResponse();
+    await uploads.create(
+      as(alice),
+      recorded.response,
+      '10',
+      `filename ${b64('gizli.bin')},parentId ${b64(parent.id)}`,
+    );
+    const location = recorded.headers.get('Location') ?? '';
+    const uploadId = location.slice(location.lastIndexOf('/') + 1);
+    expect(uploadId).not.toBe('');
+
+    // 404 and not 403 on both routes: an upload id is not something one member should be able to
+    // confirm about another. Completing it would have published into a folder Bora cannot write
+    // to, stamped with HIS posix uid.
+    await expect(uploads.status(as(bob), stubResponse(), uploadId)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    await expect(
+      uploads.sendChunk(as(bob), stubResponse(), uploadId, '0', '10'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+
+    // The owner still reaches her own session.
+    await expect(uploads.status(as(alice), stubResponse(), uploadId)).resolves.toBeUndefined();
+  });
+
+  it('answers 404 for a malformed parentId in tus metadata, not 500', async () => {
+    // `Upload-Metadata` is caller-supplied text and reaches an `id = $2` against a `uuid` column.
+    // Unvalidated it came back as SQLSTATE 22P02 that nothing maps — a 500 for a bad link, and one
+    // that also tells a caller their id was malformed rather than someone else's.
+    await expect(
+      uploads.create(
+        as(alice),
+        stubResponse(),
+        '10',
+        `filename ${b64('x.bin')},parentId ${b64('x')}`,
+      ),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('hides the rows a caller cannot list from SEARCH as well as from the tree', async () => {
+    const open = await folder(null, 'arama-acik');
+    await folder(null, 'arama-gizli');
+    await grantTo({ user: alice }, open.id, ['list', 'read']);
+
+    const hits = await search.search(as(alice), 'arama', undefined, undefined, '50');
+    expect(hits.items.map((item) => item.name)).toEqual(['arama-acik']);
+  });
+
+  // ─── the one exception ──────────────────────────────────────────────────────
+
+  it('lets the organisation administrator past every one of these', async () => {
+    const closed = await folder(null, 'yoneticiye-acik');
+    const file = await pfiles.recordPublishedFile(org, share, closed.id, 'ic.bin', 3, null);
+    // A grant that names only Alice, on the root — so the walk itself grants the administrator
+    // nothing at all.
+    await grantTo({ user: alice }, null, ['list']);
+
+    expect(await names(as(admin, 'admin'))).toContain('yoneticiye-acik');
+    const detail = await controller.detail(as(admin, 'admin'), file.id);
+    // Every one of §6.2's eleven, which is what ADR-0021 §5 means by "reaches everything".
+    expect(detail.permissions).toHaveLength(11);
+    expect(detail.permissions).toContain('manage');
+    expect((await controller.trash(as(admin, 'admin'), file.id)).id).toBe(file.id);
+  });
+
+  it('keeps the administrator whole even where a narrow grant names them personally', async () => {
+    const sub = await folder(null, 'dar-yonetici');
+    // The trap a root-level synthetic grant would fall into: nearest-ancestor per principal would
+    // let this row win over it and cancel §6.1's hierarchy.
+    await grantTo({ user: admin }, sub.id, ['list']);
+    expect((await pfiles.effectiveAt(callerFor(admin, true), share, sub.id)).size).toBe(11);
+  });
+});
+
+/** The data socket, absent. Every test above that reaches it is asserting that it got that far. */
+const stubData = { isAvailable: () => false } as unknown as AgentDataService;
+
+/** `UploadsController` refuses every request when the data socket is down, before it checks
+ * anything else — so the upload test needs one that claims to be there and is never used. */
+const stubUploadData = { isAvailable: () => true } as unknown as AgentDataService;
+
+/** An Express response that keeps its headers, for the one test that needs the `Location` back. */
+const recordingResponse = (): { response: Response; headers: Map<string, string> } => {
+  const headers = new Map<string, string>();
+  return {
+    headers,
+    response: {
+      setHeader: (name: string, value: string) => headers.set(name, value),
+      status: () => undefined,
+      end: () => undefined,
+    } as unknown as Response,
+  };
+};
+
+/** An Express response that swallows headers; nothing here asserts on them. */
+const stubResponse = (): Response =>
+  ({
+    setHeader: () => undefined,
+    status: () => undefined,
+    end: () => undefined,
+  }) as unknown as Response;
+
+const b64 = (value: string): string => Buffer.from(value, 'utf8').toString('base64');

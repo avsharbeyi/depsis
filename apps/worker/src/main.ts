@@ -2,14 +2,18 @@ import 'reflect-metadata';
 import { Logger, Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import {
+  AclApplyModule,
+  AclApplyService,
   AgentModule,
   AgentService,
+  ConfigModule,
   DbModule,
   JobsModule,
   JobsService,
+  PosixIdentityModule,
 } from '@depsis/api/worker-surface';
 
-import { snapshotHandler, SNAPSHOT_KIND } from './handlers/snapshot.handler.js';
+import { registerHandlers } from './handlers/registry.js';
 import { WorkerService } from './worker.service.js';
 
 /**
@@ -20,7 +24,13 @@ import { WorkerService } from './worker.service.js';
  * be reached by anything, which is one fewer surface to reason about — and its systemd unit says
  * the same thing with `RestrictAddressFamilies=AF_UNIX AF_INET` for PostgreSQL and the agent only.
  */
-@Module({ imports: [DbModule, AgentModule, JobsModule] })
+// `ConfigModule` FIRST and not optional: `DbModule`'s provider factory injects `APP_CONFIG`, so
+// without it Nest cannot construct `DbService` and this process exits on boot with a dependency
+// error. It was missing, which meant the worker did not run at all — and a queue whose consumer
+// never starts looks exactly like a queue whose handler was never registered.
+@Module({
+  imports: [ConfigModule, DbModule, AgentModule, JobsModule, PosixIdentityModule, AclApplyModule],
+})
 class WorkerAppModule {}
 
 async function bootstrap(): Promise<void> {
@@ -33,7 +43,10 @@ async function bootstrap(): Promise<void> {
   app.enableShutdownHooks();
 
   const worker = new WorkerService(app.get(JobsService));
-  worker.register(SNAPSHOT_KIND, snapshotHandler(app.get(AgentService)));
+  // Registration is not bookkeeping: `WorkerService.claim` only ever asks for the kinds registered
+  // there, so a kind the API enqueues and the registry omits is a job nobody will ever run. It is
+  // a separate module so a test can assert the list without booting this process.
+  registerHandlers(worker, { agent: app.get(AgentService), acl: app.get(AclApplyService) });
   worker.start();
 
   const shutdown = (signal: string): void => {
