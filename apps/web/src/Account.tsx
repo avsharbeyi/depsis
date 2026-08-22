@@ -4,22 +4,22 @@ import { useState } from 'react';
 import { api, problemMessage } from './api.js';
 
 type CurrentUser = OpenApi.components['schemas']['CurrentUser'];
+type Notify = (kind: 'ok' | 'error', text: string) => void;
 
-interface Props {
-  me: CurrentUser;
-  notify: (kind: 'ok' | 'error', text: string) => void;
-}
+/** The same role tints the user list uses, so one person is one colour across the desktop. */
+const AVATAR: Record<CurrentUser['role'], React.CSSProperties> = {
+  admin: { background: 'rgba(143,166,255,.24)', color: '#8FA6FF' },
+  member: { background: 'rgba(91,200,245,.24)', color: '#5BC8F5' },
+};
 
 /**
- * The account, and the one thing a person does to it.
+ * The account, and the one thing a person does to it — POST /me/password.
  *
- * The screen this replaces was a two-factor enrolment panel — a QR code, ten recovery codes and a
- * turn-off button — on an appliance whose owner does not use two-factor. The endpoints are still
- * there and still tested, because §6.3 asks for the capability and deleting working code to tidy a
- * screen is the wrong trade; what changed is that the interface no longer leads with something
- * nobody asked for.
+ * There is no two-factor panel here. The endpoints for it exist and are tested, because §6.3 asks
+ * for the capability, but leading a household appliance's account screen with a QR code and ten
+ * recovery codes is answering a question nobody in this house asked.
  */
-export function Account({ me, notify }: Props): React.JSX.Element {
+export function Account({ me, notify }: { me: CurrentUser; notify: Notify }): React.JSX.Element {
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [again, setAgain] = useState('');
@@ -35,79 +35,87 @@ export function Account({ me, notify }: Props): React.JSX.Element {
       body: { currentPassword: current, newPassword: next },
     });
     setBusy(false);
-    if (error !== undefined || data === undefined) {
+    if (data === undefined) {
       notify('error', problemMessage(error, 'Parola değiştirilemedi. Mevcut parolanız doğru mu?'));
       return;
     }
     setCurrent('');
     setNext('');
     setAgain('');
+    // The revoked-session count is the only proof the user gets that the change reached every
+    // device they were signed in on — the whole reason a password change revokes anything.
     notify(
       'ok',
       data.otherSessionsRevoked > 0
         ? `Parola değişti. Diğer ${data.otherSessionsRevoked} oturum kapatıldı.`
-        : 'Parola değişti.',
+        : 'Parola değişti. Başka açık oturumunuz yoktu.',
     );
   }
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Hesabım</h1>
-          <p className="muted">
-            {me.username}
-            {me.role === 'admin' ? ' · yönetici' : ''}
-          </p>
-        </div>
+      <div className="urow">
+        <span className="av" style={AVATAR[me.role]} aria-hidden>
+          {me.username.slice(0, 1).toLocaleUpperCase('tr')}
+        </span>
+        <span className="i">
+          <b>{me.username}</b>
+          <span>{me.organizationSlug}</span>
+        </span>
+        <span className={me.role === 'admin' ? 'st2 up' : 'st2 dn'}>
+          {me.role === 'admin' ? 'yönetici' : 'üye'}
+        </span>
       </div>
 
-      <div className="panel" style={{ maxWidth: '32rem' }}>
-        <h2>Parolayı değiştir</h2>
-        <p className="muted">
-          Mevcut parolanız, oturumunuz açık olsa bile isteniyor: bir oturum, birinin açık bırakılmış
-          bilgisayarını ödünç aldığında sahip olduğu şeydir. Değişiklikten sonra diğer bütün
-          oturumlarınız kapatılır; bu sekme açık kalır.
-        </p>
-
-        <form onSubmit={(e) => void submit(e)}>
-          <label>
-            Mevcut parola
-            <input
-              type="password"
-              autoComplete="current-password"
-              required
-              value={current}
-              onChange={(e) => setCurrent(e.target.value)}
-            />
-          </label>
-          <label>
-            Yeni parola
-            <input
-              type="password"
-              autoComplete="new-password"
-              required
-              minLength={12}
-              value={next}
-              onChange={(e) => setNext(e.target.value)}
-            />
-            <span className="muted">En az 12 karakter.</span>
-          </label>
-          <label>
-            Yeni parola (tekrar)
-            <input
-              type="password"
-              autoComplete="new-password"
-              required
-              value={again}
-              onChange={(e) => setAgain(e.target.value)}
-            />
-            {mismatch && <span className="error">İki parola aynı değil.</span>}
-          </label>
-          <button type="submit" className="primary" disabled={busy || mismatch}>
+      <form
+        onSubmit={(event) => void submit(event)}
+        style={{ display: 'flex', flexDirection: 'column', gap: 9 }}
+      >
+        <div className="lbl">Parolayı değiştir</div>
+        <label>
+          Mevcut parola
+          <input
+            type="password"
+            autoComplete="current-password"
+            required
+            value={current}
+            onChange={(event) => setCurrent(event.target.value)}
+          />
+        </label>
+        <label>
+          Yeni parola
+          <input
+            type="password"
+            autoComplete="new-password"
+            required
+            minLength={12}
+            value={next}
+            onChange={(event) => setNext(event.target.value)}
+          />
+          <small>En az 12 karakter.</small>
+        </label>
+        <label>
+          Yeni parola (tekrar)
+          <input
+            type="password"
+            autoComplete="new-password"
+            required
+            value={again}
+            onChange={(event) => setAgain(event.target.value)}
+          />
+          {mismatch && <small style={{ color: '#FF7E8A' }}>İki parola aynı değil.</small>}
+        </label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button type="submit" className="b pri" disabled={busy || mismatch}>
             {busy ? 'Değiştiriliyor…' : 'Parolayı değiştir'}
           </button>
-        </form>
+        </div>
+      </form>
+
+      <div className="note">
+        Oturumunuz açıkken bile mevcut parola isteniyor, çünkü açık bırakılmış bir bilgisayarı ödünç
+        alan biri oturuma sahiptir ama parolaya sahip değildir. Değişiklikten sonra diğer bütün
+        oturumlarınız kapanır; bu sekme açık kalır.
       </div>
     </>
   );

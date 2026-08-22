@@ -1,103 +1,69 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 
+import { sfx } from './sfx.js';
+
 /**
- * The handful of pieces every screen needs.
+ * The pieces every screen is assembled from.
  *
- * They exist because the alternative was `window.prompt` and `window.confirm`, which is what the
- * first version of the file browser used to name a folder and to confirm a deletion. Those are not
- * a design decision — they cannot be styled, cannot be labelled, are blocked outright by some
- * browsers, and put the appliance's most destructive action behind a dialog that looks like a
- * phishing prompt.
+ * The rule this file enforces is that no screen invents its own card, window, dialog or toast.
+ * The previous version of the appliance grew four slightly different confirmation dialogs, one
+ * per screen, and by the time the fourth was written the first one still used `window.confirm` —
+ * an unstyleable box that puts the most destructive action in the product behind something that
+ * looks like a phishing prompt.
  */
 
-/* ─── icons ─────────────────────────────────────────────────────────────────
+/* ─── tones ─────────────────────────────────────────────────────────────────── */
+
+export type Tone = 'cool' | 'live' | 'iris' | 'warn' | 'rose' | 'dim';
+
+/**
+ * The whole palette, in one place.
  *
- * Inline, and only the seven that are used. An icon font or a package would be a dependency and a
- * network request for a few hundred bytes of path data; these are `currentColor` so they inherit
- * whatever the surrounding text is doing, including the dark palette.
+ * The reference wrote every badge tint inline — `rgba(91,200,245,.24)` appears a dozen times in
+ * its markup. Copied into a dozen React components that becomes a dozen places to disagree the
+ * first time a colour is adjusted, so the components take a tone name and look the value up here.
  */
-
-type IconProps = { className?: string };
-
-const stroke = {
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 1.7,
-  strokeLinecap: 'round' as const,
-  strokeLinejoin: 'round' as const,
+export const TONES: Record<Tone, string> = {
+  cool: '#5BC8F5',
+  live: '#4FE3A8',
+  iris: '#8FA6FF',
+  warn: '#F5B944',
+  rose: '#FF7E8A',
+  dim: '#5B6D7E',
 };
 
-export function IconDashboard(p: IconProps): React.JSX.Element {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden {...p}>
-      <g {...stroke}>
-        <rect x="3" y="3" width="7.5" height="8" rx="1.5" />
-        <rect x="13.5" y="3" width="7.5" height="5" rx="1.5" />
-        <rect x="3" y="14" width="7.5" height="7" rx="1.5" />
-        <rect x="13.5" y="11" width="7.5" height="10" rx="1.5" />
-      </g>
-    </svg>
-  );
+/** The same colours as channels, for the canvas plots in `sky.tsx`, which need gradients. */
+export function toneRgb(tone: Tone): [number, number, number] {
+  const hex = TONES[tone];
+  return [
+    parseInt(hex.slice(1, 3), 16),
+    parseInt(hex.slice(3, 5), 16),
+    parseInt(hex.slice(5, 7), 16),
+  ];
 }
 
-export function IconFiles(p: IconProps): React.JSX.Element {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden {...p}>
-      <path {...stroke} d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.5h7A1.5 1.5 0 0 1 19 9v8.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17.5Z" />
-    </svg>
-  );
+function toneTint(tone: Tone, alpha: number): string {
+  const [r, g, b] = toneRgb(tone);
+  return `rgba(${r},${g},${b},${alpha})`;
 }
 
-export function IconFile(p: IconProps): React.JSX.Element {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden {...p}>
-      <g {...stroke}>
-        <path d="M6 3.5h7l5 5v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-16a1 1 0 0 1 1-1Z" />
-        <path d="M13 3.5V8a1 1 0 0 0 1 1h4" />
-      </g>
-    </svg>
-  );
-}
+/* ─── the brand mark ────────────────────────────────────────────────────────── */
 
-export function IconUsers(p: IconProps): React.JSX.Element {
+/**
+ * The only icon still drawn as a path. Everything else on the desktop is a glyph, but the mark
+ * on the sign-in screen is the first thing anyone sees of the appliance and an emoji will not do.
+ */
+export function IconLogo(props: { className?: string }): React.JSX.Element {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden {...p}>
-      <g {...stroke}>
-        <circle cx="9" cy="8" r="3.2" />
-        <path d="M3.5 19.5a5.5 5.5 0 0 1 11 0" />
-        <path d="M16 5.4a3.2 3.2 0 0 1 0 5.2M17.5 14.4a5.5 5.5 0 0 1 3 5.1" />
-      </g>
-    </svg>
-  );
-}
-
-export function IconAccount(p: IconProps): React.JSX.Element {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden {...p}>
-      <g {...stroke}>
-        <circle cx="12" cy="8.5" r="3.5" />
-        <path d="M5 20a7 7 0 0 1 14 0" />
-      </g>
-    </svg>
-  );
-}
-
-export function IconUpload(p: IconProps): React.JSX.Element {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden {...p}>
-      <g {...stroke}>
-        <path d="M12 16V4.5M8 8l4-4 4 4" />
-        <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" />
-      </g>
-    </svg>
-  );
-}
-
-export function IconLogo(p: IconProps): React.JSX.Element {
-  return (
-    <svg viewBox="0 0 192 192" aria-hidden {...p}>
-      <rect width="192" height="192" rx="34" fill="var(--accent)" />
-      <g fill="none" stroke="var(--accent-fg)" strokeWidth="11" strokeLinecap="round">
+    <svg viewBox="0 0 192 192" aria-hidden {...props}>
+      <rect width="192" height="192" rx="34" fill="url(#depsis-mark)" />
+      <defs>
+        <linearGradient id="depsis-mark" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor={TONES.cool} />
+          <stop offset="1" stopColor={TONES.iris} />
+        </linearGradient>
+      </defs>
+      <g fill="none" stroke="#06202B" strokeWidth="11" strokeLinecap="round">
         <ellipse cx="96" cy="58" rx="52" ry="20" />
         <path d="M44 58v76c0 11 23 20 52 20s52-9 52-20V58" />
         <path d="M44 96c0 11 23 20 52 20s52-9 52-20" />
@@ -106,134 +72,395 @@ export function IconLogo(p: IconProps): React.JSX.Element {
   );
 }
 
-/* ─── dialog ─────────────────────────────────────────────────────────────── */
+/* ─── primitives ────────────────────────────────────────────────────────────── */
 
-interface PromptProps {
-  title: string;
-  label: string;
-  initial?: string;
-  confirmLabel?: string;
-  onSubmit: (value: string) => void;
-  onCancel: () => void;
+/**
+ * The tinted square that labels a card, a row or a menu item.
+ *
+ * The tint is the tone at 24% and the ink is the tone at full strength — the reference's ratio,
+ * kept because at 24% the badge reads as a surface rather than as a second button.
+ */
+export function Glyph({
+  tone,
+  size,
+  children,
+}: {
+  tone: Tone;
+  size?: number;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  const style: React.CSSProperties = { background: toneTint(tone, 0.24), color: TONES[tone] };
+  if (size !== undefined) {
+    style.width = size;
+    style.height = size;
+    style.borderRadius = Math.round(size * 0.29);
+    style.fontSize = Math.round(size * 0.46);
+  }
+  return (
+    <span className="gl" style={style} aria-hidden>
+      {children}
+    </span>
+  );
 }
 
 /**
- * Ask for one string.
+ * A glass panel with a header strip. Becomes a tile — hoverable, clickable, reachable by
+ * keyboard — the moment it is given an `onClick`.
  *
- * A real `<dialog>` rather than a div with a high z-index: the element brings the focus trap, the
- * inert background, the backdrop and the escape key with it, and every one of those is something a
- * hand-rolled modal gets wrong the first time.
+ * The header always renders its `.st` slot even when there is no meta text, because that element
+ * carries `margin-left:auto` in the stylesheet and it is what pushes the actions to the right.
+ * Without it a card with buttons and no meta puts them against the title.
  */
-export function PromptDialog({
+export function Card({
+  glyph,
+  tone,
   title,
-  label,
-  initial = '',
-  confirmLabel = 'Tamam',
-  onSubmit,
-  onCancel,
-}: PromptProps): React.JSX.Element {
-  const ref = useRef<HTMLDialogElement>(null);
-  const [value, setValue] = useState(initial);
-  const id = useId();
+  meta,
+  actions,
+  className,
+  onClick,
+  children,
+}: {
+  glyph: React.ReactNode;
+  tone: Tone;
+  title: string;
+  meta?: string;
+  actions?: React.ReactNode;
+  className?: string;
+  onClick?: () => void;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  const classes = ['card'];
+  if (onClick !== undefined) classes.push('tile');
+  if (className !== undefined && className !== '') classes.push(className);
 
-  useEffect(() => {
-    const dialog = ref.current;
-    if (dialog === null) return;
-    dialog.showModal();
-    // `cancel` fires for the escape key. Without this the dialog closes and the component that
-    // opened it still believes it is open, so the next attempt renders nothing.
-    const onCancelEvent = (event: Event): void => {
-      event.preventDefault();
-      onCancel();
-    };
-    dialog.addEventListener('cancel', onCancelEvent);
-    return () => dialog.removeEventListener('cancel', onCancelEvent);
-  }, [onCancel]);
+  const interactive =
+    onClick === undefined
+      ? {}
+      : {
+          role: 'button',
+          tabIndex: 0,
+          onClick,
+          onKeyDown: (event: React.KeyboardEvent<HTMLElement>): void => {
+            // A div with a click handler is invisible to the keyboard. Enter and Space are what
+            // a real button answers to, and Space has to be swallowed or the desktop scrolls.
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            onClick();
+          },
+        };
 
   return (
-    <dialog ref={ref} aria-labelledby={id}>
-      <form
-        method="dialog"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (value.trim() !== '') onSubmit(value.trim());
-        }}
+    <section className={classes.join(' ')} {...interactive}>
+      <div className="ch">
+        <Glyph tone={tone}>{glyph}</Glyph>
+        <span className="tt">{title}</span>
+        <span className="st">{meta ?? ''}</span>
+        {actions}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/** A thin progress track. `ratio` is 0…1; anything else is treated as empty rather than drawn. */
+export function Bar({ ratio }: { ratio: number }): React.JSX.Element {
+  const safe = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0;
+  return (
+    <div
+      className="bar2"
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(safe * 100)}
+    >
+      <span style={{ width: `${safe * 100}%` }} />
+    </div>
+  );
+}
+
+/**
+ * What a list shows when it is empty. Takes an action so "no files here" can offer the upload
+ * button instead of leaving the reader to find it.
+ */
+export function Empty({
+  glyph,
+  text,
+  action,
+}: {
+  glyph: React.ReactNode;
+  text: string;
+  action?: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <div className="empty">
+      <span className="ic" aria-hidden>
+        {glyph}
+      </span>
+      <b>{text}</b>
+      {action}
+    </div>
+  );
+}
+
+/* ─── overlays ──────────────────────────────────────────────────────────────── */
+
+/**
+ * Escape belongs to the topmost overlay only.
+ *
+ * A window can open a confirmation on top of itself, and both are listening. Without a stack one
+ * Escape closes both, so the user answers a question they never saw and the window they were
+ * working in disappears with it.
+ */
+const escapeStack: Array<() => void> = [];
+
+function useEscape(onEscape: () => void): void {
+  const latest = useRef(onEscape);
+  useEffect(() => {
+    latest.current = onEscape;
+  });
+
+  useEffect(() => {
+    const entry = (): void => latest.current();
+    escapeStack.push(entry);
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return;
+      if (escapeStack[escapeStack.length - 1] !== entry) return;
+      event.stopPropagation();
+      entry();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      const at = escapeStack.indexOf(entry);
+      if (at >= 0) escapeStack.splice(at, 1);
+    };
+  }, []);
+}
+
+/**
+ * Move focus into an overlay on open and put it back where it came from on close.
+ *
+ * Skipping the second half is the bug that makes a keyboard user start over from the top of the
+ * page every time they close a dialog.
+ */
+function useOverlayFocus<T extends HTMLElement>(ref: React.RefObject<T | null>): void {
+  useEffect(() => {
+    const opener = document.activeElement;
+    ref.current?.focus();
+    return () => {
+      // The opener can be gone — a row's own delete button, on a row the dialog just removed.
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
+  }, [ref]);
+}
+
+/**
+ * Closes when the backdrop itself is the thing pressed.
+ *
+ * `mousedown` rather than `click`: with `click` a text selection that starts inside the window and
+ * ends outside it counts as a click on the backdrop, and the window vanishes mid-drag.
+ */
+function backdropCloser(onClose: () => void) {
+  return (event: React.MouseEvent<HTMLDivElement>): void => {
+    if (event.target === event.currentTarget) onClose();
+  };
+}
+
+/** A modal window. `wide` is for the console and the app grid, which are unusable at 780px. */
+export function Win({
+  title,
+  glyph,
+  tone,
+  wide,
+  onClose,
+  children,
+}: {
+  title: string;
+  glyph: React.ReactNode;
+  tone: Tone;
+  wide?: boolean;
+  onClose: () => void;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  const ref = useRef<HTMLDivElement>(null);
+  const labelId = useId();
+  useEscape(onClose);
+  useOverlayFocus(ref);
+
+  // The width is set here rather than through a class because the stylesheet has no `.win.wide`
+  // rule; the class still goes on so the two can be reconciled later without touching callers.
+  const style: React.CSSProperties | undefined =
+    wide === true ? { width: 'min(1120px, 100%)' } : undefined;
+
+  return (
+    <div className="ovl" onMouseDown={backdropCloser(onClose)}>
+      <div
+        className={wide === true ? 'win wide' : 'win'}
+        style={style}
+        ref={ref}
+        role="dialog"
+        aria-modal
+        aria-labelledby={labelId}
+        tabIndex={-1}
       >
-        <h2 id={id}>{title}</h2>
-        <label>
-          {label}
-          {/* Focused on open: a modal that exists for one field and does not focus it makes the
-              keyboard user hunt for it. */}
-          <input autoFocus value={value} onChange={(e) => setValue(e.target.value)} required />
-        </label>
-        <div className="dialog-actions">
-          <button type="button" onClick={onCancel}>
+        <div className="wh">
+          <Glyph tone={tone}>{glyph}</Glyph>
+          <span className="tt" id={labelId}>
+            {title}
+          </span>
+          <button type="button" className="wx" onClick={onClose} aria-label="Kapat">
+            ×
+          </button>
+        </div>
+        <div className="wb">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A yes/no question. `list` names the things about to be affected — deleting "3 öğe" without
+ * saying which three is how people lose the wrong folder.
+ */
+export function ConfirmBox({
+  title,
+  body,
+  list,
+  yesLabel,
+  danger,
+  onYes,
+  onNo,
+}: {
+  title: string;
+  body: string;
+  list?: string[];
+  yesLabel: string;
+  danger?: boolean;
+  onYes: () => void;
+  onNo: () => void;
+}): React.JSX.Element {
+  // The focus target is a button rather than the box, so the answer is one Enter away. It is a
+  // ref rather than `autoFocus` because the overlay hook runs in an effect, and an effect that
+  // focuses the container would take the focus straight back off an autofocused child.
+  const focusRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  const bodyId = useId();
+  useEscape(onNo);
+  useOverlayFocus(focusRef);
+
+  // The reference sounds this box on the way up, and it is the one place the sound earns its keep:
+  // a destructive question that appears while somebody is looking elsewhere is the question they
+  // answer without reading. Silent unless the account asked for sound.
+  useEffect(() => {
+    sfx.warn();
+  }, []);
+
+  return (
+    <div className="ovl" onMouseDown={backdropCloser(onNo)}>
+      <div
+        className={danger === true ? 'cf danger' : 'cf'}
+        role="alertdialog"
+        aria-modal
+        aria-labelledby={titleId}
+        aria-describedby={bodyId}
+      >
+        <h3 id={titleId}>{title}</h3>
+        <p id={bodyId}>{body}</p>
+        {list !== undefined && list.length > 0 && (
+          <div className="lst2">
+            {list.map((item) => (
+              <span key={item}>{item}</span>
+            ))}
+          </div>
+        )}
+        <div className="row">
+          {/* On a destructive question the safe answer takes the focus, so a stray Enter cancels
+              rather than deletes. On an ordinary one the affirmative does, because that is what
+              the reader opened the box to press. */}
+          <button
+            type="button"
+            className="no"
+            onClick={onNo}
+            ref={danger === true ? focusRef : null}
+          >
             Vazgeç
           </button>
-          <button type="submit" className="primary" disabled={value.trim() === ''}>
+          <button
+            type="button"
+            className="yes"
+            onClick={onYes}
+            ref={danger === true ? null : focusRef}
+          >
+            {yesLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Ask for one string — a folder name, a nickname, a network id. */
+export function PromptBox({
+  title,
+  label,
+  initial,
+  confirmLabel,
+  onSubmit,
+  onCancel,
+}: {
+  title: string;
+  label: string;
+  initial?: string;
+  confirmLabel: string;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+}): React.JSX.Element {
+  const [value, setValue] = useState(initial ?? '');
+  const ref = useRef<HTMLInputElement>(null);
+  const titleId = useId();
+  const fieldId = useId();
+  useEscape(onCancel);
+  useOverlayFocus(ref);
+
+  const trimmed = value.trim();
+
+  return (
+    <div className="ovl" onMouseDown={backdropCloser(onCancel)}>
+      <form
+        className="cf"
+        aria-labelledby={titleId}
+        onSubmit={(event) => {
+          event.preventDefault();
+          // Enter on an empty field must do nothing rather than submit an empty name; the API
+          // would reject it, but a 422 for something the form already knows is a wasted round
+          // trip and a confusing error.
+          if (trimmed !== '') onSubmit(trimmed);
+        }}
+      >
+        <h3 id={titleId}>{title}</h3>
+        <label htmlFor={fieldId}>{label}</label>
+        <input
+          id={fieldId}
+          ref={ref}
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          autoComplete="off"
+        />
+        <div className="row">
+          <button type="button" className="no" onClick={onCancel}>
+            Vazgeç
+          </button>
+          <button type="submit" className="yes" disabled={trimmed === ''}>
             {confirmLabel}
           </button>
         </div>
       </form>
-    </dialog>
+    </div>
   );
 }
 
-interface ConfirmProps {
-  title: string;
-  body: string;
-  confirmLabel?: string;
-  danger?: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
-}
-
-export function ConfirmDialog({
-  title,
-  body,
-  confirmLabel = 'Tamam',
-  danger = false,
-  onConfirm,
-  onCancel,
-}: ConfirmProps): React.JSX.Element {
-  const ref = useRef<HTMLDialogElement>(null);
-  const id = useId();
-
-  useEffect(() => {
-    const dialog = ref.current;
-    if (dialog === null) return;
-    dialog.showModal();
-    const onCancelEvent = (event: Event): void => {
-      event.preventDefault();
-      onCancel();
-    };
-    dialog.addEventListener('cancel', onCancelEvent);
-    return () => dialog.removeEventListener('cancel', onCancelEvent);
-  }, [onCancel]);
-
-  return (
-    <dialog ref={ref} aria-labelledby={id}>
-      <h2 id={id}>{title}</h2>
-      <p className="muted">{body}</p>
-      <div className="dialog-actions">
-        <button type="button" onClick={onCancel}>
-          Vazgeç
-        </button>
-        <button
-          type="button"
-          className={danger ? 'danger' : 'primary'}
-          onClick={onConfirm}
-          // Focused on open — the dialog exists to be answered.
-          autoFocus
-        >
-          {confirmLabel}
-        </button>
-      </div>
-    </dialog>
-  );
-}
-
-/* ─── toasts ─────────────────────────────────────────────────────────────── */
+/* ─── toasts ────────────────────────────────────────────────────────────────── */
 
 export interface Toast {
   id: number;
@@ -246,9 +473,10 @@ let nextToastId = 1;
 /**
  * Transient messages that do not move the page.
  *
- * An error rendered inline pushes the table down and, on a long list, lands off-screen — so the
- * user sees nothing happen and clicks again. Errors do NOT auto-dismiss: a message that vanishes
- * before it is read is the same as no message.
+ * A message rendered inline pushes the list down and, halfway through a long one, lands off
+ * screen — so the user sees nothing happen and clicks again. Successes clear themselves after
+ * four seconds; failures never do. An error that disappears before it is read is the same as no
+ * error at all, and the person is left with a file that quietly did not upload.
  */
 export function useToasts(): {
   toasts: Toast[];
@@ -258,14 +486,21 @@ export function useToasts(): {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   const dismiss = useCallback((id: number) => {
-    setToasts((current) => current.filter((t) => t.id !== id));
+    setToasts((current) => current.filter((toast) => toast.id !== id));
   }, []);
 
   const push = useCallback(
     (kind: Toast['kind'], text: string) => {
       const id = nextToastId++;
       setToasts((current) => [...current, { id, kind, text }]);
-      if (kind === 'ok') setTimeout(() => dismiss(id), 4000);
+      // Two different sounds, because the two messages want different things from the reader: one
+      // is an acknowledgement they can ignore, the other is a failure they have to come back to.
+      if (kind === 'ok') {
+        sfx.ok();
+        window.setTimeout(() => dismiss(id), 4000);
+      } else {
+        sfx.error();
+      }
     },
     [dismiss],
   );
@@ -283,9 +518,16 @@ export function Toasts({
   return (
     <div className="toasts" aria-live="polite">
       {toasts.map((toast) => (
-        <div key={toast.id} className={`toast ${toast.kind}`} role={toast.kind === 'error' ? 'alert' : 'status'}>
-          <span>{toast.text}</span>
-          <button type="button" onClick={() => dismiss(toast.id)} aria-label="Kapat">
+        <div
+          key={toast.id}
+          className={toast.kind === 'error' ? 'toast error' : 'toast'}
+          role={toast.kind === 'error' ? 'alert' : 'status'}
+        >
+          <span className="g" aria-hidden>
+            {toast.kind === 'error' ? '!' : '✓'}
+          </span>
+          <span className="n">{toast.text}</span>
+          <button type="button" className="x" onClick={() => dismiss(toast.id)} aria-label="Kapat">
             ×
           </button>
         </div>

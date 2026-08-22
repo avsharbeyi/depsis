@@ -23,10 +23,17 @@
  *      Visually identical while .os covers the viewport, but it keeps them correct no matter which
  *      component in the React tree happens to mount them, and it keeps them out of .os's
  *      overflow:hidden.
- *   3. Anything the reference mocked up that this device has no API for — notes, the to-do list,
- *      the terminal, the app store, the wallpaper picker, desktop shortcuts — is not here at all.
- *      Dead rules for screens that will never exist are how a stylesheet starts lying about the
- *      product.
+ *   3. Nothing is styled that the device cannot actually do. When this sheet was first ported the
+ *      device had no endpoint behind notes, the to-do list, the terminal, the app list, the
+ *      wallpaper picker or the desktop shortcuts, so those families were left out on purpose —
+ *      dead rules for screens that will never exist are how a stylesheet starts lying about the
+ *      product. Those endpoints exist now, so the rules came back; each family carries the note
+ *      below. The principle did not change: no selector here without a screen, no screen without
+ *      an API. The one thing still missing is a move affordance, because PATCH /files/{id} answers
+ *      501 for parentId. Families the port had brought over anyway and that no endpoint can ever
+ *      fill — the task manager's .tmtop/.errbox and its .tree pid colours, the expanding .conn
+ *      client list, .tabs, .gear, .dk.plus, .frow .exp, .kill.tk — have since been deleted rather
+ *      than left as a reservation, for exactly the reason stated above.
  *
  * Everything else that is *not* in the reference (the sign-in card, real form controls, empty
  * states, inline notices) is built out of the reference's own vocabulary — the .search field's
@@ -35,19 +42,19 @@
  */
 
 :root {
-  --ink: #EDF3F9;
-  --ink2: #BCCBDA;
-  --mut: #8698AA;
-  --dim: #5B6D7E;
+  --ink: #edf3f9;
+  --ink2: #bccbda;
+  --mut: #8698aa;
+  --dim: #5b6d7e;
   --glass: rgba(12, 20, 32, 0.66);
   --glass2: rgba(16, 26, 40, 0.84);
   --edge: rgba(180, 215, 245, 0.15);
   --edge2: rgba(180, 215, 245, 0.32);
-  --live: #4FE3A8;
-  --cool: #5BC8F5;
-  --iris: #8FA6FF;
-  --warn: #F5B944;
-  --rose: #FF7E8A;
+  --live: #4fe3a8;
+  --cool: #5bc8f5;
+  --iris: #8fa6ff;
+  --warn: #f5b944;
+  --rose: #ff7e8a;
   --mono: ui-monospace, 'Cascadia Mono', Consolas, 'SF Mono', monospace;
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --e: cubic-bezier(0.2, 0.9, 0.25, 1);
@@ -70,7 +77,7 @@ body {
 body {
   margin: 0;
   min-height: 100dvh;
-  background: #02040A;
+  background: #02040a;
   color: var(--ink);
   font-family: var(--sans);
   -webkit-font-smoothing: antialiased;
@@ -93,7 +100,7 @@ body {
   position: fixed;
   inset: 0;
   overflow: hidden;
-  background: #02040A;
+  background: #02040a;
   display: flex;
   flex-direction: column;
 }
@@ -196,7 +203,7 @@ body {
 .tbtn.pw:hover {
   background: rgba(255, 126, 138, 0.2);
   border-color: rgba(255, 126, 138, 0.5);
-  color: #FFD9DD;
+  color: #ffd9dd;
 }
 
 .main {
@@ -283,7 +290,7 @@ body {
 }
 .ch .cx:hover {
   background: rgba(91, 200, 245, 0.2);
-  color: #DBF2FE;
+  color: #dbf2fe;
   border-color: rgba(91, 200, 245, 0.44);
 }
 .ch .cx.q {
@@ -369,6 +376,110 @@ body {
   color: var(--dim);
 }
 
+/* ─── desktop shortcuts ────────────────────────────────────────────────────── */
+
+/* Left out of the first port: the layout is persisted through GET/PUT /me/preferences, and until
+   that endpoint existed a shortcut dragged anywhere would have snapped back on reload.
+   Grid-snapped rather than free-floating, as in the reference — a desk where icons land wherever
+   they were dropped looks untidy within a week, and the saved layout is a list of cells, not
+   pixels. The tiles and the shortcut field share the left column, so this one takes the slack. */
+.shorts {
+  position: relative;
+  flex: 1;
+  min-height: 100px;
+}
+.sc {
+  position: absolute;
+  width: 78px;
+  padding: 9px 5px;
+  border-radius: 13px;
+  border: 1px solid var(--edge);
+  background: var(--glass);
+  backdrop-filter: blur(18px);
+  cursor: grab;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--sans);
+  /* Pointer events only reach the drag handler if the browser is not busy scrolling the page. */
+  touch-action: none;
+  transition:
+    left 0.22s var(--e),
+    top 0.22s var(--e),
+    background 0.18s var(--e),
+    border-color 0.18s var(--e);
+}
+.sc:hover {
+  background: rgba(20, 30, 44, 0.8);
+  border-color: var(--edge2);
+}
+/* While dragging the icon must track the pointer exactly, so the easing that makes a snap look
+   deliberate is switched off for the duration. */
+.sc.dragging {
+  cursor: grabbing;
+  transition: none;
+  z-index: 30;
+  transform: scale(1.06);
+  box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.9);
+  border-color: var(--cool);
+}
+.sc .g {
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  font-weight: 700;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.13) inset;
+}
+.sc .l {
+  font-size: 10.5px;
+  color: var(--ink2);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.sc .x {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 126, 138, 0.9);
+  color: #2a0a0f;
+  font-size: 10px;
+  cursor: pointer;
+  opacity: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  line-height: 1;
+}
+.sc:hover .x,
+.sc:focus-within .x {
+  opacity: 1;
+}
+/* The cell the icon will land in, shown under the pointer so the snap is never a surprise. */
+.ghost {
+  position: absolute;
+  width: 78px;
+  height: 78px;
+  border-radius: 13px;
+  border: 1.5px dashed var(--cool);
+  background: rgba(91, 200, 245, 0.09);
+  pointer-events: none;
+  display: none;
+}
+.ghost.on {
+  display: block;
+}
+
 /* ─── progress ─────────────────────────────────────────────────────────────── */
 
 .prog {
@@ -413,6 +524,12 @@ body {
 .fm.on {
   display: flex;
   animation: pop 0.3s var(--e);
+}
+/* In the reference the file manager IS a card in the left column. Here it opens as a window, and
+   its columns already carry their own 13px inset, so it cancels the window body's padding instead
+   of nesting a second frame and a second gutter inside the first. */
+.wb > .fm {
+  margin: -14px;
 }
 @keyframes pop {
   from {
@@ -471,17 +588,17 @@ body {
 .mk:hover {
   background: rgba(91, 200, 245, 0.16);
   border-color: rgba(91, 200, 245, 0.44);
-  color: #DBF2FE;
+  color: #dbf2fe;
 }
 .mk.act {
   background: rgba(91, 200, 245, 0.2);
   border-color: rgba(91, 200, 245, 0.5);
-  color: #DBF2FE;
+  color: #dbf2fe;
 }
 .mk.up {
   background: rgba(79, 227, 168, 0.16);
   border-color: rgba(79, 227, 168, 0.42);
-  color: #C6F6E4;
+  color: #c6f6e4;
 }
 .mk.up:hover {
   background: rgba(79, 227, 168, 0.26);
@@ -616,7 +733,7 @@ body {
 .addr .path a:hover,
 .addr .path button:hover {
   background: rgba(91, 200, 245, 0.18);
-  color: #DBF2FE;
+  color: #dbf2fe;
 }
 
 .quick {
@@ -671,7 +788,7 @@ body {
   background: rgba(91, 200, 245, 0.13);
   border: 1px solid rgba(91, 200, 245, 0.36);
   font-size: 11.5px;
-  color: #DBF2FE;
+  color: #dbf2fe;
   flex: none;
 }
 .selbar.on {
@@ -785,13 +902,6 @@ body {
   white-space: nowrap;
   flex: none;
 }
-.frow .exp {
-  font-family: var(--mono);
-  font-size: 9.5px;
-  color: var(--warn);
-  white-space: nowrap;
-  flex: none;
-}
 .fact {
   display: flex;
   gap: 3px;
@@ -819,12 +929,12 @@ body {
 }
 .fact button:hover:not(:disabled) {
   background: rgba(91, 200, 245, 0.22);
-  color: #DBF2FE;
+  color: #dbf2fe;
   border-color: rgba(91, 200, 245, 0.44);
 }
 .fact button.del:hover:not(:disabled) {
   background: rgba(255, 126, 138, 0.24);
-  color: #FFD9DD;
+  color: #ffd9dd;
   border-color: rgba(255, 126, 138, 0.5);
 }
 .fact button:disabled {
@@ -931,107 +1041,35 @@ canvas.spark {
   font-weight: 500;
   color: var(--mut);
 }
-.conns {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.conn {
-  border: 1px solid var(--edge);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.04);
-  padding: 6px 9px;
-  cursor: pointer;
-  transition: 0.16s var(--e);
-}
-.conn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: var(--edge2);
-}
-.conn .h {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 11px;
-  color: var(--ink2);
-}
-.conn .h i {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  flex: none;
-}
-.conn .h .ar {
-  margin-left: auto;
-  color: var(--dim);
-  font-size: 10px;
-  transition: transform 0.2s;
-}
-.conn.on .h .ar {
-  transform: rotate(90deg);
-}
-.conn .dsc {
-  display: none;
-  font-size: 10.5px;
-  color: var(--mut);
-  margin-top: 6px;
-  line-height: 1.5;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  padding-top: 6px;
-}
-.conn .dsc .p {
-  font-family: var(--mono);
-  color: var(--cool);
-  display: block;
-  margin-bottom: 4px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.conn.on .dsc {
-  display: block;
-  animation: fd 0.22s var(--e);
-}
+/* The reference's expanding .conn/.conns connection rows are gone rather than kept "for later".
+   They described a per-client SMB/NFS session list — protocol, address, throughput — and the API
+   publishes no endpoint that could fill one. `SidePanel` draws the networks it can actually read
+   as plain `.r` rows. */
 .netrow {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.netrow .lbl {
+/* The reference scoped .lbl and .val to .netrow but then used bare .lbl all over its windows as a
+   section caption — those captions simply came out unstyled in the mock. They are the small
+   tracked uppercase caption used everywhere else in the sheet (.tbl th, .pmh), so they are
+   defined free-standing here and .netrow only adds what the row needs. */
+.lbl {
   font-size: 9px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--dim);
   font-weight: 700;
+}
+.netrow .lbl {
   flex: 1;
 }
-.netrow .val {
+.val {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--ink2);
+  font-variant-numeric: tabular-nums;
 }
-.gear {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  border: 1px solid var(--edge);
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--mut);
-  cursor: pointer;
-  font-size: 13px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  flex: none;
-  transition: 0.2s var(--e);
-}
-.gear:hover {
-  background: rgba(245, 185, 68, 0.2);
-  color: #FFE6B0;
-  border-color: rgba(245, 185, 68, 0.45);
-  transform: rotate(45deg);
-}
-
 /* ─── brand badge and dock ─────────────────────────────────────────────────── */
 
 /* Departure 2: fixed rather than absolute, so these keep their corner regardless of which
@@ -1061,12 +1099,12 @@ canvas.spark {
   width: 26px;
   height: 26px;
   border-radius: 9px;
-  background: linear-gradient(150deg, #5BC8F5, #8FA6FF);
+  background: linear-gradient(150deg, #5bc8f5, #8fa6ff);
   display: grid;
   place-items: center;
   font-size: 12px;
   font-weight: 800;
-  color: #06202B;
+  color: #06202b;
   font-family: var(--mono);
   flex: none;
 }
@@ -1144,7 +1182,7 @@ canvas.spark {
 .dk:hover {
   background: rgba(91, 200, 245, 0.18);
   border-color: rgba(91, 200, 245, 0.4);
-  color: #DBF2FE;
+  color: #dbf2fe;
   transform: translateY(-2px);
 }
 .dk .g {
@@ -1153,15 +1191,6 @@ canvas.spark {
   border-radius: 6px;
   font-size: 10px;
 }
-.dk.plus {
-  background: rgba(79, 227, 168, 0.16);
-  border-color: rgba(79, 227, 168, 0.4);
-  color: #C6F6E4;
-}
-.dk.plus:hover {
-  background: rgba(79, 227, 168, 0.26);
-}
-
 .pmenu {
   position: fixed;
   bottom: 72px;
@@ -1220,7 +1249,7 @@ canvas.spark {
 }
 .pm.danger:hover {
   background: rgba(255, 126, 138, 0.2);
-  color: #FFD9DD;
+  color: #ffd9dd;
 }
 .pm.dis {
   opacity: 0.4;
@@ -1311,7 +1340,7 @@ canvas.spark {
 }
 .wx:hover {
   background: var(--rose);
-  color: #2A0A0F;
+  color: #2a0a0f;
   border-color: transparent;
 }
 .wb {
@@ -1387,7 +1416,7 @@ canvas.spark {
   border-radius: 9px;
   border: 1px solid rgba(91, 200, 245, 0.5);
   background: rgba(91, 200, 245, 0.2);
-  color: #DBF2FE;
+  color: #dbf2fe;
   font-size: 12.5px;
   cursor: pointer;
   font-family: var(--sans);
@@ -1400,7 +1429,7 @@ canvas.spark {
 .cf.danger .yes {
   border-color: rgba(255, 126, 138, 0.5);
   background: rgba(255, 126, 138, 0.2);
-  color: #FFD9DD;
+  color: #ffd9dd;
 }
 .cf .yes.danger:hover,
 .cf.danger .yes:hover {
@@ -1421,7 +1450,7 @@ canvas.spark {
   background: rgba(245, 185, 68, 0.13);
   font-size: 12px;
   line-height: 1.6;
-  color: #FFE6B0;
+  color: #ffe6b0;
 }
 .warn .ic,
 .notice .ic {
@@ -1431,7 +1460,7 @@ canvas.spark {
 .warn .tx,
 .notice .tx {
   font-size: 12px;
-  color: #FFE6B0;
+  color: #ffe6b0;
   line-height: 1.6;
 }
 .warn .tx b,
@@ -1439,55 +1468,35 @@ canvas.spark {
   display: block;
   font-size: 12.5px;
   margin-bottom: 3px;
-  color: #FFF0CF;
+  color: #fff0cf;
 }
 .notice.error {
   border-color: rgba(255, 126, 138, 0.45);
   background: rgba(255, 126, 138, 0.13);
-  color: #FFD9DD;
+  color: #ffd9dd;
 }
 .notice.error .tx {
-  color: #FFD9DD;
+  color: #ffd9dd;
 }
 .notice.error .tx b {
-  color: #FFEBEE;
+  color: #ffebee;
 }
 .notice.ok {
   border-color: rgba(79, 227, 168, 0.42);
   background: rgba(79, 227, 168, 0.12);
-  color: #C6F6E4;
+  color: #c6f6e4;
 }
 .notice.ok .tx {
-  color: #C6F6E4;
+  color: #c6f6e4;
 }
 .notice.ok .tx b {
-  color: #DFFBF0;
+  color: #dffbf0;
 }
 
-/* ─── tabs, tables, status pills ───────────────────────────────────────────── */
+/* ─── tables and status pills ──────────────────────────────────────────────── */
 
-.tabs {
-  display: flex;
-  gap: 5px;
-  flex: none;
-  flex-wrap: wrap;
-}
-.tab {
-  padding: 7px 14px;
-  border-radius: 9px;
-  border: 1px solid var(--edge);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--mut);
-  font-size: 12px;
-  cursor: pointer;
-  font-family: var(--sans);
-}
-.tab.on {
-  background: rgba(91, 200, 245, 0.18);
-  border-color: rgba(91, 200, 245, 0.44);
-  color: #DBF2FE;
-  font-weight: 600;
-}
+/* The reference's .tabs/.tab strip is not here: no screen in this build is tabbed. Every pane is
+   its own window off the dock, which is the navigation the reference itself used for them. */
 
 .tbl {
   width: 100%;
@@ -1535,6 +1544,44 @@ canvas.spark {
   color: var(--rose);
 }
 
+/* The reference's .tmtop row and .errbox counter belonged to its Görev yöneticisi window — a
+   process table with pids, levels and restart counts. Nothing in the contract reports a process,
+   so that window cannot be built and its rules are not kept against the day it might be. Its
+   .tree .lvl / .tree .pid colours went with them.
+
+   Indented monospace output — an app's log lines — still exists, so .tree does. Monospace because
+   the indentation is the structure, and a proportional face would let it drift. */
+.tree {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.85;
+  color: var(--ink2);
+}
+
+/* Ending something that is running: a console session, an app. Kept visually quieter than
+   .b.danger — it sits inside rows, where a full-weight red button would shout on every line. */
+.kill {
+  padding: 4px 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 126, 138, 0.4);
+  background: rgba(255, 126, 138, 0.14);
+  color: #ffd9dd;
+  font-size: 10.5px;
+  cursor: pointer;
+  font-family: var(--sans);
+}
+.kill:hover:not(:disabled) {
+  background: rgba(255, 126, 138, 0.26);
+  border-color: rgba(255, 126, 138, 0.5);
+  color: #ffd9dd;
+}
+.kill:disabled {
+  border-color: var(--edge);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--mut);
+  cursor: default;
+  opacity: 1;
+}
 /* ─── users ────────────────────────────────────────────────────────────────── */
 
 .urow {
@@ -1575,7 +1622,7 @@ canvas.spark {
   border-radius: 7px;
   border: 1px solid rgba(255, 126, 138, 0.4);
   background: rgba(255, 126, 138, 0.13);
-  color: #FFD9DD;
+  color: #ffd9dd;
   font-size: 11px;
   cursor: pointer;
   font-family: var(--sans);
@@ -1588,7 +1635,7 @@ canvas.spark {
 .revoke.back {
   border-color: rgba(79, 227, 168, 0.42);
   background: rgba(79, 227, 168, 0.14);
-  color: #C6F6E4;
+  color: #c6f6e4;
 }
 .revoke.back:hover:not(:disabled) {
   background: rgba(79, 227, 168, 0.26);
@@ -1625,7 +1672,7 @@ canvas.spark {
 .admin.on {
   background: rgba(79, 227, 168, 0.18);
   border-color: rgba(79, 227, 168, 0.44);
-  color: #C6F6E4;
+  color: #c6f6e4;
 }
 
 /* ─── buttons ──────────────────────────────────────────────────────────────── */
@@ -1649,7 +1696,7 @@ button:hover:not(:disabled),
 .b:hover:not(:disabled) {
   background: rgba(91, 200, 245, 0.16);
   border-color: rgba(91, 200, 245, 0.44);
-  color: #DBF2FE;
+  color: #dbf2fe;
 }
 button:disabled,
 .b:disabled {
@@ -1665,7 +1712,7 @@ button:disabled,
 .b.pri {
   background: rgba(91, 200, 245, 0.2);
   border-color: rgba(91, 200, 245, 0.5);
-  color: #DBF2FE;
+  color: #dbf2fe;
   font-weight: 600;
 }
 .b.pri:hover:not(:disabled) {
@@ -1674,12 +1721,12 @@ button:disabled,
 .b.danger {
   border-color: rgba(255, 126, 138, 0.42);
   background: rgba(255, 126, 138, 0.14);
-  color: #FFD9DD;
+  color: #ffd9dd;
 }
 .b.danger:hover:not(:disabled) {
   background: rgba(255, 126, 138, 0.26);
   border-color: rgba(255, 126, 138, 0.5);
-  color: #FFD9DD;
+  color: #ffd9dd;
 }
 
 /* ─── forms ────────────────────────────────────────────────────────────────── */
@@ -1747,6 +1794,410 @@ label textarea,
 .cf select,
 .cf textarea {
   margin-top: 0;
+}
+
+/* ─── screens the first port left out ──────────────────────────────────────── */
+
+/* Everything from here to the sign-in card was skipped when this sheet was ported, because the
+   device had no endpoint behind any of it and a rule with no screen is a lie. Notes, tasks,
+   preferences, the console, the app list and the transfer list all have tested endpoints now, so
+   the reference's rules for them are back, unchanged in value.
+   They sit *after* the button and field sections on purpose: several of them are <button> and
+   <input> elements that must beat the base skin, and a single-class hover rule cannot outrank
+   `button:hover:not(:disabled)` on specificity alone — only on source order. */
+
+/* notes — GET/POST /notes, PATCH/DELETE /notes/{id} */
+.nlist {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
+.nitem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+}
+.nitem:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+.nitem .t {
+  flex: 1;
+  font-size: 11.5px;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nitem .d {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--dim);
+  flex: none;
+}
+/* The reference first hid this behind :hover and then gave up on that and made it permanent;
+   only the permanent one is ported, since a delete you cannot reach with a finger is not a
+   delete. Opening the note is a click on the row, so this button stops the row's own handler. */
+.ndel {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 1px solid var(--edge);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--mut);
+  cursor: pointer;
+  font-size: 11px;
+  flex: none;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.ndel:hover:not(:disabled) {
+  background: rgba(255, 126, 138, 0.24);
+  color: #ffd9dd;
+  border-color: rgba(255, 126, 138, 0.5);
+}
+/* The note body fills its window: a note editor that scrolls at 300px while empty space sits
+   under it is the fastest way to make writing feel cramped. */
+.nbig {
+  width: 100%;
+  min-height: 300px;
+  flex: 1;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  padding: 12px 14px;
+  color: var(--ink2);
+  font-size: 13px;
+  line-height: 1.7;
+  outline: none;
+  font-family: var(--sans);
+  resize: none;
+}
+.nbig:focus {
+  border-color: var(--edge2);
+}
+.ntitle {
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--edge);
+  border-radius: 9px;
+  padding: 8px 11px;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  outline: none;
+  width: 100%;
+  margin: 0;
+}
+.ntitle:focus {
+  border-color: var(--edge2);
+}
+
+/* tasks — GET/POST /tasks, PATCH/DELETE /tasks/{id}; grouped by the person they belong to,
+   which is why .jper repeats and .jhead carries an avatar rather than a plain caption. */
+.jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.jper {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.jhead {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.jhead .av {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+.jhead b {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.jhead .cnt {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--mut);
+  font-variant-numeric: tabular-nums;
+}
+.jitem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.jitem:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+.jck {
+  width: 17px;
+  height: 17px;
+  border-radius: 5px;
+  border: 1.5px solid var(--edge2);
+  background: transparent;
+  cursor: pointer;
+  flex: none;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  /* The tick is always in the DOM and only becomes visible when checked, so the box does not
+     change size the moment it is ticked. */
+  color: transparent;
+  padding: 0;
+}
+.jck:hover:not(:disabled) {
+  background: transparent;
+  border-color: var(--cool);
+  color: transparent;
+}
+.jck.on {
+  background: var(--live);
+  border-color: var(--live);
+  color: #053024;
+}
+.jck.on:hover:not(:disabled) {
+  background: var(--live);
+  border-color: var(--live);
+  color: #053024;
+}
+.jitem .tx {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--ink2);
+  outline: none;
+  min-width: 0;
+}
+.jitem.done .tx {
+  text-decoration: line-through;
+  color: var(--dim);
+}
+.jitem .del {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 12px;
+  opacity: 0;
+  flex: none;
+  padding: 0;
+}
+/* :focus-within is not in the reference. Without it the delete button is unreachable by keyboard,
+   because a control at opacity 0 is still focusable and the ring lands on nothing visible. */
+.jitem:hover .del,
+.jitem:focus-within .del {
+  opacity: 1;
+}
+.jitem .del:hover:not(:disabled) {
+  background: rgba(255, 126, 138, 0.2);
+  color: #ffd9dd;
+}
+.jadd input {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.26);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 12px;
+  outline: none;
+}
+/* A quiet aside inside a window body — who can see this list, what the endpoint will not do. */
+.note {
+  font-size: 11px;
+  color: var(--dim);
+  border-left: 2px solid var(--edge2);
+  padding-left: 9px;
+  line-height: 1.6;
+}
+
+/* apps — GET /apps, POST/PATCH/DELETE /apps/{slug}, GET /apps/{slug}/logs */
+.apps {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}
+.app {
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.app .h {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.app .h .g {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  font-size: 15px;
+}
+.app .h b {
+  font-size: 12.5px;
+  font-weight: 600;
+  flex: 1;
+}
+.app .m {
+  font-size: 11px;
+  color: var(--mut);
+}
+/* The start/stop control. It is deliberately full width and neutral until hovered: the tint is
+   the consequence of pressing it, so a card full of running apps is not a wall of red. */
+.tg {
+  padding: 6px 0;
+  border-radius: 7px;
+  border: 1px solid var(--edge);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink2);
+  font-size: 11.5px;
+  cursor: pointer;
+  font-family: var(--sans);
+  width: 100%;
+}
+.tg.stop:hover:not(:disabled) {
+  background: rgba(255, 126, 138, 0.2);
+  border-color: rgba(255, 126, 138, 0.42);
+  color: #ffd9dd;
+}
+.tg.start:hover:not(:disabled) {
+  background: rgba(79, 227, 168, 0.2);
+  border-color: rgba(79, 227, 168, 0.42);
+  color: #c6f6e4;
+}
+
+/* console — POST/GET /console, the SSE stream at /console/{id}/stream.
+   The reference faked a terminal with a <pre>, so its .term set the type itself. Here xterm.js
+   draws the text and brings its own stylesheet (@xterm/xterm/css/xterm.css, imported by the
+   component), so this rule's job is only the container: a definite height for the fit addon to
+   measure, the recessed black well the rest of the sheet uses, and a hairline edge so the
+   terminal reads as part of the glass rather than a hole punched through it. */
+.term {
+  flex: 1;
+  min-height: 260px;
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: #9fe8c4;
+  overflow: hidden;
+  position: relative;
+}
+/* xterm.css paints the viewport opaque black. Left alone it would sit as a flat rectangle on top
+   of the well above, which is a shade lighter — the seam is visible. */
+.term .xterm .xterm-viewport {
+  background-color: transparent;
+}
+/* Used by the plain-text fallback the component shows before a session is attached. */
+.term .p {
+  color: var(--cool);
+}
+
+/* transfers — GET /transfers; one row per job, the bar underneath rather than beside, because a
+   filename and a percentage competing for the same line means one of them gets truncated. */
+.trrow {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.trrow:last-child {
+  border-bottom: none;
+}
+.trrow .l {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  font-size: 12px;
+}
+.trrow .l span {
+  flex: 1;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trrow .l em {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--cool);
+  font-variant-numeric: tabular-nums;
+}
+
+/* background picker — GET/PUT /me/preferences */
+.bgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+.bopt {
+  border: 1px solid var(--edge);
+  border-radius: 11px;
+  overflow: hidden;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0;
+  text-align: left;
+  transition: 0.16s var(--e);
+}
+.bopt:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ink2);
+  border-color: var(--edge2);
+  transform: translateY(-2px);
+}
+/* Not in the reference: there, picking a wallpaper closed the window, so nothing ever had to show
+   which one was in force. This picker stays open and the choice is persisted, so the current one
+   has to be marked or the screen cannot answer "what am I using". */
+.bopt.on {
+  border-color: rgba(91, 200, 245, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(91, 200, 245, 0.35);
+}
+.bopt.on .lb {
+  color: #dbf2fe;
+}
+.bopt .pv {
+  aspect-ratio: 16 / 10;
+  background-size: cover;
+  background-position: center;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+}
+.bopt .lb {
+  padding: 7px 9px;
+  font-size: 11px;
+  color: var(--ink2);
 }
 
 /* ─── sign-in and setup ────────────────────────────────────────────────────── */
@@ -1968,6 +2419,12 @@ label textarea,
   .tiles .card {
     min-height: 190px;
   }
+  /* The shortcut field no longer gets the slack left over by a fixed-height desk, because the
+     page scrolls here — without a floor it would collapse to nothing and the icons, being
+     absolutely positioned, would spill over whatever follows. */
+  .shorts {
+    min-height: 190px;
+  }
   .fm.on {
     min-height: 520px;
   }
@@ -2041,6 +2498,9 @@ label textarea,
   .tfig {
     font-size: 19px;
   }
+  .shorts {
+    min-height: 200px;
+  }
   .side .card {
     min-width: 236px;
   }
@@ -2087,9 +2547,6 @@ label textarea,
     padding: 9px 7px;
     gap: 8px;
   }
-  .frow .exp {
-    display: none;
-  }
   .addr {
     font-size: 11.5px;
     padding: 8px 11px;
@@ -2134,6 +2591,26 @@ label textarea,
   }
   .tabs {
     flex-wrap: wrap;
+  }
+  .tmtop {
+    flex-wrap: wrap;
+  }
+  .errbox {
+    width: 100%;
+    justify-content: center;
+  }
+  .apps {
+    grid-template-columns: 1fr;
+  }
+  .bgrid {
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  }
+  /* Same rule as .fact above: on a touch screen nothing may hide behind hover, so the task's
+     delete button is permanently visible and given a thumb-sized target. */
+  .jitem .del {
+    opacity: 1;
+    width: 30px;
+    height: 30px;
   }
   .dock {
     gap: 5px;

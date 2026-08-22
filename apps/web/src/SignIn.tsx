@@ -4,7 +4,7 @@ import { useState, type FormEvent } from 'react';
 // wrong password, an unknown account and an unknown organisation, so there is no detail to surface
 // and echoing whatever the server happened to say would risk inventing one.
 import { api } from './api.js';
-import { IconLogo } from './ui.js';
+import { Sky } from './sky.js';
 
 interface Props {
   onSignedIn: (note: string | null) => void;
@@ -15,11 +15,37 @@ interface Props {
 type Step = 'password' | 'second-factor';
 
 /**
+ * The brand mark that sits at the top of both first-run screens.
+ *
+ * It is the reference's `.brandbox` — gradient square, letter-spaced wordmark — and not the drawn
+ * `IconLogo`, because `.authcard .brandbox` is the rule the stylesheet actually carries for this
+ * position. An SVG dropped in here has no sizing rule at all and renders at whatever width the
+ * flex row gives it.
+ *
+ * It lives here rather than in `ui.tsx` because the two first-run screens are its only callers;
+ * the signed-in desktop mounts the real `.brandbox`, which is a menu button and not this.
+ */
+export function BrandMark(): React.JSX.Element {
+  return (
+    <div className="brandbox">
+      <span className="mark" aria-hidden>
+        D
+      </span>
+      <span className="nm">DEPSIS</span>
+    </div>
+  );
+}
+
+/**
  * Sign in.
  *
- * Two fields. There is no organisation box: with one organisation on the box the server resolves it
- * itself, and asking for a slug that must be typed exactly turned an invisible trailing space into
- * "wrong password" — which is how it actually failed the first time someone tried to log in.
+ * Two fields. There is no organisation box: with one organisation on the box the server resolves
+ * it itself, and asking for a slug that must be typed exactly turned an invisible trailing space
+ * into "wrong password" — which is how it actually failed the first time someone tried to log in.
+ *
+ * The galaxy runs behind this screen as well as behind the desktop. The appliance is the same
+ * machine before and after a session exists, and a login form on a flat background followed by a
+ * drawn sky reads as two different products.
  *
  * The second-factor step is still here even though nothing in the interface can turn two-factor ON
  * any more. It costs one branch, and removing it would strand an account that had already enrolled
@@ -81,103 +107,115 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
       return;
     }
     onSignedIn(
-      data.usedRecoveryCode
-        ? 'Kurtarma koduyla girdiniz. O kod artık kullanılamaz.'
-        : null,
+      data.usedRecoveryCode ? 'Kurtarma koduyla girdiniz. O kod artık kullanılamaz.' : null,
     );
   }
 
   if (step === 'second-factor') {
     return (
+      <>
+        <Sky mode="sky" />
+        <div className="centered">
+          <main className="authcard">
+            <BrandMark />
+            <h1>Bir adım daha</h1>
+            <p>
+              Doğrulayıcı uygulamanızdaki altı haneli kodu ya da kurtarma kodlarınızdan birini
+              girin.
+            </p>
+
+            <form onSubmit={(e) => void submitSecondFactor(e)}>
+              <label>
+                Kod
+                <input
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.trim())}
+                  autoComplete="one-time-code"
+                  inputMode="text"
+                  maxLength={64}
+                  autoFocus
+                  required
+                />
+              </label>
+
+              {error !== null && (
+                <div className="notice error" role="alert">
+                  <span className="ic" aria-hidden>
+                    !
+                  </span>
+                  <span className="tx">{error}</span>
+                </div>
+              )}
+
+              <button type="submit" className="b pri wide" disabled={busy}>
+                {busy ? 'Kontrol ediliyor…' : 'Devam'}
+              </button>
+            </form>
+          </main>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Sky mode="sky" />
       <div className="centered">
-        <main className="card">
-          <div className="brand-mark">
-            <IconLogo />
-            <span>DEPSIS</span>
-          </div>
-          <h1>Bir adım daha</h1>
-          <p className="muted">
-            Doğrulayıcı uygulamanızdaki altı haneli kodu ya da kurtarma kodlarınızdan birini girin.
-          </p>
-          <form onSubmit={(e) => void submitSecondFactor(e)}>
+        <main className="authcard">
+          <BrandMark />
+          <h1>Giriş yap</h1>
+
+          {note !== null && (
+            <div className="notice" role="alert">
+              <span className="ic" aria-hidden>
+                ⚠
+              </span>
+              <span className="tx">{note}</span>
+            </div>
+          )}
+
+          <form onSubmit={(e) => void submitPassword(e)}>
             <label>
-              Kod
+              Kullanıcı adı
               <input
-                value={code}
-                onChange={(e) => setCode(e.target.value.trim())}
-                autoComplete="one-time-code"
-                inputMode="text"
+                value={username}
+                // Trimmed. A name with a trailing space fails the server's format check and comes
+                // back as the same refusal as a wrong password — measured on a real sign-in, where
+                // the invisible character cost three rounds of instrumentation to find.
+                onChange={(e) => setUsername(e.target.value.trim())}
+                autoComplete="username"
+                maxLength={64}
                 autoFocus
+                required
+              />
+            </label>
+            <label>
+              Parola
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                maxLength={1024}
                 required
               />
             </label>
 
             {error !== null && (
-              <p className="notice error" role="alert">
-                {error}
-              </p>
+              <div className="notice error" role="alert">
+                <span className="ic" aria-hidden>
+                  !
+                </span>
+                <span className="tx">{error}</span>
+              </div>
             )}
 
-            <button type="submit" className="primary" disabled={busy}>
-              {busy ? 'Kontrol ediliyor…' : 'Devam'}
+            <button type="submit" className="b pri wide" disabled={busy}>
+              {busy ? 'Giriş yapılıyor…' : 'Giriş yap'}
             </button>
           </form>
         </main>
       </div>
-    );
-  }
-
-  return (
-    <div className="centered">
-      <main className="card">
-        <div className="brand-mark">
-          <IconLogo />
-          <span>DEPSIS</span>
-        </div>
-        <h1>Giriş yap</h1>
-
-        {note !== null && (
-          <p className="notice warning" role="alert">
-            {note}
-          </p>
-        )}
-
-        <form onSubmit={(e) => void submitPassword(e)}>
-          <label>
-            Kullanıcı adı
-            <input
-              value={username}
-              // Trimmed. A name with a trailing space fails the server's format check and comes
-              // back as the same refusal as a wrong password — measured on a real sign-in, where
-              // the invisible character cost three rounds of instrumentation to find.
-              onChange={(e) => setUsername(e.target.value.trim())}
-              autoComplete="username"
-              autoFocus
-              required
-            />
-          </label>
-          <label>
-            Parola
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              required
-            />
-          </label>
-
-          {error !== null && (
-            <p className="notice error" role="alert">
-              {error}
-            </p>
-          )}
-
-          <button type="submit" className="primary" disabled={busy}>
-            {busy ? 'Giriş yapılıyor…' : 'Giriş yap'}
-          </button>
-        </form>
-      </main>
-    </div>
+    </>
   );
 }
