@@ -14,6 +14,8 @@ import {
 
 import { AgentService, expectStatus } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
+import { JobsService } from '../jobs/jobs.service.js';
+import { APPLY_ACL_KIND, APPLY_ACL_MAX_ATTEMPTS } from '../permissions/permissions.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 
 /**
@@ -557,6 +559,15 @@ export class FilesService {
     private readonly db: DbService,
     private readonly agent: AgentService,
     private readonly posix: PosixIdentityService,
+    /**
+     * For the ONE thing in this service that changes who can reach a folder: `move`.
+     *
+     * A move re-parents a subtree, and ADR-0021 resolves permissions from the ancestor chain — so
+     * the same folder answers differently the moment it lands, while its directory on disk still
+     * carries the ACL the old parent produced. Only an explicit `ApplyFolderAcl` per folder can
+     * close that, and only the queue can deliver it.
+     */
+    private readonly jobs: JobsService,
   ) {}
 
   /**
@@ -1019,6 +1030,38 @@ export class FilesService {
   }
 
   /**
+   * Queue the POSIX re-application for a subtree, or say in the journal that it did not happen.
+   *
+   * Unconditional — there is deliberately no `agent.isAvailable()` check, for the reason
+   * `PermissionsService.enqueueApply` sets out: this writes a queue row, the WORKER is what needs
+   * the agent, and `available` is a startup latch that never recovers. Guarding here would mean a
+   * move performed during an agent restart never reached the filesystem at all.
+   *
+   * A failure to enqueue is logged rather than thrown. The move itself has already happened on
+   * both sides and is correct; refusing it after the fact would be worse than a stale ACL, and
+   * undoing it would move a user's folder back under them without being asked.
+   */
+  private async enqueueAclApply(
+    organizationId: string,
+    shareId: string,
+    entryId: string,
+  ): Promise<void> {
+    try {
+      await this.jobs.enqueue(
+        organizationId,
+        APPLY_ACL_KIND,
+        { shareId, entryId },
+        { maxAttempts: APPLY_ACL_MAX_ATTEMPTS },
+      );
+    } catch (error) {
+      this.logger.error(
+        `moved ${entryId} in share ${shareId} but could not queue the ACL re-application: ` +
+          `${messageOf(error)}. The subtree still carries the ACL of its previous parent.`,
+      );
+    }
+  }
+
+  /**
    * Ask the agent for ONE directory, and turn its answer into this file's errors.
    *
    * `directory_created`, `conflict` and `not_found` are all ordinary answers on this wire, so each
@@ -1362,7 +1405,7 @@ export class FilesService {
 
     const newPath = `${parentPath}/${name}`;
     try {
-      return await this.db.withTenant(organizationId, async (db) => {
+      const moved = await this.db.withTenant(organizationId, async (db) => {
         const rows = await db.query<FileEntryRow>(
           `UPDATE public.file_entries
               SET parent_id = $3, name = $4, path = $5
@@ -1376,6 +1419,24 @@ export class FilesService {
         await rebuildSubtreePaths(db, organizationId, id);
         return row;
       });
+
+      // THE MOVE CHANGED WHICH GRANTS THIS SUBTREE INHERITS, so the kernel has to be told.
+      //
+      // ADR-0021 resolves from the ancestor chain, and the chain is exactly what a move replaces:
+      // a folder taken out of an open parent and dropped into a locked-down one is closed in the
+      // application layer on the very next request. On disk nothing happened — `renameat2`
+      // preserves a directory's access and default ACLs, and POSIX default-ACL inheritance only
+      // ever runs at CREATE time, so the subtree arrives still carrying the entries the OLD
+      // parent's grants produced and stays reachable over SMB.
+      //
+      // Only for a FOLDER. A file has no ACL of DEPSIS's making — permissions are set on folders
+      // and a file inherits from the one it sits in (`NotAFolderError` says so) — so moving a file
+      // changes nothing an apply could write.
+      //
+      // After the transaction and never inside it, the ordering every other enqueue here uses:
+      // `JobsService.enqueue` opens its own tenant transaction.
+      if (moved.kind === 'folder') await this.enqueueAclApply(organizationId, share.id, id);
+      return moved;
     } catch (error) {
       // The file is at its new name and the row is not. Put it back, because the alternative is
       // exactly the divergence the ordering above exists to prevent — and this is the one window

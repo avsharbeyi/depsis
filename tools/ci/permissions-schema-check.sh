@@ -89,6 +89,16 @@ T2=$(q "SELECT public.everyone_team('$C')")
 { [ -n "$T1" ] && [ "$T1" = "$T2" ]; } && pass 'everyone_team is idempotent' \
                                        || fail 'EVERYONE_TEAM IS NOT IDEMPOTENT' "$T1 vs $T2"
 
+# gid'i OLMAK ZORUNDA. NULL bir gid, `AclApplyService.gidFor`'un uyarı yazıp ATLADIĞI bir
+# girdidir — yani veritabanı "herkes erişebilir" derken paylaşımın kökünde hiç ACL girdisi
+# olmaması demek. 0016 bu fonksiyonu gid'siz yazmıştı ve varsayılan paylaşımın TEK grant'ı buna
+# yazılıyor; 0017 düzeltti. Bu satır, düzeltmenin geri gelmemesi için.
+GID=$(q "SELECT coalesce(posix_gid::text,'NULL') FROM teams WHERE id='$T1'")
+case "$GID" in
+  NULL|'') fail 'EVERYONE_TEAM HAS NO GID' "$GID" ;;
+  *) [ "$GID" -ge 300000 ] && [ "$GID" -le 399999 ]        && pass 'everyone_team reserves a gid in the DEPSIS range' "$GID"        || fail 'EVERYONE_TEAM GID IS OUT OF RANGE' "$GID" ;;
+esac
+
 MEM=$(q "SELECT count(*) FROM team_members WHERE team_id='$T1'")
 [ "$MEM" = '2' ] && pass 'everyone_team holds every user of the tenant' \
                  || fail 'EVERYONE_TEAM MEMBERSHIP IS WRONG' "$MEM"
@@ -164,14 +174,26 @@ grep -qi 'posix_gid_range' <<<"$OUT" && pass 'a gid outside the reserved range i
 # uid/gid tahsisi cihaz genelinde tek olmalı — iki kiracı, aynı sayaç.
 q "UPDATE users SET posix_uid = public.allocate_posix_id('user') WHERE username='ali'" >/dev/null
 q "UPDATE users SET posix_uid = public.allocate_posix_id('user') WHERE username='veli'" >/dev/null
-IDS=$(q "SELECT string_agg(posix_uid::text,',' ORDER BY posix_uid) FROM users WHERE posix_uid IS NOT NULL")
-[ "$IDS" = '300000,300001' ] && pass 'two tenants draw from ONE device-wide counter' "$IDS" \
-                             || fail 'ALLOCATION IS NOT DEVICE-WIDE' "$IDS"
+# RELATIVE, not absolute. This used to read `= '300000,300001'` and broke the moment anything
+# else allocated first — `everyone_team()` now reserves a gid above, so the pair shifted by one and
+# a correct system reported a failure. The property is that the two ids come from ONE counter and
+# differ across tenants, not that they are any particular pair of numbers.
+ALI=$(q "SELECT posix_uid FROM users WHERE username='ali'")
+VELI=$(q "SELECT posix_uid FROM users WHERE username='veli'")
+{ [ -n "$ALI" ] && [ -n "$VELI" ] && [ "$ALI" -ne "$VELI" ] \
+    && [ "$ALI" -ge 300000 ] && [ "$VELI" -ge 300000 ]; } \
+  && pass 'two tenants draw from ONE device-wide counter' "$ALI,$VELI" \
+  || fail 'ALLOCATION IS NOT DEVICE-WIDE' "$ALI,$VELI"
 
 q "UPDATE teams SET posix_gid = public.allocate_posix_id('team') WHERE name='muhasebe'" >/dev/null
 G=$(q "SELECT posix_gid FROM teams WHERE name='muhasebe'")
-[ "$G" = '300002' ] && pass 'gids continue the same sequence as uids' "$G" \
-                    || fail 'GID COLLIDES WITH A UID SPACE' "$G"
+# Strictly above both uids, because the counter is shared. Absolute again would be brittle; what
+# must never happen is a gid that equals some user's uid, since the filesystem knows only numbers
+# and `ls -l` would show one principal's files owned by the other.
+COLLIDES=$(q "SELECT count(*) FROM users WHERE posix_uid = $G")
+{ [ -n "$G" ] && [ "$G" -gt "$ALI" ] && [ "$G" -gt "$VELI" ] && [ "$COLLIDES" = '0' ]; } \
+  && pass 'gids continue the same sequence as uids' "$G" \
+  || fail 'GID COLLIDES WITH A UID SPACE' "$G (uids $ALI,$VELI; collisions $COLLIDES)"
 
 OUT=$(q "SELECT public.allocate_posix_id('root')")
 grep -qi 'user or team' <<<"$OUT" && pass 'allocate_posix_id refuses an unknown kind' \

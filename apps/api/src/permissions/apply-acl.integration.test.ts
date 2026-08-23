@@ -233,4 +233,68 @@ describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
     // entry is not lost just because the job did not rewrite the root.
     expect(calls[0]?.entries).toEqual([{ gid: takimGid, read: true, write: false, execute: true }]);
   });
+
+  it('rewrites a trashed folder too, because its directory is live on SMB', async () => {
+    // The walk used to filter `trashed_at IS NULL`, justified in a comment as "they are not
+    // somewhere anybody browses". That is false for the half of the appliance the ACLs exist for:
+    // trashing sets a flag and touches nothing else, so the directory is still at its original
+    // path inside the same Samba section — `samba.rs` vetoes only `/.depsis/` — and it is
+    // browsable over SMB the whole time it sits in the bin. A narrowing at the root reported
+    // success and left the binned branch carrying the OLD, wider ACL.
+    await owner.withoutTenant('migration-status', (q) =>
+      // Both columns together: `file_entries_trash_pair` is
+      // `(trashed_at IS NULL) = (trashed_by IS NULL)`, so a half-set pair is refused — which is
+      // the constraint doing exactly its job on a fixture that got it wrong.
+      q.query(`UPDATE file_entries SET trashed_at = now(), trashed_by = $2 WHERE id = $1`, [
+        ortak,
+        ayse,
+      ]),
+    );
+
+    calls = [];
+    await acl.apply(org, { shareId: share, entryId: null }, 'test');
+    expect(calls.map((call) => call.path.join('/')).sort()).toContain('belgeler/ortak');
+
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE file_entries SET trashed_at = NULL, trashed_by = NULL WHERE id = $1`, [
+        ortak,
+      ]),
+    );
+  });
+
+  it('does not lose a LIVE folder just because its parent is in the bin', async () => {
+    // The sharper half of the same defect, and the one a reader is least likely to predict. The
+    // filter sat on both the anchor AND the recursive join, so a child could not enter a tree its
+    // parent was absent from — one binned folder near the root silently took its whole subtree out
+    // of every future apply, live descendants included.
+    const derin =
+      (
+        await owner.withoutTenant('migration-status', (q) =>
+          q.query<{ id: string }>(
+            `INSERT INTO file_entries (organization_id, share_id, parent_id, kind, name, path)
+             VALUES ($1,$2,$3,'folder','derin','/belgeler/ortak/derin') RETURNING id::text AS id`,
+            [org, share, ortak],
+          ),
+        )
+      )[0]?.id ?? '';
+
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE file_entries SET trashed_at = now(), trashed_by = $2 WHERE id = $1`, [
+        ortak,
+        ayse,
+      ]),
+    );
+
+    calls = [];
+    await acl.apply(org, { shareId: share, entryId: null }, 'test');
+    const written = calls.map((call) => call.path.join('/'));
+    expect(written).toContain('belgeler/ortak/derin');
+
+    await owner.withoutTenant('migration-status', async (q) => {
+      await q.query(`UPDATE file_entries SET trashed_at = NULL, trashed_by = NULL WHERE id = $1`, [
+        ortak,
+      ]);
+      await q.query(`DELETE FROM file_entries WHERE id = $1`, [derin]);
+    });
+  });
 });

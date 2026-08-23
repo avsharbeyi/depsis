@@ -14,7 +14,7 @@ import { AgentService } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
-import { APPLY_ACL_KIND } from '../permissions/permissions.service.js';
+import { APPLY_ACL_KIND, APPLY_ACL_MAX_ATTEMPTS } from '../permissions/permissions.service.js';
 
 export interface TeamRow {
   id: string;
@@ -411,19 +411,23 @@ export class TeamsService {
    */
   private async applyToShares(organizationId: string, shareIds: readonly string[]): Promise<void> {
     if (shareIds.length === 0) return;
-    if (!this.agent.isAvailable()) {
-      this.logger.warn(
-        `dropped grants across ${shareIds.length} share(s) with the agent unreachable: their ` +
-          `POSIX ACLs are now stale`,
-      );
-      return;
-    }
+    // The `agent.isAvailable()` guard that used to stand here was the worst instance of the three,
+    // because this path is a BULK REVOCATION and the endpoint has no way to report the miss:
+    // `DELETE /teams/{id}` answers 204, and the dry-run's `PermissionImpact` has no
+    // `applyingJobId` field at all. An administrator deleting a team during an agent restart got a
+    // 204, lost every grant the team carried, and left the group's ACL entries on every folder —
+    // with no signal anywhere but a log line. See `PermissionsService.enqueueApply`.
     for (const shareId of shareIds) {
       try {
         // `entryId: null` is the share root, so the job walks the whole share. A team's grants can
         // sit on any number of nodes in it and the cascade took all of them at once; re-applying
         // from the root is the only scope that is certainly a superset of what changed.
-        await this.jobs.enqueue(organizationId, APPLY_ACL_KIND, { shareId, entryId: null });
+        await this.jobs.enqueue(
+          organizationId,
+          APPLY_ACL_KIND,
+          { shareId, entryId: null },
+          { maxAttempts: APPLY_ACL_MAX_ATTEMPTS },
+        );
       } catch (error) {
         this.logger.error(
           `grants were dropped in share ${shareId} but the apply job could not be queued: ` +

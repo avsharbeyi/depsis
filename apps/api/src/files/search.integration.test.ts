@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AgentService } from '../agent/agent.service.js';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
 import { DbService } from '../db/db.service.js';
+import { JobsService } from '../jobs/jobs.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import { FilesService } from './files.service.js';
 import { SearchController } from './search.controller.js';
@@ -117,7 +118,7 @@ describeDb('GET /search, at the controller', () => {
       userB = seeded.find((r) => r.username === 'search-bora')?.id ?? '';
     });
 
-    files = new FilesService(db, fixtureAgent, new PosixIdentityService(db));
+    files = new FilesService(db, fixtureAgent, new PosixIdentityService(db), new JobsService(db));
     search = new SearchController(files);
 
     shareA = (await files.shareOf(orgA)).id;

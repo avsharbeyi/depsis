@@ -11,7 +11,11 @@ import {
 import { DbService, type TenantQuery } from '../db/db.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { OrganizationsService } from '../organizations/organizations.service.js';
-import { APPLY_ACL_KIND, type GrantInput } from '../permissions/permissions.service.js';
+import {
+  APPLY_ACL_KIND,
+  APPLY_ACL_MAX_ATTEMPTS,
+  type GrantInput,
+} from '../permissions/permissions.service.js';
 
 /** One row of `public.shares`. */
 export interface ShareRow {
@@ -361,14 +365,17 @@ export class SharesService {
    * with whatever ACL ZFS gave it and nobody reaching it over SMB.
    */
   private async enqueueApply(organizationId: string, shareId: string): Promise<string | null> {
-    if (!this.agent.isAvailable()) {
-      this.logger.warn(
-        `created share ${shareId} with the agent unreachable: its POSIX ACLs have not been written`,
-      );
-      return null;
-    }
+    // Unconditionally, for the reason `PermissionsService.enqueueApply` sets out at length: this
+    // writes a queue row and nothing else, the worker is what needs the agent, and
+    // `agent.isAvailable()` is a startup latch that never recovers. Guarding here meant a share
+    // created during an agent restart never had an ACL written for it at all.
     try {
-      return await this.jobs.enqueue(organizationId, APPLY_ACL_KIND, { shareId, entryId: null });
+      return await this.jobs.enqueue(
+        organizationId,
+        APPLY_ACL_KIND,
+        { shareId, entryId: null },
+        { maxAttempts: APPLY_ACL_MAX_ATTEMPTS },
+      );
     } catch (error) {
       this.logger.error(
         `share ${shareId} and its root grant were written but the apply job could not be queued: ` +

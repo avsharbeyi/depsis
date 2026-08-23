@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { AgentService } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
+import { JobsService } from '../jobs/jobs.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import { FilesService } from '../files/files.service.js';
 import { PreferencesRejectedError, PreferencesService } from './preferences.service.js';
@@ -59,7 +60,7 @@ describeDb('interface preferences, against a real PostgreSQL', () => {
     db = new DbService(APP_URL as string);
     await db.onModuleInit();
     owner = new DbService(OWNER_URL as string);
-    files = new FilesService(db, fixtureAgent, new PosixIdentityService(db));
+    files = new FilesService(db, fixtureAgent, new PosixIdentityService(db), new JobsService(db));
     preferences = new PreferencesService(db, files);
 
     await owner.withoutTenant('migration-status', async (q) => {

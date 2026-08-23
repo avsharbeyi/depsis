@@ -5,6 +5,7 @@ import { DbService } from '../db/db.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import {
   APPLY_ACL_KIND,
+  APPLY_ACL_MAX_ATTEMPTS,
   LastGrantError,
   NodeNotFoundError,
   NotAFolderError,
@@ -508,7 +509,7 @@ describeDb('folder permissions, against a real PostgreSQL', () => {
     expect(await grantsAt(projeler)).toBe(3);
   });
 
-  it('queues the POSIX re-application, and says so plainly when it cannot', async () => {
+  it('queues the POSIX re-application, with a retry budget that outlives an agent restart', async () => {
     const applied = await permissions.write(
       orgA,
       asAdmin(patron),
@@ -519,18 +520,43 @@ describeDb('folder permissions, against a real PostgreSQL', () => {
     expect(applied.applyingJobId).not.toBeNull();
 
     const queued = await owner.withoutTenant('migration-status', (q) =>
-      q.query<{ kind: string; payload: { shareId: string; entryId: string | null } }>(
-        `SELECT kind, payload FROM job_queue WHERE id = $1`,
-        [applied.applyingJobId],
-      ),
+      q.query<{
+        kind: string;
+        payload: { shareId: string; entryId: string | null };
+        max_attempts: number;
+      }>(`SELECT kind, payload, max_attempts FROM job_queue WHERE id = $1`, [
+        applied.applyingJobId,
+      ]),
     );
     expect(queued[0]?.kind).toBe(APPLY_ACL_KIND);
     expect(queued[0]?.payload.shareId).toBe(shareA);
     expect(queued[0]?.payload.entryId).toBeNull();
 
-    // With the agent down the row is still written and the null says the filesystem is behind.
-    // Hiding that would mean the interface reporting a permission the kernel has not been told
-    // about — ADR-0021's accepted debt, made visible rather than papered over.
+    // NOT the queue's default of five. `finish_job` backs off by `least(300, 2^attempt)`, so five
+    // attempts spend thirty seconds in total and then the job is dead for good — and what is
+    // abandoned is a revocation. Thirty seconds does not survive an agent restart, a package
+    // upgrade or a reboot; twenty attempts reach the 300-second cap and spend about an hour.
+    expect(queued[0]?.max_attempts).toBe(APPLY_ACL_MAX_ATTEMPTS);
+    expect(APPLY_ACL_MAX_ATTEMPTS).toBeGreaterThan(5);
+  });
+
+  it('queues the apply even when this process believes the agent is unreachable', async () => {
+    // THIS TEST ASSERTED THE OPPOSITE, and the behaviour it pinned was the largest hole in the
+    // permission model. `enqueueApply` used to check `agent.isAvailable()` and return null without
+    // writing anything, on the reasoning that queuing work for an absent daemon is pointless.
+    //
+    // Three facts make that wrong, and they only bite together:
+    //
+    //   * Enqueuing does not touch the agent. It is an INSERT into `job_queue`.
+    //   * What touches the agent is the WORKER: a different process, with its own connection and
+    //     its own retries. A row written now is applied the moment that process can.
+    //   * `AgentService.available` is a STARTUP LATCH — false at construction, set true once in
+    //     `onModuleInit`, never re-evaluated. An API that booted while the socket was down reports
+    //     the agent unreachable for the rest of its life, however healthy it becomes.
+    //
+    // So the guard suppressed the only mechanism that would have recovered, and a revocation
+    // written during a five-second restart stayed on disk forever with a `warn` line as its only
+    // record. `offline` is a `PermissionsService` whose agent says `isAvailable() === false`.
     const stale = await offline.write(
       orgA,
       asAdmin(patron),
@@ -539,8 +565,19 @@ describeDb('folder permissions, against a real PostgreSQL', () => {
       false,
     );
     expect(stale.applied).toBe(true);
-    expect(stale.applyingJobId).toBeNull();
+    expect(stale.applyingJobId).not.toBeNull();
     expect(await grantsAt(null)).toBe(1);
+
+    // The row is real and claimable, which is the whole point: a worker that reconnects picks it
+    // up with no human involved.
+    const row = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ kind: string; status: string }>(
+        `SELECT kind, status FROM job_queue WHERE id = $1`,
+        [stale.applyingJobId],
+      ),
+    );
+    expect(row[0]?.kind).toBe(APPLY_ACL_KIND);
+    expect(row[0]?.status).toBe('queued');
   });
 
   it('refuses a grant on a file, which no default ACL could ever carry', async () => {

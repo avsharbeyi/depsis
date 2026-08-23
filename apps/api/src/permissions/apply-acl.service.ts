@@ -303,8 +303,27 @@ async function shareName(q: TenantQuery, organizationId: string, shareId: string
  * that subtree depends on the grants ABOVE it too. Only the subtree is written; the rest is the
  * chain the resolver needs.
  *
- * Trashed folders are skipped. Their directories are still on disk — trashing sets a flag — but
- * they are not somewhere anybody browses, and a permanent delete removes them shortly after.
+ * TRASHED FOLDERS ARE INCLUDED, and they used to be skipped on a premise that is false.
+ *
+ * The old reason was "they are not somewhere anybody browses, and a permanent delete removes them
+ * shortly after". Both halves fail on the half of the appliance the ACLs exist for. Trashing sets
+ * `trashed_at` and touches nothing else — `FilesService.trash` says so itself — so the directory
+ * is still at its original path, inside the same Samba section, and `samba.rs` vetoes only
+ * `/.depsis/`. It is browsable over SMB the entire time it sits in the bin, and nothing empties
+ * the bin on a timer.
+ *
+ * The consequence was a hole with no failure attached to it. A narrowing at the share root would
+ * rewrite every live folder, report success, and leave the binned branch carrying the OLD, wider
+ * ACL — reachable over SMB throughout, and restored into the listing later still carrying it,
+ * because `restore` is one UPDATE and enqueues nothing either. The filter also dropped every
+ * NON-trashed descendant of a trashed folder, since a child cannot join a tree its parent is
+ * absent from, so a single binned folder near the root could take a whole subtree out of every
+ * future apply.
+ *
+ * There is no name collision to fear from including them: the uniqueness indexes are partial on
+ * `trashed_at IS NULL`, but a live folder cannot take a binned folder's name on DISK — `mkdirat`
+ * answers EEXIST and `createFolder` turns that into `NameTakenByTrashedEntryError`. So one path
+ * still means one directory.
  */
 async function folderRows(
   q: TenantQuery,
@@ -316,12 +335,12 @@ async function folderRows(
        SELECT e.id, e.parent_id, ARRAY[e.name]::text[] AS parts, 0 AS depth
          FROM public.file_entries e
         WHERE e.organization_id = $1 AND e.share_id = $2 AND e.parent_id IS NULL
-          AND e.kind = 'folder' AND e.trashed_at IS NULL
+          AND e.kind = 'folder'
        UNION ALL
        SELECT c.id, c.parent_id, tree.parts || c.name, tree.depth + 1
          FROM public.file_entries c
          JOIN tree ON c.parent_id = tree.id
-        WHERE c.organization_id = $1 AND c.kind = 'folder' AND c.trashed_at IS NULL
+        WHERE c.organization_id = $1 AND c.kind = 'folder'
           AND tree.depth < $3
      )
      SELECT id::text AS id, parent_id::text AS parent_id, parts, depth

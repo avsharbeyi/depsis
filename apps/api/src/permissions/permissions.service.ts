@@ -65,6 +65,24 @@ const IMPACT_FOLDER_LIMIT = 1000;
 /** The job that walks the subtree and rewrites POSIX ACLs, one `ApplyFolderAcl` per folder. */
 export const APPLY_ACL_KIND = 'permissions.apply';
 
+/**
+ * How many times the queue will retry an ACL apply before giving up on it.
+ *
+ * The default is five, and five is far too few FOR THIS KIND. `finish_job` backs off by
+ * `least(300, 2^attempt)` seconds, so five attempts spend 2 + 4 + 8 + 16 = **thirty seconds** and
+ * then the job is dead for good. Thirty seconds does not survive an agent restart, a package
+ * upgrade, or a reboot — and what is abandoned is a REVOCATION: the grant is gone from Postgres
+ * and the folder is still open over SMB, permanently, with nothing left that will ever retry.
+ *
+ * Twenty reaches the 300-second cap and spends about an hour in total, which does survive all
+ * three. It is not unbounded on purpose: a job that has been failing for an hour is a fault an
+ * operator has to see, and `dead` in `job_history` is where it becomes visible.
+ *
+ * Applying is idempotent (it re-reads the grants and writes an absolute ACL), so a late delivery
+ * is always safe — which is what makes a long budget the cheap direction.
+ */
+export const APPLY_ACL_MAX_ATTEMPTS = 20;
+
 /** No such node in this tenant. 404, because 403 here would confirm that the id exists. */
 export class NodeNotFoundError extends Error {
   constructor() {
@@ -444,21 +462,36 @@ export class PermissionsService {
    * over SMB while the web says it is closed is the one failure §6.2 forbids by name.
    */
   private async enqueueApply(organizationId: string, target: Target): Promise<string | null> {
-    if (!this.agent.isAvailable()) {
-      this.logger.warn(
-        `wrote grants for share ${target.shareId} with the agent unreachable: the POSIX ACLs ` +
-          `under ${target.entryId ?? 'the share root'} are now stale`,
-      );
-      return null;
-    }
+    // NO `agent.isAvailable()` CHECK, and its removal is the fix rather than an oversight.
+    //
+    // There used to be one here, and it looked like caution. It was the largest hole in the
+    // permission model, for three reasons that only bite together:
+    //
+    //   * This method does not talk to the agent. `jobs.enqueue` is an INSERT into `job_queue`.
+    //   * What talks to the agent is the WORKER — a separate process, with its own connection and
+    //     its own retry budget. A row written while the API could not see the agent would have
+    //     been claimed and applied the moment the worker could.
+    //   * `AgentService.available` is a STARTUP LATCH. It is `false` at construction, set `true` in
+    //     exactly one place — `onModuleInit`, after a successful ping — and never re-evaluated. An
+    //     API that booted while the socket was down reports the agent unreachable for the whole
+    //     life of the process, however healthy the agent becomes afterwards.
+    //
+    // So the guard protected nothing and suppressed the only thing that would have recovered. A
+    // revocation written during a five-second agent restart stayed on disk forever, and the sole
+    // record of it was a `warn` line.
     try {
-      return await this.jobs.enqueue(organizationId, APPLY_ACL_KIND, {
-        shareId: target.shareId,
-        // NULL is the share root, the same convention as the column this came from. The job
-        // re-reads the grants when it runs rather than carrying them: by then they may have been
-        // changed again, and the newer answer is the right one to apply.
-        entryId: target.entryId,
-      });
+      return await this.jobs.enqueue(
+        organizationId,
+        APPLY_ACL_KIND,
+        {
+          shareId: target.shareId,
+          // NULL is the share root, the same convention as the column this came from. The job
+          // re-reads the grants when it runs rather than carrying them: by then they may have been
+          // changed again, and the newer answer is the right one to apply.
+          entryId: target.entryId,
+        },
+        { maxAttempts: APPLY_ACL_MAX_ATTEMPTS },
+      );
     } catch (error) {
       this.logger.error(
         `grants for share ${target.shareId} were written but the apply job could not be ` +

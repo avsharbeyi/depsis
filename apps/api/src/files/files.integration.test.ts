@@ -13,6 +13,7 @@ import {
 } from '../agent/agent.service.js';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
 import { DbService } from '../db/db.service.js';
+import { JobsService } from '../jobs/jobs.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import { FilesController } from './files.controller.js';
 import {
@@ -107,7 +108,10 @@ function withAgent(answer: (request: Record<string, unknown>) => Record<string, 
       });
     },
   } as unknown as AgentService;
-  return { files: new FilesService(db, agent, new PosixIdentityService(db)), calls };
+  return {
+    files: new FilesService(db, agent, new PosixIdentityService(db), new JobsService(db)),
+    calls,
+  };
 }
 
 // Declared out here because `withAgent` above builds a second `FilesService` on the same pool.
@@ -166,7 +170,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
       userB = await seedUser(orgB, 'bfiles');
     });
 
-    files = new FilesService(db, fixtureAgent, new PosixIdentityService(db));
+    files = new FilesService(db, fixtureAgent, new PosixIdentityService(db), new JobsService(db));
     shareA = (await files.defaultShare(orgA, 'files-a')).id;
     shareB = (await files.defaultShare(orgB, 'files-b')).id;
   });
@@ -1522,7 +1526,12 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
       );
     });
 
-    pfiles = new FilesService(pdb, permissionsAgent, new PosixIdentityService(pdb));
+    pfiles = new FilesService(
+      pdb,
+      permissionsAgent,
+      new PosixIdentityService(pdb),
+      new JobsService(pdb),
+    );
     share = (await pfiles.defaultShare(org, 'files-p')).id;
     controller = new FilesController(pfiles, stubData);
     search = new SearchController(pfiles);
@@ -1649,6 +1658,81 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     // same rule every other endpoint here applies, and it is why the listing above is empty
     // rather than full of rows with no permissions on them.
     await expect(controller.detail(as(bob), made.id)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('queues an ACL re-apply when a folder moves, because its inherited grants changed', async () => {
+    const genis = await folder(null, 'tasima-genis');
+    const dar = await folder(null, 'tasima-dar');
+    const tasinan = await folder(genis.id, 'tasinan');
+
+    await pdb.withTenant(org, (q) =>
+      q.query(`DELETE FROM public.job_queue WHERE organization_id = $1 AND kind = $2`, [
+        org,
+        'permissions.apply',
+      ]),
+    );
+
+    await pfiles.move(org, tasinan.id, shareRef(), { parentId: dar.id }, admin, 'cid-move', 'test');
+
+    // ADR-0021 resolves from the ancestor chain, and a move REPLACES the chain — so this folder
+    // answers differently on the very next request. On disk nothing happened: `renameat2` keeps a
+    // directory's access and default ACLs, and POSIX default-ACL inheritance only runs at create
+    // time, so the subtree arrives still carrying what the old parent's grants produced. Without
+    // this job the divergence is permanent and reachable over SMB.
+    const queued = await pdb.withTenant(org, (q) =>
+      q.query<{ payload: { shareId: string; entryId: string | null }; max_attempts: number }>(
+        `SELECT payload, max_attempts FROM public.job_queue
+          WHERE organization_id = $1 AND kind = 'permissions.apply'`,
+        [org],
+      ),
+    );
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.payload.shareId).toBe(share);
+    // The MOVED node, not the share root: the walk writes its whole subtree and resolves it
+    // against the full chain above it, which is exactly the scope that changed.
+    expect(queued[0]?.payload.entryId).toBe(tasinan.id);
+    expect(queued[0]?.max_attempts).toBeGreaterThan(5);
+  });
+
+  it('queues nothing when a FILE moves, because a file carries no ACL of ours', async () => {
+    const hedef = await folder(null, 'dosya-hedefi');
+    const dosya = await pdb.withTenant(org, (q) =>
+      q.query<{ id: string }>(
+        `INSERT INTO public.file_entries (organization_id, share_id, parent_id, kind, name, path)
+         VALUES ($1,$2,NULL,'file','tasinacak.txt','/tasinacak.txt') RETURNING id::text AS id`,
+        [org, share],
+      ),
+    );
+    const dosyaId = dosya[0]?.id ?? '';
+
+    await pdb.withTenant(org, (q) =>
+      q.query(`DELETE FROM public.job_queue WHERE organization_id = $1 AND kind = $2`, [
+        org,
+        'permissions.apply',
+      ]),
+    );
+
+    await pfiles.move(
+      org,
+      dosyaId,
+      shareRef(),
+      { parentId: hedef.id },
+      admin,
+      'cid-move-2',
+      'test',
+    );
+
+    // Permissions are set on FOLDERS and a file inherits the one it sits in — `NotAFolderError`
+    // says so at the endpoint. There is no per-file ACL for DEPSIS to rewrite, so queuing a job
+    // here would be work that provably changes nothing.
+    const queued = await pdb.withTenant(org, (q) =>
+      q.query<{ id: string }>(
+        `SELECT id::text AS id FROM public.job_queue
+          WHERE organization_id = $1 AND kind = 'permissions.apply'`,
+        [org],
+      ),
+    );
+    expect(queued).toHaveLength(0);
   });
 
   it('leaves an organisation administrator reaching everything without a grant of their own', async () => {
