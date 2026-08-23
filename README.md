@@ -95,35 +95,24 @@ imzalı apt deposundan kurar.
 - Paylaşımı SİLMEK. Grant'ları paylaşımı tutuyor (`ON DELETE RESTRICT`) ve son grant'ı silmek de
   reddediliyor. Bilinçli: paylaşımı silmek dataset'i silmek demek, ve ADR-0007 yıkıcı havuz
   işlemlerini üründen dışarıda tutuyor. Kapatmanın yolu, kimseyi adlandırmayan bir kök izni.
-- **Samba'nın kullanıcı eşlemesi — ve artık tam olarak neyin eksik olduğu ÖLÇÜLDÜ.**
+- **SMB kimlik zinciri artık uçtan uca çalışıyor ve ölçüldü** — eksik kalan tek şey `valid users`.
 
-  `tools/poc/p2-a-smb-identity.sh` gerçek Samba 4.22 ile on ölçüm yapıyor ve üçünü birden
-  cevaplıyor:
+  `tools/poc/p2-c-identity-end-to-end.sh` (14/14) derlenmiş ajana gerçek bir soket üzerinden
+  gerçek bir `sync_posix_identity` gönderiyor ve sonra makineye ve smbd'ye soruyor:
 
-  1. DEPSIS'in yazdığı ACL zinciri SMB'ye **ulaşıyor**: `SecureShareRoot`'un 0750'si +
-     `ApplyFolderAcl`'in `g:<gid>` girdisi, smbd oturumunu gerçekten kapılıyor. Gruba üye olan
-     okuyor, olmayan reddediliyor.
-  2. `valid users` bağımsız bir ikinci kapı: ACL'in izin verdiğini daraltıyor, ACL'in vermediğini
-     **genişletemiyor**. İkisi kesişim.
-  3. `valid users` içinde karşılığı olmayan bir ad, P0-B'nin `full_audit` tuzağına DÜŞMÜYOR:
-     `testparm` onu kabul ediyor (yani testparm kapı değil) ama smbd diğer paylaşımları sunmaya
-     devam ediyor. Yani DEPSIS bu direktifi güvenle üretebilir.
+  - tek istek iki hesap, üç grup (iki özel + bir ekip) ve iki parola yaratıyor;
+  - hesaplar DEPSIS'in verdiği uid'lerde, nologin, ev dizinsiz;
+  - **ali, Samba'nın düz metin olarak hiç görmediği parolasıyla paylaşıma giriyor**;
+  - veli doğrulanıyor ama ACL onu paylaşıma sokmuyor;
+  - ikinci senkron hiçbir şey yaratmıyor (idempotent);
+  - ali ekipten çıkarılınca paylaşım ona gerçekten kapanıyor;
+  - `nt_hash` göndermeyen bir senkron mevcut parolayı bozmuyor.
 
-  Geriye kalan tek eksik: **Unix hesapları ve grup üyelikleri**. ACL'ler sayısal uid/gid
-  adlandırıyor ve o numaralara karşılık gelen hesapları hiçbir şey yaratmıyor. Hesaplar var olduğu
-  anda zincirin tamamı çalışıyor — ölçüldü.
-
-  Parola tarafı da ölçüldü (`tools/poc/p2-b-smb-password.sh`, 6/6) ve düz parolayı ayrıcalıklı
-  tarafa geçirmeden çözülebiliyor:
-
-  - `MD4(UTF-16LE(parola))` gerçekten Samba'nın sakladığı şey — smbpasswd'ye karşı doğrulandı.
-  - Önceden hesaplanmış bir hash `pdbedit -i smbpasswd:<dosya> -e tdbsam` ile kurulabiliyor ve
-    **gerçekten giriş yaptırıyor**. Şart: hesabın passdb'de zaten var olması (SID'i Samba
-    üretsin) ve `LCT` alanının gerçek bir zaman damgası olması — `LCT-00000000` hash'i sessizce
-    kuruyor ve kimseyi içeri almıyor.
-  - Node'un crypto'sunda MD4 YOK (OpenSSL 3 onu legacy provider'a taşıdı), yani API kendi MD4'ünü
-    taşımak zorunda. RFC 1320, yayımlanmış test vektörleriyle ~80 satır — telde düz parola
-    taşımaktan ucuz.
+  Kalan: `smb.conf` bölümlerinde `valid users` yok. Yani bir paylaşımı SMB'den açabilmek şu an
+  yalnız POSIX ACL'e bakıyor — ki p2-a bunun gerçekten kapıladığını ölçtü — ama operatörün
+  globals'ının doğruladığı her principal en azından bölümü GÖREBİLİYOR. `valid users`'ın güvenle
+  üretilebileceği de ölçüldü (p2-a: daraltıyor, genişletemiyor, karşılığı olmayan bir ad dosyayı
+  düşürmüyor); yazılması kaldı.
 
 - **Ölen işleri gösteren bir EKRAN yok.** `GET /jobs?status=dead` var ve yönetici görebiliyor, ama
   arayüzde onu okuyan bir yer yok — yani bakmayı bilen birinin API'yi çağırması gerekiyor.
