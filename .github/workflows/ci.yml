@@ -53,21 +53,20 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
 
-      - name: The workflow files themselves
-        # actionlint implements GitHub's own workflow schema, which is stricter than YAML in ways
-        # that matter: a `runner.temp` in a job-level `env:` parses fine and makes GitHub reject
-        # the ENTIRE FILE before a single job starts.
-        #
-        # That is not hypothetical. Every push for a day produced a `startup_failure` of zero
-        # seconds and nobody saw it, because a workflow that cannot start also cannot report. The
-        # API even names such a workflow after its own path, having failed to read `name:`.
-        #
-        # This step cannot catch the fatal case — if ci.yml is invalid, this job never runs — so
-        # it is a backstop, not the guard. The guard is `pnpm lint:workflows` before pushing, and
-        # looking at the run afterwards.
-        uses: rhysd/actionlint@main
-        with:
-          fail-on-error: true
+      # THERE IS DELIBERATELY NO actionlint STEP HERE, and the reason is worth the paragraph.
+      #
+      # One was added and it is what broke this file. It read `uses: rhysd/actionlint@main` —
+      # which is the tool's SOURCE repository and carries no `action.yml`, so GitHub could not
+      # resolve it and rejected the whole workflow. A step added to prevent invalid workflow files
+      # made the workflow file invalid, and did it invisibly: a zero-second `startup_failure` with
+      # no name and no log.
+      #
+      # It was not worth re-adding through a different wrapper, because the step cannot catch the
+      # failure that actually hurt: if ci.yml is invalid, this job never runs. A check that is
+      # skipped exactly when it is needed is not a check.
+      #
+      # The guard is `pnpm lint:workflows` BEFORE pushing, and reading the run afterwards. README
+      # carries the symptom so the next person recognises it in seconds instead of a day.
       - run: pnpm typecheck
 
       - name: OpenAPI types are in sync with the spec
