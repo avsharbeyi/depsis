@@ -113,10 +113,17 @@ imzalı apt deposundan kurar.
   adlandırıyor ve o numaralara karşılık gelen hesapları hiçbir şey yaratmıyor. Hesaplar var olduğu
   anda zincirin tamamı çalışıyor — ölçüldü.
 
-  İkinci bir engel daha var ve tasarımı etkiliyor: Samba'nın kendi NT hash'ine ihtiyacı var ve
-  DEPSIS'in parola hash'inden türetilemiyor. Yani ya kullanıcı ayrı bir SMB parolası koyacak, ya
-  da parola belirleme anında düz metin ayrıcalıklı tarafa geçecek — ikincisi ayrıcalık sınırından
-  düz parola geçirmek demek ve ayrı bir karar.
+  Parola tarafı da ölçüldü (`tools/poc/p2-b-smb-password.sh`, 6/6) ve düz parolayı ayrıcalıklı
+  tarafa geçirmeden çözülebiliyor:
+
+  - `MD4(UTF-16LE(parola))` gerçekten Samba'nın sakladığı şey — smbpasswd'ye karşı doğrulandı.
+  - Önceden hesaplanmış bir hash `pdbedit -i smbpasswd:<dosya> -e tdbsam` ile kurulabiliyor ve
+    **gerçekten giriş yaptırıyor**. Şart: hesabın passdb'de zaten var olması (SID'i Samba
+    üretsin) ve `LCT` alanının gerçek bir zaman damgası olması — `LCT-00000000` hash'i sessizce
+    kuruyor ve kimseyi içeri almıyor.
+  - Node'un crypto'sunda MD4 YOK (OpenSSL 3 onu legacy provider'a taşıdı), yani API kendi MD4'ünü
+    taşımak zorunda. RFC 1320, yayımlanmış test vektörleriyle ~80 satır — telde düz parola
+    taşımaktan ucuz.
 
 - **Ölen işleri gösteren bir EKRAN yok.** `GET /jobs?status=dead` var ve yönetici görebiliyor, ama
   arayüzde onu okuyan bir yer yok — yani bakmayı bilen birinin API'yi çağırması gerekiyor.
