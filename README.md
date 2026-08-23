@@ -99,9 +99,6 @@ imzalı apt deposundan kurar.
   bağlantı denemesi + başarısızlıkta geri dönüş) ama bölümlerde `valid users` yok: bir paylaşımı
   SMB'den kimin açabileceği POSIX izinlerine bırakılmış durumda. Web tarafındaki izin modeli
   (§6.2) çalışıyor ve ACL'ler yazılıyor; eksik olan `smb.conf`'un kendi filtresi.
-- **`claim_job` `max_attempts`'i kontrol etmiyor.** Kirası dolan bir iş sınırsız yeniden
-  alınabiliyor: `attempt` tavansız artıyor, iş ne başarıyor ne ölüyor. Bunun tersi de var —
-  temiz başarısız olan bir iş, `finish_job`'da sınıra çarpıp ölüyor.
 - **Ölen işleri gösteren bir EKRAN yok.** `GET /jobs?status=dead` var ve yönetici görebiliyor, ama
   arayüzde onu okuyan bir yer yok — yani bakmayı bilen birinin API'yi çağırması gerekiyor.
 - Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`

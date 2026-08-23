@@ -128,6 +128,89 @@ describeDb('the job queue, against a real PostgreSQL', () => {
     expect(listed).not.toContain(theirs);
   });
 
+  it('stops re-claiming a job whose worker keeps dying, and dead-letters it', async () => {
+    // THE OPPOSITE FAILURE TO THE ONE `finish_job` GUARDS. A job that fails CLEANLY reaches
+    // `finish_job`, which compares `attempt` to `max_attempts` and kills it. A job whose worker is
+    // SIGKILLed, OOMs, or simply overruns its lease never reaches `finish_job` at all —
+    // `WorkerService.execute` skips it when the lease is gone, and it must, because a late write
+    // would overwrite the result of whoever legitimately took the job over.
+    //
+    // `claim_job`'s predicate did not look at `max_attempts`, so such a job was re-claimed without
+    // bound: `attempt` climbed past the ceiling, `last_error` was never written, and the job
+    // neither succeeded nor died. The worker takes one job at a time, so a job that kills its
+    // worker starves everything behind it forever.
+    //
+    // A NEGATIVE lease is how the death is simulated: `lease_until` lands in the past, so the row
+    // is immediately reclaimable — exactly the state a worker that died mid-job leaves behind,
+    // without this test having to sleep through a real lease.
+    const id = await jobs.enqueue(orgA, 'test.suicidal', {}, { maxAttempts: 3 });
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const claimed = await jobs.claim(['test.suicidal'], -1);
+      expect(claimed?.id, `attempt ${attempt} should still be claimable`).toBe(id);
+      expect(claimed?.attempt).toBe(attempt);
+      // No `finish` — the worker died holding it.
+    }
+
+    // The fourth claim must find nothing, and the job must be DEAD rather than a ghost sitting in
+    // `job_queue` as `running` with a lease nobody holds. Both halves matter: the predicate alone
+    // would leave the row unclaimable and unfinished forever, with `GET /jobs/{id}` reporting
+    // "running" for good.
+    expect(await jobs.claim(['test.suicidal'], -1)).toBeNull();
+
+    const found = await jobs.find(orgA, id);
+    expect(found?.status).toBe('dead');
+    expect(found?.lastError).toMatch(/attempts are exhausted/);
+
+    const left = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ n: string }>(`SELECT count(*)::text AS n FROM job_queue WHERE id = $1`, [id]),
+    );
+    expect(left[0]?.n).toBe('0');
+  });
+
+  it('does not reap a job another worker is still running', async () => {
+    // The reaping step only takes rows whose lease has EXPIRED. Killing a job that is still being
+    // worked on would do precisely what idempotency cannot cover for: two "finished" records for
+    // one piece of work, one of them written by a process still running.
+    const id = await jobs.enqueue(orgA, 'test.busy', {}, { maxAttempts: 1 });
+
+    // One claim exhausts the budget, but the lease is live and this worker is still on it.
+    const claimed = await jobs.claim(['test.busy'], 60);
+    expect(claimed?.id).toBe(id);
+    expect(claimed?.attempt).toBe(1);
+
+    // Another worker sweeping for work must leave it alone.
+    expect(await other.claim(['test.busy'], 60)).toBeNull();
+    expect((await jobs.find(orgA, id))?.status).toBe('running');
+
+    // And the holder can still finish it, which is the whole point of not reaping it.
+    expect(await jobs.finish(id, 'succeeded')).toBe('succeeded');
+  });
+
+  it('keeps the first real error rather than overwriting it with the reaper\u2019s note', async () => {
+    // A job can fail cleanly, be requeued, and THEN have its worker die. What an operator wants to
+    // read is why it failed the first time, not that a process stopped — so the reaper only fills
+    // `last_error` in when there is nothing there.
+    const id = await jobs.enqueue(orgA, 'test.twoways', {}, { maxAttempts: 2 });
+
+    const first = await jobs.claim(['test.twoways'], 60);
+    expect(first?.id).toBe(id);
+    expect(await jobs.finish(id, 'failed', 'the disk said no')).toBe('queued');
+
+    // Requeued with a backoff, so bring it forward rather than waiting it out.
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE job_queue SET run_after = now() WHERE id = $1`, [id]),
+    );
+
+    // Second and last attempt, and this time the worker dies holding it.
+    expect((await jobs.claim(['test.twoways'], -1))?.id).toBe(id);
+    expect(await jobs.claim(['test.twoways'], -1)).toBeNull();
+
+    const found = await jobs.find(orgA, id);
+    expect(found?.status).toBe('dead');
+    expect(found?.lastError).toBe('the disk said no');
+  });
+
   it('hands the same job to exactly one of two workers claiming at once', async () => {
     // The whole reason SKIP LOCKED is here. Without it one claimant blocks on the other's row lock
     // and then takes the row it already saw — or, with a naive SELECT-then-UPDATE, both do.
