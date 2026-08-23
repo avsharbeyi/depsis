@@ -15,7 +15,6 @@ import {
 import { AgentService, expectStatus } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
-import { LEGACY_OPEN_SHARE } from '../permissions/legacy-open-share.js';
 
 /**
  * A row in `file_entries`, as the database returns it.
@@ -467,28 +466,28 @@ function principalOf(row: GrantRow): Principal | null {
  * stays the only rule: one resolver decides every question, and `canMove` keeps working for an
  * administrator without a second code path that could disagree with the first.
  *
- * The administrator's synthetic grant is attached to the TARGET node, not to the root. Nearest
- * ancestor wins per principal, so a root grant would lose to any narrower row written for that
- * same account further down — and an administrator who had also been given a narrow grant on a
- * subfolder would find §6.1's hierarchy quietly cancelled by it. It is also placed BEFORE the real
- * rows in the node's list, because two grants for one principal on one node cannot both apply and
- * `resolve` takes the first: the database's uniqueness makes that impossible for real rows, and
- * this is the one place a second one is manufactured.
+ * ONE exception is left, and it used to be two. The administrator's synthetic grant is attached to
+ * the TARGET node, not to the root. Nearest ancestor wins per principal, so a root grant would lose
+ * to any narrower row written for that same account further down — and an administrator who had
+ * also been given a narrow grant on a subfolder would find §6.1's hierarchy quietly cancelled by
+ * it. It is also placed BEFORE the real rows in the node's list, because two grants for one
+ * principal on one node cannot both apply and `resolve` takes the first: the database's uniqueness
+ * makes that impossible for real rows, and this is the one place a second one is manufactured.
  *
- * The legacy grant is attached to the ROOT, because it stands in for the share-wide default that a
- * migration would have written there. It exists only while `governed` is false — that is, while
- * the share has no grant rows at all — so there is never anything below it to lose to.
+ * THE ONE THAT WENT was `LEGACY_OPEN_SHARE`: while a share had no grant rows at all, every member
+ * of the tenant was handed the seven permissions this API served before §6.2. It was a bridge for
+ * data that predated the model, and it was also a hole — the condition was an existence test over
+ * `folder_grants`, asked afresh on every request, so anything that emptied a share reopened it to
+ * everybody. It is gone because its own removal condition is now met: migration 0016 wrote a root
+ * grant for every share that had none, and `POST /shares` — the only thing in the product that
+ * creates one — writes the row and its first grant in a single transaction. A share with zero
+ * grants is no longer a state this system can be in, so the code for it is no longer a bridge, it
+ * is a second answer waiting to disagree with the first.
  */
-function syntheticGrants(
-  caller: Caller,
-  governed: boolean,
-  isTarget: boolean,
-  isRoot: boolean,
-): Grant[] {
+function syntheticGrants(caller: Caller, isTarget: boolean): Grant[] {
+  if (!caller.isOrganizationAdmin) return [];
   const principal: Principal = { kind: 'user', id: caller.userId };
-  if (caller.isOrganizationAdmin) return isTarget ? [{ principal, permissions: PERMISSIONS }] : [];
-  if (governed) return [];
-  return isRoot ? [{ principal, permissions: LEGACY_OPEN_SHARE }] : [];
+  return isTarget ? [{ principal, permissions: PERMISSIONS }] : [];
 }
 
 /**
@@ -509,15 +508,11 @@ function chainTo(
   parentOf: ReadonlyMap<string, string | null>,
   granted: ReadonlyMap<string, Grant[]>,
   caller: Caller,
-  governed: boolean,
 ): AclNode[] | null {
   const root: AclNode = {
     id: shareId,
     parentId: null,
-    grants: [
-      ...syntheticGrants(caller, governed, target === null, true),
-      ...(granted.get(ROOT) ?? []),
-    ],
+    grants: [...syntheticGrants(caller, target === null), ...(granted.get(ROOT) ?? [])],
   };
   if (target === null) return [root];
 
@@ -532,10 +527,7 @@ function chainTo(
     descending.push({
       id: cursor,
       parentId: parentId ?? shareId,
-      grants: [
-        ...syntheticGrants(caller, governed, cursor === target, false),
-        ...(granted.get(cursor) ?? []),
-      ],
+      grants: [...syntheticGrants(caller, cursor === target), ...(granted.get(cursor) ?? [])],
     });
     cursor = parentId;
   }
@@ -596,6 +588,44 @@ export class FilesService {
       );
       const share = created[0];
       if (!share) throw new Error('the default share was not created');
+
+      // THE ROOT GRANT, in the same transaction as the row, and this is the second half of an
+      // invariant the rest of the permission model now rests on: every share has at least one
+      // grant. Without it this method would break that invariant on the FIRST request a fresh
+      // appliance ever serves — it is reached from `GET /files` and `GET /search` by any signed-in
+      // user, before an administrator has done anything at all.
+      //
+      // It was very nearly missed. The audit for the removal of `LEGACY_OPEN_SHARE` searched for
+      // `INSERT INTO shares` and found only tests; this statement says `INSERT INTO public.shares`
+      // and did not match. What found it was the search suite going red, because its member could
+      // suddenly see none of the fifty-one folders it had seeded.
+      //
+      // `everyone_team()` and not the caller, unlike `SharesService.create`. The difference is who
+      // decided: an administrator opening a share can say who it is for, and if they decline the
+      // share is theirs alone. Nobody opened THIS one — it appeared because somebody opened the
+      // file manager — so there is no intent to honour, and the historical answer, the one this
+      // appliance has always given, is everyone. Migration 0016 defines the team, so the two paths
+      // cannot drift into disagreeing about what "everyone" means.
+      const team = await db.query<{ id: string }>(`SELECT public.everyone_team($1)::text AS id`, [
+        organizationId,
+      ]);
+      const teamId = team[0]?.id;
+      if (teamId === undefined) throw new Error('the everyone team was not returned');
+      await db.query(
+        `INSERT INTO public.folder_grants
+           (organization_id, share_id, entry_id, team_id, permissions)
+         VALUES ($1, $2, NULL, $3, $4::public.folder_permission[])`,
+        // The same seven `LEGACY_OPEN_SHARE` served, and `manage` is still not among them: the
+        // first person to be given authority over a share's permissions is an administrator, by
+        // an administrator's decision (ADR-0021 §5), never by appearing on an implicit grant.
+        [
+          organizationId,
+          share.id,
+          teamId,
+          ['list', 'read', 'download', 'create', 'modify', 'move', 'delete'],
+        ],
+      );
+
       this.logger.log(`created the default share '${name}' for ${organizationId}`);
       return share;
     });
@@ -703,18 +733,6 @@ export class FilesService {
         ).map((row) => row.team_id),
       };
 
-      // The whole share's grant count, asked as an existence test. See `LEGACY_OPEN_SHARE`.
-      const governed =
-        (
-          await db.query<{ one: number }>(
-            `SELECT 1 AS one
-               FROM public.folder_grants
-              WHERE organization_id = $1 AND share_id = $2
-              LIMIT 1`,
-            [caller.organizationId, shareId],
-          )
-        ).length > 0;
-
       // Every ancestor of every target, in one statement, from `parent_id` and never from `path`
       // (ADR-0005). Bounded to the share so that a target in another one produces no chain at all
       // rather than a chain rooted at the wrong share.
@@ -740,23 +758,25 @@ export class FilesService {
 
       // Only the caller's OWN grants. Reading every principal's rows would be a bigger result for
       // no gain here — who else can reach a folder is a separate question, behind `manage`.
-      const grantRows = governed
-        ? await db.query<GrantRow>(
-            // `permissions::text[]`: node-postgres has no parser for a custom enum's array type
-            // and hands back the raw `{list,read}` literal, which every consumer would then have
-            // to unpick. The cast makes it an ordinary text array the driver already knows.
-            `SELECT entry_id::text AS entry_id,
-                    user_id::text  AS user_id,
-                    team_id::text  AS team_id,
-                    permissions::text[] AS permissions
-               FROM public.folder_grants
-              WHERE organization_id = $1
-                AND share_id = $2
-                AND (entry_id IS NULL OR entry_id = ANY($3::uuid[]))
-                AND (user_id = $4 OR team_id = ANY($5::uuid[]))`,
-            [caller.organizationId, shareId, [...parentOf.keys()], caller.userId, subject.teamIds],
-          )
-        : [];
+      //
+      // Unconditional now. It used to be skipped entirely while the share had no grant rows, which
+      // was the fast path for `LEGACY_OPEN_SHARE`; with that gone there is no such share, and a
+      // query that returns nothing costs less than the existence test that used to guard it.
+      const grantRows = await db.query<GrantRow>(
+        // `permissions::text[]`: node-postgres has no parser for a custom enum's array type and
+        // hands back the raw `{list,read}` literal, which every consumer would then have to
+        // unpick. The cast makes it an ordinary text array the driver already knows.
+        `SELECT entry_id::text AS entry_id,
+                user_id::text  AS user_id,
+                team_id::text  AS team_id,
+                permissions::text[] AS permissions
+           FROM public.folder_grants
+          WHERE organization_id = $1
+            AND share_id = $2
+            AND (entry_id IS NULL OR entry_id = ANY($3::uuid[]))
+            AND (user_id = $4 OR team_id = ANY($5::uuid[]))`,
+        [caller.organizationId, shareId, [...parentOf.keys()], caller.userId, subject.teamIds],
+      );
 
       const granted = new Map<string, Grant[]>();
       for (const row of grantRows) {
@@ -772,7 +792,7 @@ export class FilesService {
 
       const access = new Map<string | null, ResolveInput>();
       const build = (target: string | null): void => {
-        const chain = chainTo(target, shareId, parentOf, granted, caller, governed);
+        const chain = chainTo(target, shareId, parentOf, granted, caller);
         if (chain !== null) access.set(target, { chain, subject });
       };
       if (wantsRoot) build(null);

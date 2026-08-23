@@ -1,13 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { PERMISSIONS as ALL_PERMISSIONS } from '@depsis/authz';
 
 import {
   AgentRefusedError,
   AgentService,
   AgentUnavailableError,
+  expectStatus,
   type AgentRequest,
 } from '../agent/agent.service.js';
-import { DbService } from '../db/db.service.js';
+import { DbService, type TenantQuery } from '../db/db.service.js';
+import { JobsService } from '../jobs/jobs.service.js';
 import { OrganizationsService } from '../organizations/organizations.service.js';
+import { APPLY_ACL_KIND, type GrantInput } from '../permissions/permissions.service.js';
 
 /** One row of `public.shares`. */
 export interface ShareRow {
@@ -55,6 +59,41 @@ export class SmbPublishFailedError extends Error {
   constructor(readonly agentReason: string) {
     super('the samba configuration was not published and its previous state is unknown');
     this.name = 'SmbPublishFailedError';
+  }
+}
+
+/** No pool has been configured, so there is nowhere to put a new share's dataset. */
+export class ShareStorageUnconfiguredError extends Error {
+  constructor() {
+    super('DEPSIS_SHARE_PARENT_DATASET is not set, so this appliance cannot create a share');
+    this.name = 'ShareStorageUnconfiguredError';
+  }
+}
+
+/** The name is taken — in the database, or on the pool by a dataset DEPSIS did not record. */
+export class ShareNameTakenError extends Error {
+  constructor(
+    readonly shareName: string,
+    readonly where: 'database' | 'pool',
+  ) {
+    super(`a share named '${shareName}' already exists`);
+    this.name = 'ShareNameTakenError';
+  }
+}
+
+/** A share must be created with at least one root grant. See `create`. */
+export class ShareWithoutGrantsError extends Error {
+  constructor() {
+    super('a share cannot be created with an empty grant list');
+    this.name = 'ShareWithoutGrantsError';
+  }
+}
+
+/** A grant named a user or team that is not in this organisation. */
+export class UnknownGrantPrincipalError extends Error {
+  constructor(readonly ids: readonly string[]) {
+    super(`no such user or team in this organisation: ${ids.join(', ')}`);
+    this.name = 'UnknownGrantPrincipalError';
   }
 }
 
@@ -161,7 +200,183 @@ export class SharesService {
      * authoritative and does not answer, which is the one failure this endpoint exists to prevent.
      */
     private readonly smbHost: string,
+    /**
+     * The dataset new shares are created under (`DEPSIS_SHARE_PARENT_DATASET`), or null.
+     *
+     * Null is a real state and not a misconfiguration: a box whose operator has not made a pool
+     * yet has nowhere to put a share, and `create` says so with a 503 rather than assembling a
+     * dataset name against a pool that may not exist and letting the agent discover it.
+     */
+    private readonly parentDataset: string | null,
+    /** Queues the POSIX re-application after a share's first grant lands. See `create`. */
+    private readonly jobs: JobsService,
   ) {}
+
+  /**
+   * Open a share: a dataset, a row, and the grant that governs it — in that order.
+   *
+   * §9 has had `GET /shares` since the beginning and no way to make one. Until now the only thing
+   * that ever inserted into `public.shares` was a test, which is a peculiar fact to discover about
+   * a NAS: the appliance could list, publish and serve shares that nothing in the product could
+   * create.
+   *
+   * ── THE ORDER, AND WHAT IT COSTS WHEN EACH STEP IS THE ONE THAT FAILS ──
+   *
+   * **Dataset first.** A row written before the dataset exists is a share that appears in the file
+   * manager, accepts a click and answers 503 on everything — and the person looking at it cannot
+   * tell a broken share from a broken appliance. A dataset with no row is invisible instead, which
+   * is the direction to be wrong in: `zfs list` still shows it to the operator, and creating the
+   * share again by the same name reports the collision below rather than silently adopting it.
+   *
+   * There is no compensating undo for step one, and that is a property of the operation set rather
+   * than an omission here: `Request` carries `CreateDataset` and no destroy, because ADR-0007 keeps
+   * destructive pool operations out of the product — an API that can create a dataset and an API
+   * that can destroy one are very different things to put behind a web session. So the name is
+   * checked free BEFORE the agent is called, which turns the overwhelmingly common failure (a
+   * double click, or a name already in use) into a refusal that costs nothing.
+   *
+   * **Row and grant in ONE transaction**, and this is the half that closes a hole rather than
+   * tidying a sequence. `LEGACY_OPEN_SHARE` used to give every member of the tenant seven
+   * permissions on any share with no grant rows at all, so a share that existed for even a moment
+   * with none was a share briefly open to everybody. Two transactions would leave exactly that
+   * window on a crash between them. One makes "a share with zero grants" a state this path cannot
+   * produce — the condition the fallback's own removal notice named, and the same condition
+   * migration 0016 applied to the rows that already existed.
+   *
+   * **The ACL apply last, and allowed to fail.** Queued after the commit, exactly as
+   * `PermissionsService.write` does it: the grant is already durable, and refusing to create the
+   * share because a daemon is down would be worse than creating it with the filesystem a step
+   * behind. `applyingJobId: null` is how the interface is told the kernel has not been informed,
+   * and the contract makes showing that mandatory.
+   */
+  async create(
+    organizationId: string,
+    actorId: string,
+    input: {
+      name: string;
+      readOnly: boolean;
+      quotaBytes: number | null;
+      grants: readonly GrantInput[] | null;
+    },
+    correlationId: string,
+  ): Promise<{ share: ShareView; applyingJobId: string | null }> {
+    if (this.parentDataset === null) throw new ShareStorageUnconfiguredError();
+
+    // Before anything else, because the agent refuses these too — and it refuses the WHOLE publish,
+    // so one badly named share would stop every other share on the box from being served. `publish`
+    // makes the same check for the same reason; making it here as well means the name never
+    // becomes a row.
+    if (RESERVED_SECTIONS.some((reserved) => reserved === input.name.toLowerCase())) {
+      throw new UnpublishableShareError(
+        input.name,
+        "it is a reserved smb.conf section name and would rewrite the server's own settings",
+      );
+    }
+
+    // An explicit empty list is refused rather than defaulted, and the distinction is the point:
+    // `grants: null` means "the caller did not say", which becomes the creating administrator;
+    // `grants: []` means "the caller said nobody", which is a request for exactly the ungoverned
+    // share this method exists to make impossible.
+    if (input.grants !== null && input.grants.length === 0) throw new ShareWithoutGrantsError();
+    const grants: readonly GrantInput[] = input.grants ?? [
+      { userId: actorId, teamId: null, permissions: [...ALL_PERMISSIONS] },
+    ];
+
+    const dataset = `${this.parentDataset}/${input.name}`;
+
+    // The pre-check RACES — two requests can both pass it — and it is worth having anyway, because
+    // the race is rare and the case it catches is not: the same name submitted twice. What makes
+    // the race safe is `shares_name_unique`, which folds case the way SMB clients do and turns the
+    // loser into a 409 rather than a second share nobody can address.
+    await this.db.withTenant(organizationId, (q) => assertShareNameFree(q, input.name));
+
+    const created = await this.agent.call(
+      {
+        op: 'create_dataset',
+        dataset,
+        // The only variant the operation set can express. P0-B measured `nfsv4` reporting itself
+        // as configured while enforcing nothing, which is why this is a constant here rather than
+        // a field on the request body.
+        acltype: 'posixacl',
+        // `refquota`, not `quota`: it excludes snapshots, so an administrator's snapshot policy
+        // cannot lock a user out of their own space (ADR-0008).
+        refquota_bytes: input.quotaBytes,
+      },
+      `create share '${input.name}' on ${dataset}`,
+      correlationId,
+    );
+    // A dataset already at that path. Reported as the name being taken rather than as an agent
+    // refusal, because that is what it means to the person who typed it — and it is reachable
+    // without a race: a share deleted from the database leaves its dataset behind, since nothing
+    // in the product can destroy one.
+    if (created.status === 'conflict') throw new ShareNameTakenError(input.name, 'pool');
+    expectStatus(created, 'created');
+
+    const row = await this.db.withTenant(organizationId, async (q) => {
+      await assertPrincipalsInOrganization(q, organizationId, grants);
+
+      const inserted = await q.query<ShareRow>(
+        `INSERT INTO public.shares (organization_id, name, dataset, read_only)
+              VALUES ($1, $2, $3, $4)
+           RETURNING id::text AS id, name, dataset, read_only`,
+        [organizationId, input.name, dataset, input.readOnly],
+      );
+      const share = inserted[0];
+      if (share === undefined) throw new Error('the share row was not returned');
+
+      // `entry_id` NULL is the share root: the convention `folder_grants` uses everywhere, and the
+      // node `AclApplyService` walks down from.
+      for (const grant of grants) {
+        await q.query(
+          `INSERT INTO public.folder_grants
+             (organization_id, share_id, entry_id, user_id, team_id, permissions, granted_by)
+           VALUES ($1, $2, NULL, $3, $4, $5::public.folder_permission[], $6)`,
+          [organizationId, share.id, grant.userId, grant.teamId, [...grant.permissions], actorId],
+        );
+      }
+
+      return share;
+    });
+
+    return {
+      share: {
+        ...row,
+        unc_path: uncPath(this.smbHost, row.name),
+        // Creating a share does not publish it — `POST /system/smb` does — so nothing is being
+        // served yet and saying otherwise would send someone to type an address that does not
+        // answer. False here for the same reason it is false after a restart.
+        published: false,
+      },
+      applyingJobId: await this.enqueueApply(organizationId, row.id),
+    };
+  }
+
+  /**
+   * Queue the POSIX apply for a new share's root, or report honestly that it did not happen.
+   *
+   * The same shape as `PermissionsService.enqueueApply` and `TeamsService.applyToShares`, and the
+   * same reasoning: the grant is already committed, so an unreachable agent is a divergence to
+   * REPORT rather than an error to fail the request with. A null here means the row and the grant
+   * are real and the kernel has not been told — for a brand-new share, a directory sitting there
+   * with whatever ACL ZFS gave it and nobody reaching it over SMB.
+   */
+  private async enqueueApply(organizationId: string, shareId: string): Promise<string | null> {
+    if (!this.agent.isAvailable()) {
+      this.logger.warn(
+        `created share ${shareId} with the agent unreachable: its POSIX ACLs have not been written`,
+      );
+      return null;
+    }
+    try {
+      return await this.jobs.enqueue(organizationId, APPLY_ACL_KIND, { shareId, entryId: null });
+    } catch (error) {
+      this.logger.error(
+        `share ${shareId} and its root grant were written but the apply job could not be queued: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
 
   /**
    * The tenant's shares.
@@ -328,6 +543,68 @@ export class SharesService {
       ),
     );
   }
+}
+
+/**
+ * Refuse a share name the tenant is already using.
+ *
+ * Case-folded through `fold_identity`, which is what `shares_name_unique` indexes on — so this
+ * asks the same question the constraint will. A plain `name = $1` would pass `Belgeler` beside an
+ * existing `belgeler` and let the INSERT fail instead, which is the same outcome by a worse route:
+ * the dataset would already have been created by then, and nothing in the product can remove it.
+ *
+ * The Turkish i-family folds here too, and that is not incidental — `İSTANBUL` and `istanbul` are
+ * one name to an SMB client, and two shares a Windows user cannot tell apart is precisely what the
+ * fold exists to prevent.
+ */
+async function assertShareNameFree(q: TenantQuery, name: string): Promise<void> {
+  const taken = await q.query<{ id: string }>(
+    `SELECT id::text AS id FROM public.shares WHERE public.fold_identity(name) = public.fold_identity($1)`,
+    [name],
+  );
+  if (taken.length > 0) throw new ShareNameTakenError(name, 'database');
+}
+
+/**
+ * Every principal in the grant list must belong to THIS organisation.
+ *
+ * The same check `PermissionsService.write` makes, for a reason worth stating rather than
+ * inheriting: a foreign key does NOT enforce it. `folder_grants.user_id` references
+ * `public.users(id)` and referential integrity is checked by the system, below row level security
+ * — so a grant naming a user in another tenant inserts cleanly, and the row would then be a
+ * cross-tenant permission that RLS hides from everyone who could notice it.
+ *
+ * Missing and foreign are deliberately the same answer. Telling a caller "that id exists but not
+ * here" confirms the existence of another tenant's user, which is the leak the whole model is
+ * built to prevent.
+ */
+async function assertPrincipalsInOrganization(
+  q: TenantQuery,
+  organizationId: string,
+  grants: readonly GrantInput[],
+): Promise<void> {
+  const userIds = grants.map((g) => g.userId).filter((id): id is string => id !== null);
+  const teamIds = grants.map((g) => g.teamId).filter((id): id is string => id !== null);
+
+  const missing: string[] = [];
+  if (userIds.length > 0) {
+    const found = await q.query<{ id: string }>(
+      `SELECT id::text AS id FROM public.users WHERE organization_id = $1 AND id = ANY($2::uuid[])`,
+      [organizationId, userIds],
+    );
+    const seen = new Set(found.map((row) => row.id));
+    missing.push(...userIds.filter((id) => !seen.has(id)));
+  }
+  if (teamIds.length > 0) {
+    const found = await q.query<{ id: string }>(
+      `SELECT id::text AS id FROM public.teams WHERE organization_id = $1 AND id = ANY($2::uuid[])`,
+      [organizationId, teamIds],
+    );
+    const seen = new Set(found.map((row) => row.id));
+    missing.push(...teamIds.filter((id) => !seen.has(id)));
+  }
+
+  if (missing.length > 0) throw new UnknownGrantPrincipalError(missing);
 }
 
 /**

@@ -5,6 +5,8 @@ import { AuthModule } from '../auth/auth.module.js';
 import { APP_CONFIG } from '../config.module.js';
 import { SMB_HOST_DEFAULT, type AppConfig } from '../config.js';
 import { DbService } from '../db/db.service.js';
+import { JobsModule } from '../jobs/jobs.module.js';
+import { JobsService } from '../jobs/jobs.service.js';
 import { OrganizationsModule } from '../organizations/organizations.module.js';
 import { OrganizationsService } from '../organizations/organizations.service.js';
 import { SharesController } from './shares.controller.js';
@@ -27,18 +29,29 @@ import { SharesService } from './shares.service.js';
  * `OrganizationsModule` supplies the one question `publish` has to ask about the whole device.
  */
 @Module({
-  imports: [AuthModule, OrganizationsModule],
+  imports: [AuthModule, OrganizationsModule, JobsModule],
   controllers: [SharesController, SmbController],
   providers: [
     {
       provide: SharesService,
-      inject: [DbService, AgentService, OrganizationsService, APP_CONFIG],
+      inject: [DbService, AgentService, OrganizationsService, APP_CONFIG, JobsService],
       useFactory: (
         db: DbService,
         agent: AgentService,
         organizations: OrganizationsService,
         config: AppConfig,
-      ) => new SharesService(db, agent, organizations, config.smbHost ?? SMB_HOST_DEFAULT),
+        jobs: JobsService,
+      ) =>
+        new SharesService(
+          db,
+          agent,
+          organizations,
+          config.smbHost ?? SMB_HOST_DEFAULT,
+          // `?? null` rather than a default: there is no sensible pool name to guess, and a wrong
+          // one produces datasets nothing serves. Absent means `POST /shares` answers 503.
+          config.shareParentDataset ?? null,
+          jobs,
+        ),
     },
   ],
   exports: [SharesService],

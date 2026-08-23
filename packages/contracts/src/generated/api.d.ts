@@ -1232,7 +1232,58 @@ export interface paths {
             };
         };
         put?: never;
-        post?: never;
+        /**
+         * Paylaşım aç
+         * @description Yalnız yöneticiler. §9'un eksik yarısı: bugüne kadar DEPSIS paylaşımları LİSTELİYOR ama
+         *     açamıyordu — satırlar yalnız testlerden ve elle gelebiliyordu.
+         *
+         *     Üç şey tek bir işlemde olur ve sırası önemlidir:
+         *
+         *     1. **Dataset.** Ajan `zfs create -o acltype=posixacl` çalıştırır ve özelliği geri OKUR;
+         *        `nfsv4` kendini kurulmuş gibi raporlayıp hiçbir şey uygulamadığı için (P0-B) bu
+         *        doğrulama pazarlık konusu değil. Dataset `DEPSIS_SHARE_PARENT_DATASET` altına açılır
+         *        ve oraya bağlı olduğu için paylaşım köküne düşer.
+         *     2. **Satır.** `public.shares`. Dataset ÖNCE açılır: bir satır yazıp dataset'i açamamak,
+         *        dosya yöneticisinde görünen ama açılamayan bir paylaşım bırakır.
+         *     3. **Kök grant.** `grants` verilmezse paylaşımı açan yöneticiye tam izin yazılır.
+         *
+         *     Üçüncüsü isteğe bağlı DEĞİL, ve sebebi bir güvenlik açığı: grant'ı olmayan bir paylaşım,
+         *     §6.2 öncesi "kiracının herkesi yedi izin alır" davranışına geri düşen bir istisnayı
+         *     canlı tutuyordu. `POST /shares` kök grant'ı aynı işlemde yazdığı için o istisna
+         *     kaldırıldı (migration 0016). **Yeni paylaşım KAPALI doğar**: yalnız grant'ta adı geçen
+         *     principal'lar ve organizasyon yöneticileri görür.
+         *
+         *     POSIX ACL'lerin yazılması bir iş kuyruğuna girer ve `applyingJobId` onu adlandırır.
+         *     `null` ise ajana ulaşılamadı: satır ve grant duruyor, dosya sistemi henüz haberdar değil.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ShareCreateRequest"];
+                };
+            };
+            responses: {
+                /** @description Açıldı */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ShareCreated"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -3726,6 +3777,38 @@ export interface components {
              *     false'tur ve bu bir arıza değil, kurulmamış bir bileşendir.
              */
             smbAvailable: boolean;
+        };
+        ShareCreateRequest: {
+            /**
+             * @description Paylaşımın adı, ve aynı zamanda SMB adresindeki son bileşen. Büyük/küçük harf ve
+             *     Türkçe i ailesi katlanarak karşılaştırılır: `Belgeler` varken `belgeler` açılamaz,
+             *     çünkü SMB istemcileri ikisini ayırt edemez.
+             */
+            name: string;
+            /** @default false */
+            readOnly: boolean;
+            /**
+             * Format: int64
+             * @description `refquota`. Snapshot'ları HARİÇ tutar, yani yönetici anlık görüntü politikası bir
+             *     kullanıcıyı kendi alanının dışına kilitleyemez (ADR-0008). null: kota yok.
+             */
+            quotaBytes?: number | null;
+            /**
+             * @description Paylaşımın kökündeki başlangıç izinleri. Verilmezse paylaşımı açan yöneticiye tam
+             *     izin yazılır — boş bir dizi DEĞİL: grant'sız bir paylaşım, kaldırılan istisnayı geri
+             *     getirir, ve `422` ile reddedilir.
+             */
+            grants?: components["schemas"]["Grant"][];
+        };
+        ShareCreated: {
+            share: components["schemas"]["Share"];
+            /**
+             * Format: uuid
+             * @description POSIX ACL'leri yazacak işin kimliği. null ise ajana ulaşılamadı ve dosya sistemi
+             *     henüz bu paylaşımın izinlerini bilmiyor — arayüz bunu göstermek zorunda, çünkü
+             *     web'in kapalı dediği bir klasörün SMB'den açılması §6.2'nin adıyla yasakladığı şey.
+             */
+            applyingJobId: string | null;
         };
         SmbPublishResult: {
             shares: number;

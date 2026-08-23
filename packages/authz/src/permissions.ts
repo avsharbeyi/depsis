@@ -133,7 +133,8 @@ export function sortPermissions(permissions: Iterable<Permission>): readonly Per
  * delegated manager useless unless they were first given everything they might ever grant, which
  * is the opposite of least privilege.
  *
- * What stops `manage` from being total is that it is per-node and given deliberately, and that
- * `LEGACY_OPEN_SHARE` withholds it so nobody inherits the right to write a share's first grant.
- * A named constant that enforced nothing read as if a further control existed.
+ * What stops `manage` from being total is that it is per-node and given deliberately: nobody holds
+ * it anywhere until an administrator writes a row that says so. A share's FIRST grant is therefore
+ * always an administrator's — there is no node for a member to inherit `manage` from before one
+ * exists — and `SharesService.create` writes it at the moment the share is made.
  */

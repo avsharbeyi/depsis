@@ -169,6 +169,34 @@ const schema = z.object({
     .optional()
     .transform((value) => (value === undefined || value === '' ? null : value)),
 
+  // The dataset new shares are created UNDER, e.g. `tank/depsis`. `POST /shares` needs it and
+  // refuses without it.
+  //
+  // Configuration rather than discovery, for the same reason as DEPSIS_ZFS_POOLS below: the
+  // agent's operation set is closed and has no "list datasets", and ADR-0007 keeps pool creation
+  // out of the product entirely. The pool is the operator's, made at install time.
+  //
+  // IT MUST BE THE DATASET MOUNTED AT `DEPSIS_SHARES_ROOT`, and that pairing is the whole design.
+  // `CreateDataset` sets no mountpoint — deliberately, because a mountpoint operand would let the
+  // API mount a tenant's dataset anywhere on the box — so a child dataset lands wherever ZFS
+  // inheritance puts it. With `tank/depsis` mounted at `/srv/depsis`, creating `tank/depsis/belgeler`
+  // produces `/srv/depsis/belgeler`, which is precisely the directory the agent resolves for the
+  // share named `belgeler`. Point this at a dataset mounted somewhere else and the appliance
+  // creates datasets nothing serves: the row exists, `zfs list` shows it, and the share is empty
+  // in the file manager because the agent is looking at a directory that was never created.
+  //
+  // Optional, because a box before setup has no pool. Creating a share then answers 503 with that
+  // sentence rather than inventing a dataset name against a pool that may not exist.
+  DEPSIS_SHARE_PARENT_DATASET: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => (value === undefined || value === '' ? null : value))
+    .refine(
+      (value) => value === null || /^[A-Za-z0-9][A-Za-z0-9:._/-]*$/.test(value),
+      'must be a ZFS dataset path such as tank/depsis — no leading dash, no spaces',
+    ),
+
   // The server name in the UNC paths /shares reports. See SMB_HOST_DEFAULT.
   //
   // The pattern is not decoration. This value is concatenated into `\\host\share` and handed to a
@@ -238,6 +266,12 @@ export interface AppConfig {
   /** See `DEPSIS_PODMAN_ALLOW_ROOTFUL`. Absent reads as false, which is the safe direction. */
   podmanAllowRootful?: boolean;
   sharesRoot?: string | null;
+  /**
+   * See `DEPSIS_SHARE_PARENT_DATASET`. Absent or null means no share can be created, which is the
+   * honest state of a box whose pool the operator has not made yet — `POST /shares` answers 503
+   * and says so, rather than guessing a pool name and failing inside the agent.
+   */
+  shareParentDataset?: string | null;
   // Optional in the interface for the same reason as the two above: it has a usable answer when
   // absent, and a test building an `AppConfig` literal for something else should not have to name
   // every socket the appliance has grown. See `CONSOLE_SOCKET_DEFAULT`.
@@ -267,6 +301,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     podmanAllowRootful: parsed.data.DEPSIS_PODMAN_ALLOW_ROOTFUL,
     consoleSocket: parsed.data.DEPSIS_CONSOLE_SOCKET,
     sharesRoot: parsed.data.DEPSIS_SHARES_ROOT,
+    shareParentDataset: parsed.data.DEPSIS_SHARE_PARENT_DATASET,
     smbHost: parsed.data.DEPSIS_SMB_HOST,
     zfsPools: parsed.data.DEPSIS_ZFS_POOLS,
     smartDisks: parsed.data.DEPSIS_SMART_DISKS,

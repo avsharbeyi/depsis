@@ -50,7 +50,9 @@ describeDb('folder permissions, against a real PostgreSQL', () => {
 
   let shareA = '';
   let shareB = '';
-  // orgA's second share, deliberately left without a single grant row. See `LEGACY_OPEN_SHARE`.
+  // orgA's second share, carrying exactly ONE root grant and nothing else — the shape migration
+  // 0016 leaves behind for a share that predates §6.2. It used to be the share with no grants at
+  // all, which is a state the appliance can no longer be in.
   let shareC = '';
   let bakir = '';
 
@@ -148,9 +150,9 @@ describeDb('folder permissions, against a real PostgreSQL', () => {
       );
       shareB = theirShare[0]?.id ?? '';
 
-      // A THIRD share in the same tenant that no test ever writes a grant into. It is the only
-      // way to exercise `LEGACY_OPEN_SHARE` from here: the fallback is share-wide, and `perms_a`
-      // stops being on it the moment the fixture below inserts its first row.
+      // A THIRD share in the same tenant, governed by a single root grant and carrying no other
+      // rule. Two things need it: a chain exactly one node long, and a share where the tests below
+      // can write the SECOND grant without disturbing `perms_a`'s carefully layered fixture.
       const virginShare = await q.query<{ id: string }>(
         `INSERT INTO shares (organization_id, name, dataset)
          VALUES ($1,'perms_bakir','tank/perms_bakir')
@@ -206,6 +208,16 @@ describeDb('folder permissions, against a real PostgreSQL', () => {
                 ($1,$2,$5,$3,'{list}'),
                 ($1,$2,$4,$6,'{share}')`,
         [orgA, shareA, ekipBir, projeler, gizli, ekipIki],
+      );
+
+      // `perms_bakir`'s single root grant. Seven permissions naming `zeynep`: the same set
+      // migration 0016 writes when it backfills a share nobody had granted, and `zeynep` because
+      // she is the member `perms_a` never names — so what she can reach is decided by this share
+      // alone, with nothing bleeding in from the fixture above.
+      await q.query(
+        `INSERT INTO folder_grants (organization_id, share_id, entry_id, user_id, permissions)
+         VALUES ($1,$2,NULL,$3,'{list,read,download,create,modify,move,delete}')`,
+        [orgA, shareC, zeynep],
       );
 
       // `yonetici` is an ordinary member who was given `manage` on one folder. That is the whole
@@ -315,15 +327,16 @@ describeDb('folder permissions, against a real PostgreSQL', () => {
     ).rejects.toBeInstanceOf(NotManageableError);
   });
 
-  // ─── the pre-§6.2 fallback, read through THIS endpoint ──────────────────────
+  // ─── one root grant, inherited all the way down ─────────────────────────────
   //
-  // `FilesService` has always applied `LEGACY_OPEN_SHARE`, so on an appliance where nobody has
-  // written a grant yet `GET /files` serves seven permissions per row. This service did not, and
-  // answered the same question about the same node with an empty set — the two realities §6.2
-  // exists to prevent, in the worst place for them, since this is the endpoint the permissions
-  // panel reads. These tests are what has to be deleted with the constant.
+  // These two used to measure `LEGACY_OPEN_SHARE`: a share with no grant rows at all served every
+  // member the pre-§6.2 seven, and this endpoint had to agree with `GET /files` about that or the
+  // permissions panel would be the one screen in the product that got access wrong. The exception
+  // is gone and `perms_bakir` now carries the root grant migration 0016 would have written for it,
+  // so what is left to measure is the ordinary rule — and the same seven come out, which is the
+  // point of the backfill.
 
-  it('reports the pre-§6.2 seven in a share that carries no grant at all', async () => {
+  it('reports a root grant at every node below it, and names the root as the source', async () => {
     const view = await permissions.read(orgA, asUser(zeynep), { kind: 'entry', id: bakir });
     expect(view.effective).toEqual([
       'list',
@@ -334,25 +347,28 @@ describeDb('folder permissions, against a real PostgreSQL', () => {
       'move',
       'delete',
     ]);
-    // No node granted this, so there is none to name: sending an administrator to `bakir` to
-    // delete a row that was never written is worse than saying nothing.
-    expect(view.inheritedFrom).toBeNull();
-    // And `manage` is still not in it, so the first grant of this share remains an
-    // administrator's to write (ADR-0021 §5).
+    // The share root, and this is the half the fallback could never answer: there IS a row now, so
+    // an administrator asking "where does this come from" can be sent to the node that grants it.
+    // It used to be null because nothing had granted anything.
+    expect(view.inheritedFrom).toBe(shareC);
+    // `manage` is not in the backfilled set, so authority over a share's permissions still starts
+    // with an administrator rather than arriving with the data (ADR-0021 §5).
     expect(view.effective).not.toContain('manage');
     expect(view.canManage).toBe(false);
   });
 
-  it('drops the fallback for the whole share the moment one grant exists anywhere in it', async () => {
-    // `perms_a` has grants — none of them naming zeynep, and none of them on `bos`. The walk is
-    // therefore in charge there and she cannot even see the folder, while `bakir` in the ungranted
-    // share still reports seven in the same breath.
+  it('decides each chain on its own: a grant in one share reaches nothing in another', async () => {
+    // `zeynep`'s root grant is in `perms_bakir` and nothing in `perms_a` names her, so `bos` is
+    // invisible to her while `bakir` reports seven in the same breath. Under the fallback these
+    // two answers came from different RULES — one from the walk, one from a share-wide exception —
+    // and the pair is kept because it is now the same rule applied twice, which is the property
+    // worth having a test for.
     await expect(
       permissions.read(orgA, asUser(zeynep), { kind: 'entry', id: bos }),
     ).rejects.toBeInstanceOf(NodeNotFoundError);
 
-    const ungoverned = await permissions.read(orgA, asUser(zeynep), { kind: 'entry', id: bakir });
-    expect(ungoverned.effective).toHaveLength(7);
+    const granted = await permissions.read(orgA, asUser(zeynep), { kind: 'entry', id: bakir });
+    expect(granted.effective).toHaveLength(7);
   });
 
   it('hands an administrator everything, and does not blame a node for it', async () => {
@@ -566,19 +582,22 @@ describeDb('folder permissions, against a real PostgreSQL', () => {
     ).rejects.toBeInstanceOf(NodeNotFoundError);
   });
 
-  // ─── the fallback boundary ──────────────────────────────────────────────────
+  // ─── writes into `perms_bakir` ──────────────────────────────────────────────
   //
-  // These run LAST and they run against `perms_bakir`, because they are the two tests that put a
-  // grant into it: the fallback is share-wide, so the moment one of them writes, the tests above
-  // that read `bakir` as an ungoverned share stop describing the same world.
+  // These run LAST and against `perms_bakir` because they are the tests that add a SECOND grant to
+  // it, and the two above describe it with exactly one.
 
-  it('previews the first grant of a share as the loss it actually is', async () => {
-    // `before` here is not "nobody has anything". While a share is ungoverned every member holds
-    // the pre-§6.2 seven everywhere in it, and writing the first grant takes that away from
-    // everyone the grant does not name — across the WHOLE share, including folders the target is
-    // not an ancestor of. A preview built from grant rows alone reports `usersLosing: []` on the
-    // single most disruptive click the appliance has, which is the opposite of what §6.2 asks a
-    // dry-run to do.
+  it('previews a second grant as a gain for the people it names and a loss for nobody', async () => {
+    // This test used to assert the opposite, and the difference is the whole shape of the change.
+    // While `LEGACY_OPEN_SHARE` existed, `before` in an ungoverned share was not "nobody has
+    // anything" — every member held the pre-§6.2 seven everywhere in it, so writing the FIRST
+    // grant silently took that away from everyone the grant did not name, across folders the
+    // target was not even an ancestor of. The preview had to be seeded with a synthetic root grant
+    // to see it, or it reported `usersLosing: []` on the most disruptive click in the appliance.
+    //
+    // There is no such click any more. `perms_bakir` is governed by its root grant, this write
+    // adds a narrower one below it for a team, and the arithmetic is the ordinary kind: the team's
+    // members gain what they did not have, and nobody's existing grant is touched.
     const preview = await permissions.write(
       orgA,
       asAdmin(patron),
@@ -588,62 +607,55 @@ describeDb('folder permissions, against a real PostgreSQL', () => {
     );
 
     expect(preview.applied).toBe(false);
-    expect(preview.impact.usersGaining).toEqual([]);
-    // Everyone who is not an administrator, including the two who ARE named by the grant: they had
-    // seven and end with two, so they lose five and gain nothing.
-    expect(preview.impact.usersLosing.map((u) => u.username).sort()).toEqual([
-      'ali',
-      'veli',
-      'yonetici',
-      'zeynep',
-    ]);
-    const losingAli = preview.impact.usersLosing.find((u) => u.username === 'ali');
-    expect(losingAli?.before).toHaveLength(7);
-    expect(losingAli?.after).toEqual(['list', 'read']);
+    // `ali` and `veli` are `muhasebe`; neither is named anywhere in this share today.
+    expect(preview.impact.usersGaining.map((u) => u.username).sort()).toEqual(['ali', 'veli']);
+    const gainingAli = preview.impact.usersGaining.find((u) => u.username === 'ali');
+    expect(gainingAli?.before).toEqual([]);
+    expect(gainingAli?.after).toEqual(['list', 'read']);
 
-    // The share root is in the radius too, although the grant is written a level below it: the
-    // fallback hangs off the root and the change removes it from there as well.
-    expect(preview.impact.foldersAffected).toBeGreaterThanOrEqual(2);
+    // `zeynep` holds the root grant's seven and this write does not touch the root, so she keeps
+    // them: a narrower grant below an ancestor narrows it for the principals it NAMES, and nearest
+    // ancestor is resolved per principal (ADR-0021).
+    expect(preview.impact.usersLosing).toEqual([]);
+
+    // The radius is the subtree the write names, and no longer the whole share: `includeShareRoot`
+    // went with the fallback, because a write that reaches past its own subtree no longer exists.
+    expect(preview.impact.foldersAffected).toBeGreaterThanOrEqual(1);
   });
 
-  it('will not let the last grant of a share be removed, because that OPENS the share', async () => {
-    const first = await permissions.write(
-      orgA,
-      asAdmin(patron),
-      { kind: 'entry', id: bakir },
-      [{ userId: null, teamId: ekipBir, permissions: ['list', 'read'] }],
-      false,
-    );
-    expect(first.applied).toBe(true);
-
-    // `LEGACY_OPEN_SHARE`'s docstring promises the fallback is gone for good once any grant exists.
-    // Nothing persisted that: `shareIsGoverned` is an EXISTS query re-asked on every request, so an
-    // empty body at the only node carrying rows used to delete them and hand the whole share back
-    // to every member of the tenant — reachable by anyone the root grant gave `manage` to, and by
-    // an administrator trying to lock the share DOWN.
+  it('will not let the last grant of a share be removed', async () => {
+    // THE INVARIANT: every share holds at least one grant, always. `perms_bakir` holds exactly
+    // one — its root — so emptying that node is the write this refuses.
+    //
+    // It used to be refused for the opposite reason, and the history is why the guard is still
+    // here after the reason changed. While `LEGACY_OPEN_SHARE` existed, deleting a share's last
+    // grant did not close the share, it OPENED it: the fallback was an EXISTS query re-asked on
+    // every request, so the share fell back to giving every member of the tenant seven
+    // permissions on everything. That was reachable by anyone the root grant had given `manage`
+    // to. Now an empty share would instead be invisible to everyone but an administrator — the
+    // safe direction, and still not a state to arrive in by clicking save on an empty list.
     await expect(
-      permissions.write(orgA, asAdmin(patron), { kind: 'entry', id: bakir }, [], false),
+      permissions.write(orgA, asAdmin(patron), { kind: 'share', id: shareC }, [], false),
     ).rejects.toBeInstanceOf(LastGrantError);
     // Refused on the preview as well: a dry-run of a write that cannot happen is worse than the
     // refusal, because the caller would plan around it.
     await expect(
-      permissions.write(orgA, asAdmin(patron), { kind: 'entry', id: bakir }, [], true),
+      permissions.write(orgA, asAdmin(patron), { kind: 'share', id: shareC }, [], true),
     ).rejects.toBeInstanceOf(LastGrantError);
 
-    // The row is still there, and — the property that matters — the share is still governed, so
-    // `zeynep` still cannot see the folder that was open to her a moment ago.
+    // The row is still there and still doing its job.
     const rows = await owner.withoutTenant('migration-status', (q) =>
       q.query<{ n: string }>(`SELECT count(*)::text AS n FROM folder_grants WHERE share_id = $1`, [
         shareC,
       ]),
     );
     expect(Number(rows[0]?.n ?? '0')).toBe(1);
-    await expect(
-      permissions.read(orgA, asUser(zeynep), { kind: 'entry', id: bakir }),
-    ).rejects.toBeInstanceOf(NodeNotFoundError);
+    expect(
+      (await permissions.read(orgA, asUser(zeynep), { kind: 'entry', id: bakir })).effective,
+    ).toHaveLength(7);
 
-    // Narrowing to nobody is still expressible — it just has to be said out loud, with a root grant
-    // that names somebody rather than with an empty list.
+    // Closing a share to everyone is still expressible — it just has to be said out loud, with a
+    // root grant naming somebody rather than with an empty list.
     const closed = await permissions.write(
       orgA,
       asAdmin(patron),
@@ -652,7 +664,23 @@ describeDb('folder permissions, against a real PostgreSQL', () => {
       false,
     );
     expect(closed.applied).toBe(true);
-    // And with a second node carrying rows, emptying the first is an ordinary write again.
+    // And `zeynep`, who is no longer named, loses the share entirely. Said here rather than
+    // assumed, because "narrowing works" and "narrowing is what just happened" are different
+    // claims and only the second one survives a bug in the DELETE above.
+    await expect(
+      permissions.read(orgA, asUser(zeynep), { kind: 'entry', id: bakir }),
+    ).rejects.toBeInstanceOf(NodeNotFoundError);
+
+    // With a second node carrying rows, emptying one of them is an ordinary write again: the guard
+    // is about the SHARE having a rule, not about any particular node keeping one.
+    const second = await permissions.write(
+      orgA,
+      asAdmin(patron),
+      { kind: 'entry', id: bakir },
+      [{ userId: null, teamId: ekipBir, permissions: ['list', 'read'] }],
+      false,
+    );
+    expect(second.applied).toBe(true);
     const emptied = await permissions.write(
       orgA,
       asAdmin(patron),

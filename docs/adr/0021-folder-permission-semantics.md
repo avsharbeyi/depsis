@@ -64,6 +64,54 @@ hiyerarşisi — ve yönetici olmayan hiç kimse için istisna yoktur.
 `folder_grants.entry_id` NULL ise grant paylaşımın tamamına ait. Ayrı bir "share_grants" tablosu
 olmamasının sebebi: kök de bir düğüm, ve iki tablo aynı miras yürüyüşünü iki kez yazdırırdı.
 
+### Her paylaşımın EN AZ BİR grant'ı vardır
+
+Bu bir değişmez, bir tavsiye değil, ve modelin geri kalanı ona yaslanıyor.
+
+§6.2 ilk sunulduğunda `LEGACY_OPEN_SHARE` diye bir istisna vardı: bir paylaşımın hiç grant satırı
+yoksa, kiracının her üyesi §6.2 öncesi yedi izni alıyordu. Gerekçesi sağlamdı — o gün hiçbir
+paylaşımın grant'ı yoktu ve kuralı olduğu gibi uygulamak her cihazı bomboş bırakırdı. Ama koşul
+`folder_grants` üzerinde bir VARLIK SORUSUYDU ve her istekte yeniden soruluyordu, yani hangi
+tarafta olduğunu hiçbir yer kalıcı olarak tutmuyordu. Sonuç: **bir paylaşımın son grant'ını
+silmek onu kapatmıyor, HERKESE AÇIYORDU.** Bir kök grant'la `manage` verilmiş, yönetici olmayan
+biri oraya varabiliyordu. Denetim bunu kritik olarak işaretledi.
+
+`LastGrantError` o kapıyı kapattı ama istisnayı kaldırmadı: sıfır grant'lı bir paylaşım üretebilen
+her yeni kod yolu onu geri getirirdi. Kalıcı çözüm, istisnanın kendi belgesinin yazdığı koşulu
+sağlamak — sıfır grant'lı bir paylaşım mümkün olmasın — ve o koşul üç parçadan oluşuyor:
+
+1. **Migration 0016**, grant'sız her mevcut paylaşımın köküne bir grant yazdı.
+2. **Paylaşım yaratan her yol**, satırı ve ilk grant'ı AYNI İŞLEMDE yazıyor. İkisi vardır ve
+   ikisini de saymak gerekiyor: `POST /shares` (yönetici açar) ve `FilesService.defaultShare`
+   (kimse açmaz, ilk istekte kendiliğinden oluşur). İkincisi ilk aramada gözden kaçtı ve onu
+   düzeltmeden 0016 hiçbir şey garanti etmezdi — taze bir cihazdaki ilk istek değişmezi aynı
+   saniyede bozardı.
+3. **`LastGrantError`**, son grant'ı silmeyi reddediyor; artık koşulsuz, çünkü öncülü her zaman
+   doğru.
+
+İstisna gittiği için `manage`'in bootstrap'ı da netleşti: bir paylaşımın ilk grant'ı her zaman bir
+yöneticinin kararıdır, çünkü ondan önce hiç kimsenin `manage` miras alabileceği bir düğüm yoktur.
+
+Kimin adına yazıldığı, paylaşımı kimin açtığına bağlı ve ayrım niyette:
+
+| Paylaşımı açan                 | İlk grant               | Neden                                        |
+| ------------------------------ | ----------------------- | -------------------------------------------- |
+| Yönetici (`POST /shares`)      | Onu açan yönetici       | Kime açtığını söyleyebilirdi; söylemedi      |
+| Kendiliğinden (`defaultShare`) | `everyone_team()` ekibi | Kimse seçmedi; cevap cihazdaki herkes        |
+| Migration 0016 (eski satır)    | `everyone_team()` ekibi | Aynı sebep: o dönem izin sorusu sorulmamıştı |
+
+Ekip, kullanıcı başına satır yerine, çünkü ADR-0004 ACL girdilerinin GRUBA verilmesini istiyor:
+POSIX ACL ~30 girdiden sonra hantallaşıyor, yani iki yüz kullanıcılı bir cihazda kullanıcı başına
+bir kök grant `AclApplyService`'i dosya sistemi tarafında düşürürdü. `everyone_team()` bir SQL
+fonksiyonu ve tek tanım — migration da API de onu çağırıyor, çünkü iki dilde iki sabit, kaydıkları
+gün grant'sız bir paylaşım üretirdi.
+
+'Herkes' ekibi SIRADAN bir ekip: bayrağı yok, kod onu isimle aramıyor, yönetici yeniden
+adlandırabilir ya da silebilir. Amaç bir sistem grubu icat etmek değil, örtük bir kuralı GÖRÜNÜR
+bir satıra çevirmek — örtük kural denetlenemez, bir grant satırı denetlenebilir. Bu ekibe sonradan
+açılan kullanıcılar otomatik girmez: yeni bir üyeyi kendiliğinden her eski paylaşıma sokmak,
+erişimi GENİŞLETEN bir otomatizm olurdu ve bu ADR'nin tam olarak engellemek için var olduğu yön.
+
 ### `manage` ayrı bir izin
 
 Bir klasöre yazabilen herkesin o klasörün izinlerini de değiştirebilmesi, yetki modelinin kendi
@@ -132,6 +180,11 @@ gruba verilmesi, uygulama yetkisinin dosya sistemi yetkisinin alt kümesi olmas�
 **Kabul edilen sınır:** deny yok. "Şu kişi hariç herkes" ifade edilemez; bunun yolu, o kişiyi
 grant taşıyan ekipten çıkarmak. Bu bir eksiklik ve bilinçli.
 
+**Kabul edilen sınır:** bir paylaşımı silmenin yolu yok, çünkü grant'ları onu tutuyor
+(`folder_grants.share_id` ON DELETE RESTRICT) ve son grant'ı silmek de reddediliyor. Bu bilinçli:
+paylaşımı silmek dataset'i silmek demek ve ADR-0007 yıkıcı havuz işlemlerini üründen dışarıda
+tutuyor. Paylaşımı kapatmanın yolu, kimseyi adlandırmayan bir kök grant.
+
 **Kabul edilen borç:** grant değişikliğinden sonra POSIX ACL'lerin yeniden yazılması bir iş
 kuyruğu görevi ve tamamlanana kadar iki katman AYRIŞIK. Bu pencere ölçülmeli ve arayüzde
 görünmeli; "izinler uygulanıyor" diyen bir gösterge, yalan söyleyen bir onay kutusundan iyidir.
@@ -151,3 +204,8 @@ reddetti; blob bir Samba iç detayı ve bozuk bir blob `smbd`'nin itaat edeceği
 - web'de görülen izin ile SMB'den ölçülen erişim AYNI: bir klasör web'de kapalıysa `smbclient`
   ile de açılamıyor (ADR-0004'ün alt küme değişmezi)
 - POSIX uid/gid ayrılması eşzamanlı iki hesap oluşturmada çakışmıyor
+
+`tools/ci/permissions-schema-check.sh`, yalnız PostgreSQL ile, her push'ta — ve o betiğin kendisi
+de bu turda onarıldı: assertion'ları yalnızca EKRANA yazıyordu, çıkış kodu her zaman 0'dı. Yani
+kısıtların ısırıp ısırmadığını ölçmek için yazılmış kapı, kendisi ısırmıyordu. Şimdi ısırıyor, ve
+ilk ısırdığı şey kendi yeni assertion'ının yanlış yazılmış grep deseni oldu.

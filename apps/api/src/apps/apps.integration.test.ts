@@ -170,8 +170,16 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
     if (owner !== undefined) {
       await owner.withoutTenant('migration-status', async (q) => {
         await q.query(`DELETE FROM app_instances WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        // Before the shares: `folder_grants.share_id` is ON DELETE RESTRICT, so a share with a
+        // grant on it cannot be deleted. Both creation paths write one now.
+        await q.query(`DELETE FROM folder_grants WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM shares WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM users WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        // And the teams before the organisation, for the same reason: `teams.organization_id`
+        // is ON DELETE RESTRICT, and `everyone_team()` creates one the first time a share is
+        // opened implicitly.
+        await q.query(`DELETE FROM team_members WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        await q.query(`DELETE FROM teams WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM organizations WHERE id = ANY($1)`, [[orgA, orgB]]);
       });
       await owner.onModuleDestroy();

@@ -2,11 +2,21 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
-import { Empty } from './ui.js';
+import { Empty, Win } from './ui.js';
 
 type SharePage = OpenApi.components['schemas']['SharePage'];
 type SmbPublishResult = OpenApi.components['schemas']['SmbPublishResult'];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
+
+/**
+ * The same shape the database, the contract and the agent all insist on.
+ *
+ * Checked here as well so that a name the appliance cannot use is refused while the reader is
+ * still looking at the field, rather than after a round trip that has already created a ZFS
+ * dataset. The server checks it too, and that is the copy that matters — this one only saves the
+ * trip.
+ */
+const NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,62}$/;
 
 /**
  * Amber, because neither `.st2` variant in the stylesheet says what this pill has to say.
@@ -44,6 +54,7 @@ export function Shares({ notify, isAdmin, onUnauthenticated }: Props): React.JSX
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<SmbPublishResult | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [creating, setCreating] = useState(false);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
 
@@ -108,6 +119,44 @@ export function Shares({ notify, isAdmin, onUnauthenticated }: Props): React.JSX
     setResult(data);
     if (data.verified) notify('ok', `${data.shares} paylaşım yayımlandı ve doğrulandı.`);
     reload();
+  }
+
+  async function create(input: {
+    name: string;
+    readOnly: boolean;
+    quotaBytes: number | null;
+  }): Promise<boolean> {
+    const { data, error, response } = await api.POST('/shares', { body: input });
+    if (response.status === 401) {
+      onUnauthenticated();
+      return false;
+    }
+    if (data === undefined) {
+      notify(
+        'error',
+        problemMessage(
+          error,
+          response.status === 503
+            ? 'Depolama havuzu ayarlı değil ya da ajana ulaşılamıyor. Paylaşım açılmadı.'
+            : 'Paylaşım açılamadı.',
+        ),
+      );
+      return false;
+    }
+
+    // Two sentences, because two different things happened and only one of them is finished. The
+    // share exists; the POSIX permissions behind it are a queued job, and a null id means the
+    // agent could not be reached to start it. Saying only "açıldı" would leave the reader to
+    // discover over SMB that the folder is not reachable yet.
+    notify(
+      'ok',
+      data.applyingJobId === null
+        ? `${data.share.name} açıldı. İzinler henüz dosya sistemine yazılamadı — ajana ` +
+            'ulaşılamıyor.'
+        : `${data.share.name} açıldı. Adresi kullanmadan önce "Yeniden yayımla" deyin.`,
+    );
+    reload();
+    return true;
   }
 
   if (failed) {
@@ -183,14 +232,31 @@ export function Shares({ notify, isAdmin, onUnauthenticated }: Props): React.JSX
           {page.smbAvailable ? 'samba çalışıyor' : 'samba kurulu değil'}
         </span>
         {isAdmin && (
+          <button type="button" className="b" onClick={() => setCreating(true)}>
+            Yeni paylaşım
+          </button>
+        )}
+        {isAdmin && (
           <button type="button" className="b" disabled={busy} onClick={() => void republish()}>
             {busy ? 'Yayımlanıyor…' : 'Yeniden yayımla'}
           </button>
         )}
       </div>
 
+      {creating && <NewShare onCancel={() => setCreating(false)} onCreate={create} />}
+
       {shares.length === 0 ? (
-        <Empty glyph="💽" text="Hiç paylaşım yok." />
+        <Empty
+          glyph="💽"
+          text="Hiç paylaşım yok."
+          action={
+            isAdmin ? (
+              <button type="button" className="b" onClick={() => setCreating(true)}>
+                Paylaşım aç
+              </button>
+            ) : undefined
+          }
+        />
       ) : (
         <div>
           {shares.map((share) => (
@@ -263,5 +329,121 @@ export function Shares({ notify, isAdmin, onUnauthenticated }: Props): React.JSX
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Opening a share: a name, whether it is read-only, and an optional quota.
+ *
+ * Three fields and no permission picker, and the omission is deliberate rather than unfinished.
+ * `POST /shares` writes the first grant to whoever created the share when the body names nobody,
+ * which is the fail-closed default: the share is visible to its creator and to administrators, and
+ * opening it to anyone else is a separate, deliberate act on the permissions panel. A picker here
+ * would put the most consequential decision in the appliance — who can read this — behind the same
+ * click as "what shall we call it".
+ *
+ * The sentence under the field says so, because a share that appears and is empty for everybody
+ * else looks like a bug unless somebody was told.
+ */
+function NewShare({
+  onCancel,
+  onCreate,
+}: {
+  onCancel: () => void;
+  onCreate: (input: {
+    name: string;
+    readOnly: boolean;
+    quotaBytes: number | null;
+  }) => Promise<boolean>;
+}): React.JSX.Element {
+  const [name, setName] = useState('');
+  const [readOnly, setReadOnly] = useState(false);
+  const [quota, setQuota] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const trimmed = name.trim();
+  const nameOk = NAME_PATTERN.test(trimmed);
+  // An empty field is not "wrong" yet — nobody has typed anything — so the message only appears
+  // once there is something to be wrong about.
+  const nameError = trimmed !== '' && !nameOk;
+  const gib = Number(quota);
+  const quotaOk = quota.trim() === '' || (Number.isFinite(gib) && gib > 0);
+
+  async function submit(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    if (!nameOk || !quotaOk || busy) return;
+    setBusy(true);
+    const done = await onCreate({
+      name: trimmed,
+      readOnly,
+      // GiB in the field, bytes on the wire. The API takes bytes because `refquota` does, and
+      // asking a person for a byte count is asking them to type a number they will get wrong.
+      quotaBytes: quota.trim() === '' ? null : Math.round(gib * 1024 * 1024 * 1024),
+    });
+    setBusy(false);
+    if (done) onCancel();
+  }
+
+  return (
+    <Win title="Yeni paylaşım" glyph="💽" tone="cool" onClose={onCancel}>
+      <form onSubmit={(event) => void submit(event)}>
+        <label htmlFor="share-name">Ad</label>
+        <input
+          id="share-name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          autoComplete="off"
+          autoFocus
+          aria-invalid={nameError}
+          aria-describedby="share-name-help"
+        />
+        <p className="note" id="share-name-help">
+          {nameError
+            ? 'Harf, rakam, nokta, tire ve alt çizgi. Nokta ya da tireyle başlayamaz.'
+            : 'SMB adresinin son parçası olur: \\\\depsis\\' +
+              (trimmed === '' ? 'ad' : trimmed) +
+              '. ' +
+              'Büyük/küçük harf ayrımı yok — Windows ikisini aynı görür.'}
+        </p>
+
+        <label htmlFor="share-quota">Kota (GiB, boş bırakılabilir)</label>
+        <input
+          id="share-quota"
+          value={quota}
+          inputMode="decimal"
+          onChange={(event) => setQuota(event.target.value)}
+          autoComplete="off"
+          aria-invalid={!quotaOk}
+          aria-describedby="share-quota-help"
+        />
+        <p className="note" id="share-quota-help">
+          Anlık görüntüler bu kotanın dışında sayılır, yani yönetici yedek politikası kimseyi kendi
+          alanının dışına kilitleyemez.
+        </p>
+
+        <label>
+          <input
+            type="checkbox"
+            checked={readOnly}
+            onChange={(event) => setReadOnly(event.target.checked)}
+          />{' '}
+          Salt okunur
+        </label>
+
+        <p className="note">
+          Paylaşım <b>kapalı</b> açılır: başta yalnız siz ve diğer yöneticiler görür. Başkalarına
+          açmak için İzinler panelinden bir kök izni yazın.
+        </p>
+
+        <div className="row">
+          <button type="button" className="no" onClick={onCancel}>
+            Vazgeç
+          </button>
+          <button type="submit" className="yes" disabled={!nameOk || !quotaOk || busy}>
+            {busy ? 'Açılıyor…' : 'Aç'}
+          </button>
+        </div>
+      </form>
+    </Win>
   );
 }

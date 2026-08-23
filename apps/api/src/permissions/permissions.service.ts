@@ -17,7 +17,6 @@ import {
 import { AgentService } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
-import { LEGACY_OPEN_SHARE } from './legacy-open-share.js';
 
 /**
  * §6.2's per-folder permissions: reading what a caller may do here, and rewriting the rows that
@@ -104,22 +103,23 @@ export class NotAFolderError extends Error {
 }
 
 /**
- * The write would leave a governed share with no grant rows at all.
+ * The write would leave the share with no grant rows at all.
  *
- * Refused, because `LEGACY_OPEN_SHARE` is a ONE-WAY door and nothing persists which side of it a
- * share is on: `shareIsGoverned` is an existence test over `folder_grants`, asked afresh on every
- * request. Emptying the last row therefore does not close the share, it OPENS it — the fallback
- * comes back and every member of the tenant gets the pre-§6.2 seven on every folder of the share,
- * including folders no grant ever named them on. A delegated manager of one folder could reach
- * that state from a root grant they were given, which is the model handing away more than it was
- * ever asked to hand away.
+ * THE INVARIANT THIS DEFENDS: every share has at least one grant, always. Migration 0016 made it
+ * true of the rows that already existed and `SharesService.create` writes a share and its first
+ * grant in one transaction, so this is the only remaining way to break it — and it is refused.
  *
- * The remedy is a sentence rather than a status: closing a share completely means a root grant
- * that names somebody — an administrator, if nobody else — not an empty list. That keeps the share
- * governed and grants nothing to anyone who is not on it.
+ * The history is worth keeping, because it is what the invariant is made of. `LEGACY_OPEN_SHARE`
+ * used to serve the pre-§6.2 seven permissions to every member of the tenant while a share had no
+ * grant rows, and the condition was an existence test asked afresh on every request. Emptying the
+ * last row therefore did not close a share, it OPENED it — to everybody, on every folder,
+ * including folders no grant had ever named them on. A member with a delegated `manage` on one
+ * root grant could reach that state. The fallback is gone now, so an empty share would instead be
+ * closed to everyone including its administrator, which is a far better failure and still not one
+ * to hand somebody by accident.
  *
- * The permanent fix is a `shares.governed_at` that is set once and never cleared, so the predicate
- * stops being derivable from the rows. That needs a migration this round could not write.
+ * The remedy is the same sentence it always was: closing a share completely means a root grant
+ * that names somebody — an administrator, if nobody else — not an empty list.
  */
 export class LastGrantError extends Error {
   constructor() {
@@ -264,27 +264,12 @@ export class PermissionsService {
 
       const canManage = actor.isAdmin || resolution.effective.has('manage');
 
-      // The pre-§6.2 fallback, asked here for the same reason `FilesService` asks it: on an
-      // appliance where nobody has written a grant yet, `GET /files` serves these seven and this
-      // endpoint has to say so. Reporting the empty set that ADR-0021's walk returns would make
-      // the one endpoint whose job is to explain access the only one that gets it wrong.
-      //
-      // It does not reach `canManage`, and cannot: `LEGACY_OPEN_SHARE` has no `manage` in it, so
-      // the first grant of a share stays an administrator's to write (ADR-0021 §5). `write` below
-      // therefore needs no matching branch — the walk it does already refuses everyone but them.
-      const governed = actor.isAdmin || (await shareIsGoverned(q, organizationId, target.shareId));
-
       // Deliberately not `resolution.nearestSourceNodeId` for an administrator. Their full set
       // comes from §6.1's hierarchy and from no node at all, and naming one here would send them
-      // to delete a row that is not what is granting them access. Nor for the fallback, which
-      // stands in for a row no migration wrote: there is no node to send anyone to.
-      const inheritedFrom = actor.isAdmin || !governed ? null : resolution.nearestSourceNodeId;
+      // to delete a row that is not what is granting them access.
+      const inheritedFrom = actor.isAdmin ? null : resolution.nearestSourceNodeId;
 
-      const effective = actor.isAdmin
-        ? new Set(PERMISSIONS)
-        : governed
-          ? resolution.effective
-          : new Set(LEGACY_OPEN_SHARE);
+      const effective = actor.isAdmin ? new Set(PERMISSIONS) : resolution.effective;
 
       // The same rule `requirePermission` applies in `files.controller.ts`, and it has to be
       // applied here too or this becomes the one route that confirms an id. Every other endpoint
@@ -338,16 +323,12 @@ export class PermissionsService {
       const grants = await grantRows(q, organizationId, target.shareId, treeIds);
       const before = groupGrants(grants, target.shareId);
 
-      const governedBefore = await shareIsGoverned(q, organizationId, target.shareId);
-
       // Authority is decided on the tree as it stands, never on the tree the caller proposes: a
       // body that grants the caller `manage` must not be what admits the body.
       if (!actor.isAdmin) {
         const chain = buildChain(target.shareId, ancestors, before);
         const subject = await subjectOf(q, organizationId, actor.userId);
-        const effective = governedBefore
-          ? resolve({ chain, subject }).effective
-          : new Set(LEGACY_OPEN_SHARE);
+        const effective = resolve({ chain, subject }).effective;
         // Before `manage`, and that order is the whole point. `NotManageableError`'s docstring
         // justifies its 403 with "the caller has already been told the node exists"; until this
         // line nothing checked that, so a node the caller cannot list answered 403 and confirmed
@@ -371,43 +352,33 @@ export class PermissionsService {
         })),
       );
 
-      // Which side of `LEGACY_OPEN_SHARE` the share is on after this write. The rows this body does
-      // NOT touch are counted rather than inferred: the DELETE below clears exactly one node, so
-      // "will anything be left" is a question about the rest of the share.
+      // Will the share still hold a rule once this has run? The rows this body does NOT touch are
+      // counted rather than inferred: the DELETE below clears exactly one node, so the question is
+      // about the rest of the share.
       const elsewhere = await grantsElsewhere(q, organizationId, target.shareId, nodeKey);
-      const governedAfter = elsewhere > 0 || proposed.length > 0;
+      // Unconditional, where it used to be `governedBefore && !governedAfter`. Every share has a
+      // grant now, so the guard needs no antecedent — and dropping it also refuses to empty a
+      // share that somehow arrived here already empty, which the old form would have allowed
+      // through as a no-op.
+      //
       // Refused on a dry run too. The preview exists to be trusted, and a preview of a write that
       // cannot happen is a worse answer than the refusal itself.
-      if (governedBefore && !governedAfter) throw new LastGrantError();
+      if (elsewhere === 0 && proposed.length === 0) throw new LastGrantError();
 
       const subjects = await impactSubjects(q, organizationId);
 
-      // CROSSING THE FALLBACK BOUNDARY IS THE BIGGEST PERMISSION CHANGE THE APPLIANCE CAN MAKE, and
-      // it is the one the diff below cannot see on its own: `before` and `after` are built from
-      // grant ROWS, and while a share is ungoverned the rows are not what anybody's access comes
-      // from. Writing the first grant of a share therefore takes the pre-§6.2 seven away from every
-      // other member across the WHOLE share, and an unaugmented preview reports `usersLosing: []`
-      // on precisely that click. So the ungoverned side of the diff is seeded with the same
-      // synthetic root grant `FilesService.syntheticGrants` attaches at request time, and the folder
-      // scope widens from the target's subtree to the share's, because the change reaches folders
-      // the target is not an ancestor of.
-      //
-      // Only one direction survives here — the other is `LastGrantError` above.
-      const crossing = !governedBefore && governedAfter;
-      const impactSubtree = crossing
-        ? await subtreeRows(q, organizationId, {
-            shareId: target.shareId,
-            entryId: null,
-            isFolder: true,
-          })
-        : subtree;
+      // The dry-run used to carry a third case here: a write that turned an UNGOVERNED share into
+      // a governed one silently removed the pre-§6.2 seven from every member across the whole
+      // share, which no diff built from grant rows could see, so `before` had to be seeded with a
+      // synthetic root grant and the folder scope widened past the target's subtree. All of that
+      // went with the fallback. Every share is governed, `before` is the rows and nothing else,
+      // and the impact of a write is the subtree it names.
       const impact = impactOf({
         shareId: target.shareId,
         nodeKey,
         ancestors,
-        subtree: impactSubtree,
-        includeShareRoot: crossing,
-        before: crossing ? withLegacyFallback(before, target.shareId, subjects.subjects) : before,
+        subtree,
+        before,
         after,
         subjects,
       });
@@ -638,29 +609,6 @@ async function subtreeRows(
 }
 
 /**
- * Does ADR-0021 decide this share yet, or is it still on the pre-§6.2 fallback?
- *
- * Asked of the WHOLE share and not of the chain, which is the half `LEGACY_OPEN_SHARE` explains:
- * one grant anywhere switches the model on for everything, so that the first person to restrict a
- * folder does not leave the rest of the tree open behind them. An existence test rather than a
- * count — the number is never used and `LIMIT 1` lets the index stop at the first row.
- */
-async function shareIsGoverned(
-  q: TenantQuery,
-  organizationId: string,
-  shareId: string,
-): Promise<boolean> {
-  const rows = await q.query<{ one: number }>(
-    `SELECT 1 AS one
-       FROM public.folder_grants
-      WHERE organization_id = $1 AND share_id = $2
-      LIMIT 1`,
-    [organizationId, shareId],
-  );
-  return rows.length > 0;
-}
-
-/**
  * How many grant rows this share holds at nodes OTHER than `nodeKey`.
  *
  * `write` replaces one node's rows wholesale, so this is what decides whether the share still has
@@ -682,31 +630,6 @@ async function grantsElsewhere(
     [organizationId, shareId, nodeKey],
   );
   return Number(rows[0]?.n ?? '0');
-}
-
-/**
- * The grant map an UNGOVERNED share actually behaves like, for the dry-run to diff against.
- *
- * The same shape `FilesService.syntheticGrants` builds at request time and for the same reason: the
- * fallback stands in for a share-wide default row that no migration wrote, so it hangs off the
- * share root and names each member individually. Placed BEFORE any real row at that node, matching
- * the live path — though in an ungoverned share there are no real rows for it to precede.
- */
-function withLegacyFallback(
-  grants: ReadonlyMap<string, readonly Grant[]>,
-  shareId: string,
-  subjects: readonly Subject[],
-): Map<string, Grant[]> {
-  const seeded = new Map<string, Grant[]>();
-  for (const [key, list] of grants) seeded.set(key, [...list]);
-  seeded.set(shareId, [
-    ...subjects.map((subject): Grant => ({
-      principal: { kind: 'user', id: subject.userId },
-      permissions: LEGACY_OPEN_SHARE,
-    })),
-    ...(grants.get(shareId) ?? []),
-  ]);
-  return seeded;
 }
 
 async function grantRows(
@@ -924,14 +847,6 @@ interface ImpactRequest {
   nodeKey: string;
   ancestors: readonly NodeRow[];
   subtree: Subtree;
-  /**
-   * Resolve the share root as well, because the change reaches it.
-   *
-   * True only when the write crosses the `LEGACY_OPEN_SHARE` boundary: the subtree then covers the
-   * whole share and the root is a folder in it, but `nodeKey` may be an entry somewhere inside, so
-   * the root would otherwise be the one node nobody asked about.
-   */
-  includeShareRoot: boolean;
   before: ReadonlyMap<string, readonly Grant[]>;
   after: ReadonlyMap<string, readonly Grant[]>;
   subjects: ImpactSubjects;
@@ -951,23 +866,21 @@ interface ImpactRequest {
  * permission change is the one that gets somebody hurt.
  */
 function impactOf(request: ImpactRequest): { view: ImpactView; truncated: boolean } {
-  const { shareId, nodeKey, ancestors, subtree, includeShareRoot, before, after, subjects } =
-    request;
+  const { shareId, nodeKey, ancestors, subtree, before, after, subjects } = request;
 
   const parents = new Map<string, string | null>();
   parents.set(shareId, null);
   for (const row of ancestors) parents.set(row.id, row.parent_id ?? shareId);
   for (const row of subtree.nodes) parents.set(row.id, row.parent_id ?? shareId);
 
-  // Deduplicated, because a share-wide walk contains `nodeKey` as well, and resolving one folder
+  // Deduplicated, because the subtree walk contains `nodeKey` as well and resolving one folder
   // twice would count it twice in `foldersAffected`.
-  const targets = [
-    ...new Set([
-      nodeKey,
-      ...(includeShareRoot ? [shareId] : []),
-      ...subtree.nodes.map((row) => row.id),
-    ]),
-  ];
+  //
+  // There used to be a third source here, `includeShareRoot`, for the one write that reached
+  // beyond its own subtree: turning an ungoverned share into a governed one changed access at the
+  // share root even when `nodeKey` was a folder somewhere inside it. No write does that any more —
+  // every share is governed — so the scope of a change is the subtree it names, with no exception.
+  const targets = [...new Set([nodeKey, ...subtree.nodes.map((row) => row.id)])];
 
   const folders: FolderImpact[] = [];
   for (const id of targets) {

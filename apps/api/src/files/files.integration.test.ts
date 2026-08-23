@@ -212,8 +212,15 @@ describeDb('the file tree, against a real PostgreSQL', () => {
           [[orgA, orgB]],
         );
         await q.query(`DELETE FROM file_entries WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        // Before the shares: `folder_grants.share_id` is ON DELETE RESTRICT, and `shareOf` writes
+        // a root grant now, so a share always has one on it by the time a test has used it.
+        await q.query(`DELETE FROM folder_grants WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM shares WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM users WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        // And the teams before the organisation, for the same reason: `everyone_team()` creates
+        // one the first time a share is opened implicitly.
+        await q.query(`DELETE FROM team_members WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        await q.query(`DELETE FROM teams WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM organizations WHERE id = ANY($1)`, [[orgA, orgB]]);
       });
       await owner.onModuleDestroy();
@@ -1618,44 +1625,42 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
 
   const sorted = (permissions: ReadonlySet<Permission>): string[] => [...permissions].sort();
 
-  // ─── the compatibility fallback, and the day it stops applying ──────────────
+  // ─── no grant, no access ────────────────────────────────────────────────────
   //
-  // ADR-0021 applied to a share with no grant rows would leave everyone with nothing, and there
-  // are no grant rows anywhere yet. `LEGACY_OPEN_SHARE` in `files.service.ts` says what happens
-  // instead; these two tests are what has to be deleted with it.
+  // There used to be two tests here, and they asserted the opposite: `LEGACY_OPEN_SHARE` handed
+  // every member of the tenant seven permissions while a share had no grant rows at all. That
+  // exception is gone — every share now carries a root grant from the moment it exists, written
+  // by `SharesService.create`, by `FilesService.defaultShare`, or by migration 0016 for the rows
+  // that predate all of it — so what is left is ADR-0021 with no exception in it. These are the
+  // replacements, and they measure the rule in the direction that matters: what a member who was
+  // never named actually gets.
 
-  it('gives every member the pre-§6.2 seven while a share has no grants at all', async () => {
-    const made = await folder(null, 'eski-davranis');
+  it('shows a member nothing in a share whose grants do not name them', async () => {
+    const made = await folder(null, 'adi-gecmeyen');
 
-    const page = await controller.list(as(bob), undefined, undefined, '100', undefined);
-    const row = page.items.find((item) => item.id === made.id);
-    expect(row?.permissions).toEqual([
-      'list',
-      'read',
-      'download',
-      'create',
-      'modify',
-      'move',
-      'delete',
-    ]);
-    // Not `manage`, and that is the point: nobody inherits the right to write the first grant of
-    // a share from the fallback. An administrator writes it (ADR-0021 §5).
-    expect(row?.permissions).not.toContain('manage');
-  });
-
-  it('distinguishes "no grant at all" from a root grant that happens to name everyone', async () => {
-    const made = await folder(null, 'ilk-grant');
-    expect(await names(as(alice))).toContain('ilk-grant');
-    expect(await names(as(bob))).toContain('ilk-grant');
-
-    // ONE root grant, naming Alice. The fallback is gone for the whole share the instant it
-    // exists — which is the observable difference between the two states, and the reason the
-    // fallback is share-wide rather than "no grant above this folder".
+    // Alice is named at the root; Bob is not named anywhere. Under the old fallback this share
+    // was open to both of them until somebody wrote the first grant, and writing it took access
+    // away from Bob without anyone intending to. Now Bob simply never had it.
     await grantTo({ user: alice }, null, ['list', 'read']);
 
-    expect(await names(as(alice))).toContain('ilk-grant');
+    expect(await names(as(alice))).toContain('adi-gecmeyen');
     expect(await names(as(bob))).toEqual([]);
+    // 404 and not 403: a node a caller cannot `list` must not be confirmed to exist. That is the
+    // same rule every other endpoint here applies, and it is why the listing above is empty
+    // rather than full of rows with no permissions on them.
     await expect(controller.detail(as(bob), made.id)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('leaves an organisation administrator reaching everything without a grant of their own', async () => {
+    const made = await folder(null, 'yonetici-gorur');
+    await grantTo({ user: alice }, null, ['list', 'read']);
+
+    // §6.1's hierarchy, not a row. Worth pinning beside the test above because the two together
+    // are what make the removal safe to ship: taking the fallback away could have locked an
+    // appliance's own administrator out of a share nobody had granted them, and it does not.
+    const page = await controller.list(as(admin, 'admin'), undefined, undefined, '100', undefined);
+    expect(page.items.map((item) => item.name)).toContain('yonetici-gorur');
+    expect((await controller.detail(as(admin, 'admin'), made.id)).permissions).toContain('manage');
   });
 
   // ─── the inheritance rule ───────────────────────────────────────────────────

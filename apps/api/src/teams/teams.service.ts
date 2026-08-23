@@ -75,13 +75,20 @@ export class TeamNameTakenError extends Error {
 }
 
 /**
- * Deleting this team would take the last grant out of a share, which OPENS the share.
+ * Deleting this team would take the last grant out of a share.
  *
- * `folder_grants.team_id` is `ON DELETE CASCADE`, so a team deletion is also a grant deletion — and
- * `LEGACY_OPEN_SHARE` is decided by whether a share has any grant rows at all, asked afresh on
- * every request. A share whose only rule named this team therefore stops being governed the instant
- * the team goes, and every member of the tenant gets the pre-§6.2 seven across all of it. The
- * administrator doing this is almost always trying to REMOVE access.
+ * `folder_grants.team_id` is `ON DELETE CASCADE`, so deleting a team deletes its grants — and a
+ * share whose only rule named this team would be left with none. Every share having at least one
+ * grant is an invariant now (migration 0016, and `SharesService.create` writes the row and its
+ * first grant together), so this cascade is one of exactly two ways to break it.
+ *
+ * What it costs has changed, and it is worth being precise because the refusal used to be
+ * justified by the opposite outcome. While `LEGACY_OPEN_SHARE` existed, emptying a share OPENED it
+ * — every member of the tenant got the pre-§6.2 seven across all of it. Now an empty share is
+ * closed to everyone, including the administrator who emptied it, reachable only by an
+ * organisation administrator's bypass. That is the safe direction, and it is still not a state to
+ * arrive in by deleting a team: the folders become invisible to the people who were using them,
+ * with nothing on screen connecting that to the team that went.
  *
  * `PermissionsService.write` refuses the same transition through the front door; this is the
  * cascade that would otherwise walk round it.
@@ -89,8 +96,8 @@ export class TeamNameTakenError extends Error {
 export class LastGrantInShareError extends Error {
   constructor() {
     super(
-      'deleting this team would remove the last permission row in a share, which puts the whole ' +
-        'share back on the pre-§6.2 default and opens it to every member; write a root grant ' +
+      'deleting this team would remove the last permission row in a share, leaving it with no ' +
+        'rule at all and invisible to everyone who is not an administrator; write a root grant ' +
         'naming whoever should keep access first, then delete the team',
     );
     this.name = 'LastGrantInShareError';

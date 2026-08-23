@@ -88,36 +88,45 @@ imzalı apt deposundan kurar.
 
 Ürünün hangi kısmının bittiğini iddia etmek yerine ölçüyoruz. Bugün itibarıyla eksik olanlar:
 
-- **Klasörler diskte YOK, yalnızca veritabanı satırı.** Ajanda `mkdir` işlemi olmadığı için
-  `POST /files/folders` bir satır yazıyor ve dizin yaratmıyor. Sonucu: bir klasörü taşımak dosya
-  sistemi tarafında hiçbir zaman çalışamaz, ve bir klasörün adını değiştirmek yalnız satırı
-  değiştirir. Dosyalar için ikisi de gerçek — `MoveEntry` ile ajandan geçiyor.
-
-  Bu, listelemenin ve indirmenin bugün çalışmasını engellemiyor (yol her zaman satırlardan
-  kuruluyor) ama SMB'den bakan biri klasörleri göremez. Ajana `mkdir` eklemek ayrı bir tur.
-
-- Ekip (`teams`) ve klasör bazlı ACL (§6.2). Şu an yalnız organizasyon düzeyinde admin/member var.
 - Dosya sistemi olaylarından metadata'yı besleyen endeksleyici. Bu olmadan yalnız DEPSIS
   üzerinden yüklenen dosyalar listede görünür; SMB'den yazılanlar görünmez.
 - ZFS havuzu yaratma. Ajan dataset ve anlık görüntü yaratabiliyor, havuz yaratamıyor — mirror
-  sihirbazı bu yüzden yok.
-- Samba'nın kullanıcı eşlemesi. Yapılandırma artık gerçekten yazılıyor (atomik + `testparm` +
-  canlı bağlantı denemesi + başarısızlıkta geri dönüş) ama bölümlerde `valid users` yok: bir
-  paylaşımı kimin açabileceği henüz POSIX izinlerine bırakılmış durumda. §6.2'nin API'siyle
-  birlikte gelecek.
-- Kullanıcı → POSIX uid eşlemesi (ADR-0004). Yayımlanan dosyalar şimdilik API'nin servis hesabına
-  ait.
-- İzin arayüzü. Şema (0015) ve sözleşme yazıldı, uçlar yazılmadı — `contract.test.ts` on bir
-  işlemi "tarif edilmiş ama sunulmuyor" olarak sayıyor ve her birinin gerekçesi kayıtlı.
-  `FileEntry.permissions` bugün herkese aynı yedi izni döndürüyor; bu bir yer tutucu değil,
-  bugünün doğru cevabı — her `/files` ucu kiracının her üyesini kabul ediyor ve yalnız RLS
-  daraltıyor.
-- Ajanlı bir yığında e2e. Paket gerçek (46 test, desktop + mobile-360, `pnpm test:e2e`) ama
-  `tools/dev/e2e-stack.sh` ayrıcalıklı ajanı başlatmıyor, o yüzden bayt taşıyan 18 test kendini
-  kapatıyor. Bir etikete değil, klasör isteğinin gerçek durum koduna bakan bir probla kapılılar —
-  ajanı olan bir cihazda kendiliğinden açılıyorlar.
+  sihirbazı bu yüzden yok. `POST /shares` bir dataset açar ama havuzu operatör kurar.
+- Paylaşımı SİLMEK. Grant'ları paylaşımı tutuyor (`ON DELETE RESTRICT`) ve son grant'ı silmek de
+  reddediliyor. Bilinçli: paylaşımı silmek dataset'i silmek demek, ve ADR-0007 yıkıcı havuz
+  işlemlerini üründen dışarıda tutuyor. Kapatmanın yolu, kimseyi adlandırmayan bir kök izni.
+- Samba'nın kullanıcı eşlemesi. Yapılandırma gerçekten yazılıyor (atomik + `testparm` + canlı
+  bağlantı denemesi + başarısızlıkta geri dönüş) ama bölümlerde `valid users` yok: bir paylaşımı
+  SMB'den kimin açabileceği POSIX izinlerine bırakılmış durumda. Web tarafındaki izin modeli
+  (§6.2) çalışıyor ve ACL'ler yazılıyor; eksik olan `smb.conf`'un kendi filtresi.
+- Ajan ulaşılamazken kaçırılan ACL uygulamalarını yeniden kuyruğa koyan bir süpürücü. Bugün
+  `applyingJobId: null` dönüyor ve arayüz bunu söylüyor, ama kimse sonradan tekrar denemiyor.
 - Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`
   yalnız DEPSIS'in kendi aldıklarını gösterir ve yanıtta `complete: false` ile bunu söyler.
+- §21'in belgeleri: yönetici kılavuzu, son kullanıcı kılavuzu, yedekleme ve felaket kurtarma.
+  Hiçbiri yok.
+
+## CI şu an hiç koşmuyor — hesap kilitli
+
+Bu depoda GitHub Actions çalışmıyor, ve sebebi kodda değil:
+
+```
+The job was not started because your account is locked due to a billing issue.
+```
+
+Koşular oluşuyor, işler listeleniyor, sonra her biri **sıfır adımla** beş saniyede düşüyor —
+GitHub runner atamıyor. Depoyu public yapmak da çözmedi (public depolarda Actions ücretsiz, ama
+kilit hesap düzeyinde). Ödeme yöntemi düzelene kadar buradan ölçüm gelmeyecek.
+
+Bu yüzden **doğrulama bugün tamamen yerel**, ve sırası şu:
+
+```bash
+pnpm check                                   # format · lint · typecheck · generate · unit
+bash tools/ci/permissions-schema-check.sh    # izin şemasının kısıtları gerçekten ısırıyor mu
+DB_NAME=depsis_gate_ci bash tools/ci/migration-check.sh
+pnpm --filter @depsis/api exec vitest run    # DEPSIS_TEST_*_URL ayarlıyken
+bash tools/dev/e2e-stack.sh && pnpm test:e2e
+```
 
 ## CI dosyasını değiştirdiysen
 
@@ -136,8 +145,16 @@ Belirtisi şu: `gh run list` çıktısında süre `0s` ve durum `startup_failure
 `gh api .../actions/workflows` çıktısında workflow'un adı yerine kendi yolu görünüyor — GitHub
 `name:` alanını okuyacak kadar bile ayrıştıramadığı için.
 
-CI'ın kendi içinde de bir actionlint adımı var ama o yalnızca ölümcül olmayan sınıfı yakalar:
-dosya geçersizse o adım da çalışmaz.
+CI'ın İÇİNDE actionlint adımı **yok**, ve olmaması bilinçli. Bir tane eklenmişti ve dosyayı
+kıran şey o oldu: `uses: rhysd/actionlint@main` aracın kaynak deposu ve `action.yml` taşımıyor,
+yani GitHub referansı çözemedi ve bütün workflow'u reddetti — geçersiz workflow dosyalarını
+önlemek için eklenen adım, workflow dosyasını geçersiz yaptı. Başka bir sarmalayıcıyla geri
+koymaya da değmez: dosya geçersizse o iş zaten hiç çalışmaz, ve tam olarak gerektiği anda
+atlanan bir denetim denetim değildir.
+
+`pnpm lint:workflows` bu yüzden iki şey koşuyor: actionlint, ve her `uses:` referansının GitHub
+API'sinde gerçekten bir `action.yml`'a çözüldüğünü tek tek doğrulayan
+`tools/ci/check-action-refs.sh`. İkincisini actionlint yapmıyor.
 
 ## Depo düzeni
 

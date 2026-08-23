@@ -226,8 +226,16 @@ describeDb('the transfer list, against a real PostgreSQL', () => {
     const orgIds = `(SELECT id FROM organizations WHERE slug = ANY($1))`;
     await q.query(`DELETE FROM upload_sessions WHERE organization_id IN ${orgIds}`, [slugs]);
     await q.query(`DELETE FROM file_entries WHERE organization_id IN ${orgIds}`, [slugs]);
+    // Before the shares: `folder_grants.share_id` is ON DELETE RESTRICT, so a share carrying a
+    // grant cannot be deleted, and both creation paths write one now.
+    await q.query(`DELETE FROM folder_grants WHERE organization_id IN ${orgIds}`, [slugs]);
     await q.query(`DELETE FROM shares WHERE organization_id IN ${orgIds}`, [slugs]);
     await q.query(`DELETE FROM users WHERE organization_id IN ${orgIds}`, [slugs]);
+    // And the teams before the organisation, for the same reason: `teams.organization_id` is
+    // ON DELETE RESTRICT, and `everyone_team()` creates one the first time a share is opened
+    // implicitly. Scoped through `orgIds` like everything else here — `teams` has no `slug`.
+    await q.query(`DELETE FROM team_members WHERE organization_id IN ${orgIds}`, [slugs]);
+    await q.query(`DELETE FROM teams WHERE organization_id IN ${orgIds}`, [slugs]);
     await q.query(`DELETE FROM organizations WHERE slug = ANY($1)`, [slugs]);
   }
 

@@ -167,6 +167,23 @@ chown root:root /etc/depsis/db-url /etc/depsis/secret.key
 chmod 0400      /etc/depsis/db-url /etc/depsis/secret.key
 printf 'DEPSIS_API_PORT=%s\nNODE_ENV=production\nDEPSIS_AGENT_SOCKET=/run/depsis/agent.sock\nDEPSIS_AGENT_DATA_SOCKET=/run/depsis/agent-data.sock\nDEPSIS_ZFS_POOLS=\n' \
   "$PORT" > /etc/depsis/api.env
+# The share tree, told to the API as well as to the agent. Two settings, one directory:
+#
+#   DEPSIS_SHARES_ROOT           where a share's directory IS. The application catalogue needs
+#                                it to bind-mount a share into a container, because ADR-0019
+#                                will not let that host path come from the request.
+#   DEPSIS_SHARE_PARENT_DATASET  the dataset MOUNTED at that root. `POST /shares` creates
+#                                children of it, and `CreateDataset` sets no mountpoint —
+#                                deliberately, since a mountpoint operand would let the API
+#                                mount a tenant's dataset anywhere on the box — so a child
+#                                lands wherever ZFS inheritance puts it.
+#
+# The pair has to agree, or the appliance creates datasets nothing serves: `zfs list` shows
+# them and the file manager shows an empty share, because the agent is resolving a directory
+# that was never made. This box has no pool, so the dataset is left EMPTY rather than guessed:
+# unset is a 503 that names the setting, and wrong is a share that silently does not work.
+printf 'DEPSIS_SHARES_ROOT=%s\nDEPSIS_SHARE_PARENT_DATASET=%s\n' \
+  "$SHARES" "${DEPSIS_SHARE_PARENT_DATASET:-}" >> /etc/depsis/api.env
 printf 'DEPSIS_API_UID=%s\n' "$(id -u depsis-api)" > /etc/depsis/agent.env
 printf 'DEPSIS_SHARES_ROOT=%s\n' "$SHARES" >> /etc/depsis/agent.env
 install -d -m 0755 "$SHARES" "$SHARES/alice" "$SHARES/alice/.depsis" "$SHARES/alice/.depsis/staging"
