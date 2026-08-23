@@ -220,6 +220,24 @@ pub trait SafePath {
     /// cross-tenant read the threat model exists to prevent. Ownership is the correct axis.
     fn set_owner(&self, file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError>;
 
+    /// Set the mode of an already-open directory.
+    ///
+    /// Takes the FILE for the reason `set_owner` does: a path would be re-resolved, and a chmod
+    /// aimed at a path can be pointed elsewhere between the resolution and the call.
+    ///
+    /// It exists for exactly one thing — the share root. `zfs create` leaves a dataset's mountpoint
+    /// at ZFS's default 0755 root:root, and `ApplyFolderAcl` will not fix it: that operation
+    /// deliberately never touches the user::/group::/other:: triple and refuses outright if it
+    /// changes underneath. So a share root has always been world-traversable, and every principal
+    /// SMB authenticates could enumerate its top-level names however narrow the grants were.
+    ///
+    /// ORDER MATTERS AT THE CALL SITE and it is a POSIX property, not a local one: `chmod` on a
+    /// file that already carries an ACL sets the MASK from the group bits rather than the
+    /// `group::` entry. Running this after an ACL has been written would silently narrow every
+    /// named entry to the mask. It must therefore run BEFORE the ACL that follows it, which
+    /// recomputes the mask correctly — narrowing in the gap, which is the safe direction.
+    fn set_mode(&self, file: &std::fs::File, mode: u32) -> Result<(), SeamError>;
+
     /// The names of the directories directly under `relative`.
     ///
     /// For finding the shares. Symlinks are NOT followed and do not appear: a symlink in the share

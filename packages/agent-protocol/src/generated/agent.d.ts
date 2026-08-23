@@ -186,6 +186,10 @@ export type AgentRequest =
       share: SafeComponent;
     }
   | {
+      op: 'secure_share_root';
+      share: SafeComponent;
+    }
+  | {
       entries: AclEntry[];
       op: 'apply_folder_acl';
       /**
@@ -380,6 +384,10 @@ export type AgentResponse =
     }
   | {
       status: 'directory_created';
+    }
+  | {
+      mode: number;
+      status: 'share_root_secured';
     }
   | {
       entries: number;

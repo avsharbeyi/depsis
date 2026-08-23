@@ -112,6 +112,40 @@ bir satıra çevirmek — örtük kural denetlenemez, bir grant satırı denetle
 açılan kullanıcılar otomatik girmez: yeni bir üyeyi kendiliğinden her eski paylaşıma sokmak,
 erişimi GENİŞLETEN bir otomatizm olurdu ve bu ADR'nin tam olarak engellemek için var olduğu yön.
 
+### Paylaşımın KÖKÜ de kapatılmak zorunda
+
+Modelin dosya sistemi tarafı yalnız ACL girdilerinden ibaret değil; altındaki üçlü de sayılıyor,
+ve paylaşımın kökünde o üçlü hiç kimse tarafından ayarlanmıyordu.
+
+`zfs create` bir dataset'in bağlama noktasını ZFS'in varsayılanında bırakıyor: **0755 root:root**,
+yani `other::r-x`. `ApplyFolderAcl` bunu düzeltemez ve DÜZELTMEMELİ — o işlem
+`user::`/`group::`/`other::` üçlüsüne bilinçli olarak dokunmuyor ve üçlü altından değişirse
+reddediyor, çünkü "izinler uygulandı" cevabı verirken her erişimin geri düştüğü üç girdiyi sessizce
+yeniden yazmak yalanların en kötüsü olurdu.
+
+Sonuç: her cihazdaki her paylaşımın kökü, Samba'nın kimlik doğruladığı HERKES tarafından
+listelenebilir ve içine girilebilirdi — `folder_grants` ne kadar dar olursa olsun. Aşağıya inmek
+yine kapalıydı (ajanın açtığı her klasör 0750 ve kendi ACL'ini taşıyor), yani sızıntı bir dizinin
+İSİMLERİ ve o dizine giriş; içeriği değil. İlk okunduğundan daha küçük bir delik, ve yine de
+"özel" bir paylaşımın klasör adlarını bütün cihaza okutan bir delik.
+
+`SecureShareRoot` bunu kapatıyor: kök `0750`, sahibi `root:root`. Sahip operandı YOK ve bu eksiklik
+değil bir karar — root zaten her ACL'i aşıyor, hiçbir DEPSIS principal'ı bir paylaşımın tepesine
+sahip olmamalı, ve onu açan yöneticiye vermek bir kişinin hesabını dosya sistemine gömmek olurdu.
+`0750` + root sahipliğiyle `user::` ve `group::` cihazın eşlediği hiç kimseye ulaşmıyor, `other::`
+hiç kimseye ulaşmıyor, ve her gerçek izin adlandırılmış bir ACL girdisi olarak geliyor — ADR-0004'ün
+tarif ettiği model tam olarak bu.
+
+**Sıra POSIX kuralı, tercih değil.** Zaten bir ACL taşıyan bir dosyada `chmod`, grup bitlerinden
+`group::` girdisini değil MASKEYİ ayarlıyor. Kökü ACL'den SONRA kapatmak, adlandırılmış her girdiyi
+sessizce `r-x`'e kırpardı. Bu yüzden `AclApplyService` kökü yazmadan hemen ÖNCE çağırıyor; arada
+kalan pencere genişletmiyor, daraltıyor — yanılmak istenen yön bu.
+
+Yeni bir işlem, `CreateDataset`'e bir alan değil: hâlihazırda var olan paylaşımlar da açık, ve
+yaratma anındaki bir operand yalnızca bir sonrakini düzeltirdi. İşlem idempotent, o yüzden hangi
+paylaşımın kapatıldığını kaydetmeye gerek yok — her kök uygulamasında bir gidiş dönüş, ve eski
+paylaşımlar bir sonraki izin değişikliğinde kendiliğinden kapanıyor.
+
 ### `manage` ayrı bir izin
 
 Bir klasöre yazabilen herkesin o klasörün izinlerini de değiştirebilmesi, yetki modelinin kendi

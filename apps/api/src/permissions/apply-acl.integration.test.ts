@@ -30,9 +30,49 @@ const describeDb = runnable ? describe : describe.skip;
 interface AclCall {
   op: string;
   share: string;
-  path: string[];
-  entries: Array<{ gid: number; read: boolean; write: boolean; execute: boolean }>;
+  /** Absent on `secure_share_root`, which names a share and no path inside it. */
+  path?: string[];
+  entries?: Array<{ gid: number; read: boolean; write: boolean; execute: boolean }>;
 }
+
+/**
+ * An agent that answers each operation with its own status.
+ *
+ * One status for everything was fine while `apply` made one kind of call. It now makes two —
+ * `secure_share_root` on the share root, then `apply_folder_acl` per folder — and answering the
+ * first with `acl_applied` would exercise the service's "the agent said something impossible"
+ * branch on every test rather than its happy path.
+ */
+function aclAgent(
+  respond: (request: Record<string, unknown>) => Promise<{ status: string; [k: string]: unknown }>,
+  // A GETTER, not the array. Every test starts with `calls = []`, so an agent that captured the
+  // array it was built with would keep pushing into the one nobody reads any more — which is
+  // exactly what the first version of this helper did, and it turned nine passing tests into nine
+  // assertions against an empty list.
+  sink: () => AclCall[],
+): AgentService {
+  return {
+    isAvailable: () => true,
+    call: (request: Record<string, unknown>) => {
+      sink().push(request as unknown as AclCall);
+      return respond(request);
+    },
+  } as unknown as AgentService;
+}
+
+/** The ordinary answers: the root is secured, every folder's ACL is written. */
+const answersNormally = (
+  request: Record<string, unknown>,
+): Promise<{ status: string; [k: string]: unknown }> =>
+  Promise.resolve(
+    request['op'] === 'secure_share_root'
+      ? { status: 'share_root_secured', mode: 0o750 }
+      : { status: 'acl_applied', entries: 1 },
+  );
+
+/** Only the folder writes, for assertions about which folders were rewritten. */
+const aclCallsIn = (calls: readonly AclCall[]): AclCall[] =>
+  calls.filter((call) => call.op === 'apply_folder_acl');
 
 describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
   let db: DbService;
@@ -53,21 +93,18 @@ describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
   let ortak = '';
 
   const aclFor = (path: string[]): AclCall | undefined =>
-    calls.find((call) => call.path.join('/') === path.join('/'));
+    aclCallsIn(calls).find((call) => (call.path ?? []).join('/') === path.join('/'));
 
   beforeAll(async () => {
     db = new DbService(APP_URL as string);
     await db.onModuleInit();
     owner = new DbService(OWNER_URL as string);
 
-    const agent = {
-      isAvailable: () => true,
-      call: (request: Record<string, unknown>) => {
-        calls.push(request as unknown as AclCall);
-        return Promise.resolve({ status: 'acl_applied' });
-      },
-    } as unknown as AgentService;
-    acl = new AclApplyService(db, agent, new PosixIdentityService(db));
+    acl = new AclApplyService(
+      db,
+      aclAgent(answersNormally, () => calls),
+      new PosixIdentityService(db),
+    );
 
     await owner.withoutTenant('migration-status', async (q) => {
       org =
@@ -172,18 +209,17 @@ describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
     calls = [];
     await acl.apply(org, { shareId: share, entryId: null }, 'test');
 
-    expect(calls.map((call) => call.op)).toEqual(Array(4).fill('apply_folder_acl'));
+    expect(aclCallsIn(calls).map((call) => call.op)).toEqual(Array(4).fill('apply_folder_acl'));
     expect(calls.every((call) => call.share === 'acl_a')).toBe(true);
     // Paths are components under the share root, built from `parent_id` and not from the `path`
     // column (ADR-0005) — this string is about to be handed to a privileged process.
-    expect(calls.map((call) => call.path.join('/')).sort()).toEqual([
-      '',
-      'belgeler',
-      'belgeler/gizli',
-      'belgeler/ortak',
-    ]);
+    expect(
+      aclCallsIn(calls)
+        .map((call) => (call.path ?? []).join('/'))
+        .sort(),
+    ).toEqual(['', 'belgeler', 'belgeler/gizli', 'belgeler/ortak']);
     // Only folders. A file carries no default ACL and inherits the directory's.
-    expect(calls.some((call) => call.path.includes('not.txt'))).toBe(false);
+    expect(calls.some((call) => (call.path ?? []).includes('not.txt'))).toBe(false);
   });
 
   it("turns §6.2's permissions into the three bits a directory has", async () => {
@@ -228,10 +264,62 @@ describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
     calls = [];
     await acl.apply(org, { shareId: share, entryId: gizli }, 'test');
 
-    expect(calls.map((call) => call.path.join('/'))).toEqual(['belgeler/gizli']);
+    expect(aclCallsIn(calls).map((call) => (call.path ?? []).join('/'))).toEqual([
+      'belgeler/gizli',
+    ]);
     // And the answer is still resolved against the WHOLE chain, so the root grant above the named
     // entry is not lost just because the job did not rewrite the root.
     expect(calls[0]?.entries).toEqual([{ gid: takimGid, read: true, write: false, execute: true }]);
+  });
+
+  it('closes the share root before writing its ACL, and never after', async () => {
+    // WHAT THIS CLOSES. `zfs create` leaves a mountpoint at 0755 root:root and `ApplyFolderAcl`
+    // refuses to touch the base triple, so every share root was `other::r-x`: any principal Samba
+    // authenticated could enumerate the top-level folder names whatever the grants said.
+    calls = [];
+    await acl.apply(org, { shareId: share, entryId: null }, 'test');
+
+    const ops = calls.map((call) => call.op);
+    expect(ops[0]).toBe('secure_share_root');
+    expect(calls[0]?.share).toBe('acl_a');
+
+    // FIRST, and the order is a POSIX rule rather than a preference: `chmod` on a file that
+    // already carries an ACL sets the MASK from the group bits instead of the `group::` entry, so
+    // securing afterwards would clamp every named entry to r-x. The `setfacl` calls that follow
+    // recompute the mask correctly.
+    expect(ops.indexOf('secure_share_root')).toBeLessThan(ops.indexOf('apply_folder_acl'));
+    expect(ops.filter((op) => op === 'secure_share_root')).toHaveLength(1);
+  });
+
+  it('does not touch the root mode for a job aimed at one folder inside the share', async () => {
+    // A subtree apply is not about the root, and re-securing it on every folder-scoped write would
+    // be a round trip that changes nothing — and would clamp the root's mask between the chmod and
+    // an ACL write that is never going to come, because this job does not write the root.
+    calls = [];
+    await acl.apply(org, { shareId: share, entryId: gizli }, 'test');
+
+    expect(calls.map((call) => call.op)).not.toContain('secure_share_root');
+  });
+
+  it('applies the rest of the share even when the root cannot be closed', async () => {
+    // An older agent does not know this operation. Failing the whole job for that would trade a
+    // narrow, pre-existing leak for the entire permission model going unapplied — so it is logged
+    // and the walk continues.
+    const refusing = new AclApplyService(
+      db,
+      aclAgent(
+        (request) =>
+          request['op'] === 'secure_share_root'
+            ? Promise.resolve({ status: 'refused', reason: 'unknown operation' })
+            : Promise.resolve({ status: 'acl_applied', entries: 1 }),
+        () => [],
+      ),
+      new PosixIdentityService(db),
+    );
+
+    await expect(
+      refusing.apply(org, { shareId: share, entryId: null }, 'test'),
+    ).resolves.toBeDefined();
   });
 
   it('applies a share larger than one chunk across several jobs, covering every folder once', async () => {
@@ -258,7 +346,7 @@ describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
     // It stopped, and it SAYS it stopped — the cursor is the whole difference between a chunk and
     // a truncation.
     expect(firstPass.next).not.toBeNull();
-    const firstWritten = calls.map((call) => call.path.join('/'));
+    const firstWritten = aclCallsIn(calls).map((call) => (call.path ?? []).join('/'));
     expect(firstWritten.length).toBe(APPLY_CHUNK + 1); // the chunk, plus the share root
 
     // Keep going until it says it is done, exactly as the worker does by re-queueing.
@@ -267,7 +355,7 @@ describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
     for (let round = 0; cursor !== null && round < 10; round += 1) {
       calls = [];
       const pass = await acl.apply(org, { shareId: share, entryId: null, after: cursor }, 'test');
-      everything.push(...calls.map((call) => call.path.join('/')));
+      everything.push(...aclCallsIn(calls).map((call) => (call.path ?? []).join('/')));
       cursor = pass.next;
     }
     expect(cursor).toBeNull();
@@ -349,7 +437,9 @@ describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
 
     calls = [];
     await acl.apply(org, { shareId: share, entryId: null }, 'test');
-    expect(calls.map((call) => call.path.join('/')).sort()).toContain('belgeler/ortak');
+    expect(aclCallsIn(calls).map((call) => (call.path ?? []).join('/'))).toContain(
+      'belgeler/ortak',
+    );
 
     await owner.withoutTenant('migration-status', (q) =>
       q.query(`UPDATE file_entries SET trashed_at = NULL, trashed_by = NULL WHERE id = $1`, [
@@ -383,7 +473,7 @@ describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
 
     calls = [];
     await acl.apply(org, { shareId: share, entryId: null }, 'test');
-    const written = calls.map((call) => call.path.join('/'));
+    const written = aclCallsIn(calls).map((call) => (call.path ?? []).join('/'));
     expect(written).toContain('belgeler/ortak/derin');
 
     await owner.withoutTenant('migration-status', async (q) => {

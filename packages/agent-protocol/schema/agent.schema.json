@@ -370,6 +370,24 @@
       ]
     },
     {
+      "description": "Close a share root to everybody the ACL does not name.\n\nWHAT WAS WRONG. `zfs create` leaves a dataset's mountpoint at ZFS's default, which is\n`0755 root:root` — `other::r-x`. `ApplyFolderAcl` cannot fix it and must not try: that\noperation deliberately never touches the `user::`/`group::`/`other::` triple, and refuses\noutright if it changes underneath, because a \"permissions applied\" reply that had quietly\nrewritten the three entries every access falls back to would be the worst kind of lie.\n\nSo nothing in the product had ever set the mode of a share root, and every share on every\nappliance was traversable by anyone: an authenticated SMB principal could list the\ntop-level names and enter the root however narrow `folder_grants` was. Descent past it was\nstill gated, because agent-created folders are 0750 with an ACL of their own — so the leak\nis enumeration and traversal of ONE directory, not the contents below it. That is a smaller\nhole than it first reads as, and still one that makes a \"private\" share list its folder\nnames to the whole appliance.\n\nAN OPERATION OF ITS OWN, not a field on `CreateDataset`. Shares that already exist are open\ntoo, and an operand at creation time would only ever fix the next one. This can be aimed at\nany share, is idempotent, and the API runs it immediately before writing the root's ACL.\n\nTHE ORDER IS LOAD-BEARING AND IT IS A POSIX RULE, not a local convention: `chmod` on a file\nthat already carries an ACL sets the MASK from the group bits rather than the `group::`\nentry. Running this AFTER an ACL would silently clamp every named entry to `r-x`. Run\nbefore, the `setfacl` that follows recomputes the mask correctly — and the gap between them\nnarrows rather than widens, which is the direction to be wrong in.\n\nNo owner operand. The root stays `root:root` and that is the right answer rather than a\nmissing one: root bypasses every ACL anyway, no DEPSIS principal should own the top of a\nshare, and giving it to the administrator who happened to create it would bake one person's\naccount into the filesystem. With `0750` and root ownership, `user::` and `group::` reach\nnobody the appliance maps, `other::` reaches nobody at all, and every real grant arrives as\na named ACL entry — which is exactly the model ADR-0004 describes.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "secure_share_root"
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share"
+      ]
+    },
+    {
       "description": "Rewrite the POSIX ACL of ONE folder inside a share — access ACL and default ACL both.\n\nThe operation the access-control model rests on. `folder_grants` in the database says who\nmay read a folder; until this runs, the kernel has never been told, and SMB — which does not\ngo through the API at all — enforces the mode bits and nothing else. A grant that exists\nonly in Postgres is not a permission, it is a note about one.\n\nThe entry list is COMPLETE, never a delta. The agent clears the extended entries before it\nwrites, because a merge leaves a group the caller has just removed still holding its old\npermission: `setfacl -m` only ever adds and overwrites, so an entry that is no longer\nmentioned survives. \"Here is who may reach this folder\" is a statement the caller can make\ncorrectly; \"here is what changed\" is one it would have to reconstruct from a disk it cannot\nread.\nONE folder, never a subtree. There was a `recursive: bool` here and it is gone.\n\nIt was the shape §2.2/ADR-0006 rejects everywhere else in this enum — `RemoveEntry` and\n`SafePath::remove_dir` both say it outright about `rm -rf`: one call whose blast radius the\ncaller chooses, in the one process that can reach every tenant's data. The ACL variant was\nthe same primitive with a different verb, and it was destructive in a way its own comment\ndid not admit, because the recursive pass began with `setfacl -R -b`. Measured: a sub-folder\ncarrying §6.2's documented narrower grant (`İstisna: daha dar izin` — the entire reason\n`folder_grants` has per-folder rows) lost it and inherited the parent's wider one, while the\n`folder_grants` row went on saying the narrow thing. Two realities, widening.\n\nIt also could not survive the fix to the TOCTOU above it: `setfacl -R` does not descend\nthrough `/proc/self/fd/N`, so keeping recursion meant keeping the joined path that let a\nsymlink swap redirect a root-owned `setfacl` onto `/etc`. See the `acl` module note.\n\nA mass re-apply is therefore a loop on the API's side, which is where it belongs: the API\nstores the tree and holds a grant row per folder, so one call per folder writes each row's\nown grant instead of stamping one answer over descendants that disagree with it.",
       "type": "object",
       "properties": {
@@ -812,6 +830,25 @@
       },
       "required": [
         "status"
+      ]
+    },
+    {
+      "description": "The share root is closed to everyone the ACL does not name.\n\n`mode` is echoed rather than omitted, unlike `DirectoryCreated`, and for the same reason\n`AclApplied` echoes its count: the caller did not choose it. The number is the agent's,\nfixed in `SHARE_ROOT_MODE`, so sending it back is the only way an operator reading an audit\nline can see what was actually applied without going to read the source.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "const": "share_root_secured"
+        }
+      },
+      "required": [
+        "status",
+        "mode"
       ]
     },
     {

@@ -102,11 +102,6 @@ imzalı apt deposundan kurar.
 - **`claim_job` `max_attempts`'i kontrol etmiyor.** Kirası dolan bir iş sınırsız yeniden
   alınabiliyor: `attempt` tavansız artıyor, iş ne başarıyor ne ölüyor. Bunun tersi de var —
   temiz başarısız olan bir iş, `finish_job`'da sınıra çarpıp ölüyor.
-- **Paylaşım kökünün `other::` bitleri yönetilmiyor.** `zfs create` mountpoint'i 0755 root:root
-  bırakıyor ve `ApplyFolderAcl` temel üçlüye bilinçli olarak dokunmuyor, yani kimlik doğrulaması
-  geçen her SMB principal'ı paylaşım kökünün üst düzey adlarını listeleyebiliyor. Alt klasörler
-  etkilenmiyor (ajanın açtığı klasörler 0750 + kendi ACL'i). Ajan tarafında bir değişiklik
-  gerektiriyor.
 - **Ölen işleri gösteren bir EKRAN yok.** `GET /jobs?status=dead` var ve yönetici görebiliyor, ama
   arayüzde onu okuyan bir yer yok — yani bakmayı bilen birinin API'yi çağırması gerekiyor.
 - Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`

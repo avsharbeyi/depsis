@@ -70,6 +70,10 @@ pub struct MockSafePath {
     /// could not be tested against the mock at all, and the untested path in a root daemon would be
     /// the one that deletes user files.
     owners: std::sync::Mutex<Vec<(u32, u32)>>,
+    /// Every mode `set_mode` was asked for, in order. Recorded rather than performed, like
+    /// `owners`: a real mode change is measured against a kernel in `unix.rs`, and what the
+    /// portable tests can pin is that the dispatcher asked for the right one.
+    modes: std::sync::Mutex<Vec<u32>>,
     /// The path of the most recent `open_dir`, so `command_path` can answer with a real one.
     ///
     /// The real implementation asks the kernel for `/proc/self/fd/N` and needs no bookkeeping. The
@@ -99,6 +103,7 @@ impl MockSafePath {
         Self {
             root: root.into(),
             owners: std::sync::Mutex::new(Vec::new()),
+            modes: std::sync::Mutex::new(Vec::new()),
             last_dir: std::sync::Mutex::new(None),
             command_paths: std::sync::Mutex::new(0),
         }
@@ -113,6 +118,13 @@ impl MockSafePath {
     }
 
     /// The `(uid, gid)` pairs `set_owner` was called with.
+    pub fn modes(&self) -> Vec<u32> {
+        self.modes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub fn owners(&self) -> Vec<(u32, u32)> {
         self.owners
             .lock()
@@ -272,6 +284,14 @@ impl SafePath for MockSafePath {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((uid, gid));
+        Ok(())
+    }
+
+    fn set_mode(&self, _file: &std::fs::File, mode: u32) -> Result<(), SeamError> {
+        self.modes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(mode);
         Ok(())
     }
 

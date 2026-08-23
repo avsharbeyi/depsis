@@ -555,6 +555,40 @@ pub enum Request {
         owner_gid: PosixId,
     },
 
+    /// Close a share root to everybody the ACL does not name.
+    ///
+    /// WHAT WAS WRONG. `zfs create` leaves a dataset's mountpoint at ZFS's default, which is
+    /// `0755 root:root` — `other::r-x`. `ApplyFolderAcl` cannot fix it and must not try: that
+    /// operation deliberately never touches the `user::`/`group::`/`other::` triple, and refuses
+    /// outright if it changes underneath, because a "permissions applied" reply that had quietly
+    /// rewritten the three entries every access falls back to would be the worst kind of lie.
+    ///
+    /// So nothing in the product had ever set the mode of a share root, and every share on every
+    /// appliance was traversable by anyone: an authenticated SMB principal could list the
+    /// top-level names and enter the root however narrow `folder_grants` was. Descent past it was
+    /// still gated, because agent-created folders are 0750 with an ACL of their own — so the leak
+    /// is enumeration and traversal of ONE directory, not the contents below it. That is a smaller
+    /// hole than it first reads as, and still one that makes a "private" share list its folder
+    /// names to the whole appliance.
+    ///
+    /// AN OPERATION OF ITS OWN, not a field on `CreateDataset`. Shares that already exist are open
+    /// too, and an operand at creation time would only ever fix the next one. This can be aimed at
+    /// any share, is idempotent, and the API runs it immediately before writing the root's ACL.
+    ///
+    /// THE ORDER IS LOAD-BEARING AND IT IS A POSIX RULE, not a local convention: `chmod` on a file
+    /// that already carries an ACL sets the MASK from the group bits rather than the `group::`
+    /// entry. Running this AFTER an ACL would silently clamp every named entry to `r-x`. Run
+    /// before, the `setfacl` that follows recomputes the mask correctly — and the gap between them
+    /// narrows rather than widens, which is the direction to be wrong in.
+    ///
+    /// No owner operand. The root stays `root:root` and that is the right answer rather than a
+    /// missing one: root bypasses every ACL anyway, no DEPSIS principal should own the top of a
+    /// share, and giving it to the administrator who happened to create it would bake one person's
+    /// account into the filesystem. With `0750` and root ownership, `user::` and `group::` reach
+    /// nobody the appliance maps, `other::` reaches nobody at all, and every real grant arrives as
+    /// a named ACL entry — which is exactly the model ADR-0004 describes.
+    SecureShareRoot { share: SafeComponent },
+
     /// Rewrite the POSIX ACL of ONE folder inside a share — access ACL and default ACL both.
     ///
     /// The operation the access-control model rests on. `folder_grants` in the database says who
@@ -751,6 +785,17 @@ pub enum Response {
     /// know is that the next call — the database row, or a publish into this directory — may now
     /// proceed, and the status alone says that.
     DirectoryCreated {},
+    /// The share root is closed to everyone the ACL does not name.
+    ///
+    /// `mode` is echoed rather than omitted, unlike `DirectoryCreated`, and for the same reason
+    /// `AclApplied` echoes its count: the caller did not choose it. The number is the agent's,
+    /// fixed in `SHARE_ROOT_MODE`, so sending it back is the only way an operator reading an audit
+    /// line can see what was actually applied without going to read the source.
+    #[serde(rename = "share_root_secured")]
+    ShareRootSecured {
+        mode: u32,
+    },
+
     /// The folder's POSIX ACL is what the caller asked for, access ACL and DEFAULT ACL both.
     ///
     /// `entries` is how many group entries the folder now carries, and it is here rather than
@@ -887,7 +932,19 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
+
+/// The mode `SecureShareRoot` writes: `rwx` for the owner, `r-x` for the group, nothing for other.
+///
+/// `0o750` and not `0o700`. The owner and group are both root, which the appliance maps to nobody,
+/// so neither triple reaches a DEPSIS principal either way — but `0o750` is what every directory
+/// the agent creates already uses (`create_dir`), and one mode across the tree is one fewer thing
+/// for an operator comparing `ls -l` output to wonder about.
+///
+/// What closes the share is the last digit. `other::---` is the difference between a share whose
+/// top-level names every authenticated SMB principal can read and one where only a named ACL entry
+/// gets in.
+pub const SHARE_ROOT_MODE: u32 = 0o750;
 
 #[cfg(test)]
 mod deny_unknown_tests {

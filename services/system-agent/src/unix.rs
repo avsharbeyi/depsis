@@ -435,6 +435,18 @@ impl SafePath for Openat2SafePath {
         .map_err(|e| SeamError::Io(format!("fchown to {uid}:{gid}: {e}")))
     }
 
+    fn set_mode(&self, file: &std::fs::File, mode: u32) -> Result<(), SeamError> {
+        // `fchmod`, on the descriptor, for the reason `set_owner` uses `fchown`: the path-taking
+        // form re-resolves and can be redirected between the resolution and the call.
+        //
+        // `from_bits_truncate` rather than a fallible parse: the only caller is the share-root
+        // operation and the value it passes is a constant in `op.rs`, so a bit outside the mask
+        // would be a programming error rather than input. Truncating keeps a stray high bit from
+        // becoming a setuid directory.
+        rustix::fs::fchmod(file, rustix::fs::Mode::from_bits_truncate(mode))
+            .map_err(|e| SeamError::Io(format!("fchmod to {mode:o}: {e}")))
+    }
+
     fn list_dirs(&self, relative: &[&str]) -> Result<Vec<String>, SeamError> {
         self.entries(
             relative,
@@ -1240,6 +1252,25 @@ mod tests {
         assert!(split_envelope("").is_err());
         assert!(split_envelope("[]").is_err());
         assert!(split_envelope("null").is_err());
+    }
+
+    #[test]
+    fn set_mode_changes_the_directory_the_descriptor_pins() {
+        // Against a real kernel, unlike the dispatcher's test: `fchmod` needs no capability when
+        // the caller owns the file, so this runs for anybody and measures the actual bits.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("share")).expect("seed");
+        let paths = Openat2SafePath::open_root(dir.path()).expect("root");
+        let opened = paths.open_dir(&["share"]).expect("open_dir");
+
+        // Deliberately world-traversable first, which is what `zfs create` leaves behind.
+        paths.set_mode(&opened, 0o755).expect("chmod 0755");
+        assert_eq!(mode_of(&dir.path().join("share")), 0o755);
+
+        paths.set_mode(&opened, 0o750).expect("chmod 0750");
+        // The last digit is the whole fix: `other` loses `r-x`, so a principal the ACL does not
+        // name cannot enumerate or enter the share root.
+        assert_eq!(mode_of(&dir.path().join("share")), 0o750);
     }
 
     #[test]

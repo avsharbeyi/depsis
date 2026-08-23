@@ -216,6 +216,29 @@ export class AclApplyService {
         ? [payload.shareId, ...plan.folders.written]
         : plan.folders.written;
 
+    // THE SHARE ROOT'S MODE, before its ACL and only when its ACL is being written.
+    //
+    // `zfs create` leaves a dataset's mountpoint at 0755 root:root, and `ApplyFolderAcl` refuses
+    // to touch the user::/group::/other:: triple — deliberately, since a "permissions applied"
+    // reply that had rewritten the three entries every access falls back to would be the worst
+    // kind of lie. So no share root had ever had its mode set, and every one of them was
+    // `other::r-x`: any principal SMB authenticated could enumerate the top-level names and enter
+    // the root however narrow the grants were.
+    //
+    // BEFORE the ACL, and that ordering is a POSIX rule rather than a preference. `chmod` on a
+    // file that already carries an ACL sets the MASK from the group bits instead of the `group::`
+    // entry, so doing this afterwards would clamp every named entry to r-x. Done first, the
+    // `setfacl` below recomputes the mask correctly, and the window between them narrows rather
+    // than widens.
+    //
+    // Only on a root write, because that is the only node whose mode is wrong: every folder the
+    // agent creates is already 0750. And it is idempotent, so running it on each root apply costs
+    // one round trip and needs no record of which shares have been done — which is what makes it
+    // fix EXISTING shares rather than only the next one created.
+    if (targets[0] === payload.shareId) {
+      await this.secureRoot(plan.share, reason);
+    }
+
     const failures: string[] = [];
     for (const nodeId of targets) {
       const chain = chainTo(nodeId, payload.shareId, parents, granted);
@@ -262,6 +285,36 @@ export class AclApplyService {
       );
     }
     return { next: plan.folders.next };
+  }
+
+  /**
+   * Close the share root to everyone its ACL does not name.
+   *
+   * A failure here does NOT fail the job, and that is the judgement worth writing down. The ACL
+   * writes that follow are the thing the caller asked for and they are useful on their own; losing
+   * them because an older agent does not know this operation would trade a narrow, pre-existing
+   * leak for the whole permission model going unapplied. So it is logged loudly and the walk
+   * continues.
+   *
+   * `not_found` is not an error at all: a share whose directory is missing has no mode to set, and
+   * the ACL calls below will report that far more precisely than this would.
+   */
+  private async secureRoot(share: string, reason: string): Promise<void> {
+    try {
+      const response = await this.agent.call({ op: 'secure_share_root', share }, reason);
+      if (response.status === 'share_root_secured') return;
+      if (response.status === 'not_found') return;
+      this.logger.error(
+        `could not close the root of share '${share}': the agent answered ` +
+          `'${response.status}'. Its top-level folder names stay readable to every principal ` +
+          `Samba authenticates.`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `could not close the root of share '${share}': ${error instanceof Error ? error.message : String(error)}. ` +
+          `Its top-level folder names stay readable to every principal Samba authenticates.`,
+      );
+    }
   }
 
   /** One folder: turn principals into numbers, and send it. */

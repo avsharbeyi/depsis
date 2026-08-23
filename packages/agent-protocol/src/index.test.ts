@@ -87,6 +87,14 @@ describe('the emitted agent schema', () => {
       // behind a typed name, in the one process that can reach every tenant's data. The API walks
       // the tree from the leaves up, because the API is the side that stores it (§2.2, ADR-0006).
       'remove_entry',
+      // The one operation that touches a share root's MODE, and the reason it is separate from
+      // `create_dataset`. `zfs create` leaves a mountpoint at 0755 root:root and `apply_folder_acl`
+      // refuses to touch the user::/group::/other:: triple, so every share root was `other::r-x`
+      // and any principal Samba authenticated could enumerate its top-level names whatever
+      // `folder_grants` said. An operand on creation would only ever have fixed the next share;
+      // this can be aimed at one that already exists, and the API runs it before every root ACL
+      // write. It takes no mode: the value is the agent's, so a caller cannot ask for 0777.
+      'secure_share_root',
       // ADR-0020's four, and the shape of them is the point. A general `ZeroTierRequest { path }`
       // proxy would have been the network form of the free-form command §2.2 forbids: one variant
       // through which every other endpoint of zerotier-one's local API becomes reachable. Instead
@@ -155,10 +163,11 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 3 since `MoveEntry` and
-    // `RemoveEntry`; the pair is what makes a new API against a stale agent fail at the handshake
-    // instead of on the first privileged call.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(4);
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 5 since `SecureShareRoot`;
+    // the pair is what makes a new API against a stale agent fail at the handshake instead of on
+    // the first privileged call — which for this operation would mean a share root left
+    // world-traversable with the API believing it had been closed.
+    expect(EXPECTED_SCHEMA_VERSION).toBe(5);
   });
 
   it('agrees with the number the agent actually reports', () => {

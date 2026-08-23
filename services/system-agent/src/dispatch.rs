@@ -11,7 +11,7 @@
 use crate::acl::{self, AclError};
 use crate::audit::{self, Outcome, Sink};
 use crate::authz::{Decision, Policy};
-use crate::op::{AclEntry, AclType, PosixId, Request, Response, SCHEMA_VERSION};
+use crate::op::{AclEntry, AclType, PosixId, Request, Response, SCHEMA_VERSION, SHARE_ROOT_MODE};
 use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource};
 use crate::transfer::{
     Abandoned, Direction, InsertError, PendingTransfer, TransferRegistry, MAX_PENDING_TRANSFERS,
@@ -564,6 +564,47 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// agent creating intermediate nodes silently would leave directories on disk that nothing in
     /// the database names — invisible to the UI, unmovable, undeletable. A missing parent is an
     /// error the API needs to hear about, not one to work around here.
+    /// Close a share root to everyone its ACL does not name.
+    ///
+    /// One `openat2` and one `fchmod`, and both halves matter. The resolution is the ordinary
+    /// confined one — `RESOLVE_BENEATH` under the shares root — so a share name that tried to
+    /// leave the tree never reaches the syscall. The `fchmod` is aimed at the DESCRIPTOR, so the
+    /// directory it changes is the one the kernel already pinned; a path-taking `chmod` could be
+    /// redirected between the resolve and the call, which for a mode change on the top of a share
+    /// is about the worst redirection available.
+    ///
+    /// Nothing to undo and nothing to verify afterwards, unlike `apply_folder_acl`: the mode is a
+    /// constant this agent owns rather than a list the caller sent, so there is no "did it write
+    /// what I asked" question to answer. `fchmod` either succeeded or returned an error.
+    ///
+    /// Idempotent. Running it on a root that is already 0750 is a no-op that reports the same
+    /// answer, which is what lets the API run it before every root ACL write instead of tracking
+    /// which shares have been done.
+    fn secure_share_root(&self, share: &str) -> Result<Response, SeamError> {
+        let Some(paths) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+
+        // The share itself, as a directory. A share that does not exist comes back as `NotFound`
+        // rather than being created — this operation secures, it does not provision.
+        let root = match paths.open_dir(&[share]) {
+            Ok(dir) => dir,
+            Err(SeamError::NotFound(what)) => {
+                return Ok(Response::NotFound {
+                    reason: format!("no such share: {what}"),
+                });
+            }
+            Err(e) => return Err(e),
+        };
+
+        paths.set_mode(&root, SHARE_ROOT_MODE)?;
+        Ok(Response::ShareRootSecured {
+            mode: SHARE_ROOT_MODE,
+        })
+    }
+
     fn create_directory(
         &self,
         share: &str,
@@ -1028,6 +1069,8 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 let parts: Vec<&str> = path.iter().map(|c| c.as_str()).collect();
                 self.create_directory(share.as_str(), &parts, *owner_uid, *owner_gid)
             }
+
+            Request::SecureShareRoot { share } => self.secure_share_root(share.as_str()),
 
             Request::ApplyFolderAcl {
                 share,
@@ -1939,6 +1982,87 @@ mod tests {
         let s = MemorySink::default();
         h.agent(&r, &s)
             .handle(raw, peer(API_UID), "c-entry", "user asked")
+    }
+
+    #[test]
+    fn securing_a_share_root_asks_for_0750_on_the_resolved_directory() {
+        // WHAT THIS CLOSES. `zfs create` leaves a mountpoint at 0755 root:root, and
+        // `ApplyFolderAcl` refuses to touch the base triple — so every share root was
+        // `other::r-x` and any principal SMB authenticated could enumerate its top-level names
+        // whatever `folder_grants` said.
+        let h = Harness::with_share("alice");
+
+        let raw = r#"{"op":"secure_share_root","share":"alice"}"#;
+        match call(&h, raw) {
+            Response::ShareRootSecured { mode } => assert_eq!(mode, crate::op::SHARE_ROOT_MODE),
+            other => panic!("expected the root to be secured, got {other:?}"),
+        }
+
+        // The mock records the mode rather than applying it: a real chmod is measured against a
+        // kernel in `unix.rs`, and what a portable test can pin is that the dispatcher asked for
+        // the right number. `0o750` is the whole point — the last digit is what closes the share.
+        assert_eq!(
+            h.paths.as_ref().expect("share root").modes(),
+            vec![0o750],
+            "the share root must be asked for 0750, and nothing else"
+        );
+    }
+
+    #[test]
+    fn securing_a_share_that_does_not_exist_is_a_not_found_rather_than_a_new_directory() {
+        // It secures; it does not provision. Creating the directory here would let a typo in a
+        // share name produce a root-owned folder in the share tree that nothing in the database
+        // names — and the next `openat2` for the real share would still fail.
+        let h = Harness::with_share("alice");
+
+        match call(&h, r#"{"op":"secure_share_root","share":"yok"}"#) {
+            Response::NotFound { reason } => assert!(reason.contains("yok"), "{reason}"),
+            other => panic!("expected not_found, got {other:?}"),
+        }
+        assert!(
+            h.paths.as_ref().expect("share root").modes().is_empty(),
+            "nothing should have been chmodded"
+        );
+    }
+
+    #[test]
+    fn securing_a_share_root_is_refused_when_no_share_root_is_configured() {
+        // The same refusal every filesystem operation gives on a box whose storage is not set up.
+        // A 503 the API can report, not a fault.
+        //
+        // `Harness::bare`, not `without_shares_root`: the env var is read when the agent is BUILT,
+        // and the harness already holds a resolved root. Unsetting the variable afterwards changes
+        // nothing, which is exactly what the first version of this test discovered by passing when
+        // it should not have.
+        let h = Harness::bare();
+        match call(&h, r#"{"op":"secure_share_root","share":"alice"}"#) {
+            Response::Refused { reason } => assert!(reason.contains("no share root"), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_share_name_that_tries_to_leave_the_tree_never_reaches_the_chmod() {
+        // `SafeComponent` refuses these at parse time, so the request does not deserialise at all
+        // — which is the point of the typed operand set. Asserted here anyway because this
+        // operation changes the MODE of a directory, and a redirected chmod on the top of a share
+        // is about the worst thing in the operation set to get wrong.
+        let h = Harness::with_share("alice");
+        for raw in [
+            r#"{"op":"secure_share_root","share":"../etc"}"#,
+            r#"{"op":"secure_share_root","share":".."}"#,
+            r#"{"op":"secure_share_root","share":"a/b"}"#,
+            r#"{"op":"secure_share_root","share":"-rf"}"#,
+        ] {
+            match call(&h, raw) {
+                Response::Refused { .. } => {}
+                other => panic!("expected {raw} to be refused, got {other:?}"),
+            }
+            assert!(
+                h.paths.as_ref().expect("share root").modes().is_empty(),
+                "a refused request must not have chmodded anything: {raw}"
+            );
+        }
     }
 
     #[test]
