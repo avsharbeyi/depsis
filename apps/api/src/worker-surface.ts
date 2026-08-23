@@ -37,7 +37,6 @@ export {
   type JobStatus,
 } from './jobs/jobs.service.js';
 
-export { PosixIdentityModule } from './identity/posix.module.js';
 export { PosixIdentityService } from './identity/posix.service.js';
 
 /**
@@ -47,6 +46,12 @@ export { PosixIdentityService } from './identity/posix.service.js';
  */
 export { AclApplyModule } from './permissions/apply-acl.module.js';
 export { AclApplyService, type ApplyAclPayload } from './permissions/apply-acl.service.js';
+export {
+  IDENTITY_SYNC_KIND,
+  IDENTITY_SYNC_MAX_ATTEMPTS,
+  IdentitySyncService,
+} from './identity/identity-sync.service.js';
+export { PosixIdentityModule } from './identity/posix.module.js';
 export {
   APPLY_ACL_KIND,
   // The retry budget the kind needs, exported alongside it: the worker queues its own

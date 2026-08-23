@@ -102,6 +102,9 @@ export class UsersController {
         parsed.data.username,
         parsed.data.role,
         hash,
+        // The plaintext, for the SMB credential. This is the only moment it exists — Argon2 is
+        // one-way — and it is sealed inside the same transaction as the row.
+        parsed.data.password,
       );
       return toUser(row);
     } catch (error) {

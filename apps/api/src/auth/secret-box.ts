@@ -97,6 +97,47 @@ export function generateKey(): string {
  * Bob's row and then sign in as Bob using Alice's phone. The ciphertext would decrypt perfectly,
  * because nothing in it would say whose it was. With it, the tag check fails.
  */
+/**
+ * Load the key that seals secrets at rest, or say why there is none.
+ *
+ * A bad key path is a LOGGED failure rather than a thrown one, deliberately. Refusing to boot would
+ * lock out every user — including the ones with no second factor, and including the recovery codes
+ * that are the way back in when the key is the thing that broke.
+ *
+ * It lives here rather than in `AuthModule` because there are two callers now: TOTP secrets and
+ * the NT hash that gives a user SMB access. Two copies of "read the key, or explain" would be two
+ * places to change the day the key moves, and one of them would be missed.
+ */
+export function loadSecretBox(keyFile: string | null, log: SecretBoxLog): SecretBox | null {
+  if (keyFile === null) {
+    log.warn(
+      'DEPSIS_SECRET_KEY_FILE is not set: secrets cannot be sealed, so enrolling a second factor ' +
+        'and storing an SMB credential will both be refused. Generate one with ' +
+        '`openssl rand -base64 32` (ADR-0016).',
+    );
+    return null;
+  }
+  try {
+    const box = new SecretBox(readKeyFile(keyFile));
+    log.log(`secrets at rest are sealed with the key at ${keyFile}`);
+    return box;
+  } catch (error) {
+    log.error(
+      `${error instanceof Error ? error.message : String(error)}. ` +
+        'Enrolment and SMB credentials will be refused and existing sealed values will not open; ' +
+        'recovery codes still work.',
+    );
+    return null;
+  }
+}
+
+/** Just enough of a logger to be satisfied by Nest's, without importing Nest into this file. */
+export interface SecretBoxLog {
+  log: (message: string) => void;
+  warn: (message: string) => void;
+  error: (message: string) => void;
+}
+
 export class SecretBox {
   constructor(private readonly key: Buffer) {
     if (key.length !== KEY_BYTES) {

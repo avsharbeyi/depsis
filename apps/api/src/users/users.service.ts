@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { DbService } from '../db/db.service.js';
+import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import type { UserRole } from '../auth/session.service.js';
 
@@ -52,7 +53,18 @@ export class LastAdminError extends Error {
  */
 @Injectable()
 export class UsersService {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    /**
+     * For the SMB credential, and only that.
+     *
+     * `UsersService` owns the moment a password is set, and that is the only instant the plaintext
+     * exists — Argon2 is one-way, so an NT hash not captured here can never be recovered. The seal
+     * happens inside this service's transaction rather than in a caller afterwards, so the web
+     * password and the SMB password cannot end up describing different secrets.
+     */
+    private readonly identity: IdentitySyncService,
+  ) {}
 
   async list(organizationId: string): Promise<UserRow[]> {
     return this.db.withTenant(organizationId, (db) =>
@@ -99,19 +111,40 @@ export class UsersService {
     username: string,
     role: UserRole,
     passwordHash: string,
+    /**
+     * The plaintext, for the SMB credential only.
+     *
+     * OPTIONAL, and the asymmetry with `passwordHash` is deliberate rather than sloppy: Argon2 is
+     * one-way, so the NT hash Samba needs can only be computed at the instant the password exists.
+     * A caller that has it should pass it; one that does not — a fixture, a future import path —
+     * creates an account that works everywhere except SMB, which is honest rather than broken.
+     *
+     * It is sealed in the SAME TRANSACTION as the row. Two transactions would let a commit store
+     * one password and lose the other, leaving a user whose web and SMB passwords disagree with
+     * nothing recording which is which.
+     */
+    password?: string,
   ): Promise<UserRow> {
     try {
       const rows = await this.db.withTenant(organizationId, async (db) => {
         const posixUid = await PosixIdentityService.allocateWithin(db, 'user');
-        return db.query<UserRow>(
+        const created = await db.query<UserRow>(
           `INSERT INTO public.users (organization_id, username, role, password_hash, posix_uid)
            VALUES ($1, $2, $3, $4, $5)
            RETURNING id::text AS id, username, email, role, disabled_at, created_at`,
           [organizationId, username, role, passwordHash, posixUid],
         );
+        const row = created[0];
+        if (row !== undefined && password !== undefined) {
+          await this.identity.rememberPassword(db, organizationId, row.id, password);
+        }
+        return created;
       });
       const row = rows[0];
       if (!row) throw new Error('the user row was not returned');
+      // After the transaction, never inside it: `JobsService.enqueue` opens its own tenant
+      // transaction. The same ordering every other enqueue in this codebase uses.
+      await this.identity.enqueue(organizationId, `creating the account '${username}'`);
       return row;
     } catch (error) {
       throw translateDbError(error);
@@ -167,14 +200,33 @@ export class UsersService {
     }
   }
 
-  /** Replace a user's own password hash. */
-  async setPasswordHash(organizationId: string, id: string, hash: string): Promise<void> {
-    await this.db.withTenant(organizationId, (db) =>
-      db.query(
+  /**
+   * Replace a user's password hash, and the SMB credential that goes with it.
+   *
+   * `password` is optional for the reason it is on `create`: only a caller holding the plaintext
+   * can produce an NT hash, and one that cannot should still be able to set the web password. Both
+   * writes are in ONE transaction so the two can never disagree.
+   */
+  async setPasswordHash(
+    organizationId: string,
+    id: string,
+    hash: string,
+    password?: string,
+  ): Promise<void> {
+    await this.db.withTenant(organizationId, async (db) => {
+      await db.query(
         `UPDATE public.users SET password_hash = $3 WHERE organization_id = $1 AND id = $2`,
         [organizationId, id, hash],
-      ),
-    );
+      );
+      if (password !== undefined) {
+        await this.identity.rememberPassword(db, organizationId, id, password);
+      }
+    });
+    // Only when a plaintext was supplied: without one the SMB credential did not change, so there
+    // is nothing for the agent to install and a job would be pure noise.
+    if (password !== undefined) {
+      await this.identity.enqueue(organizationId, `resetting the password for ${id}`);
+    }
   }
 }
 

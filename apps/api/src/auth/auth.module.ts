@@ -10,39 +10,18 @@ import { LoginThrottleService } from './login-throttle.service.js';
 import { MfaService } from './mfa.service.js';
 import { PasswordService } from './password.service.js';
 import { PendingLoginService } from './pending-login.service.js';
-import { readKeyFile, SecretBox } from './secret-box.js';
+import { loadSecretBox, type SecretBox } from './secret-box.js';
 import { AdminGuard, SessionGuard } from './session.guard.js';
 import { SessionService } from './session.service.js';
 
-/**
- * Load the key that seals TOTP secrets, or say why there is none.
- *
- * A bad key path is a startup ERROR rather than a thrown exception, deliberately. Refusing to boot
- * would lock out every user — including the ones with no second factor, and including the recovery
- * codes that are the way back in when the key is the thing that broke. Enrolment refuses, sealed
- * secrets stop verifying, recovery codes keep working, and the log says so in one line.
- */
-function loadSecretBox(config: AppConfig): SecretBox | null {
+/** See `loadSecretBox` in `secret-box.ts`; the reading is shared with the SMB credential. */
+function secretBoxFor(config: AppConfig): SecretBox | null {
   const logger = new Logger('SecretBox');
-  if (config.secretKeyFile === null) {
-    logger.warn(
-      'DEPSIS_SECRET_KEY_FILE is not set: TOTP secrets cannot be sealed, so enrolling a second ' +
-        'factor will be refused. Generate one with `openssl rand -base64 32` (ADR-0016).',
-    );
-    return null;
-  }
-  try {
-    const box = new SecretBox(readKeyFile(config.secretKeyFile));
-    logger.log(`TOTP secrets are sealed with the key at ${config.secretKeyFile}`);
-    return box;
-  } catch (error) {
-    logger.error(
-      `${error instanceof Error ? error.message : String(error)}. ` +
-        'Enrolment will be refused and existing sealed secrets will not verify; recovery codes ' +
-        'still work.',
-    );
-    return null;
-  }
+  return loadSecretBox(config.secretKeyFile ?? null, {
+    log: (m) => logger.log(m),
+    warn: (m) => logger.warn(m),
+    error: (m) => logger.error(m),
+  });
 }
 
 @Module({
@@ -56,7 +35,7 @@ function loadSecretBox(config: AppConfig): SecretBox | null {
     {
       provide: MfaService,
       inject: [DbService, APP_CONFIG],
-      useFactory: (db: DbService, config: AppConfig) => new MfaService(db, loadSecretBox(config)),
+      useFactory: (db: DbService, config: AppConfig) => new MfaService(db, secretBoxFor(config)),
     },
     PendingLoginService,
     SessionGuard,

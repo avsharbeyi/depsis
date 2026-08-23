@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import type { AclApplyService, AgentService, JobsService } from '@depsis/api/worker-surface';
+import type {
+  AclApplyService,
+  AgentService,
+  IdentitySyncService,
+  JobsService,
+} from '@depsis/api/worker-surface';
 
 import { registerHandlers } from './registry.js';
 import { WorkerService } from '../worker.service.js';
@@ -21,7 +26,8 @@ describe('the worker consumes every kind the API enqueues', () => {
       agent: {} as unknown as AgentService,
       acl: {} as unknown as AclApplyService,
       jobs: {} as unknown as JobsService,
+      identity: {} as unknown as IdentitySyncService,
     });
-    expect(worker.kinds.sort()).toEqual(['permissions.apply', 'storage.snapshot']);
+    expect(worker.kinds.sort()).toEqual(['identity.sync', 'permissions.apply', 'storage.snapshot']);
   });
 });

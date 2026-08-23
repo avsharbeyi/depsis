@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AgentService } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
+import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import {
   LastGrantInShareError,
   TeamMemberNotFoundError,
@@ -65,9 +66,17 @@ describeDb('teams and membership, against a real PostgreSQL', () => {
     // The agent, as far as this service is concerned: one question, asked once per bulk change.
     // Available, so that the POSIX re-application these operations owe actually lands on the queue
     // and the tests below can read it back.
-    teams = new TeamsService(db, new JobsService(db), {
-      isAvailable: () => true,
-    } as unknown as AgentService);
+    const agent = { isAvailable: () => true } as unknown as AgentService;
+    teams = new TeamsService(
+      db,
+      new JobsService(db),
+      agent,
+      // A real one. Membership changes enqueue an `identity.sync` now, and a stub that swallowed
+      // it would let the enqueue silently stop happening — the `putMember` gap this closes was
+      // invisible for exactly that reason. Its own agent is never reached from `enqueue`, which is
+      // a database INSERT.
+      new IdentitySyncService(db, agent, null, new JobsService(db)),
+    );
 
     await owner.withoutTenant('migration-status', async (q) => {
       await q.query(

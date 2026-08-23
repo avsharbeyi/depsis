@@ -12,6 +12,7 @@ import {
 
 import { AgentService } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
+import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { APPLY_ACL_KIND, APPLY_ACL_MAX_ATTEMPTS } from '../permissions/permissions.service.js';
@@ -163,6 +164,8 @@ export class TeamsService {
     private readonly db: DbService,
     private readonly jobs: JobsService,
     private readonly agent: AgentService,
+    /** For the Unix side of a membership change. See `syncIdentity`. */
+    private readonly identity: IdentitySyncService,
   ) {}
 
   /**
@@ -290,7 +293,10 @@ export class TeamsService {
       return { impact, changed: true };
     });
 
-    if (done.changed) await this.applyToShares(organizationId, done.impact.shareIds);
+    if (done.changed) {
+      await this.applyToShares(organizationId, done.impact.shareIds);
+      await this.syncIdentity(organizationId, 'a team membership change');
+    }
     return done.impact.summary;
   }
 
@@ -352,6 +358,22 @@ export class TeamsService {
   }
 
   /**
+   * Tell the agent the Unix groups have moved.
+   *
+   * MEMBERSHIP IS HALF THE MODEL. `folder_grants` names a team, `ApplyFolderAcl` writes that team's
+   * gid onto the folder, and the kernel decides by asking whether the user is IN that group. So a
+   * membership change that never reaches `/etc/group` is a grant that never takes effect — or,
+   * worse, a removal that never takes effect, which leaves someone reaching folders their grant no
+   * longer covers.
+   *
+   * `putMember` had no re-apply of any kind before this: `removeMember` queued an ACL job and its
+   * counterpart queued nothing, so joining a team worked on the web and never on SMB.
+   */
+  private async syncIdentity(organizationId: string, why: string): Promise<void> {
+    await this.identity.enqueue(organizationId, why);
+  }
+
+  /**
    * Take a user out of a team, or price it first.
    *
    * With no explicit deny in the model (ADR-0021), this is the ONLY way to express "everyone except
@@ -391,7 +413,10 @@ export class TeamsService {
       return { impact, changed: true };
     });
 
-    if (done.changed) await this.applyToShares(organizationId, done.impact.shareIds);
+    if (done.changed) {
+      await this.applyToShares(organizationId, done.impact.shareIds);
+      await this.syncIdentity(organizationId, 'a team membership change');
+    }
     return done.impact.summary;
   }
 

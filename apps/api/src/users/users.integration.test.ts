@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { DbService } from '../db/db.service.js';
+import { JobsService } from '../jobs/jobs.service.js';
+import type { AgentService } from '../agent/agent.service.js';
+import { generateKey, SecretBox } from '../auth/secret-box.js';
+import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import {
   UsernameTakenError,
   LastAdminError,
@@ -42,7 +46,22 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     db = new DbService(APP_URL as string);
     await db.onModuleInit();
     owner = new DbService(OWNER_URL as string);
-    users = new UsersService(db);
+    // A REAL `IdentitySyncService` with a real key, so the sealing path in `create` and
+    // `setPasswordHash` is exercised rather than stubbed away. The agent is never reached from
+    // those two methods — sealing is a database write — so a stub agent that refuses everything is
+    // the honest fixture: if either method started talking to the agent, this would fail.
+    users = new UsersService(
+      db,
+      new IdentitySyncService(
+        db,
+        {
+          isAvailable: () => false,
+          call: () => Promise.reject(new Error('create/setPasswordHash must not call the agent')),
+        } as unknown as AgentService,
+        new SecretBox(Buffer.from(generateKey(), 'base64')),
+        new JobsService(db),
+      ),
+    );
 
     await owner.withoutTenant('migration-status', async (q) => {
       await q.query(

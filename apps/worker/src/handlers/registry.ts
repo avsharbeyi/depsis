@@ -1,7 +1,13 @@
-import type { AclApplyService, AgentService, JobsService } from '@depsis/api/worker-surface';
+import type {
+  AclApplyService,
+  AgentService,
+  IdentitySyncService,
+  JobsService,
+} from '@depsis/api/worker-surface';
 
 import type { WorkerService } from '../worker.service.js';
 import { applyAclHandler, APPLY_ACL_KIND } from './apply-acl.handler.js';
+import { identitySyncHandler, IDENTITY_SYNC_KIND } from './identity-sync.handler.js';
 import { snapshotHandler, SNAPSHOT_KIND } from './snapshot.handler.js';
 
 /**
@@ -15,10 +21,16 @@ import { snapshotHandler, SNAPSHOT_KIND } from './snapshot.handler.js';
  */
 export function registerHandlers(
   worker: WorkerService,
-  services: { agent: AgentService; acl: AclApplyService; jobs: JobsService },
+  services: {
+    agent: AgentService;
+    acl: AclApplyService;
+    jobs: JobsService;
+    identity: IdentitySyncService;
+  },
 ): void {
   worker.register(SNAPSHOT_KIND, snapshotHandler(services.agent));
   // `jobs` as well as `acl`: a share too large for one chunk queues its own continuation, so the
   // handler needs the queue it was claimed from.
   worker.register(APPLY_ACL_KIND, applyAclHandler(services.acl, services.jobs));
+  worker.register(IDENTITY_SYNC_KIND, identitySyncHandler(services.identity));
 }

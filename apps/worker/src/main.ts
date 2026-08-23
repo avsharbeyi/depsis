@@ -6,6 +6,7 @@ import {
   AclApplyService,
   AgentModule,
   AgentService,
+  IdentitySyncService,
   ConfigModule,
   DbModule,
   JobsModule,
@@ -50,6 +51,7 @@ async function bootstrap(): Promise<void> {
     agent: app.get(AgentService),
     acl: app.get(AclApplyService),
     jobs: app.get(JobsService),
+    identity: app.get(IdentitySyncService),
   });
   worker.start();
 

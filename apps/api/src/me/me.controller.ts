@@ -19,6 +19,7 @@ import { MfaService } from '../auth/mfa.service.js';
 import { PasswordService } from '../auth/password.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { SessionService } from '../auth/session.service.js';
+import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import { DbService } from '../db/db.service.js';
 
 type Schemas = OpenApi.components['schemas'];
@@ -61,6 +62,14 @@ export class MeController {
     private readonly mfa: MfaService,
     private readonly passwords: PasswordService,
     private readonly sessions: SessionService,
+    /**
+     * For the SMB credential, resealed in the same transaction as the password change.
+     *
+     * `PosixIdentityModule` is global, so this arrives without `UsersModule` having to export
+     * anything — which matters: that module exports nothing on purpose, so that an account is
+     * changed through its endpoints or not at all.
+     */
+    private readonly identity: IdentitySyncService,
   ) {}
 
   /**
@@ -96,12 +105,22 @@ export class MeController {
     }
 
     const hash = await this.passwords.hash(parsed.data.newPassword);
-    await this.db.withTenant(session.organizationId, (db) =>
-      db.query(
+    // ONE transaction for both. Writing the Argon2 hash here and sealing the NT hash afterwards
+    // would leave a user whose web password changed and whose Windows password silently did not —
+    // the exact divergence the permission work spent this round closing everywhere else.
+    await this.db.withTenant(session.organizationId, async (db) => {
+      await db.query(
         `UPDATE public.users SET password_hash = $3 WHERE organization_id = $1 AND id = $2`,
         [session.organizationId, session.userId, hash],
-      ),
-    );
+      );
+      await this.identity.rememberPassword(
+        db,
+        session.organizationId,
+        session.userId,
+        parsed.data.newPassword,
+      );
+    });
+    await this.identity.enqueue(session.organizationId, 'a password change');
 
     const revoked = await this.sessions.revokeAllForUser(session.organizationId, session.userId);
     // `revokeAllForUser` takes this one too, so it is reissued rather than left dead — the caller
