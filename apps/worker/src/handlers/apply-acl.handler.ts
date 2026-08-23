@@ -1,5 +1,10 @@
 import { Logger } from '@nestjs/common';
-import { APPLY_ACL_KIND, type AclApplyService } from '@depsis/api/worker-surface';
+import {
+  APPLY_ACL_KIND,
+  APPLY_ACL_MAX_ATTEMPTS,
+  type AclApplyService,
+  type JobsService,
+} from '@depsis/api/worker-surface';
 
 import type { JobHandler } from '../worker.service.js';
 
@@ -23,7 +28,7 @@ export { APPLY_ACL_KIND };
  * stand when it runs and writes an absolute ACL per folder, so a second delivery writes the same
  * thing and a delivery that arrives after a newer grant applies the newer answer.
  */
-export function applyAclHandler(acl: AclApplyService): JobHandler {
+export function applyAclHandler(acl: AclApplyService, jobs: JobsService): JobHandler {
   const logger = new Logger('ApplyAclHandler');
 
   return async ({ job, report }) => {
@@ -44,7 +49,32 @@ export function applyAclHandler(acl: AclApplyService): JobHandler {
       `applying folder ACLs under ${payload.entryId ?? 'the share root'} of share ` +
         `${payload.shareId} for job ${job.id}`,
     );
-    await acl.apply(organizationId, payload, `permissions.apply job ${job.id}`);
+    const { next } = await acl.apply(organizationId, payload, `permissions.apply job ${job.id}`);
+
+    // A LARGE SHARE IS APPLIED ACROSS SEVERAL JOBS, and the successor is queued here rather than
+    // looped inside the service. Two reasons, and the second is the one that matters:
+    //
+    //   * Each folder is one round trip to a daemon that serves the whole appliance one connection
+    //     at a time. A single job walking a hundred thousand of them would hold the agent for
+    //     hours and starve every upload behind it. Between chunks the worker returns to
+    //     `claim_job`, so other work interleaves.
+    //   * A chunk that fails is retried as a chunk. The cursor only advances past folders that
+    //     were actually written, so a crash mid-share resumes where it stopped instead of starting
+    //     over or, worse, skipping the remainder.
+    //
+    // Queued BEFORE `report(1)` so that a worker which dies between the two leaves the successor
+    // on the queue: this job would then be retried in full, which is safe — every apply is
+    // idempotent — while the reverse order could lose the remainder entirely.
+    if (next !== null) {
+      await jobs.enqueue(
+        organizationId,
+        APPLY_ACL_KIND,
+        { shareId: payload.shareId, entryId: payload.entryId, after: next },
+        { maxAttempts: APPLY_ACL_MAX_ATTEMPTS },
+      );
+      logger.log(`share ${payload.shareId} has more folders; queued a continuation after ${next}`);
+    }
+
     await report(1);
   };
 }
@@ -54,7 +84,11 @@ export function applyAclHandler(acl: AclApplyService): JobHandler {
  * not interpret payloads — a row could have been written by a fixture or by an older build that
  * spelled a field differently.
  */
-function parse(payload: unknown): { shareId: string; entryId: string | null } {
+function parse(payload: unknown): {
+  shareId: string;
+  entryId: string | null;
+  after: string | null;
+} {
   if (typeof payload !== 'object' || payload === null) {
     throw new Error('permissions.apply payload is not an object');
   }
@@ -68,5 +102,12 @@ function parse(payload: unknown): { shareId: string; entryId: string | null } {
   if (entryId !== undefined && entryId !== null && typeof entryId !== 'string') {
     throw new Error('permissions.apply payload has an entryId that is not an id');
   }
-  return { shareId, entryId: entryId ?? null };
+  // The resume cursor a previous chunk left. Absent and null both mean "start at the beginning",
+  // for the reason `entryId` gives: `JSON.stringify` drops an explicit undefined, so the two
+  // spellings reach the queue as one thing and must not mean different things coming back.
+  const after = (payload as Record<string, unknown>)['after'];
+  if (after !== undefined && after !== null && typeof after !== 'string') {
+    throw new Error('permissions.apply payload has an `after` cursor that is not an id');
+  }
+  return { shareId, entryId: entryId ?? null, after: after ?? null };
 }

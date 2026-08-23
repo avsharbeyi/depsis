@@ -99,11 +99,6 @@ imzalı apt deposundan kurar.
   bağlantı denemesi + başarısızlıkta geri dönüş) ama bölümlerde `valid users` yok: bir paylaşımı
   SMB'den kimin açabileceği POSIX izinlerine bırakılmış durumda. Web tarafındaki izin modeli
   (§6.2) çalışıyor ve ACL'ler yazılıyor; eksik olan `smb.conf`'un kendi filtresi.
-- **5000 klasörden büyük bir paylaşımda hiçbir ACL uygulanamıyor.** `AclApplyService.folderRows`
-  sınırı aşınca hata FIRLATıyor — ilk klasörü bile yazmadan, yani kısmi değil TOTAL bir
-  başarısızlık. Deterministik olduğu için bütün denemeler aynı şekilde düşüyor ve iş ölüyor. Alt
-  ağaca daraltılmış bir iş bile düşüyor, çünkü sayım paylaşımın tamamını sayıyor. Doğru çözüm
-  parçalı uygulama (imleçli, kendini yeniden kuyruğa koyan bir iş); bu tur yapılmadı.
 - **`MAX_TREE_DEPTH` 256'dan derindeki klasörleri SESSİZCE atlıyor.** 5000 sınırının aksine bir
   hata yok: satırlar dönmüyor, iş yeşil bitiyor, o klasörler eski ACL'iyle kalıyor. Yalnız
   `TeamsService`'in kök uygulamasından erişilebilir — `PermissionsService.write` bir seviye önce

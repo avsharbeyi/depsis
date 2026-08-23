@@ -43,17 +43,48 @@ export interface ApplyAclPayload {
   shareId: string;
   /** NULL is the share root, the same convention as `folder_grants.entry_id`. */
   entryId: string | null;
+  /**
+   * Resume point: write only folders whose id sorts after this one. Absent means start.
+   *
+   * A job that could not finish its share in one chunk re-queues itself carrying this, so a large
+   * share is applied across several jobs instead of failing. See `APPLY_CHUNK`.
+   */
+  after?: string | null;
 }
 
 /**
- * How many folders one job will rewrite.
+ * How many folders ONE JOB writes before handing the rest to a successor.
  *
- * A bound rather than a promise to finish: a share with a hundred thousand folders is one job
- * holding a lease and one agent connection for hours, and the agent takes one connection at a time
- * for the whole appliance. Past this the job fails loudly with the count, because a silent partial
- * application is the divergence this class exists to close.
+ * A chunk, not a cliff — and the difference is the whole point of this constant existing. It used
+ * to be `APPLY_FOLDER_LIMIT = 5000` and the code THREW when a share had more, before writing a
+ * single folder. So a share past the bound did not get a partial application, it got none: the
+ * throw was deterministic, every retry failed identically, and the job died. Every permission
+ * change in that share — including every revocation — committed to Postgres and never reached the
+ * filesystem, permanently. Five thousand folders is nothing for a NAS.
+ *
+ * The bound itself is real and stays: each folder is one round trip to a daemon that serves the
+ * whole appliance one connection at a time, so a job that walked a hundred thousand of them would
+ * hold the agent for hours and starve every upload behind it. Chunking keeps that bound and drops
+ * the cliff — between chunks the worker returns to `claim_job`, so other work interleaves.
+ *
+ * Ordering is by id and nothing else. Each folder's ACL is absolute and computed from the grants
+ * ABOVE it, so no folder depends on a sibling having been written first; any total order works,
+ * and ids are the one that cannot shift between chunks.
  */
-const APPLY_FOLDER_LIMIT = 5000;
+export const APPLY_CHUNK = 1000;
+
+/**
+ * How much TREE one job will load, which is a different and much cheaper question.
+ *
+ * Three columns per row, in memory, to resolve inheritance — not a round trip. Conflating this
+ * with the write bound is what made a small subtree apply fail because the SHARE was large: the
+ * count was taken over every folder loaded, so a job aimed at one folder inherited the whole
+ * share's size as its limit.
+ *
+ * It is still bounded, because an unbounded query against a corrupted tree is how a worker hangs
+ * rather than fails. Reaching it is a fault to look at, not a size to design for.
+ */
+const TREE_LOAD_LIMIT = 250_000;
 
 /** The same depth bound the permission walk uses, for the same reason: a cycle must not hang. */
 const MAX_TREE_DEPTH = 256;
@@ -84,6 +115,13 @@ interface FolderRow {
 interface Folders {
   all: FolderRow[];
   written: string[];
+  /**
+   * The id to resume after, or null when this chunk finished the job.
+   *
+   * `null` is a claim — "there is nothing left in this scope" — so it is derived from having seen
+   * fewer candidates than the chunk holds, never assumed.
+   */
+  next: string | null;
 }
 
 interface GrantRow {
@@ -110,7 +148,11 @@ export class AclApplyService {
    * transaction held open across an unbounded number of round trips to a daemon that serialises
    * them is a transaction that outlives its usefulness, and nothing here writes to the database.
    */
-  async apply(organizationId: string, payload: ApplyAclPayload, reason: string): Promise<void> {
+  async apply(
+    organizationId: string,
+    payload: ApplyAclPayload,
+    reason: string,
+  ): Promise<{ next: string | null }> {
     const plan = await this.db.withTenant(organizationId, async (q) => {
       const share = await shareName(q, organizationId, payload.shareId);
       const folders = await folderRows(q, organizationId, payload);
@@ -154,8 +196,15 @@ export class AclApplyService {
     // The share root is written only when the job names it. A job aimed at one entry rewrites that
     // entry's subtree; the root's own ACL is not part of it and overwriting it would widen or
     // narrow a folder nobody asked about.
+    //
+    // And only in the FIRST chunk. A continuation re-writing the root every time would be wasted
+    // agent calls, and — worse — would keep re-applying an increasingly stale answer to the one
+    // node every other folder inherits from.
+    const first = (payload.after ?? null) === null;
     const targets =
-      payload.entryId === null ? [payload.shareId, ...plan.folders.written] : plan.folders.written;
+      payload.entryId === null && first
+        ? [payload.shareId, ...plan.folders.written]
+        : plan.folders.written;
 
     const failures: string[] = [];
     for (const nodeId of targets) {
@@ -186,11 +235,23 @@ export class AclApplyService {
     if (failures.length > 0) {
       // The job fails so the queue records it and retries; the ones that succeeded stay applied,
       // which is safe because each call writes an absolute ACL for one folder.
+      //
+      // The cursor is deliberately NOT advanced on failure. A retry redoes this whole chunk, which
+      // costs some duplicated agent calls and is the only safe direction: advancing past a chunk
+      // that partly failed would leave folders unwritten with nothing recording it.
       throw new Error(
         `${failures.length} of ${targets.length} folder(s) in share ${payload.shareId} could not ` +
           `be applied: ${failures.slice(0, 5).join('; ')}`,
       );
     }
+
+    if (plan.folders.next !== null) {
+      this.logger.log(
+        `applied ${targets.length} folder(s) in share ${payload.shareId}; more remain, resuming ` +
+          `after ${plan.folders.next}`,
+      );
+    }
+    return { next: plan.folders.next };
   }
 
   /** One folder: turn principals into numbers, and send it. */
@@ -347,31 +408,57 @@ async function folderRows(
        FROM tree
       ORDER BY depth, id
       LIMIT $4`,
-    [organizationId, payload.shareId, MAX_TREE_DEPTH, APPLY_FOLDER_LIMIT],
+    [organizationId, payload.shareId, MAX_TREE_DEPTH, TREE_LOAD_LIMIT],
   );
-  if (rows.length >= APPLY_FOLDER_LIMIT) {
+  if (rows.length >= TREE_LOAD_LIMIT) {
+    // Not a size to design for — a tree this large is a fault to look at. Loud rather than
+    // truncated, because a silently short tree resolves every folder against a chain with a hole
+    // in it.
     throw new Error(
-      `share ${payload.shareId} has at least ${APPLY_FOLDER_LIMIT} folders, which is more than ` +
-        `one apply job will rewrite; the POSIX ACLs below it are stale`,
+      `share ${payload.shareId} has at least ${TREE_LOAD_LIMIT} folders, which is more than one ` +
+        `apply job will load; the POSIX ACLs below it are stale`,
     );
   }
 
   const all = rows.map(strip);
-  if (payload.entryId === null) return { all, written: all.map((row) => row.id) };
 
-  // One entry named: keep the chain for resolution but write only its subtree. Membership is
-  // decided by walking `parent_id` upward through the rows already loaded, so the answer comes
-  // from the same tree the ACLs are resolved against.
-  const parentOf = new Map(rows.map((row) => [row.id, row.parent_id]));
-  const inSubtree = (id: string): boolean => {
-    let cursor: string | null | undefined = id;
-    for (let step = 0; cursor !== null && cursor !== undefined && step <= rows.length; step += 1) {
-      if (cursor === payload.entryId) return true;
-      cursor = parentOf.get(cursor);
-    }
-    return false;
-  };
-  return { all, written: all.filter((row) => inSubtree(row.id)).map((row) => row.id) };
+  // Which folders this job is RESPONSIBLE for, before the chunk is taken off the front.
+  let candidates: string[];
+  if (payload.entryId === null) {
+    candidates = all.map((row) => row.id);
+  } else {
+    // One entry named: keep the chain for resolution but write only its subtree. Membership is
+    // decided by walking `parent_id` upward through the rows already loaded, so the answer comes
+    // from the same tree the ACLs are resolved against.
+    const parentOf = new Map(rows.map((row) => [row.id, row.parent_id]));
+    const inSubtree = (id: string): boolean => {
+      let cursor: string | null | undefined = id;
+      for (
+        let step = 0;
+        cursor !== null && cursor !== undefined && step <= rows.length;
+        step += 1
+      ) {
+        if (cursor === payload.entryId) return true;
+        cursor = parentOf.get(cursor);
+      }
+      return false;
+    };
+    candidates = all.filter((row) => inSubtree(row.id)).map((row) => row.id);
+  }
+
+  // Sorted, then cursored. The sort is what makes the cursor mean anything: without a total order
+  // "after this id" does not identify a remainder, and a chunk could revisit or skip folders
+  // forever. Ids are used rather than depth because they cannot change between chunks.
+  candidates.sort();
+  const after = payload.after ?? null;
+  const remaining = after === null ? candidates : candidates.filter((id) => id > after);
+  const written = remaining.slice(0, APPLY_CHUNK);
+  const last = written[written.length - 1];
+  // `next` is null only when this chunk exhausted the remainder — measured by comparing lengths,
+  // not by assuming a short chunk means the end.
+  const next = remaining.length > written.length && last !== undefined ? last : null;
+
+  return { all, written, next };
 }
 
 function strip(row: FolderRow & { depth: number }): FolderRow {

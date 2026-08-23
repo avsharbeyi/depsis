@@ -47,7 +47,13 @@ export { PosixIdentityService } from './identity/posix.service.js';
  */
 export { AclApplyModule } from './permissions/apply-acl.module.js';
 export { AclApplyService, type ApplyAclPayload } from './permissions/apply-acl.service.js';
-export { APPLY_ACL_KIND } from './permissions/permissions.service.js';
+export {
+  APPLY_ACL_KIND,
+  // The retry budget the kind needs, exported alongside it: the worker queues its own
+  // continuations for a large share and a successor written with the queue's default of five
+  // attempts would have a thirty-second life while its predecessor had an hour.
+  APPLY_ACL_MAX_ATTEMPTS,
+} from './permissions/permissions.service.js';
 
 export { loadConfig, type AppConfig } from './config.js';
 

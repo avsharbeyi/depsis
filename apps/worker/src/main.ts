@@ -46,7 +46,11 @@ async function bootstrap(): Promise<void> {
   // Registration is not bookkeeping: `WorkerService.claim` only ever asks for the kinds registered
   // there, so a kind the API enqueues and the registry omits is a job nobody will ever run. It is
   // a separate module so a test can assert the list without booting this process.
-  registerHandlers(worker, { agent: app.get(AgentService), acl: app.get(AclApplyService) });
+  registerHandlers(worker, {
+    agent: app.get(AgentService),
+    acl: app.get(AclApplyService),
+    jobs: app.get(JobsService),
+  });
   worker.start();
 
   const shutdown = (signal: string): void => {

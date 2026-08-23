@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AgentService } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
-import { AclApplyService } from './apply-acl.service.js';
+import { APPLY_CHUNK, AclApplyService } from './apply-acl.service.js';
 
 /**
  * The half of §6.2 that leaves the database: `permissions.apply`, against a real PostgreSQL.
@@ -232,6 +232,59 @@ describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
     // And the answer is still resolved against the WHOLE chain, so the root grant above the named
     // entry is not lost just because the job did not rewrite the root.
     expect(calls[0]?.entries).toEqual([{ gid: takimGid, read: true, write: false, execute: true }]);
+  });
+
+  it('applies a share larger than one chunk across several jobs, covering every folder once', async () => {
+    // THE OLD BEHAVIOUR WAS TOTAL FAILURE, not a partial one. `folderRows` threw when the share
+    // held more folders than the bound, and it threw BEFORE the write loop — so a large share got
+    // no ACLs at all, deterministically, on every retry, until the job died. Every permission
+    // change in it, revocations included, committed to Postgres and never reached disk. Five
+    // thousand folders is nothing for a NAS, and counting trashed folders made it easier to reach.
+    //
+    // `APPLY_CHUNK + 1` rather than a literal: the bound is a tuning number and this test has to
+    // keep measuring chunking when it moves.
+    const extra = APPLY_CHUNK + 1;
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO file_entries (organization_id, share_id, parent_id, kind, name, path)
+         SELECT $1, $2, $3, 'folder', 'c' || i, '/belgeler/c' || i
+           FROM generate_series(1, $4) AS i`,
+        [org, share, belgeler, extra],
+      ),
+    );
+
+    calls = [];
+    const firstPass = await acl.apply(org, { shareId: share, entryId: null }, 'test');
+    // It stopped, and it SAYS it stopped — the cursor is the whole difference between a chunk and
+    // a truncation.
+    expect(firstPass.next).not.toBeNull();
+    const firstWritten = calls.map((call) => call.path.join('/'));
+    expect(firstWritten.length).toBe(APPLY_CHUNK + 1); // the chunk, plus the share root
+
+    // Keep going until it says it is done, exactly as the worker does by re-queueing.
+    let cursor = firstPass.next;
+    const everything = [...firstWritten];
+    for (let round = 0; cursor !== null && round < 10; round += 1) {
+      calls = [];
+      const pass = await acl.apply(org, { shareId: share, entryId: null, after: cursor }, 'test');
+      everything.push(...calls.map((call) => call.path.join('/')));
+      cursor = pass.next;
+    }
+    expect(cursor).toBeNull();
+
+    // EVERY folder, and each of them ONCE. A cursor that overlapped would merely waste agent
+    // calls; one that skipped would leave a folder carrying the pre-change ACL with nothing
+    // recording it, which is the failure this whole class exists to prevent.
+    const seen = new Set(everything);
+    expect(seen.size).toBe(everything.length);
+    expect(everything).toHaveLength(extra + 4); // the seeded folders, plus the fixture's four nodes
+    expect(seen.has('')).toBe(true); // the share root, written in the first chunk only
+    expect(seen.has('belgeler/c1')).toBe(true);
+    expect(seen.has(`belgeler/c${extra}`)).toBe(true);
+
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`DELETE FROM file_entries WHERE organization_id = $1 AND name LIKE 'c%'`, [org]),
+    );
   });
 
   it('rewrites a trashed folder too, because its directory is live on SMB', async () => {

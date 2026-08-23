@@ -20,6 +20,7 @@ describe('the worker consumes every kind the API enqueues', () => {
     registerHandlers(worker, {
       agent: {} as unknown as AgentService,
       acl: {} as unknown as AclApplyService,
+      jobs: {} as unknown as JobsService,
     });
     expect(worker.kinds.sort()).toEqual(['permissions.apply', 'storage.snapshot']);
   });
