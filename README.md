@@ -46,8 +46,12 @@ yazıyor, ya da `hostname -I` verir.
 yüzden yükleme ve indirme 503 döner. Listeleme, klasör oluşturma, yeniden adlandırma, çöp kutusu,
 kullanıcı yönetimi ve telemetri çalışır.
 
-Arayüzde iki adımlı doğrulama **yok**. Sunucu tarafı duruyor ve test ediliyor, ama hesabı olan
-kimsenin açamayacağı bir ekran bir özellik değil; yerel ağdaki bir NAS için istenen de bu değildi.
+İki adımlı doğrulamanın **girişi var, KAYDI yok**. `SignIn.tsx` `mfa_required` cevabını işliyor,
+kod ekranını çiziyor ve kurtarma kodunu da kabul ediyor — yani ikinci faktörü olan biri giriş
+yapabiliyor. Ama `POST /me/mfa/enrolment` ve kardeşlerini çağıran hiçbir ekran yok, yani kimse onu
+AÇAMIYOR. Bu satır uzun süre "arayüzde iki adımlı doğrulama yok" diyordu; doğrulama koda karşı
+yapılınca yanlış olduğu görüldü.
+
 Giriş kullanıcı adı ve parolayla yapılır — e-posta adresi ve ayrı bir "görünen ad" yoktur.
 
 Baytların gerçekten aktığı tam kurulum `deploy/systemd/` altındaki birim dosyalarıdır ve
@@ -86,8 +90,40 @@ imzalı apt deposundan kurar.
 
 ## Faz 1'de henüz olmayanlar
 
-Ürünün hangi kısmının bittiğini iddia etmek yerine ölçüyoruz. Bugün itibarıyla eksik olanlar:
+Bu liste elle tutuluyordu ve dört yerde bayat çıktı, o yüzden koda karşı DOĞRULANDI: spec'in her
+maddesi tarandı ve her bulgu ayrıca çürütülmeye çalışıldı. Sonuç 85 madde; tamamı
+[Eksikler Panosu](https://claude.ai/code/artifact/7949358c-b855-4128-9e99-082e15249ea2)'nda.
 
+### En pahalı sınıf: yazıldı, ulaşılamıyor
+
+Eksiklerin en ağırı yazılmamış özellikler değil. **Yazılmış, test edilmiş ve hiçbir ekranın
+çağırmadığı** uçlar — dokuz kalem:
+
+- **İzin paneli yok.** `GET/PUT /files/{id}/permissions` ve `GET/PUT /shares/{id}/permissions`
+  sunuluyor, 968 satırlık bir servis ve iki entegrasyon paketi arkasında duruyor, ve
+  `apps/web/src` içinde tek bir çağrısı yok. `Shares.tsx` kullanıcıyı hiç var olmayan bir
+  "izinler paneline" yönlendiriyor.
+- **Ekiplerin hiç arayüzü yok.** Dört yol üzerinde sekiz işlem sunuluyor; web'de sıfır çağrı.
+- **MFA kaydının arayüzü yok** (yukarıya bakınız).
+- **İşler ekranı yok.** `GET /jobs` yönetici için var; onu okuyan hiçbir yer yok.
+
+**Bunun somut sonucu: ikinci bir kullanıcıya hiçbir şeye erişim veremiyorsun.** Üstelik
+`everyone_team()` yalnız o an var olan kullanıcıları ekibe aldığı için, ilk `GET /files`'tan
+SONRA açılan bir üye boş bir dosya yöneticisi görüyor — ve bunu düzeltecek iki yolun (ekip
+üyeliği, kök izni) ikisinin de ekranı yok.
+
+### Diğerleri
+
+- **Web dosya yöneticisi yalnız TEK paylaşımı görebiliyor.** `FilesService.shareOf` her zaman
+  `ORDER BY created_at LIMIT 1` ile ilk paylaşımı seçiyor ve `/files`'ın bir `share` parametresi
+  yok — yani `POST /shares` ile açılan bir paylaşım Samba'ya yayımlanıyor ama web'de görünmüyor.
+- **Sözleşmenin söz verip sunucunun yapmadıkları.** RFC 9457 `ProblemDetails` gövdesi hiç
+  üretilmiyor; `Idempotency-Key` dört uçta tanımlı ve hiçbir yerde okunmuyor; `If-Match`/412
+  tanımlı ve uygulanmamış; `GET /files`'ın `sort` parametresi yok sayılıyor; `Upload-Checksum`
+  doğrulanmıyor. §14'ün istediği SSE/WebSocket olay akışı da yok.
+- **Yönetici parola sıfırlama yok.** Parolasını unutan bir kullanıcı üründen kurtarılamıyor.
+- **Kopyalama yok** (`POST /file-operations`, ajanda karşılık gelen tipli işlem olmadığı için).
+- **Çöp kutusunun saklama süresi ve temizleme politikası yok.**
 - Dosya sistemi olaylarından metadata'yı besleyen endeksleyici. Bu olmadan yalnız DEPSIS
   üzerinden yüklenen dosyalar listede görünür; SMB'den yazılanlar görünmez.
 - ZFS havuzu yaratma. Ajan dataset ve anlık görüntü yaratabiliyor, havuz yaratamıyor — mirror
