@@ -95,10 +95,29 @@ imzalı apt deposundan kurar.
 - Paylaşımı SİLMEK. Grant'ları paylaşımı tutuyor (`ON DELETE RESTRICT`) ve son grant'ı silmek de
   reddediliyor. Bilinçli: paylaşımı silmek dataset'i silmek demek, ve ADR-0007 yıkıcı havuz
   işlemlerini üründen dışarıda tutuyor. Kapatmanın yolu, kimseyi adlandırmayan bir kök izni.
-- Samba'nın kullanıcı eşlemesi. Yapılandırma gerçekten yazılıyor (atomik + `testparm` + canlı
-  bağlantı denemesi + başarısızlıkta geri dönüş) ama bölümlerde `valid users` yok: bir paylaşımı
-  SMB'den kimin açabileceği POSIX izinlerine bırakılmış durumda. Web tarafındaki izin modeli
-  (§6.2) çalışıyor ve ACL'ler yazılıyor; eksik olan `smb.conf`'un kendi filtresi.
+- **Samba'nın kullanıcı eşlemesi — ve artık tam olarak neyin eksik olduğu ÖLÇÜLDÜ.**
+
+  `tools/poc/p2-a-smb-identity.sh` gerçek Samba 4.22 ile on ölçüm yapıyor ve üçünü birden
+  cevaplıyor:
+
+  1. DEPSIS'in yazdığı ACL zinciri SMB'ye **ulaşıyor**: `SecureShareRoot`'un 0750'si +
+     `ApplyFolderAcl`'in `g:<gid>` girdisi, smbd oturumunu gerçekten kapılıyor. Gruba üye olan
+     okuyor, olmayan reddediliyor.
+  2. `valid users` bağımsız bir ikinci kapı: ACL'in izin verdiğini daraltıyor, ACL'in vermediğini
+     **genişletemiyor**. İkisi kesişim.
+  3. `valid users` içinde karşılığı olmayan bir ad, P0-B'nin `full_audit` tuzağına DÜŞMÜYOR:
+     `testparm` onu kabul ediyor (yani testparm kapı değil) ama smbd diğer paylaşımları sunmaya
+     devam ediyor. Yani DEPSIS bu direktifi güvenle üretebilir.
+
+  Geriye kalan tek eksik: **Unix hesapları ve grup üyelikleri**. ACL'ler sayısal uid/gid
+  adlandırıyor ve o numaralara karşılık gelen hesapları hiçbir şey yaratmıyor. Hesaplar var olduğu
+  anda zincirin tamamı çalışıyor — ölçüldü.
+
+  İkinci bir engel daha var ve tasarımı etkiliyor: Samba'nın kendi NT hash'ine ihtiyacı var ve
+  DEPSIS'in parola hash'inden türetilemiyor. Yani ya kullanıcı ayrı bir SMB parolası koyacak, ya
+  da parola belirleme anında düz metin ayrıcalıklı tarafa geçecek — ikincisi ayrıcalık sınırından
+  düz parola geçirmek demek ve ayrı bir karar.
+
 - **Ölen işleri gösteren bir EKRAN yok.** `GET /jobs?status=dead` var ve yönetici görebiliyor, ama
   arayüzde onu okuyan bir yer yok — yani bakmayı bilen birinin API'yi çağırması gerekiyor.
 - Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`
