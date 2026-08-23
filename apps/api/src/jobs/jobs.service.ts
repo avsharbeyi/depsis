@@ -128,6 +128,53 @@ export class JobsService {
     };
   }
 
+  /**
+   * The tenant's jobs, newest first — the listing `GET /jobs/{jobId}` cannot substitute for.
+   *
+   * It exists for one status in particular. A `dead` job is a piece of work the queue gave up on
+   * after exhausting its attempts, and for `permissions.apply` that means a permission applied in
+   * the database and never applied to the filesystem: a folder the web reports as closed and SMB
+   * keeps serving. The row is preserved in `job_history` rather than deleted, which ADR-0003 calls
+   * "an alarm can find it" — but nothing could, because the only way to reach a job was to already
+   * hold its id, and the page holding it is long gone by the time the job dies.
+   *
+   * BOTH TABLES, because a job lives in `job_queue` until it reaches a terminal state and in
+   * `job_history` afterwards. A listing that read only one of them would answer "no dead jobs" on
+   * an appliance full of them, which is the worst available answer.
+   *
+   * `withTenant`, so RLS decides what is visible rather than a WHERE clause anyone could forget.
+   */
+  async list(
+    organizationId: string,
+    statuses: readonly JobStatus[],
+    limit: number,
+  ): Promise<Job[]> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<JobRow>(
+        `SELECT id::text AS id, kind, status, progress, created_at, last_error
+           FROM (
+             SELECT id, kind, status, progress, created_at, last_error FROM public.job_queue
+             UNION ALL
+             SELECT id, kind, status, progress, created_at, last_error FROM public.job_history
+             -- NOT "AS both": BOTH is a reserved word in PostgreSQL, as in TRIM(BOTH ...), and a
+             -- bare alias by that name is a syntax error. (No backticks here -- template literal.)
+           ) AS every_job
+          WHERE cardinality($1::text[]) = 0 OR status = ANY($1::text[])
+          ORDER BY created_at DESC, id DESC
+          LIMIT $2`,
+        [[...statuses], limit],
+      ),
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      progress: row.progress,
+      createdAt: row.created_at,
+      lastError: row.last_error,
+    }));
+  }
+
   // ─── the worker's side ──────────────────────────────────────────────────────
 
   /**

@@ -64,20 +64,68 @@ describeDb('the job queue, against a real PostgreSQL', () => {
   beforeEach(async () => {
     // Both tables, because a job that finished moved between them and residue in either would let
     // a later test claim a job it did not create.
+    //
+    // SCOPED TO THIS SUITE'S ORGANISATIONS. It used to be an unqualified `DELETE FROM
+    // public.job_queue`, and vitest runs test files concurrently against one database — so this
+    // emptied every other suite's queue in the middle of their runs. A suite that enqueues a job
+    // and then counts it to prove the enqueue happened would measure zero and fail on an assertion
+    // about its own tenant. It was a race that had simply not lost yet; two slower tests added
+    // elsewhere were enough to make it lose.
     await owner.withoutTenant('migration-status', async (q) => {
-      await q.query('DELETE FROM public.job_queue');
-      await q.query('DELETE FROM public.job_history');
+      await q.query('DELETE FROM public.job_queue WHERE organization_id = ANY($1)', [[orgA, orgB]]);
+      await q.query('DELETE FROM public.job_history WHERE organization_id = ANY($1)', [
+        [orgA, orgB],
+      ]);
     });
   });
 
   afterAll(async () => {
     await owner.withoutTenant('migration-status', async (q) => {
-      await q.query('DELETE FROM public.job_queue');
-      await q.query('DELETE FROM public.job_history');
+      await q.query('DELETE FROM public.job_queue WHERE organization_id = ANY($1)', [[orgA, orgB]]);
+      await q.query('DELETE FROM public.job_history WHERE organization_id = ANY($1)', [
+        [orgA, orgB],
+      ]);
       await q.query('DELETE FROM public.organizations WHERE slug = ANY($1)', [[SLUG_A, SLUG_B]]);
     });
     await db.onModuleDestroy();
     await owner.onModuleDestroy();
+  });
+
+  it('lists dead jobs, which is the only way anybody finds one', async () => {
+    // A dead job is work the queue gave up on. For `permissions.apply` that means a permission
+    // applied in the database and never on the filesystem — a folder the web reports as closed and
+    // SMB keeps serving. ADR-0003 says the row "lands in history where an alarm can find it", and
+    // until this listing existed nothing could: `GET /jobs/{jobId}` answers only to whoever still
+    // holds the id, and the page that held it closed long before the job died.
+    const id = await jobs.enqueue(orgA, 'test.doomed', {}, { maxAttempts: 1 });
+    const claimed = await jobs.claim(['test.doomed']);
+    expect(claimed?.id).toBe(id);
+    expect(await jobs.finish(id, 'failed', 'nothing on the other end')).toBe('dead');
+
+    // It has left `job_queue` for `job_history` by now, so a listing that read only the live table
+    // would answer "no dead jobs" on an appliance full of them — the worst available answer.
+    const dead = await jobs.list(orgA, ['dead'], 50);
+    expect(dead.map((job) => job.id)).toContain(id);
+    expect(dead.find((job) => job.id === id)?.lastError).toBe('nothing on the other end');
+
+    // And the filter narrows rather than decorates.
+    const queued = await jobs.list(orgA, ['queued'], 50);
+    expect(queued.map((job) => job.id)).not.toContain(id);
+
+    // No filter means everything, both tables included.
+    expect((await jobs.list(orgA, [], 50)).map((job) => job.id)).toContain(id);
+  });
+
+  it('does not show one tenant the other tenant\u2019s jobs', async () => {
+    // The listing reads two tables through `withTenant`, so RLS is what confines it — the same
+    // property the single-job lookup has, asserted here because a listing is where a missing
+    // policy would show up as somebody else's work appearing on an administrator's screen.
+    const mine = await jobs.enqueue(orgA, 'test.mine');
+    const theirs = await jobs.enqueue(orgB, 'test.theirs');
+
+    const listed = (await jobs.list(orgA, [], 50)).map((job) => job.id);
+    expect(listed).toContain(mine);
+    expect(listed).not.toContain(theirs);
   });
 
   it('hands the same job to exactly one of two workers claiming at once', async () => {

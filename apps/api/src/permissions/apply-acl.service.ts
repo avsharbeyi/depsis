@@ -86,8 +86,18 @@ export const APPLY_CHUNK = 1000;
  */
 const TREE_LOAD_LIMIT = 250_000;
 
-/** The same depth bound the permission walk uses, for the same reason: a cycle must not hang. */
-const MAX_TREE_DEPTH = 256;
+/**
+ * The same depth bound the permission walk uses, for the same reason: a cycle must not hang.
+ *
+ * The query walks ONE level PAST this and refuses if it finds anything, rather than stopping at it.
+ * Stopping was silent: the rows below simply did not come back, so those folders were missing from
+ * `all`, from `written`, from `targets` — and therefore from `failures`, which can only name ids
+ * that were in `targets`. The job reported success having left them carrying the pre-change ACL.
+ *
+ * A bound that drops work without saying so is the same shape of defect as a constraint that
+ * accepts what it claims to refuse: written, reviewed, and enforcing nothing anybody can see.
+ */
+export const MAX_TREE_DEPTH = 256;
 
 /** One folder's ACL, before the numbers are looked up. */
 interface ResolvedEntry {
@@ -402,7 +412,11 @@ async function folderRows(
          FROM public.file_entries c
          JOIN tree ON c.parent_id = tree.id
         WHERE c.organization_id = $1 AND c.kind = 'folder'
-          AND tree.depth < $3
+          -- Less-than-or-equal, not less-than: one level PAST the bound, so that going over it
+          -- is something this query can SEE rather than something it silently truncates. The
+          -- check below refuses the whole job if that level turns out to be occupied.
+          -- (No backticks in here: this is inside a template literal.)
+          AND tree.depth <= $3
      )
      SELECT id::text AS id, parent_id::text AS parent_id, parts, depth
        FROM tree
@@ -417,6 +431,17 @@ async function folderRows(
     throw new Error(
       `share ${payload.shareId} has at least ${TREE_LOAD_LIMIT} folders, which is more than one ` +
         `apply job will load; the POSIX ACLs below it are stale`,
+    );
+  }
+
+  const tooDeep = rows.filter((row) => row.depth >= MAX_TREE_DEPTH);
+  if (tooDeep.length > 0) {
+    // Refused rather than truncated. Everything below this point resolves against a chain the
+    // walk cannot see the top of, and writing an ACL derived from a partial chain is the one
+    // outcome worse than writing none.
+    throw new Error(
+      `share ${payload.shareId} has folders nested deeper than ${MAX_TREE_DEPTH} ` +
+        `(for example ${tooDeep[0]?.parts.join('/') ?? '?'}); their POSIX ACLs cannot be resolved`,
     );
   }
 

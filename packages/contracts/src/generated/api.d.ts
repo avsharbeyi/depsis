@@ -1383,6 +1383,62 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * İşleri listele — özellikle ölenleri
+         * @description Yalnız yöneticiler. `GET /jobs/{jobId}` yalnızca kimliği ELİNDE OLANA cevap veriyor, ve bir
+         *     işin ölmesi genellikle o kimliği taşıyan sayfa kapandıktan çok sonra oluyor. Böyle bir işi
+         *     görebileceğin hiçbir yer yoktu.
+         *
+         *     `dead`, `max_attempts` tükendiğinde veriliyor ve sessizce kaybolmuyor: satır
+         *     `job_history`'ye taşınıyor. Ama taşınmak, birinin bakması demek değil — ADR-0003'ün
+         *     "sistem alarmı üretir" cümlesinin karşılığı bu uç noktaydı ve yoktu.
+         *
+         *     Neden önemli: ölen bir `permissions.apply` işi, veritabanında uygulanmış ama dosya
+         *     sisteminde uygulanmamış bir izin demek. Yani web'de kapalı görünen bir klasör SMB'den
+         *     açılmaya devam ediyor — §6.2'nin ve ADR-0004'ün adıyla yasakladığı iki gerçeklik. Deneme
+         *     bütçesi bunu nadir kılıyor; nadir olan şey görünmez olmamalı.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Verilmezse hepsi. Birden fazla için virgülle ayır. */
+                    status?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description İşler, en yenisi başta */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JobPage"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/jobs/{jobId}": {
         parameters: {
             query?: never;
@@ -3452,6 +3508,9 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
             error?: components["schemas"]["ProblemDetails"];
+        };
+        JobPage: {
+            items: components["schemas"]["Job"][];
         };
         Telemetry: {
             pools: components["schemas"]["PoolStatus"][];

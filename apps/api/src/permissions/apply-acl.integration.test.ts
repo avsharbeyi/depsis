@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AgentService } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
-import { APPLY_CHUNK, AclApplyService } from './apply-acl.service.js';
+import { APPLY_CHUNK, MAX_TREE_DEPTH, AclApplyService } from './apply-acl.service.js';
 
 /**
  * The half of §6.2 that leaves the database: `permissions.apply`, against a real PostgreSQL.
@@ -285,6 +285,49 @@ describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
     await owner.withoutTenant('migration-status', (q) =>
       q.query(`DELETE FROM file_entries WHERE organization_id = $1 AND name LIKE 'c%'`, [org]),
     );
+  });
+
+  it('refuses a tree deeper than the bound instead of quietly dropping the bottom of it', async () => {
+    // THE OLD BEHAVIOUR WAS SILENCE. `tree.depth < MAX_TREE_DEPTH` simply stopped returning rows,
+    // so folders below the bound were absent from `all`, from `written`, from `targets` — and
+    // therefore from `failures`, which can only name ids that were in `targets`. The job reported
+    // SUCCESS having left those directories carrying the pre-change ACL. A bound that drops work
+    // without saying so is the same defect as a constraint that accepts what it claims to refuse.
+    //
+    // One chain, MAX_TREE_DEPTH + 1 deep. `generate_series` with a recursive insert would be
+    // neater but the ids have to be known to chain them, so a loop it is.
+    const deep: string[] = [];
+    await owner.withoutTenant('migration-status', async (q) => {
+      // Annotated because the loop assigns from its own result: without it TypeScript infers
+      // `parent` from an expression that references `parent`.
+      let parent: string | null = null;
+      let path = '';
+      for (let level = 0; level <= MAX_TREE_DEPTH; level += 1) {
+        path = `${path}/d${level}`;
+        const row: { id: string }[] = await q.query<{ id: string }>(
+          `INSERT INTO file_entries (organization_id, share_id, parent_id, kind, name, path)
+           VALUES ($1,$2,$3,'folder',$4,$5) RETURNING id::text AS id`,
+          [org, share, parent, `d${level}`, path],
+        );
+        parent = row[0]?.id ?? null;
+        if (parent !== null) deep.push(parent);
+      }
+    });
+
+    calls = [];
+    await expect(acl.apply(org, { shareId: share, entryId: null }, 'test')).rejects.toThrow(
+      /nested deeper than/,
+    );
+    // And nothing was written. Refusing AFTER writing part of the tree would leave the shallow
+    // half on the new answer and the deep half on the old one, which is the divergence with no
+    // record that this whole class exists to prevent.
+    expect(calls).toHaveLength(0);
+
+    await owner.withoutTenant('migration-status', async (q) => {
+      for (const id of [...deep].reverse()) {
+        await q.query(`DELETE FROM file_entries WHERE id = $1`, [id]);
+      }
+    });
   });
 
   it('rewrites a trashed folder too, because its directory is live on SMB', async () => {

@@ -99,10 +99,6 @@ imzalı apt deposundan kurar.
   bağlantı denemesi + başarısızlıkta geri dönüş) ama bölümlerde `valid users` yok: bir paylaşımı
   SMB'den kimin açabileceği POSIX izinlerine bırakılmış durumda. Web tarafındaki izin modeli
   (§6.2) çalışıyor ve ACL'ler yazılıyor; eksik olan `smb.conf`'un kendi filtresi.
-- **`MAX_TREE_DEPTH` 256'dan derindeki klasörleri SESSİZCE atlıyor.** 5000 sınırının aksine bir
-  hata yok: satırlar dönmüyor, iş yeşil bitiyor, o klasörler eski ACL'iyle kalıyor. Yalnız
-  `TeamsService`'in kök uygulamasından erişilebilir — `PermissionsService.write` bir seviye önce
-  reddediyor.
 - **`claim_job` `max_attempts`'i kontrol etmiyor.** Kirası dolan bir iş sınırsız yeniden
   alınabiliyor: `attempt` tavansız artıyor, iş ne başarıyor ne ölüyor. Bunun tersi de var —
   temiz başarısız olan bir iş, `finish_job`'da sınıra çarpıp ölüyor.
@@ -111,9 +107,8 @@ imzalı apt deposundan kurar.
   geçen her SMB principal'ı paylaşım kökünün üst düzey adlarını listeleyebiliyor. Alt klasörler
   etkilenmiyor (ajanın açtığı klasörler 0750 + kendi ACL'i). Ajan tarafında bir değişiklik
   gerektiriyor.
-- **Ölen bir `permissions.apply` işini kimse izlemiyor.** Deneme bütçesi 5'ten 20'ye çıktı (yaklaşık
-  bir saat, 30 saniye yerine), yani ajan yeniden başlatmasını ve yükseltmeyi atlatıyor. Ama sonunda
-  ölen bir iş `job_history`'de duruyor ve onu listeleyen bir uç ya da ekran yok.
+- **Ölen işleri gösteren bir EKRAN yok.** `GET /jobs?status=dead` var ve yönetici görebiliyor, ama
+  arayüzde onu okuyan bir yer yok — yani bakmayı bilen birinin API'yi çağırması gerekiyor.
 - Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`
   yalnız DEPSIS'in kendi aldıklarını gösterir ve yanıtta `complete: false` ile bunu söyler.
 - §21'in belgeleri: yönetici kılavuzu, son kullanıcı kılavuzu, yedekleme ve felaket kurtarma.

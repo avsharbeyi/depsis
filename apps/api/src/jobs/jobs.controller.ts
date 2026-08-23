@@ -3,22 +3,82 @@ import {
   Get,
   NotFoundException,
   Param,
+  Query,
   Req,
   UnauthorizedException,
+  UnprocessableEntityException,
   UseGuards,
 } from '@nestjs/common';
 import type { OpenApi } from '@depsis/contracts';
 
-import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
-import { JobsService } from './jobs.service.js';
+import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import { JobsService, type Job, type JobStatus } from './jobs.service.js';
 
 type Schemas = OpenApi.components['schemas'];
 type JobResponse = Schemas['Job'];
+
+/** The five the queue can be in. Written here so a typo in a query string is a 422, not an empty page. */
+const STATUSES: readonly JobStatus[] = ['queued', 'running', 'succeeded', 'failed', 'dead'];
+
+/** How many rows one page returns when the caller does not say. */
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
 
 @Controller('jobs')
 @UseGuards(SessionGuard)
 export class JobsController {
   constructor(private readonly jobs: JobsService) {}
+
+  /**
+   * GET /jobs — the listing that makes a dead job findable.
+   *
+   * `GET /jobs/:jobId` answers only to whoever already holds the id, and a job usually dies long
+   * after the page that held it was closed. So a `permissions.apply` that exhausted its attempts —
+   * a permission applied in the database and never on the filesystem — existed in `job_history`
+   * with nothing in the product able to reach it. ADR-0003 says a dead job "does not silently
+   * disappear: the row lands in history where an alarm can find it"; this is the first thing that
+   * can.
+   *
+   * ADMINISTRATORS ONLY, unlike the single-job lookup. That one is safe for anybody because
+   * holding the id is itself the authorisation — it comes back from the request that created the
+   * job. A LISTING has no such property: it would show a member every job in the tenant, which is
+   * a running account of what everyone else is doing.
+   */
+  @Get()
+  @UseGuards(AdminGuard)
+  async list(
+    @Req() request: AuthenticatedRequest,
+    @Query('status') status: string | undefined,
+    @Query('limit') limit: string | undefined,
+  ): Promise<Schemas['JobPage']> {
+    const session = request.depsis;
+    if (session === undefined) throw new UnauthorizedException();
+
+    // An unknown status is refused rather than ignored. Ignoring it would answer `?status=daed`
+    // with every job in the tenant, which reads as "nothing is wrong" to the one person who went
+    // looking — the opposite of what this endpoint is for.
+    const wanted = (status ?? '')
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part !== '');
+    for (const part of wanted) {
+      if (!STATUSES.includes(part as JobStatus)) {
+        throw new UnprocessableEntityException(
+          `unknown job status '${part}'; expected one of ${STATUSES.join(', ')}`,
+        );
+      }
+    }
+
+    // Clamped rather than refused: a limit is a request for a page size, and answering a big
+    // number with a 422 helps nobody. A limit that is not a number at all falls back to the
+    // default for the same reason.
+    const asked = Number(limit);
+    const size =
+      Number.isFinite(asked) && asked >= 1 ? Math.min(Math.trunc(asked), MAX_LIMIT) : DEFAULT_LIMIT;
+
+    const jobs = await this.jobs.list(session.organizationId, wanted as JobStatus[], size);
+    return { items: jobs.map(toResponse) };
+  }
 
   /**
    * GET /jobs/:jobId — how a long-running operation is going.
@@ -39,26 +99,36 @@ export class JobsController {
     const job = await this.jobs.find(session.organizationId, jobId);
     if (job === null) throw new NotFoundException();
 
-    return {
-      id: job.id,
-      kind: job.kind,
-      status: job.status,
-      progress: job.progress,
-      createdAt: job.createdAt.toISOString(),
-      // `error` is present only when there is one. The queue stores a single string, so it is
-      // carried as the title; inventing a `type`, `status` and `code` for a failure that happened
-      // inside a worker would be dressing a message up as a classified problem it never was.
-      ...(job.lastError === null
-        ? {}
-        : {
-            error: {
-              type: 'about:blank',
-              title: job.lastError,
-              status: 500,
-              code: 'job_failed',
-              correlationId: job.id,
-            },
-          }),
-    };
+    return toResponse(job);
   }
+}
+
+/**
+ * One job, as the contract describes it.
+ *
+ * Shared by the listing and the lookup so the two cannot describe the same row differently — which
+ * they would, eventually, if each built the object itself.
+ */
+function toResponse(job: Job): JobResponse {
+  return {
+    id: job.id,
+    kind: job.kind,
+    status: job.status,
+    progress: job.progress,
+    createdAt: job.createdAt.toISOString(),
+    // `error` is present only when there is one. The queue stores a single string, so it is
+    // carried as the title; inventing a `type`, `status` and `code` for a failure that happened
+    // inside a worker would be dressing a message up as a classified problem it never was.
+    ...(job.lastError === null
+      ? {}
+      : {
+          error: {
+            type: 'about:blank',
+            title: job.lastError,
+            status: 500,
+            code: 'job_failed',
+            correlationId: job.id,
+          },
+        }),
+  };
 }
