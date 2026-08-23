@@ -95,6 +95,20 @@ describe('the emitted agent schema', () => {
       // this can be aimed at one that already exists, and the API runs it before every root ACL
       // write. It takes no mode: the value is the agent's, so a caller cannot ask for 0777.
       'secure_share_root',
+      // The last link between the permission model and SMB, and the most privileged thing in the
+      // set: it creates system accounts. The operands are narrowed until the dangerous shapes
+      // cannot be expressed — every id is a `PosixId` confined to 300000-399999, so `root` and
+      // `www-data` are unrepresentable, and GROUP names are derived from the gid rather than
+      // supplied, which is what stops `gpasswd -M` being pointed at `sudo`. The one caller-supplied
+      // string is the login, because the alternative is a person typing `depsis-u-300001` into
+      // Windows; the agent checks it against `getent` and refuses a name that belongs to an
+      // account outside the reserved range.
+      //
+      // Passwords never appear. What crosses is an NT hash the API computed
+      // (`apps/api/src/auth/nt-hash.ts`), because `tools/poc/p2-b-smb-password.sh` measured that a
+      // precomputed hash installs and authenticates — so the user's actual password, which they
+      // may have reused elsewhere, stays on the unprivileged side.
+      'sync_posix_identity',
       // ADR-0020's four, and the shape of them is the point. A general `ZeroTierRequest { path }`
       // proxy would have been the network form of the free-form command §2.2 forbids: one variant
       // through which every other endpoint of zerotier-one's local API becomes reachable. Instead
@@ -163,11 +177,12 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 5 since `SecureShareRoot`;
-    // the pair is what makes a new API against a stale agent fail at the handshake instead of on
-    // the first privileged call — which for this operation would mean a share root left
-    // world-traversable with the API believing it had been closed.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(5);
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 6 since
+    // `SyncPosixIdentity`; the pair is what makes a new API against a stale agent fail at the
+    // handshake instead of on the first privileged call. For these last two operations that
+    // matters more than usual: a stale agent would leave share roots world-traversable and every
+    // ACL entry pointing at a uid no account holds, with the API believing both were handled.
+    expect(EXPECTED_SCHEMA_VERSION).toBe(6);
   });
 
   it('agrees with the number the agent actually reports', () => {

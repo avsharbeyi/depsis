@@ -1072,6 +1072,53 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
 
             Request::SecureShareRoot { share } => self.secure_share_root(share.as_str()),
 
+            Request::SyncPosixIdentity { users, groups } => {
+                // The whole sequence — check every login against the machine, create the private
+                // groups, the accounts, the team groups, the membership, then one passdb import —
+                // lives in `identity`, because every step is a real effect on the box that has to
+                // be tested against real `getent` output rather than asserted about an argv. What
+                // stays here is the mapping onto the answers the API can act on, and there are
+                // three:
+                //
+                //   posix_identity_synced  the machine matches; the counts say what changed
+                //   smb_unavailable        Samba is not installed — a 503, not a fault (§17)
+                //   refused                a login belongs to an account DEPSIS did not create,
+                //                          or a uid is taken by a different name. Nothing was
+                //                          changed: the checks run before the first `useradd`.
+                let specs: Vec<crate::identity::UserSpec> = users
+                    .iter()
+                    .map(|u| crate::identity::UserSpec {
+                        uid: u.uid,
+                        login: u.login.clone(),
+                        nt_hash: u.nt_hash.clone(),
+                    })
+                    .collect();
+                let want: Vec<crate::identity::GroupSpec> = groups
+                    .iter()
+                    .map(|g| crate::identity::GroupSpec {
+                        gid: g.gid,
+                        members: g.members.clone(),
+                    })
+                    .collect();
+                match crate::identity::sync(self.runner, &specs, &want) {
+                    Ok(outcome) => Ok(Response::PosixIdentitySynced {
+                        users_created: outcome.users_created,
+                        groups_created: outcome.groups_created,
+                        passwords_set: outcome.passwords_set,
+                    }),
+                    Err(e) if e.is_unavailable() => Ok(Response::SmbUnavailable {
+                        reason: e.to_string(),
+                    }),
+                    Err(
+                        e @ (crate::identity::IdentityError::NotOurs { .. }
+                        | crate::identity::IdentityError::UidTaken { .. }),
+                    ) => Ok(Response::Refused {
+                        reason: e.to_string(),
+                    }),
+                    Err(e) => Err(SeamError::Io(e.to_string())),
+                }
+            }
+
             Request::ApplyFolderAcl {
                 share,
                 path,

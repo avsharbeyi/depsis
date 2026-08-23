@@ -196,6 +196,166 @@ pub enum PosixIdError {
 #[serde(try_from = "u32", into = "u32")]
 pub struct PosixId(u32);
 
+/// Why a login name was rejected.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PosixNameError {
+    #[error("empty login")]
+    Empty,
+    #[error("login is {len} characters; the limit is {max}")]
+    TooLong { len: usize, max: usize },
+    #[error("login must start with a letter or digit, not {0:?}")]
+    BadStart(char),
+    #[error("character {0:?} is not allowed in a login")]
+    IllegalChar(char),
+}
+
+/// A Unix login name the agent is willing to create.
+///
+/// THE ONE CALLER-SUPPLIED STRING IN THE IDENTITY OPERATION, and it is supplied for a reason worth
+/// stating: the alternative is deriving the account name from the uid, which works perfectly and
+/// tells a person to type `depsis-u-300001` into Windows. Group names ARE derived, because nobody
+/// types one.
+///
+/// The shape is exactly migration 0010's `users_username_format` — `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`
+/// — re-stated here rather than inherited, because §2.2 is that the agent does not trust the API.
+/// Debian's `useradd` was measured accepting every string this admits, leading digits, uppercase
+/// and 64 characters included, so a name the database allows is a name the agent can create.
+///
+/// What it CANNOT express is the shape that would matter: no NUL, no slash, no leading dash, no
+/// space. A name beginning with a dash would become a flag to `useradd` — and unlike `zfs`, which
+/// at least fails, `useradd -M` would be read as a valid option.
+///
+/// It does NOT prevent naming a system account: `root` and `postgres` both match. That check
+/// cannot be a type because it is a question about the machine, and `identity::sync` asks it
+/// against `getent` before creating anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct PosixName(String);
+
+impl PosixName {
+    const MAX: usize = 64;
+
+    pub fn parse(raw: impl Into<String>) -> Result<Self, PosixNameError> {
+        let s: String = raw.into();
+        let mut chars = s.chars();
+        let Some(first) = chars.next() else {
+            return Err(PosixNameError::Empty);
+        };
+        if s.chars().count() > Self::MAX {
+            return Err(PosixNameError::TooLong {
+                len: s.chars().count(),
+                max: Self::MAX,
+            });
+        }
+        if !first.is_ascii_alphanumeric() {
+            return Err(PosixNameError::BadStart(first));
+        }
+        for ch in s.chars() {
+            if !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-') {
+                return Err(PosixNameError::IllegalChar(ch));
+            }
+        }
+        Ok(Self(s))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for PosixName {
+    type Error = PosixNameError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<PosixName> for String {
+    fn from(value: PosixName) -> Self {
+        value.0
+    }
+}
+
+/// Why an NT hash was rejected.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NtHashError {
+    #[error("an NT hash is 32 hex characters; got {0}")]
+    WrongLength(usize),
+    #[error("character {0:?} is not uppercase hex")]
+    NotHex(char),
+}
+
+/// An NTLM password hash — `MD4(UTF-16LE(password))`, uppercase hex.
+///
+/// A TYPE rather than a `String`, because the failure it prevents is silent. The smbpasswd import
+/// format is fixed-width: a lowercase or short field produces a line `pdbedit` accepts and a user
+/// who cannot log in, with no error anywhere. `tools/poc/p2-b-smb-password.sh` measured that shape
+/// of failure from the other direction with the `LCT` field.
+///
+/// The agent never computes this and never sees a password. The API computes it — see
+/// `apps/api/src/auth/nt-hash.ts`, which carries its own MD4 because OpenSSL 3 moved MD4 to the
+/// legacy provider and Node cannot reach it. What crosses the boundary is password-EQUIVALENT for
+/// one protocol, which is worse than nothing and much better than the user's actual password.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct NtHash(String);
+
+impl NtHash {
+    pub fn parse(raw: impl Into<String>) -> Result<Self, NtHashError> {
+        let s: String = raw.into();
+        if s.len() != 32 {
+            return Err(NtHashError::WrongLength(s.len()));
+        }
+        for ch in s.chars() {
+            if !(ch.is_ascii_digit() || ('A'..='F').contains(&ch)) {
+                return Err(NtHashError::NotHex(ch));
+            }
+        }
+        Ok(Self(s))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for NtHash {
+    type Error = NtHashError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<NtHash> for String {
+    fn from(value: NtHash) -> Self {
+        value.0
+    }
+}
+
+/// One account the appliance must have, as the wire carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PosixUserSpec {
+    pub uid: PosixId,
+    pub login: PosixName,
+    /// Absent leaves the existing password alone. A user who has not set one since this feature
+    /// existed has no passdb entry at all, which is the honest state rather than a broken one:
+    /// they cannot reach SMB until they next change their password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nt_hash: Option<NtHash>,
+}
+
+/// One group and the membership it must END UP with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PosixGroupSpec {
+    pub gid: PosixId,
+    /// EXACT, not additive. `gpasswd -M` replaces the whole list, which is what makes a member who
+    /// left the team actually leave the group — an additive sync would let their ACL access
+    /// outlive the grant that justified it.
+    pub members: Vec<PosixId>,
+}
+
 impl PosixId {
     pub const MIN: u32 = 300_000;
     pub const MAX: u32 = 399_999;
@@ -555,6 +715,34 @@ pub enum Request {
         owner_gid: PosixId,
     },
 
+    /// Make the machine's accounts and groups match DEPSIS's principals.
+    ///
+    /// THE LAST LINK. `folder_grants` decides access, `ApplyFolderAcl` writes it as POSIX entries
+    /// naming numeric gids, and `SecureShareRoot` closes the top of the share so nothing else gets
+    /// in. `tools/poc/p2-a-smb-identity.sh` measured that this genuinely gates a real smbd session
+    /// — and that it gated EVERYONE, because the numbers belonged to no account. Nothing in the
+    /// product had ever created one.
+    ///
+    /// DESIRED STATE, not a delta. The caller sends every user and every group it wants to exist,
+    /// and membership is replaced rather than added to. A delta would mean the agent had to be told
+    /// about removals separately, and the removal is the half that matters: a member who left a
+    /// team but stayed in the Unix group keeps reaching folders their grant no longer covers.
+    ///
+    /// Creating system accounts is the most privileged thing in this set, so the operands are
+    /// narrowed until the dangerous shapes cannot be expressed. Every id is a `PosixId`, which
+    /// refuses 0 and anything outside 300000-399999 — the agent cannot be asked to touch `root`,
+    /// `www-data` or `shadow`. Group names are DERIVED from the gid rather than supplied, so
+    /// `gpasswd -M` can never be pointed at `sudo`. The login IS supplied, because the alternative
+    /// is a person typing `depsis-u-300001` into Windows, and `identity::sync` checks it against
+    /// `getent` before creating anything: a name that already belongs to an account outside the
+    /// reserved range refuses the whole operation.
+    ///
+    /// Passwords arrive as NT hashes and never as passwords. See `NtHash`.
+    SyncPosixIdentity {
+        users: Vec<PosixUserSpec>,
+        groups: Vec<PosixGroupSpec>,
+    },
+
     /// Close a share root to everybody the ACL does not name.
     ///
     /// WHAT WAS WRONG. `zfs create` leaves a dataset's mountpoint at ZFS's default, which is
@@ -785,6 +973,20 @@ pub enum Response {
     /// know is that the next call — the database row, or a publish into this directory — may now
     /// proceed, and the status alone says that.
     DirectoryCreated {},
+    /// The machine's accounts and groups now match what was asked for.
+    ///
+    /// Counts rather than a bare acknowledgement, and only the ones the agent CHANGED: a sync that
+    /// creates nothing is the ordinary steady state, and an operator watching zeros turn into a
+    /// number is watching the appliance take on a new user. `passwords_set` is separate because it
+    /// is the one that can be zero while the others are not — a user with no NT hash yet is a real
+    /// account that simply cannot reach SMB.
+    #[serde(rename = "posix_identity_synced")]
+    PosixIdentitySynced {
+        users_created: usize,
+        groups_created: usize,
+        passwords_set: usize,
+    },
+
     /// The share root is closed to everyone the ACL does not name.
     ///
     /// `mode` is echoed rather than omitted, unlike `DirectoryCreated`, and for the same reason
@@ -932,7 +1134,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// The mode `SecureShareRoot` writes: `rwx` for the owner, `r-x` for the group, nothing for other.
 ///

@@ -370,6 +370,34 @@
       ]
     },
     {
+      "description": "Make the machine's accounts and groups match DEPSIS's principals.\n\nTHE LAST LINK. `folder_grants` decides access, `ApplyFolderAcl` writes it as POSIX entries\nnaming numeric gids, and `SecureShareRoot` closes the top of the share so nothing else gets\nin. `tools/poc/p2-a-smb-identity.sh` measured that this genuinely gates a real smbd session\n— and that it gated EVERYONE, because the numbers belonged to no account. Nothing in the\nproduct had ever created one.\n\nDESIRED STATE, not a delta. The caller sends every user and every group it wants to exist,\nand membership is replaced rather than added to. A delta would mean the agent had to be told\nabout removals separately, and the removal is the half that matters: a member who left a\nteam but stayed in the Unix group keeps reaching folders their grant no longer covers.\n\nCreating system accounts is the most privileged thing in this set, so the operands are\nnarrowed until the dangerous shapes cannot be expressed. Every id is a `PosixId`, which\nrefuses 0 and anything outside 300000-399999 — the agent cannot be asked to touch `root`,\n`www-data` or `shadow`. Group names are DERIVED from the gid rather than supplied, so\n`gpasswd -M` can never be pointed at `sudo`. The login IS supplied, because the alternative\nis a person typing `depsis-u-300001` into Windows, and `identity::sync` checks it against\n`getent` before creating anything: a name that already belongs to an account outside the\nreserved range refuses the whole operation.\n\nPasswords arrive as NT hashes and never as passwords. See `NtHash`.",
+      "type": "object",
+      "properties": {
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PosixGroupSpec"
+          }
+        },
+        "op": {
+          "type": "string",
+          "const": "sync_posix_identity"
+        },
+        "users": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PosixUserSpec"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "users",
+        "groups"
+      ]
+    },
+    {
       "description": "Close a share root to everybody the ACL does not name.\n\nWHAT WAS WRONG. `zfs create` leaves a dataset's mountpoint at ZFS's default, which is\n`0755 root:root` — `other::r-x`. `ApplyFolderAcl` cannot fix it and must not try: that\noperation deliberately never touches the `user::`/`group::`/`other::` triple, and refuses\noutright if it changes underneath, because a \"permissions applied\" reply that had quietly\nrewritten the three entries every access falls back to would be the worst kind of lie.\n\nSo nothing in the product had ever set the mode of a share root, and every share on every\nappliance was traversable by anyone: an authenticated SMB principal could list the\ntop-level names and enter the root however narrow `folder_grants` was. Descent past it was\nstill gated, because agent-created folders are 0750 with an ACL of their own — so the leak\nis enumeration and traversal of ONE directory, not the contents below it. That is a smaller\nhole than it first reads as, and still one that makes a \"private\" share list its folder\nnames to the whole appliance.\n\nAN OPERATION OF ITS OWN, not a field on `CreateDataset`. Shares that already exist are open\ntoo, and an operand at creation time would only ever fix the next one. This can be aimed at\nany share, is idempotent, and the API runs it immediately before writing the root's ACL.\n\nTHE ORDER IS LOAD-BEARING AND IT IS A POSIX RULE, not a local convention: `chmod` on a file\nthat already carries an ACL sets the MASK from the group bits rather than the `group::`\nentry. Running this AFTER an ACL would silently clamp every named entry to `r-x`. Run\nbefore, the `setfacl` that follows recomputes the mask correctly — and the gap between them\nnarrows rather than widens, which is the direction to be wrong in.\n\nNo owner operand. The root stays `root:root` and that is the right answer rather than a\nmissing one: root bypasses every ACL anyway, no DEPSIS principal should own the top of a\nshare, and giving it to the administrator who happened to create it would bake one person's\naccount into the filesystem. With `0750` and root ownership, `user::` and `group::` reach\nnobody the appliance maps, `other::` reaches nobody at all, and every real grant arrives as\na named ACL entry — which is exactly the model ADR-0004 describes.",
       "type": "object",
       "properties": {
@@ -530,11 +558,68 @@
       "description": "A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.\n\nIts own type, next to `SafeComponent`, for the same reason and one more. The value is\nCONCATENATED INTO A REQUEST PATH (`/network/<id>`) and into an HTTP request line, so a\n`String` here would have to be remembered at every call site — and the site that forgot\nwould be the one that let `../` reach the local API's router, or a `\\r\\n` split one request\ninto two. A type is a validation nobody can skip.\n\nUppercase is REFUSED rather than folded to lowercase. ZeroTier prints ids in lowercase and\nthe same value is a key in `public.remote_networks`, so accepting two spellings for one\nnetwork means the audit trail and the table can end up holding both, and \"is this the\nnetwork we joined?\" stops being a string comparison.",
       "type": "string"
     },
+    "NtHash": {
+      "description": "An NTLM password hash — `MD4(UTF-16LE(password))`, uppercase hex.\n\nA TYPE rather than a `String`, because the failure it prevents is silent. The smbpasswd import\nformat is fixed-width: a lowercase or short field produces a line `pdbedit` accepts and a user\nwho cannot log in, with no error anywhere. `tools/poc/p2-b-smb-password.sh` measured that shape\nof failure from the other direction with the `LCT` field.\n\nThe agent never computes this and never sees a password. The API computes it — see\n`apps/api/src/auth/nt-hash.ts`, which carries its own MD4 because OpenSSL 3 moved MD4 to the\nlegacy provider and Node cannot reach it. What crosses the boundary is password-EQUIVALENT for\none protocol, which is worse than nothing and much better than the user's actual password.",
+      "type": "string"
+    },
+    "PosixGroupSpec": {
+      "description": "One group and the membership it must END UP with.",
+      "type": "object",
+      "properties": {
+        "gid": {
+          "$ref": "#/$defs/PosixId"
+        },
+        "members": {
+          "description": "EXACT, not additive. `gpasswd -M` replaces the whole list, which is what makes a member who\nleft the team actually leave the group — an additive sync would let their ACL access\noutlive the grant that justified it.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PosixId"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "gid",
+        "members"
+      ]
+    },
     "PosixId": {
       "description": "A numeric POSIX uid or gid, inside the range migration 0015 reserved for DEPSIS.\n\nA type rather than a comparison, for the reason `AclType` is a type: the agent exists not to\ntrust the API, and a rule the API is asked to follow is not a rule the agent enforces. Before\nthis, the privileged side refused the value 0 and nothing else — so uid 33 (`www-data`), gid 27\n(`sudo`), gid 42 (`shadow`) and the appliance's own service accounts were all accepted operands\nof `PublishTransfer`, `CreateDirectory` and `AclEntry`. The 300000-399999 range that 0015\nintroduced *precisely* so that \"sistem gruplarıyla çakışan bir gid, cihazdaki bir servis\nhesabına kullanıcının dosyalarını açmaktır\" was enforced in exactly two places, both\nunprivileged: the `CHECK` constraints and `assertUsable` in `posix.service.ts`.\n\nThe agent's own stated reason for refusing 0 — an API that skipped the uid mapping must fail\nloudly here — applies with the same force to an API that mapped it to the WRONG number, and\nthat was the case being waved through. Now a system id cannot be expressed in a request at all,\nthe same way `nfsv4` cannot be expressed at dataset creation.\n\nThe bounds are duplicated from `0015_teams_and_grants.sql` rather than read from anywhere. That\nis deliberate and it is the point: the agent must not depend on the database to know what it\nwill accept, because the database is on the unprivileged side of the boundary.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0
+    },
+    "PosixName": {
+      "description": "A Unix login name the agent is willing to create.\n\nTHE ONE CALLER-SUPPLIED STRING IN THE IDENTITY OPERATION, and it is supplied for a reason worth\nstating: the alternative is deriving the account name from the uid, which works perfectly and\ntells a person to type `depsis-u-300001` into Windows. Group names ARE derived, because nobody\ntypes one.\n\nThe shape is exactly migration 0010's `users_username_format` — `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`\n— re-stated here rather than inherited, because §2.2 is that the agent does not trust the API.\nDebian's `useradd` was measured accepting every string this admits, leading digits, uppercase\nand 64 characters included, so a name the database allows is a name the agent can create.\n\nWhat it CANNOT express is the shape that would matter: no NUL, no slash, no leading dash, no\nspace. A name beginning with a dash would become a flag to `useradd` — and unlike `zfs`, which\nat least fails, `useradd -M` would be read as a valid option.\n\nIt does NOT prevent naming a system account: `root` and `postgres` both match. That check\ncannot be a type because it is a question about the machine, and `identity::sync` asks it\nagainst `getent` before creating anything.",
+      "type": "string"
+    },
+    "PosixUserSpec": {
+      "description": "One account the appliance must have, as the wire carries it.",
+      "type": "object",
+      "properties": {
+        "login": {
+          "$ref": "#/$defs/PosixName"
+        },
+        "nt_hash": {
+          "description": "Absent leaves the existing password alone. A user who has not set one since this feature\nexisted has no passdb entry at all, which is the honest state rather than a broken one:\nthey cannot reach SMB until they next change their password.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NtHash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uid": {
+          "$ref": "#/$defs/PosixId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "uid",
+        "login"
+      ]
     },
     "SafeComponent": {
       "description": "A single path component under a share root — never a path, never absolute.\n\nADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access\nto `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle\n`/` or `..` through, so this type refuses them rather than sanitising.",
@@ -830,6 +915,37 @@
       },
       "required": [
         "status"
+      ]
+    },
+    {
+      "description": "The machine's accounts and groups now match what was asked for.\n\nCounts rather than a bare acknowledgement, and only the ones the agent CHANGED: a sync that\ncreates nothing is the ordinary steady state, and an operator watching zeros turn into a\nnumber is watching the appliance take on a new user. `passwords_set` is separate because it\nis the one that can be zero while the others are not — a user with no NT hash yet is a real\naccount that simply cannot reach SMB.",
+      "type": "object",
+      "properties": {
+        "groups_created": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "passwords_set": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "const": "posix_identity_synced"
+        },
+        "users_created": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "status",
+        "users_created",
+        "groups_created",
+        "passwords_set"
       ]
     },
     {

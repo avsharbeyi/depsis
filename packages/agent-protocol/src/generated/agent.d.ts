@@ -186,6 +186,11 @@ export type AgentRequest =
       share: SafeComponent;
     }
   | {
+      groups: PosixGroupSpec[];
+      op: 'sync_posix_identity';
+      users: PosixUserSpec[];
+    }
+  | {
       op: 'secure_share_root';
       share: SafeComponent;
     }
@@ -257,6 +262,42 @@ export type SafeComponent = string;
  */
 export type PosixId = number;
 /**
+ * A Unix login name the agent is willing to create.
+ *
+ * THE ONE CALLER-SUPPLIED STRING IN THE IDENTITY OPERATION, and it is supplied for a reason worth
+ * stating: the alternative is deriving the account name from the uid, which works perfectly and
+ * tells a person to type `depsis-u-300001` into Windows. Group names ARE derived, because nobody
+ * types one.
+ *
+ * The shape is exactly migration 0010's `users_username_format` — `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`
+ * — re-stated here rather than inherited, because §2.2 is that the agent does not trust the API.
+ * Debian's `useradd` was measured accepting every string this admits, leading digits, uppercase
+ * and 64 characters included, so a name the database allows is a name the agent can create.
+ *
+ * What it CANNOT express is the shape that would matter: no NUL, no slash, no leading dash, no
+ * space. A name beginning with a dash would become a flag to `useradd` — and unlike `zfs`, which
+ * at least fails, `useradd -M` would be read as a valid option.
+ *
+ * It does NOT prevent naming a system account: `root` and `postgres` both match. That check
+ * cannot be a type because it is a question about the machine, and `identity::sync` asks it
+ * against `getent` before creating anything.
+ */
+export type PosixName = string;
+/**
+ * An NTLM password hash — `MD4(UTF-16LE(password))`, uppercase hex.
+ *
+ * A TYPE rather than a `String`, because the failure it prevents is silent. The smbpasswd import
+ * format is fixed-width: a lowercase or short field produces a line `pdbedit` accepts and a user
+ * who cannot log in, with no error anywhere. `tools/poc/p2-b-smb-password.sh` measured that shape
+ * of failure from the other direction with the `LCT` field.
+ *
+ * The agent never computes this and never sees a password. The API computes it — see
+ * `apps/api/src/auth/nt-hash.ts`, which carries its own MD4 because OpenSSL 3 moved MD4 to the
+ * legacy provider and Node cannot reach it. What crosses the boundary is password-EQUIVALENT for
+ * one protocol, which is worse than nothing and much better than the user's actual password.
+ */
+export type NtHash = string;
+/**
  * A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.
  *
  * Its own type, next to `SafeComponent`, for the same reason and one more. The value is
@@ -276,6 +317,31 @@ export interface ShareSpec {
   dataset: DatasetName;
   name: SafeComponent;
   read_only: boolean;
+}
+/**
+ * One group and the membership it must END UP with.
+ */
+export interface PosixGroupSpec {
+  gid: PosixId;
+  /**
+   * EXACT, not additive. `gpasswd -M` replaces the whole list, which is what makes a member who
+   * left the team actually leave the group — an additive sync would let their ACL access
+   * outlive the grant that justified it.
+   */
+  members: PosixId[];
+}
+/**
+ * One account the appliance must have, as the wire carries it.
+ */
+export interface PosixUserSpec {
+  login: PosixName;
+  /**
+   * Absent leaves the existing password alone. A user who has not set one since this feature
+   * existed has no passdb entry at all, which is the honest state rather than a broken one:
+   * they cannot reach SMB until they next change their password.
+   */
+  nt_hash?: NtHash | null;
+  uid: PosixId;
 }
 /**
  * One POSIX ACL entry: a GROUP and the three permission bits.
@@ -384,6 +450,12 @@ export type AgentResponse =
     }
   | {
       status: 'directory_created';
+    }
+  | {
+      groups_created: number;
+      passwords_set: number;
+      status: 'posix_identity_synced';
+      users_created: number;
     }
   | {
       mode: number;

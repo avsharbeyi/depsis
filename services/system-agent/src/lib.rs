@@ -40,6 +40,7 @@ pub mod audit;
 pub mod authz;
 pub mod data;
 pub mod dispatch;
+pub mod identity;
 pub mod op;
 pub mod samba;
 pub mod seams;
