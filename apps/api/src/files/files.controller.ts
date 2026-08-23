@@ -62,6 +62,10 @@ const MAX_LIMIT = 500;
 const createFolderSchema = z.object({
   parentId: z.string().uuid().nullish(),
   name: z.string().min(1).max(255),
+  // Which share a TOP-LEVEL folder goes in. Ignored when `parentId` is given, because the parent
+  // already decides it and two answers would be one too many. Absent means the tenant's default,
+  // which is what every client did before there was more than one share.
+  shareId: z.string().uuid().nullish(),
 });
 
 /**
@@ -139,10 +143,11 @@ export class FilesController {
     @Query('cursor') cursor?: string,
     @Query('limit') limit?: string,
     @Query('trashed') trashed?: string,
+    @Query('shareId') shareId?: string,
   ): Promise<Schemas['FileEntryPage']> {
     const caller = requireSession(request);
     const after = cleanCursor(cursor);
-    const share = await this.share(request);
+    const share = await this.share(request, shareId);
 
     if (isTrue(trashed)) {
       return this.visible(
@@ -205,13 +210,22 @@ export class FilesController {
     @Body() body: unknown,
   ): Promise<Schemas['FileEntry']> {
     const caller = requireSession(request);
-    const share = await this.share(request);
     const parsed = createFolderSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('parentId must be a uuid and name a string');
 
     // `create` belongs to the DESTINATION, so it is asked of the parent and not of the new folder,
     // which does not exist yet and could not carry a grant if it did.
     const parentId = parsed.data.parentId ?? null;
+    // THE ONE ROUTE THAT TAKES ITS SHARE FROM THE REQUEST, because there is no entry to ask: the
+    // folder does not exist yet. A parent, when given, decides it — and the two must agree, or a
+    // caller could name share A and a parent in share B.
+    const share =
+      parentId === null
+        ? await this.share(request, parsed.data.shareId ?? undefined)
+        : await this.shareOfEntry(
+            caller.organizationId,
+            await this.load(caller.organizationId, parentId),
+          );
     await this.permit(caller, share.id, parentId, 'create');
 
     if (!this.files.agentAvailable()) {
@@ -243,8 +257,8 @@ export class FilesController {
   ): Promise<Schemas['FileEntryDetail']> {
     const caller = requireSession(request);
     requireUuid(id);
-    const share = await this.share(request);
     const row = await this.load(caller.organizationId, id);
+    const share = await this.shareOfEntry(caller.organizationId, row);
     const effective = await this.permit(caller, share.id, id, 'list');
     return { ...toEntry(row, effective), createdAt: row.created_at.toISOString() };
   }
@@ -294,7 +308,13 @@ export class FilesController {
     const name = parsed.data.name;
 
     if (parsed.data.parentId !== undefined) {
-      const share = await this.share(request);
+      // From the entry being MOVED. A move within a share is the only kind there is —
+      // `accessForMove` refuses a destination in another one — so the source's share is the
+      // right root for both ends of the check.
+      const share = await this.shareOfEntry(
+        caller.organizationId,
+        await this.load(caller.organizationId, id),
+      );
       const destinationId = parsed.data.parentId;
       const move = await this.files.accessForMove(caller, share.id, id, destinationId);
       // Invisible at either end is 404 at both, and the destination is the interesting half: a
@@ -350,7 +370,10 @@ export class FilesController {
     // `agentAvailable` pre-check to match the branch above: the agent is the FIRST thing a rename
     // touches, so an unreachable one fails before anything has changed and `translate` turns it
     // into the same 503 by a shorter road.
-    const share = await this.share(request);
+    const share = await this.shareOfEntry(
+      caller.organizationId,
+      await this.load(caller.organizationId, id),
+    );
     const effective = await this.permit(caller, share.id, id, 'modify');
     try {
       return toEntry(
@@ -392,8 +415,8 @@ export class FilesController {
   ): Promise<Schemas['FileEntry']> {
     const caller = requireSession(request);
     requireUuid(id);
-    const share = await this.share(request);
     const entry = await this.load(caller.organizationId, id);
+    const share = await this.shareOfEntry(caller.organizationId, entry);
 
     // Both nodes in one walk: the entry, to decide whether it is visible at all, and its parent,
     // which is where the restore actually lands.
@@ -426,7 +449,10 @@ export class FilesController {
   ): Promise<Schemas['FileEntry']> {
     const caller = requireSession(request);
     requireUuid(id);
-    const share = await this.share(request);
+    const share = await this.shareOfEntry(
+      caller.organizationId,
+      await this.load(caller.organizationId, id),
+    );
     const effective = await this.permit(caller, share.id, id, 'delete');
     // AND on everything under it. Trashing a folder sets one flag on one row, but `list` filters on
     // `trashed_at IS NULL`, so every descendant vanishes from every listing for everybody —
@@ -465,7 +491,10 @@ export class FilesController {
   async purge(@Req() request: AuthenticatedRequest, @Param('id') id: string): Promise<void> {
     const caller = requireSession(request);
     requireUuid(id);
-    const share = await this.share(request);
+    const share = await this.shareOfEntry(
+      caller.organizationId,
+      await this.load(caller.organizationId, id),
+    );
     // The same permission the reversible delete asks for. A separate, stronger one would be a
     // fourth §6.2 permission the contract does not have — and the trash is already the gate
     // between a user and permanent loss, which is the protection this operation needs.
@@ -522,7 +551,7 @@ export class FilesController {
     const entry = await this.load(caller.organizationId, id);
     if (entry.kind !== 'file' || entry.trashed_at !== null) throw new NotFoundException();
 
-    const share = await this.share(request);
+    const share = await this.shareOfEntry(caller.organizationId, entry);
     // Before the agent is consulted, so that an unauthorised caller cannot use the 503 to learn
     // whether the appliance's storage is up.
     await this.permit(caller, share.id, id, 'download');
@@ -623,11 +652,44 @@ export class FilesController {
     return toPage(source, await this.files.effectiveForRows(caller, shareId, source.items));
   }
 
-  /** The tenant's share. One for now; see `FilesService.defaultShare`. */
-  private async share(request: AuthenticatedRequest): Promise<{ id: string; name: string }> {
-    const session = requireSession(request);
+  /**
+   * The share an ENTRY lives in.
+   *
+   * Per-entry routes used to resolve the tenant's DEFAULT share and then check the entry against
+   * it. With one share those are the same thing; with two, the permission walk is rooted at the
+   * wrong tree. It fails closed — `accessFor` bounds the ancestor walk to the share, so an entry
+   * from another one yields no chain and the caller is refused — but the effect is that every
+   * entry outside the first share became unreachable the moment `POST /shares` could create a
+   * second one.
+   *
+   * The row already carries `share_id`, so this is the authoritative answer and not a guess.
+   */
+  private async shareOfEntry(
+    organizationId: string,
+    row: { share_id: string },
+  ): Promise<{ id: string; name: string }> {
     try {
-      return await this.files.shareOf(session.organizationId);
+      return await this.files.shareFor(organizationId, row.share_id);
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  /**
+   * The share this request is about.
+   *
+   * `shareId` names one; without it the caller gets the tenant's default, which is what every
+   * client did before shares could be created and what keeps those clients working. A share id
+   * that is not this tenant's is a 404, identical to one that does not exist.
+   */
+  private async share(
+    request: AuthenticatedRequest,
+    shareId?: string,
+  ): Promise<{ id: string; name: string }> {
+    const session = requireSession(request);
+    if (shareId !== undefined) requireUuid(shareId);
+    try {
+      return await this.files.shareFor(session.organizationId, shareId);
     } catch (error) {
       throw translate(error);
     }

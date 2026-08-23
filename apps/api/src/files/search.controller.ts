@@ -67,6 +67,11 @@ export class SearchController {
     @Query('scope') scope?: string,
     @Query('cursor') cursor?: string,
     @Query('limit') limit?: string,
+    // LAST, and that placement is not cosmetic: the integration tests call this method positionally,
+    // so a parameter inserted in the middle silently shifts `cursor` and `limit` one place along.
+    // Seven tests failed with "cursor is not one this server issued" — a scope id being read as a
+    // cursor — which is a good reminder that a controller method is an ordinary function too.
+    @Query('shareId') shareId?: string,
   ): Promise<Schemas['FileEntryPage']> {
     const caller = requireSession(request);
     const after = cleanCursor(cursor);
@@ -78,9 +83,15 @@ export class SearchController {
       throw new UnprocessableEntityException(`q may not exceed ${MAX_QUERY_LENGTH} characters`);
     }
 
-    const share = await this.files.shareOf(caller.organizationId).catch((error: unknown) => {
-      throw translate(error);
-    });
+    // The named share, or the tenant's default. Searching only ever the FIRST share meant a
+    // result set that silently excluded everything in every share created afterwards — a
+    // search that answers confidently and leaves things out is worse than one that refuses.
+    if (shareId !== undefined) requireUuid(shareId);
+    const share = await this.files
+      .shareFor(caller.organizationId, shareId)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
 
     // A scope from another share, or one in the trash, reads as absent rather than as an empty
     // result set — the same rule the listing route follows, and for the same reason: an empty page

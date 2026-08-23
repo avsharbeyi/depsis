@@ -692,6 +692,18 @@ export interface paths {
                     /** @description Yoksa kullanıcının kökleri döner. */
                     parentId?: string;
                     /**
+                     * @description Hangi paylaşım. Verilmezse kiracının varsayılanı — yani bu parametreden önceki her
+                     *     istemci aynen çalışmaya devam eder.
+                     *
+                     *     Bu parametre olmadan dosya yöneticisi HER ZAMAN ilk paylaşımı gösteriyordu
+                     *     (`ORDER BY created_at LIMIT 1`), yani `POST /shares` ile açılan bir paylaşım
+                     *     Samba'ya yayımlanıyor ve web'de görünmüyordu.
+                     *
+                     *     Başka bir kiracının paylaşımı 404 — var olmayan bir kimlikle aynı cevap, yoksa
+                     *     parametre hangi paylaşım kimliklerinin var olduğunu söyleyen bir kâhin olurdu.
+                     */
+                    shareId?: string;
+                    /**
                      * @description Doğruysa çöp kutusu listelenir ve `parentId` yok sayılır. Çöp bir klasör değil bir
                      *     sütun (0008: `trashed_at`), yani ağaçta gezilecek bir yeri yok; ayrı bir uç nokta
                      *     yerine bir süzgeç olması da bu yüzden.
@@ -1161,6 +1173,18 @@ export interface paths {
             parameters: {
                 query: {
                     q: string;
+                    /**
+                     * @description Hangi paylaşım. Verilmezse kiracının varsayılanı — yani bu parametreden önceki her
+                     *     istemci aynen çalışmaya devam eder.
+                     *
+                     *     Bu parametre olmadan dosya yöneticisi HER ZAMAN ilk paylaşımı gösteriyordu
+                     *     (`ORDER BY created_at LIMIT 1`), yani `POST /shares` ile açılan bir paylaşım
+                     *     Samba'ya yayımlanıyor ve web'de görünmüyordu.
+                     *
+                     *     Başka bir kiracının paylaşımı 404 — var olmayan bir kimlikle aynı cevap, yoksa
+                     *     parametre hangi paylaşım kimliklerinin var olduğunu söyleyen bir kâhin olurdu.
+                     */
+                    shareId?: string;
                     /** @description Yoksa tüm erişilebilir alan. */
                     scope?: string;
                     /** @description Opak. İstemci bunu üretmez ve ayrıştırmaz; kodlaması sunucuya aittir. */
@@ -3450,6 +3474,13 @@ export interface components {
             hasMore: boolean;
         };
         CreateFolderRequest: {
+            /**
+             * Format: uuid
+             * @description ÜST DÜZEY bir klasörün hangi paylaşımda açılacağı. `parentId` verildiğinde yok sayılır:
+             *     üst klasör paylaşımı zaten belirliyor ve iki cevap bir fazla olurdu. Verilmezse
+             *     kiracının varsayılanı.
+             */
+            shareId?: string | null;
             /** Format: uuid */
             parentId?: string;
             name: components["schemas"]["FileName"];

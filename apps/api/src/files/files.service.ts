@@ -649,6 +649,34 @@ export class FilesService {
    * search — and a second copy of "which share am I in" is the kind of duplication that survives
    * long enough to disagree with itself once share administration lands.
    */
+  /**
+   * The share a request names, or the tenant's default when it names none.
+   *
+   * WHY THIS EXISTS. Every file endpoint used to resolve its share through `shareOf`, which is
+   * `ORDER BY created_at LIMIT 1` — the FIRST share, always. So `POST /shares` could open a share,
+   * Samba could publish it, and the web file manager could not see it: there was no way to say
+   * which share a listing was about. A share you can create and cannot open is worse than no
+   * share administration at all, because the product tells you it worked.
+   *
+   * A share id belonging to another tenant is `EntryNotFoundError`, the same answer as one that
+   * does not exist — RLS already makes them the same query result, and they should be the same
+   * ANSWER too or the parameter becomes an oracle for which share ids exist elsewhere.
+   */
+  async shareFor(organizationId: string, shareId: string | undefined): Promise<ShareRow> {
+    if (shareId === undefined) return this.shareOf(organizationId);
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<ShareRow>(
+        `SELECT id, name, dataset, read_only
+           FROM public.shares
+          WHERE organization_id = $1 AND id = $2`,
+        [organizationId, shareId],
+      ),
+    );
+    const row = rows[0];
+    if (row === undefined) throw new EntryNotFoundError();
+    return row;
+  }
+
   async shareOf(organizationId: string): Promise<ShareRow> {
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<{ slug: string }>(`SELECT slug FROM public.organizations WHERE id = $1`, [

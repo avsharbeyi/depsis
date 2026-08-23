@@ -365,6 +365,20 @@ paths:
           in: query
           description: Yoksa kullanıcının kökleri döner.
           schema: { type: string, format: uuid }
+        - name: shareId
+          in: query
+          required: false
+          description: |
+            Hangi paylaşım. Verilmezse kiracının varsayılanı — yani bu parametreden önceki her
+            istemci aynen çalışmaya devam eder.
+
+            Bu parametre olmadan dosya yöneticisi HER ZAMAN ilk paylaşımı gösteriyordu
+            (`ORDER BY created_at LIMIT 1`), yani `POST /shares` ile açılan bir paylaşım
+            Samba'ya yayımlanıyor ve web'de görünmüyordu.
+
+            Başka bir kiracının paylaşımı 404 — var olmayan bir kimlikle aynı cevap, yoksa
+            parametre hangi paylaşım kimliklerinin var olduğunu söyleyen bir kâhin olurdu.
+          schema: { type: string, format: uuid }
         - name: trashed
           in: query
           description: |
@@ -625,6 +639,20 @@ paths:
           in: query
           required: true
           schema: { type: string, minLength: 1, maxLength: 256 }
+        - name: shareId
+          in: query
+          required: false
+          description: |
+            Hangi paylaşım. Verilmezse kiracının varsayılanı — yani bu parametreden önceki her
+            istemci aynen çalışmaya devam eder.
+
+            Bu parametre olmadan dosya yöneticisi HER ZAMAN ilk paylaşımı gösteriyordu
+            (`ORDER BY created_at LIMIT 1`), yani `POST /shares` ile açılan bir paylaşım
+            Samba'ya yayımlanıyor ve web'de görünmüyordu.
+
+            Başka bir kiracının paylaşımı 404 — var olmayan bir kimlikle aynı cevap, yoksa
+            parametre hangi paylaşım kimliklerinin var olduğunu söyleyen bir kâhin olurdu.
+          schema: { type: string, format: uuid }
         - name: scope
           in: query
           description: Yoksa tüm erişilebilir alan.
@@ -2067,6 +2095,13 @@ components:
       type: object
       required: [name]
       properties:
+        shareId:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            ÜST DÜZEY bir klasörün hangi paylaşımda açılacağı. `parentId` verildiğinde yok sayılır:
+            üst klasör paylaşımı zaten belirliyor ve iki cevap bir fazla olurdu. Verilmezse
+            kiracının varsayılanı.
         parentId: { type: string, format: uuid }
         name: { $ref: '#/components/schemas/FileName' }
 

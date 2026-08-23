@@ -1644,6 +1644,69 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
   // replacements, and they measure the rule in the direction that matters: what a member who was
   // never named actually gets.
 
+  it('reaches a SECOND share, which was unreachable over HTTP until the id could be named', async () => {
+    // THE BUG THIS CLOSES. Every file route resolved its share through `shareOf`, which is
+    // `ORDER BY created_at LIMIT 1` — the first share, always. So `POST /shares` could open one,
+    // Samba could publish it, and nothing in the web app could ever list it: there was no way to
+    // say which share a request was about. A share you can create and cannot open is worse than no
+    // share administration at all, because the product tells you it worked.
+    const second = await pdb.withTenant(org, (q) =>
+      q.query<{ id: string }>(
+        `INSERT INTO public.shares (organization_id, name, dataset)
+         VALUES ($1, 'ikinci', 'tank/depsis/ikinci') RETURNING id::text AS id`,
+        [org],
+      ),
+    );
+    const secondId = second[0]?.id ?? '';
+    // Every share carries a root grant; this one is the administrator's, as `POST /shares` writes.
+    await pdb.withTenant(org, (q) =>
+      q.query(
+        `INSERT INTO public.folder_grants
+           (organization_id, share_id, entry_id, user_id, permissions)
+         VALUES ($1,$2,NULL,$3,'{list,read,create,modify,move,delete}')`,
+        [org, secondId, alice],
+      ),
+    );
+
+    const inSecond = await pdb.withTenant(org, (q) =>
+      q.query<{ id: string }>(
+        `INSERT INTO public.file_entries (organization_id, share_id, parent_id, kind, name, path)
+         VALUES ($1,$2,NULL,'folder','ikincideki','/ikincideki') RETURNING id::text AS id`,
+        [org, secondId],
+      ),
+    );
+    const folderId = inSecond[0]?.id ?? '';
+
+    // The default share does not contain it, and naming no share still means the default — which
+    // is what keeps every client written before this parameter existed working unchanged.
+    expect(await names(as(alice))).not.toContain('ikincideki');
+
+    // Named, it is there.
+    const page = await controller.list(as(alice), undefined, undefined, '100', undefined, secondId);
+    expect(page.items.map((item) => item.name)).toContain('ikincideki');
+
+    // And a per-entry route reaches it WITHOUT being told the share: the row carries `share_id`,
+    // so `detail` resolves it from the entry. Before this it resolved the default share, the
+    // ancestor walk found no chain rooted there, and the answer was 404 — every entry outside the
+    // first share unreachable, however wide its grants.
+    expect((await controller.detail(as(alice), folderId)).name).toBe('ikincideki');
+
+    await pdb.withTenant(org, async (q) => {
+      await q.query(`DELETE FROM public.file_entries WHERE id = $1`, [folderId]);
+      await q.query(`DELETE FROM public.folder_grants WHERE share_id = $1`, [secondId]);
+      await q.query(`DELETE FROM public.shares WHERE id = $1`, [secondId]);
+    });
+  });
+
+  it('refuses a share id belonging to somebody else with the same answer as one that is made up', async () => {
+    // A 403 here, or a distinguishable error, would turn the parameter into an oracle for which
+    // share ids exist on the appliance.
+    const madeUp = '00000000-0000-4000-8000-000000000000';
+    await expect(
+      controller.list(as(alice), undefined, undefined, '100', undefined, madeUp),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
   it('shows a member nothing in a share whose grants do not name them', async () => {
     const made = await folder(null, 'adi-gecmeyen');
 

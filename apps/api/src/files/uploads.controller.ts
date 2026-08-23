@@ -92,7 +92,11 @@ export class UploadsController {
     // answer that also distinguishes a malformed id from a well-formed one naming another tenant's
     // folder, which is the distinction RLS exists to erase.
     if (parentId !== null) requireUuid(parentId);
-    const share = await this.shareFor(session.organizationId);
+    // From the destination folder, so an upload into a share created after the first one lands in
+    // the right tree instead of being staged under the default share.
+    const share = await this.shareFor(session.organizationId, parentId).catch((e: unknown) => {
+      throw translate(e);
+    });
     if (parentId !== null) {
       const parent = await this.files.find(session.organizationId, parentId).catch((e: unknown) => {
         throw translate(e);
@@ -187,7 +191,13 @@ export class UploadsController {
       );
     }
 
-    const share = await this.shareFor(session.organizationId);
+    // The share the SESSION was opened against, not the tenant's default: a chunk has to be staged
+    // in the same tree its `OpenTransfer` resolved, or the publish at the end has nothing to move.
+    const share = await this.shareFor(session.organizationId, upload.parent_id).catch(
+      (e: unknown) => {
+        throw translate(e);
+      },
+    );
     const correlationId = randomUUID();
 
     // Two connections, in this order. The control call resolves the staging file under
@@ -344,7 +354,22 @@ export class UploadsController {
     return row;
   }
 
-  private async shareFor(organizationId: string): Promise<{ id: string; name: string }> {
+  /**
+   * The share an upload lands in.
+   *
+   * From the DESTINATION FOLDER when there is one, and the tenant's default only for an upload
+   * aimed at a share root. Resolving the default unconditionally is what made every share created
+   * after the first one unwritable: the parent lived in share B and the staging file was opened
+   * under share A, so the publish either failed or landed in the wrong tree.
+   */
+  private async shareFor(
+    organizationId: string,
+    parentId: string | null,
+  ): Promise<{ id: string; name: string }> {
+    if (parentId !== null) {
+      const parent = await this.files.find(organizationId, parentId);
+      return this.files.shareFor(organizationId, parent.share_id);
+    }
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<{ slug: string }>(`SELECT slug FROM public.organizations WHERE id = $1`, [
         organizationId,
