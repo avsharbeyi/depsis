@@ -23,6 +23,7 @@ import { Tasks } from './Tasks.js';
 import { Tiles } from './Tiles.js';
 import { Transfers } from './Transfers.js';
 import { toneRgb, Toasts, useToasts, Win, type Tone } from './ui.js';
+import { Jobs } from './Jobs.js';
 import { Teams } from './Teams.js';
 import { Users } from './Users.js';
 
@@ -57,6 +58,7 @@ export type PaneId =
   | 'tasks'
   | 'users'
   | 'teams'
+  | 'jobs'
   | 'shares'
   | 'account'
   | 'transfers'
@@ -90,6 +92,17 @@ const PANES: Record<PaneId, PaneMeta> = {
     tone: 'iris',
     wide: true,
     adminOnly: false,
+  },
+  jobs: {
+    // Admin-only, matching the endpoint. `GET /jobs/{jobId}` is safe for anybody because holding
+    // the id IS the authorisation; a LISTING has no such property — it would show a member every
+    // piece of work happening in the tenant.
+    slug: 'isler',
+    label: 'İşler',
+    glyph: '⚙',
+    tone: 'warn',
+    wide: false,
+    adminOnly: true,
   },
   teams: {
     // NOT admin-only. Granting a permission means naming a principal, and a member with `manage`
@@ -205,6 +218,7 @@ const DOCK_ORDER: PaneId[] = [
   'console',
   'users',
   'teams',
+  'jobs',
   'account',
   'background',
 ];
@@ -834,6 +848,8 @@ function PaneBody({
       return <Users currentUserId={me.id} notify={notify} onUnauthenticated={onUnauthenticated} />;
     case 'teams':
       return <Teams notify={notify} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />;
+    case 'jobs':
+      return <Jobs onUnauthenticated={onUnauthenticated} />;
     case 'account':
       return <Account me={me} notify={notify} onChanged={onAccountChanged} />;
     case 'transfers':
