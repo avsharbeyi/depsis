@@ -1120,12 +1120,45 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Taşı, kopyala veya geri yükle — uzun süren iş olarak
-         * @description Taşımada hem kaynak hem hedef yetkisi doğrulanır (§6.2).
+         * Kopyala — uzun süren iş olarak
+         * @description Hem kaynak hem hedef yetkisi doğrulanır (§6.2): kaynakta `download`, hedefte `create`.
+         *     `download`, `read` değil — `read` üstveridir (ad, boyut, tarih), kopyalama İÇERİĞİ alır.
+         *     Bir dosyanın var olduğunu görebilmek, onun kopyasını kendi klasörüne çıkarabilmek
+         *     anlamına gelmemeli.
          *
-         *     Dataset sınırını geçen bir taşıma rename DEĞİLDİR: ölçüldüğü üzere dataset'ler
-         *     arası rename(2) EXDEV verir (ADR-0008). Böyle bir istek kopyala+sil işine dönüşür
-         *     ve ilerleme raporlar.
+         *     202 ve bir `JobRef` dönüyor. §17: bin dosyalık toplu bir işlem arayüzü kilitlemez ve
+         *     durumu gerçek zamanlı güncellenir — iş kuyrukta çalışıyor, `GET /jobs/{jobId}` ve
+         *     `GET /events` üzerinden izleniyor.
+         *
+         *     ── Şu an ne sunuluyor ──────────────────────────────────────────────────
+         *
+         *     `operation: copy` — evet.
+         *
+         *     `operation: move` — hayır, 422. Tek girdi taşıma `PATCH /files/{id}`: tek bir
+         *     `renameat2`, anında, ve kuyruğa sokmak yaygın durumu hiçbir kazanç olmadan yavaşlatır.
+         *     PAYLAŞIMLAR ARASI taşıma gerçekten buraya ait — dataset sınırını geçen bir rename EXDEV
+         *     verir (ADR-0008) ve kopyala+sil'e dönüşmesi gerekir — ama yarım uygulanmış bir taşıma,
+         *     kopyalayıp silmeyi başaramadığında kullanıcının bir tane istediği yerde iki dosya
+         *     bırakır. Yaklaşık yapmak yerine reddediliyor.
+         *
+         *     `operation: restore` — hayır, 422. `POST /files/{id}/restore` var.
+         *
+         *     `conflictPolicy: keep_both` — evet, ve şu an tek desteklenen. `replace` kullanıcının
+         *     adlandırmadığı bir dosyayı yok ederdi; `RENAME_NOREPLACE` bunu syscall'a kadar
+         *     engelliyor ve desteklemek ajana sahip olmadığı bir üzerine-yazma vermek demek olurdu.
+         *     `version` var olmayan bir sürüm deposu istiyor. `skip` savunulabilir ve henüz yazılmadı;
+         *     onun adı altında sessizce `keep_both` yapmaktansa reddetmek daha dürüst.
+         *
+         *     ── Sınırlar ────────────────────────────────────────────────────────────
+         *
+         *     Bir klasör kendi içine ya da kendi altındaki bir klasöre kopyalanamaz: 409. Her adım tek
+         *     başına geçerli bir oluşturma olduğu için veritabanı bunu durdurmaz, sonu gelmeyen bir
+         *     ağaç olurdu.
+         *
+         *     100.000 girdiden büyük bir seçim reddediliyor. Performans sınırı değil: kopyalama, tek
+         *     bir yükleme olmadan saklanan baytları çoğaltabilen iki işlemden biri, ve paylaşımın
+         *     kökünü seçen birine sayıyı söylemek, bir saat sonra dolmuş bir dataset olarak
+         *     keşfettirmekten iyi.
          */
         post: {
             parameters: {
@@ -1157,7 +1190,9 @@ export interface paths {
                     };
                 };
                 403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
                 409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
             };
         };
         delete?: never;
@@ -3772,12 +3807,21 @@ export interface components {
             name: components["schemas"]["FileName"];
         };
         FileOperationRequest: {
-            /** @enum {string} */
+            /**
+             * @description Şu an yalnız `copy` uygulanıyor. `move` için `PATCH /files/{id}`, `restore` için
+             *     `POST /files/{id}/restore`; ikisi de burada 422 döner.
+             * @enum {string}
+             */
             operation: "move" | "copy" | "restore";
             sourceIds: string[];
-            /** Format: uuid */
-            destinationId: string;
             /**
+             * Format: uuid
+             * @description Hedef klasör. `null`, paylaşımın kökü demek.
+             */
+            destinationId: string | null;
+            /**
+             * @description Şu an yalnız `keep_both` uygulanıyor; diğerleri 422 ile reddediliyor. Neden
+             *     reddedildikleri uç noktanın açıklamasında.
              * @default keep_both
              * @enum {string}
              */

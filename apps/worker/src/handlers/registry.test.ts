@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   AclApplyService,
   AgentService,
+  CopyService,
   IdentitySyncService,
   JobsService,
 } from '@depsis/api/worker-surface';
@@ -27,7 +28,13 @@ describe('the worker consumes every kind the API enqueues', () => {
       acl: {} as unknown as AclApplyService,
       jobs: {} as unknown as JobsService,
       identity: {} as unknown as IdentitySyncService,
+      copies: {} as unknown as CopyService,
     });
-    expect(worker.kinds.sort()).toEqual(['identity.sync', 'permissions.apply', 'storage.snapshot']);
+    expect(worker.kinds.sort()).toEqual([
+      'files.copy',
+      'identity.sync',
+      'permissions.apply',
+      'storage.snapshot',
+    ]);
   });
 });

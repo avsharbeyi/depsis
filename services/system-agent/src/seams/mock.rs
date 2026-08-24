@@ -163,9 +163,17 @@ impl SafePath for MockSafePath {
             OpenIntent::CreateNew => options.write(true).create_new(true),
             OpenIntent::Append => options.write(true).create(true),
         };
-        options
-            .open(&path)
-            .map_err(|e| SeamError::Io(format!("{}: {e}", path.display())))
+        // Classified, not blanket `Io`, for exactly the reason `open_dir` below already gives: the
+        // dispatcher arms that turn a missing file into a 404 and a taken staging name into a
+        // conflict are unreachable from a portable test while every failure looks the same. The
+        // real implementation maps the same two errnos in `classify_openat2`.
+        options.open(&path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => SeamError::NotFound(path.display().to_string()),
+            std::io::ErrorKind::AlreadyExists => {
+                SeamError::AlreadyExists(path.display().to_string())
+            }
+            _ => SeamError::Io(format!("{}: {e}", path.display())),
+        })
     }
 
     fn open_dir(&self, relative: &[&str]) -> Result<std::fs::File, SeamError> {

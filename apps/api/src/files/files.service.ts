@@ -1291,14 +1291,24 @@ export class FilesService {
     name: string,
     sizeBytes: number,
     contentType: string | null,
+    /**
+     * The entry this row is a copy of, when it is one.
+     *
+     * Written in the SAME statement as the row, which is what makes `files.copy` idempotent: a
+     * redelivered chunk asks "is there a row here whose source is this one" and gets an exact
+     * answer. Asking by NAME cannot work — `keep_both` derives the name from what the destination
+     * holds at that moment, and that is precisely what the first attempt changed.
+     */
+    copiedFromEntryId: string | null = null,
   ): Promise<FileEntryRow> {
     const parentPath = parentId === null ? '' : (await this.find(organizationId, parentId)).path;
     try {
       const rows = await this.db.withTenant(organizationId, (db) =>
         db.query<FileEntryRow>(
           `INSERT INTO public.file_entries
-             (organization_id, share_id, parent_id, kind, name, path, size_bytes, content_type)
-           VALUES ($1, $2, $3, 'file', $4, $5, $6, $7)
+             (organization_id, share_id, parent_id, kind, name, path, size_bytes, content_type,
+              copied_from_entry_id)
+           VALUES ($1, $2, $3, 'file', $4, $5, $6, $7, $8)
            RETURNING ${ENTRY_COLUMNS}`,
           [
             organizationId,
@@ -1308,6 +1318,7 @@ export class FilesService {
             `${parentPath}/${name}`,
             sizeBytes,
             contentType,
+            copiedFromEntryId,
           ],
         ),
       );

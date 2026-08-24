@@ -1,12 +1,14 @@
 import type {
   AclApplyService,
   AgentService,
+  CopyService,
   IdentitySyncService,
   JobsService,
 } from '@depsis/api/worker-surface';
 
 import type { WorkerService } from '../worker.service.js';
 import { applyAclHandler, APPLY_ACL_KIND } from './apply-acl.handler.js';
+import { copyHandler, COPY_KIND } from './copy.handler.js';
 import { identitySyncHandler, IDENTITY_SYNC_KIND } from './identity-sync.handler.js';
 import { snapshotHandler, SNAPSHOT_KIND } from './snapshot.handler.js';
 
@@ -26,6 +28,7 @@ export function registerHandlers(
     acl: AclApplyService;
     jobs: JobsService;
     identity: IdentitySyncService;
+    copies: CopyService;
   },
 ): void {
   worker.register(SNAPSHOT_KIND, snapshotHandler(services.agent));
@@ -33,4 +36,7 @@ export function registerHandlers(
   // handler needs the queue it was claimed from.
   worker.register(APPLY_ACL_KIND, applyAclHandler(services.acl, services.jobs));
   worker.register(IDENTITY_SYNC_KIND, identitySyncHandler(services.identity));
+  // `jobs` for the same reason as the ACL walk: a tree too large for one chunk queues its
+  // own continuation, so the handler needs the queue it was claimed from.
+  worker.register(COPY_KIND, copyHandler(services.copies, services.jobs));
 }

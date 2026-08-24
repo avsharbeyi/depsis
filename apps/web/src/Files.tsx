@@ -54,6 +54,7 @@ type Modal =
   | { kind: 'permanent'; entries: FileEntry[] }
   | { kind: 'empty-trash' }
   | { kind: 'move'; entries: FileEntry[] }
+  | { kind: 'copy'; entries: FileEntry[] }
   /** A drop, which chose its own destination — so it is answered by a `ConfirmBox` naming the
    *  folder rather than by the picker. */
   | { kind: 'move-drop'; entries: FileEntry[]; target: FileEntry };
@@ -492,7 +493,7 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
    * " diskten silinecek. BU İŞLEM GERİ ALINAMAZ" with the number missing, over a list of nothing,
    * and answering "evet" would then do nothing and report nothing.
    */
-  function openOn(kind: 'trash' | 'permanent' | 'move', list: FileEntry[]): void {
+  function openOn(kind: 'trash' | 'permanent' | 'move' | 'copy', list: FileEntry[]): void {
     if (list.length === 0) return;
     setModal({ kind, entries: list });
   }
@@ -705,6 +706,47 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
    * screen is the only record of where things went. "3 öğe taşındı." over a two-hundred-row
    * listing tells the reader that something left, and nothing at all about where to look for it.
    */
+  /**
+   * Copy the selection into a folder.
+   *
+   * ONE request for the whole selection, unlike `move` — which loops, because each move is its own
+   * immediate `renameat2`. A copy is a job: the endpoint answers 202 with a job id and the work
+   * happens in the worker, so a thousand-file copy does not hold this screen open. §17 asks for
+   * exactly that.
+   *
+   * The listing is NOT reloaded here. The rows do not exist yet; they appear as the job runs, and
+   * the event stream is what brings them. Reloading immediately would show the destination
+   * unchanged and read as a copy that did nothing.
+   */
+  async function copy(list: FileEntry[], target: string | null, targetName: string): Promise<void> {
+    setModal({ kind: 'none' });
+    if (list.length === 0) return;
+
+    const { data, error, response } = await api.POST('/file-operations', {
+      body: {
+        operation: 'copy',
+        sourceIds: list.map((entry) => entry.id),
+        destinationId: target,
+        // Sent explicitly rather than left to the document's default. It is the only policy the
+        // server implements, and naming it here means a future default that changed would break
+        // this call loudly instead of quietly copying under different rules.
+        conflictPolicy: 'keep_both',
+      },
+    });
+    if (response.status === 401) {
+      onUnauthenticated();
+      return;
+    }
+    if (data === undefined) {
+      notify('error', problemMessage(error, 'Kopyalama başlatılamadı.'));
+      return;
+    }
+    notify(
+      'ok',
+      `${tally(list)} "${targetName}" klasörüne kopyalanıyor. İlerlemesi Sistem işleri panosunda.`,
+    );
+  }
+
   async function move(list: FileEntry[], target: string | null, targetName: string): Promise<void> {
     setModal({ kind: 'none' });
     if (list.length === 0) return;
@@ -948,6 +990,19 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
    */
   const moveExclude = ((): { excludeIds?: ReadonlySet<string> } => {
     if (modal.kind !== 'move') return {};
+    const folders = modal.entries.filter((entry) => entry.kind === 'folder');
+    return folders.length === 0 ? {} : { excludeIds: new Set(folders.map((entry) => entry.id)) };
+  })();
+
+  /**
+   * The same exclusion for a copy, and it is not the same reason.
+   *
+   * A move into a selected folder is a cycle the row cannot be in. A COPY into one is worse than a
+   * cycle: each step is a legal create, so nothing in the database stops it and the tree grows
+   * until the dataset is full. The server refuses it with a 409; the picker refuses to offer it.
+   */
+  const copyExclude = ((): { excludeIds?: ReadonlySet<string> } => {
+    if (modal.kind !== 'copy') return {};
     const folders = modal.entries.filter((entry) => entry.kind === 'folder');
     return folders.length === 0 ? {} : { excludeIds: new Set(folders.map((entry) => entry.id)) };
   })();
@@ -1261,6 +1316,17 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
               onClick={() => openOn('move', selected)}
             >
               ⇄ Taşı
+            </button>
+            {/* `download` and not `read`, matching what the endpoint enforces: `read` is metadata,
+                and a copy takes the contents. The server refuses either way; the button being
+                disabled is what stops somebody clicking into a 403 they cannot act on. */}
+            <button
+              type="button"
+              className="sb"
+              disabled={busy || selected.length === 0 || !selected.every((e) => can(e, 'download'))}
+              onClick={() => openOn('copy', selected)}
+            >
+              ⧉ Kopyala
             </button>
             <button
               type="button"
@@ -1598,6 +1664,19 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
           {...moveExclude}
           confirmLabel="Buraya taşı"
           onPick={(destination, where) => void move(modal.entries, destination, where)}
+          onCancel={() => setModal({ kind: 'none' })}
+        />
+      )}
+      {modal.kind === 'copy' && (
+        <FolderPicker
+          title={
+            modal.entries.length === 1 && modal.entries[0] !== undefined
+              ? `"${modal.entries[0].name}" nereye kopyalansın?`
+              : `${modal.entries.length} öğe nereye kopyalansın?`
+          }
+          {...copyExclude}
+          confirmLabel="Buraya kopyala"
+          onPick={(destination, where) => void copy(modal.entries, destination, where)}
           onCancel={() => setModal({ kind: 'none' })}
         />
       )}

@@ -146,6 +146,50 @@ export type AgentRequest =
     }
   | {
       /**
+       * The file to read, relative to the share root. The last element is its name.
+       */
+      from: SafeComponent[];
+      op: 'copy_file';
+      owner_gid: PosixId;
+      /**
+       * A numeric POSIX uid or gid, inside the range migration 0015 reserved for DEPSIS.
+       *
+       * A type rather than a comparison, for the reason `AclType` is a type: the agent exists not to
+       * trust the API, and a rule the API is asked to follow is not a rule the agent enforces. Before
+       * this, the privileged side refused the value 0 and nothing else — so uid 33 (`www-data`), gid 27
+       * (`sudo`), gid 42 (`shadow`) and the appliance's own service accounts were all accepted operands
+       * of `PublishTransfer`, `CreateDirectory` and `AclEntry`. The 300000-399999 range that 0015
+       * introduced *precisely* so that "sistem gruplarıyla çakışan bir gid, cihazdaki bir servis
+       * hesabına kullanıcının dosyalarını açmaktır" was enforced in exactly two places, both
+       * unprivileged: the `CHECK` constraints and `assertUsable` in `posix.service.ts`.
+       *
+       * The agent's own stated reason for refusing 0 — an API that skipped the uid mapping must fail
+       * loudly here — applies with the same force to an API that mapped it to the WRONG number, and
+       * that was the case being waved through. Now a system id cannot be expressed in a request at all,
+       * the same way `nfsv4` cannot be expressed at dataset creation.
+       *
+       * The bounds are duplicated from `0015_teams_and_grants.sql` rather than read from anywhere. That
+       * is deliberate and it is the point: the agent must not depend on the database to know what it
+       * will accept, because the database is on the unprivileged side of the boundary.
+       */
+      owner_uid: number;
+      share: SafeComponent;
+      /**
+       * A single path component under a share root — never a path, never absolute.
+       *
+       * ADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access
+       * to `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle
+       * `/` or `..` through, so this type refuses them rather than sanitising.
+       */
+      staging_name: string;
+      /**
+       * Where the copy goes, relative to the same share root. The last element is the new name;
+       * every element before it must already exist and be a directory.
+       */
+      to: SafeComponent[];
+    }
+  | {
+      /**
        * Is the entry a directory? The caller knows and has to say.
        */
       directory: boolean;
@@ -474,6 +518,10 @@ export type AgentResponse =
   | {
       existed: boolean;
       status: 'discarded';
+    }
+  | {
+      bytes: number;
+      status: 'copied';
     }
   | {
       status: 'moved';

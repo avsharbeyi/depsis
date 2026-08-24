@@ -46,6 +46,13 @@ describe('the emitted agent schema', () => {
       // statement the caller can make correctly and "here is what changed" is one it would have to
       // reconstruct from a disk it cannot read.
       'apply_folder_acl',
+      // A copy the bytes never leave the agent for. The obvious shape — the API reading over the
+      // data channel and writing back — holds TWO of the sixteen rendezvous-served data
+      // connections at once, and that many concurrent copies deadlock the whole socket rather than
+      // merely queueing. Both ends are under one root, so `copy_file_range(2)` inside the agent is
+      // both safer and faster. One FILE: the API issues one `create_directory` per folder and one
+      // of these per file, because a recursive copy is a blast radius the caller chose.
+      'copy_file',
       'create_dataset',
       // ONE directory, never `mkdir -p`. Its absence was a hole under the product rather than a
       // gap in the set: `FilesService.createFolder` could write a row and nothing else, so a
@@ -182,7 +189,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(7);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(8);
   });
 
   it('agrees with the number the agent actually reports', () => {

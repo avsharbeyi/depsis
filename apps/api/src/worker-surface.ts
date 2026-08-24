@@ -40,6 +40,25 @@ export {
 export { PosixIdentityService } from './identity/posix.service.js';
 
 /**
+ * `POST /file-operations`'s copy. The endpoint enqueues; the worker runs it.
+ *
+ * The tree walk is exported rather than reimplemented for the same reason `AclApplyService` is: a
+ * second answer to "what is inside this folder" would drift from the first with neither looking
+ * wrong on its own. `CopyModule` is providers-only — importing `FilesModule` would drag four
+ * controllers and the auth flow into a process with no requests.
+ */
+export { CopyModule } from './files/copy.module.js';
+export {
+  COPY_KIND,
+  COPY_MAX_ATTEMPTS,
+  CopyService,
+  CopyNameExhaustedError,
+  CopyTooLargeError,
+  type CopyPayload,
+  type CopyProgress,
+} from './files/copy.service.js';
+
+/**
  * §6.2's POSIX side. `permissions.apply` is enqueued by the API and executed by the worker, and
  * the walk it needs — ADR-0021's inheritance rule over `file_entries` and `folder_grants` — lives
  * here because a copy in the worker would be a second implementation of the permission model.

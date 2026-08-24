@@ -68,15 +68,15 @@ const HTTP_METHODS = ['get', 'put', 'post', 'delete', 'patch', 'head', 'options'
  * from ever mentioning it again.
  */
 const DESCRIBED_BUT_NOT_SERVED: ReadonlyMap<string, string> = new Map([
-  [
-    'POST /file-operations',
-    // Copy of a whole subtree, in one request. Move is no longer the gap — `MoveEntry` exists in
-    // the agent protocol and `PATCH /files/{id}` serves the single-entry case — but copy still has
-    // no typed operation behind it, and §2.2 keeps the privileged agent's surface closed, so this
-    // endpoint cannot exist before one is added. Described so the shape is settled first.
-    'subtree copy; the privileged agent has no matching typed operation yet',
-  ],
-
+  // ─── nothing here ─────────────────────────────────────────────────────────
+  //
+  // `POST /file-operations` was the last entry and it is served now. What unblocked it was the
+  // agent's `CopyFile`: the endpoint could not exist while the privileged surface had no typed
+  // operation behind it (§2.2), and the shape that operation had to take was decided by a
+  // measurement — the data socket hands connections to sixteen threads over a rendezvous channel,
+  // so an API-mediated copy holding a read and a write connection at once would deadlock the whole
+  // socket. Both ends are under one root, so the agent copies between two descriptors itself and
+  // the bytes never cross the process boundary.
   // ─── §6.2: folder permissions ─────────────────────────────────────────────
   //
   // Nothing is left here. The team endpoints went first, and the four permission ones followed

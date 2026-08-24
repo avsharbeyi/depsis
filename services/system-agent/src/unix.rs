@@ -220,6 +220,14 @@ fn classify_openat2(joined: &str, e: rustix::io::Errno) -> SeamError {
     if e == rustix::io::Errno::NOTDIR {
         return SeamError::NotADirectory(joined.to_string());
     }
+    // The third misdiagnosis of the same kind, and the one with the loudest false alarm.
+    // `OpenIntent::CreateNew` passes `O_EXCL`, so a staging name that is already taken comes back
+    // EEXIST — which is an ordinary outcome of two jobs choosing one name, and was being reported
+    // as "path escapes the share root". A collision is a conflict, not an attack, and the caller
+    // needs to tell them apart because one is answered with a retry and the other with an alarm.
+    if e == rustix::io::Errno::EXIST {
+        return SeamError::AlreadyExists(joined.to_string());
+    }
     SeamError::PathEscape(format!("{joined}: {e}"))
 }
 

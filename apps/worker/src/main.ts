@@ -12,6 +12,8 @@ import {
   JobsModule,
   JobsService,
   PosixIdentityModule,
+  CopyModule,
+  CopyService,
 } from '@depsis/api/worker-surface';
 
 import { registerHandlers } from './handlers/registry.js';
@@ -30,7 +32,15 @@ import { WorkerService } from './worker.service.js';
 // error. It was missing, which meant the worker did not run at all — and a queue whose consumer
 // never starts looks exactly like a queue whose handler was never registered.
 @Module({
-  imports: [ConfigModule, DbModule, AgentModule, JobsModule, PosixIdentityModule, AclApplyModule],
+  imports: [
+    ConfigModule,
+    DbModule,
+    AgentModule,
+    JobsModule,
+    PosixIdentityModule,
+    AclApplyModule,
+    CopyModule,
+  ],
 })
 class WorkerAppModule {}
 
@@ -52,6 +62,7 @@ async function bootstrap(): Promise<void> {
     acl: app.get(AclApplyService),
     jobs: app.get(JobsService),
     identity: app.get(IdentitySyncService),
+    copies: app.get(CopyService),
   });
   worker.start();
 

@@ -662,6 +662,53 @@ pub enum Request {
         to: Vec<SafeComponent>,
     },
 
+    /// Copy ONE file to ONE new name, inside one share.
+    ///
+    /// WHY THE AGENT DOES THE WHOLE COPY. The obvious shape is for the API to read the source over
+    /// the data channel and write the destination back over it — the two halves already exist as
+    /// `OpenTransfer`/`PublishTransfer`. That shape has a measured hazard: `unix.rs` hands data
+    /// connections to `MAX_DATA_CONNECTIONS` worker threads over a rendezvous `sync_channel(0)`, so
+    /// a connection is only accepted once a thread is free. Every operation that exists today holds
+    /// exactly ONE connection. A copy done that way holds two at once, and that many concurrent
+    /// copies each holding their read connection while waiting for a write connection no thread is
+    /// free to accept is a hard deadlock of the entire data socket — every upload and every
+    /// download on the appliance, not just the copies.
+    ///
+    /// Both ends are on the same machine and under the same root, so there is no reason for the
+    /// bytes to cross the process boundary at all. The agent opens both descriptors under
+    /// `RESOLVE_BENEATH` and copies between them; on Linux `std::io::copy` between two `File`s
+    /// uses `copy_file_range(2)`, which on a copy-on-write filesystem can be near-instant and
+    /// never leaves the kernel.
+    ///
+    /// ONE FILE, NEVER A TREE. The same rule as `RemoveEntry` and for the same reason (§2.2,
+    /// ADR-0006): no single call the agent accepts may have a blast radius the caller chooses.
+    /// "Copy this subtree" is a recursive walk behind a typed name. The API knows the tree because
+    /// the API stores the tree; it issues one `CreateDirectory` per folder and one `CopyFile` per
+    /// file, and the progress a user watches is that loop.
+    ///
+    /// IT GOES THROUGH STAGING, exactly as an upload does. The bytes land in `.depsis/staging/`
+    /// under a caller-chosen name and are renamed into place with `RENAME_NOREPLACE` plus a
+    /// destination-directory fsync — one `SafePath::publish`, the same call `PublishTransfer` and
+    /// `MoveEntry` make. Writing directly at the destination would leave a half-written file under
+    /// the user's chosen name if anything failed, and `RENAME_NOREPLACE` would then make the good
+    /// copy's name permanently unusable.
+    CopyFile {
+        share: SafeComponent,
+        /// The file to read, relative to the share root. The last element is its name.
+        from: Vec<SafeComponent>,
+        /// Where the copy goes, relative to the same share root. The last element is the new name;
+        /// every element before it must already exist and be a directory.
+        to: Vec<SafeComponent>,
+        /// The name to stage under, inside `.depsis/staging/`. Caller-chosen and exclusive-created,
+        /// so two copies racing on one name cannot both win — the same guarantee `OpenTransfer`
+        /// relies on.
+        staging_name: SafeComponent,
+        /// Who owns the copy. NOT inherited from the source: a copy made by one person into their
+        /// own folder that arrived owned by somebody else is a file the maker cannot delete.
+        owner_uid: PosixId,
+        owner_gid: PosixId,
+    },
+
     /// Delete exactly ONE entry inside a share. Never a tree.
     ///
     /// `directory` is a required operand rather than something the agent works out by stat-ing the
@@ -992,6 +1039,15 @@ pub enum Response {
     Discarded {
         existed: bool,
     },
+    /// The copy is in place and the destination directory has been fsynced.
+    ///
+    /// `bytes` is what the agent actually wrote, read from the descriptor rather than from
+    /// anything the caller believed. The API records it as the new entry's size, so a copy whose
+    /// source was being appended to while it ran produces a row that matches the file rather than
+    /// a row that matches the source's size at the moment the job was queued.
+    Copied {
+        bytes: u64,
+    },
     /// The entry is at its new name and the destination directory has been fsynced.
     ///
     /// No payload. The caller named both ends of the move and nothing about them changed, so
@@ -1174,7 +1230,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// The mode `SecureShareRoot` writes: `rwx` for the owner, `r-x` for the group, nothing for other.
 ///

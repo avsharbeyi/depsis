@@ -305,6 +305,54 @@
       ]
     },
     {
+      "description": "Copy ONE file to ONE new name, inside one share.\n\nWHY THE AGENT DOES THE WHOLE COPY. The obvious shape is for the API to read the source over\nthe data channel and write the destination back over it — the two halves already exist as\n`OpenTransfer`/`PublishTransfer`. That shape has a measured hazard: `unix.rs` hands data\nconnections to `MAX_DATA_CONNECTIONS` worker threads over a rendezvous `sync_channel(0)`, so\na connection is only accepted once a thread is free. Every operation that exists today holds\nexactly ONE connection. A copy done that way holds two at once, and that many concurrent\ncopies each holding their read connection while waiting for a write connection no thread is\nfree to accept is a hard deadlock of the entire data socket — every upload and every\ndownload on the appliance, not just the copies.\n\nBoth ends are on the same machine and under the same root, so there is no reason for the\nbytes to cross the process boundary at all. The agent opens both descriptors under\n`RESOLVE_BENEATH` and copies between them; on Linux `std::io::copy` between two `File`s\nuses `copy_file_range(2)`, which on a copy-on-write filesystem can be near-instant and\nnever leaves the kernel.\n\nONE FILE, NEVER A TREE. The same rule as `RemoveEntry` and for the same reason (§2.2,\nADR-0006): no single call the agent accepts may have a blast radius the caller chooses.\n\"Copy this subtree\" is a recursive walk behind a typed name. The API knows the tree because\nthe API stores the tree; it issues one `CreateDirectory` per folder and one `CopyFile` per\nfile, and the progress a user watches is that loop.\n\nIT GOES THROUGH STAGING, exactly as an upload does. The bytes land in `.depsis/staging/`\nunder a caller-chosen name and are renamed into place with `RENAME_NOREPLACE` plus a\ndestination-directory fsync — one `SafePath::publish`, the same call `PublishTransfer` and\n`MoveEntry` make. Writing directly at the destination would leave a half-written file under\nthe user's chosen name if anything failed, and `RENAME_NOREPLACE` would then make the good\ncopy's name permanently unusable.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "The file to read, relative to the share root. The last element is its name.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "op": {
+          "type": "string",
+          "const": "copy_file"
+        },
+        "owner_gid": {
+          "$ref": "#/$defs/PosixId"
+        },
+        "owner_uid": {
+          "description": "Who owns the copy. NOT inherited from the source: a copy made by one person into their\nown folder that arrived owned by somebody else is a file the maker cannot delete.",
+          "$ref": "#/$defs/PosixId"
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "staging_name": {
+          "description": "The name to stage under, inside `.depsis/staging/`. Caller-chosen and exclusive-created,\nso two copies racing on one name cannot both win — the same guarantee `OpenTransfer`\nrelies on.",
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "to": {
+          "description": "Where the copy goes, relative to the same share root. The last element is the new name;\nevery element before it must already exist and be a directory.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "from",
+        "to",
+        "staging_name",
+        "owner_uid",
+        "owner_gid"
+      ]
+    },
+    {
       "description": "Delete exactly ONE entry inside a share. Never a tree.\n\n`directory` is a required operand rather than something the agent works out by stat-ing the\npath, and that is deliberate twice over. `unlinkat` needs `AT_REMOVEDIR` or not, so the\ndistinction has to be made somewhere; making the CALLER state it means a caller that\nbelieves it is deleting a file and finds a directory gets a refusal instead of a surprise.\nDeciding it from a stat would also be check-then-use on the one operation that cannot be\nundone.\n\nThere is no recursive variant and there will not be one. A non-empty directory comes back\nas an error (`ENOTEMPTY`) and the API walks the tree itself. The reason is §2.2 and\nADR-0006: the closed operation set exists so that no single call the agent accepts has a\nblast radius the caller chooses. \"Delete this subtree\" is `rm -rf` behind a typed name — one\nbug in the unprivileged side, or one confused-deputy request, and it is the whole share.\nThe API knows the tree because the API stores the tree; the agent only needs to be able to\nremove a leaf.",
       "type": "object",
       "properties": {
@@ -923,6 +971,25 @@
       "required": [
         "status",
         "existed"
+      ]
+    },
+    {
+      "description": "The copy is in place and the destination directory has been fsynced.\n\n`bytes` is what the agent actually wrote, read from the descriptor rather than from\nanything the caller believed. The API records it as the new entry's size, so a copy whose\nsource was being appended to while it ran produces a row that matches the file rather than\na row that matches the source's size at the moment the job was queued.",
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "const": "copied"
+        }
+      },
+      "required": [
+        "status",
+        "bytes"
       ]
     },
     {

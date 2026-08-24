@@ -472,6 +472,117 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// Not a tree. A directory with children comes back as `Conflict`, and the API — which stores
     /// the tree and therefore knows it — walks the children itself. See `op::Request::RemoveEntry`
     /// for why the agent must not be given an operation whose blast radius the caller chooses.
+    /// Copy one file to one new name inside a share, without the bytes leaving the agent.
+    ///
+    /// The order is the contract, and it is the same order `publish_transfer` follows for the same
+    /// reasons:
+    ///
+    ///   1. Open the source read-only under `RESOLVE_BENEATH`.
+    ///   2. Exclusive-create the staging file. `CreateNew` is what makes two copies racing on one
+    ///      staging name resolve to one winner in the kernel rather than in a check here.
+    ///   3. Copy. `std::io::copy` between two `File`s uses `copy_file_range(2)` on Linux, so on a
+    ///      copy-on-write filesystem this can be near-instant and the bytes never leave the kernel.
+    ///   4. Own it, THEN fsync it. `fchown` changes inode metadata and `fsync` is what makes inode
+    ///      metadata durable; the other order leaves a window where a power cut publishes the file
+    ///      under its real name with the wrong owner and no staging entry left to fix it.
+    ///   5. `publish` — `renameat2(RENAME_NOREPLACE)` plus the destination-directory fsync, in one
+    ///      call so step 5 of ADR-0008 cannot be skipped here either.
+    ///
+    /// A FAILURE AFTER STEP 2 LEAVES A STAGING FILE. That is deliberate rather than unhandled: the
+    /// agent's own sweeper walks `.depsis/staging` in every share and unlinks by mtime
+    /// (`sweep.rs`), so an abandoned copy is reclaimed exactly like an abandoned upload. Removing
+    /// it here on the error path as well would be better; not doing so is not a leak.
+    fn copy_file(
+        &self,
+        share: &str,
+        from: &[&str],
+        to: &[&str],
+        staging_name: &str,
+        owner_uid: u32,
+        owner_gid: u32,
+    ) -> Result<Response, SeamError> {
+        let Some(paths) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+
+        // An empty side names the share root, which is a directory and not a file either way.
+        let (Some(from_name), Some((to_name, to_dirs))) = (from.last(), to.split_last()) else {
+            return Ok(Response::Refused {
+                reason: "a copy needs a source and a destination; the share root is not a file"
+                    .to_string(),
+            });
+        };
+        let _ = from_name;
+
+        // The same door `MoveEntry` and `RemoveEntry` close. A copy OUT of staging would publish a
+        // half-finished upload under a name of the caller's choosing, with none of
+        // `PublishTransfer`'s byte-count check; a copy INTO it would put a file where the sweeper
+        // will delete it and the transfer registry does not know about it.
+        if Self::touches_agent_state(from) || Self::touches_agent_state(to) {
+            return Ok(Response::Refused {
+                reason: format!(
+                    "{}/ is the agent's own tree; use the transfer operations",
+                    STAGING_DIR[0]
+                ),
+            });
+        }
+
+        let mut source: Vec<&str> = vec![share];
+        source.extend_from_slice(from);
+
+        let mut source_file = match paths.open(&source, OpenIntent::Read) {
+            Ok(file) => file,
+            Err(SeamError::NotFound(what)) => {
+                return Ok(Response::NotFound {
+                    reason: format!("{what}: no such entry"),
+                });
+            }
+            Err(other) => return Err(other),
+        };
+
+        let staged = [share, STAGING_DIR[0], STAGING_DIR[1], staging_name];
+        let mut staging_file = match paths.open(&staged, OpenIntent::CreateNew) {
+            Ok(file) => file,
+            // Not a fault. A retried job that already staged this copy finds its own file, and
+            // saying so lets the caller pick a fresh name rather than treating it as a failure of
+            // the copy itself.
+            Err(SeamError::AlreadyExists(what)) => {
+                return Ok(Response::Conflict {
+                    reason: format!("{what}: a copy is already staged under this name"),
+                });
+            }
+            Err(other) => return Err(other),
+        };
+
+        let bytes = std::io::copy(&mut source_file, &mut staging_file)
+            .map_err(|e| SeamError::Io(format!("copy into staging: {e}")))?;
+
+        paths.set_owner(&staging_file, owner_uid, owner_gid)?;
+        staging_file
+            .sync_all()
+            .map_err(|e| SeamError::Io(format!("fsync copy before publish: {e}")))?;
+
+        let mut dest_dir: Vec<&str> = vec![share];
+        dest_dir.extend_from_slice(to_dirs);
+        let staging_dir = [share, STAGING_DIR[0], STAGING_DIR[1]];
+
+        match paths.publish(&staging_dir, staging_name, &dest_dir, to_name) {
+            Ok(()) => Ok(Response::Copied { bytes }),
+            // The destination parent is gone, or was never there. `RENAME_NOREPLACE` is
+            // all-or-nothing, so the staging file is still where it was and the sweeper will take
+            // it.
+            Err(SeamError::NotFound(what)) => Ok(Response::NotFound {
+                reason: format!("{what}: no such entry"),
+            }),
+            Err(SeamError::AlreadyExists(what)) => Ok(Response::Conflict {
+                reason: format!("{what}: something is already there"),
+            }),
+            Err(other) => Err(other),
+        }
+    }
+
     fn remove_entry(
         &self,
         share: &str,
@@ -1021,6 +1132,26 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 let from: Vec<&str> = from.iter().map(|c| c.as_str()).collect();
                 let to: Vec<&str> = to.iter().map(|c| c.as_str()).collect();
                 self.move_entry(share.as_str(), &from, &to)
+            }
+
+            Request::CopyFile {
+                share,
+                from,
+                to,
+                staging_name,
+                owner_uid,
+                owner_gid,
+            } => {
+                let from: Vec<&str> = from.iter().map(|c| c.as_str()).collect();
+                let to: Vec<&str> = to.iter().map(|c| c.as_str()).collect();
+                self.copy_file(
+                    share.as_str(),
+                    &from,
+                    &to,
+                    staging_name.as_str(),
+                    owner_uid.get(),
+                    owner_gid.get(),
+                )
             }
 
             Request::RemoveEntry {
@@ -2110,6 +2241,135 @@ mod tests {
                 "a refused request must not have chmodded anything: {raw}"
             );
         }
+    }
+
+    // ── CopyFile ──
+
+    #[test]
+    fn a_copy_leaves_the_source_alone_and_writes_the_same_bytes() {
+        let h = Harness::with_share("alice");
+        std::fs::create_dir(h.share_path(&["alice", "docs"])).expect("mkdir docs");
+        std::fs::write(h.share_path(&["alice", "docs", "a.txt"]), b"keep me").expect("write");
+
+        let raw = r#"{"op":"copy_file","share":"alice","from":["docs","a.txt"],"to":["b.txt"],"staging_name":"s1.part","owner_uid":300001,"owner_gid":300001}"#;
+        match call(&h, raw) {
+            Response::Copied { bytes } => assert_eq!(bytes, 7),
+            other => panic!("expected a copy, got {other:?}"),
+        }
+
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "docs", "a.txt"])).expect("read src"),
+            b"keep me",
+            "a copy must not touch the source"
+        );
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "b.txt"])).expect("read dst"),
+            b"keep me"
+        );
+    }
+
+    #[test]
+    fn a_copy_leaves_nothing_in_staging_when_it_succeeds() {
+        // The staging file is renamed, not left behind. A copy that published AND kept its staged
+        // copy would double the space every copy costs until the sweeper's ten-minute pass.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "a.txt"]), b"x").expect("write");
+
+        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"s2.part","owner_uid":300001,"owner_gid":300001}"#;
+        assert!(matches!(call(&h, raw), Response::Copied { .. }));
+        assert!(
+            !h.share_path(&["alice", STAGING_DIR[0], STAGING_DIR[1], "s2.part"])
+                .exists(),
+            "the staging file must be gone after a publish"
+        );
+    }
+
+    #[test]
+    fn a_copy_onto_an_existing_name_is_refused_and_changes_nothing() {
+        // The rule the whole product rests on: publishing never destroys a file the user already
+        // has. `RENAME_NOREPLACE` decides it inside the syscall, so there is no window.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "a.txt"]), b"the source").expect("write src");
+        std::fs::write(h.share_path(&["alice", "b.txt"]), b"the resident").expect("write dst");
+
+        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"s3.part","owner_uid":300001,"owner_gid":300001}"#;
+        match call(&h, raw) {
+            Response::Conflict { reason } => assert!(reason.contains("b.txt"), "{reason}"),
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "b.txt"])).expect("read dst"),
+            b"the resident",
+            "the destination was overwritten"
+        );
+    }
+
+    #[test]
+    fn copying_something_that_is_not_there_is_a_not_found() {
+        let h = Harness::with_share("alice");
+        let raw = r#"{"op":"copy_file","share":"alice","from":["ghost.txt"],"to":["b.txt"],"staging_name":"s4.part","owner_uid":300001,"owner_gid":300001}"#;
+        assert!(matches!(call(&h, raw), Response::NotFound { .. }));
+    }
+
+    #[test]
+    fn a_copy_into_a_folder_that_does_not_exist_is_refused_rather_than_creating_it() {
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "a.txt"]), b"x").expect("write");
+
+        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["nope","a.txt"],"staging_name":"s5.part","owner_uid":300001,"owner_gid":300001}"#;
+        assert!(matches!(call(&h, raw), Response::NotFound { .. }));
+        assert!(!h.share_path(&["alice", "nope"]).exists());
+    }
+
+    #[test]
+    fn a_second_copy_under_one_staging_name_is_refused_rather_than_racing() {
+        // `OpenIntent::CreateNew` is what decides this, in the kernel, rather than a check here.
+        // Two jobs that picked the same staging name must not both write into one file.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "a.txt"]), b"x").expect("write");
+        std::fs::write(
+            h.share_path(&["alice", STAGING_DIR[0], STAGING_DIR[1], "taken.part"]),
+            b"somebody else",
+        )
+        .expect("write staged");
+
+        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"taken.part","owner_uid":300001,"owner_gid":300001}"#;
+        assert!(matches!(call(&h, raw), Response::Conflict { .. }));
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", STAGING_DIR[0], STAGING_DIR[1], "taken.part"]))
+                .expect("read staged"),
+            b"somebody else",
+            "the other job's staging file was overwritten"
+        );
+    }
+
+    #[test]
+    fn a_copy_cannot_reach_into_or_out_of_the_agents_own_tree() {
+        // The same door `MoveEntry` and `RemoveEntry` close. A copy OUT of staging publishes a
+        // half-finished upload under a name of the caller's choosing with none of
+        // `PublishTransfer`'s byte-count check; a copy INTO it puts a file where the sweeper will
+        // delete it and the transfer registry does not know about it.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "a.txt"]), b"x").expect("write");
+
+        for raw in [
+            r#"{"op":"copy_file","share":"alice","from":[".depsis","staging","x.part"],"to":["stolen.txt"],"staging_name":"s6.part","owner_uid":300001,"owner_gid":300001}"#,
+            r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":[".depsis","staging","planted.part"],"staging_name":"s7.part","owner_uid":300001,"owner_gid":300001}"#,
+        ] {
+            assert!(
+                matches!(call(&h, raw), Response::Refused { .. }),
+                "must refuse: {raw}"
+            );
+        }
+        assert!(!h.share_path(&["alice", "stolen.txt"]).exists());
+    }
+
+    #[test]
+    fn a_copy_is_refused_when_no_share_root_is_configured() {
+        let h = Harness::bare();
+        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"s8.part","owner_uid":300001,"owner_gid":300001}"#;
+        assert!(matches!(call(&h, raw), Response::Refused { .. }));
     }
 
     #[test]
