@@ -54,6 +54,18 @@ export { CopyModule } from './files/copy.module.js';
  * runs it. The walk is exported rather than reimplemented for the same reason the copy's is.
  */
 export { TrashRetentionModule } from './files/trash-retention.module.js';
+
+/**
+ * §5.3's acceptance criterion: a file created over SMB has to reach web search. The API stores the
+ * schedule and re-seeds it at boot; the worker runs the walk.
+ */
+export { IndexerModule } from './files/indexer.module.js';
+export {
+  RECONCILE_KIND,
+  IndexerService,
+  type ReconcilePayload,
+  type ReconcileResult,
+} from './files/indexer.service.js';
 export {
   TRASH_PURGE_KIND,
   TrashRetentionService,

@@ -16,6 +16,8 @@ import {
   CopyService,
   TrashRetentionModule,
   TrashRetentionService,
+  IndexerModule,
+  IndexerService,
 } from '@depsis/api/worker-surface';
 
 import { registerHandlers } from './handlers/registry.js';
@@ -43,6 +45,7 @@ import { WorkerService } from './worker.service.js';
     AclApplyModule,
     CopyModule,
     TrashRetentionModule,
+    IndexerModule,
   ],
 })
 class WorkerAppModule {}
@@ -67,6 +70,7 @@ async function bootstrap(): Promise<void> {
     identity: app.get(IdentitySyncService),
     copies: app.get(CopyService),
     retention: app.get(TrashRetentionService),
+    indexer: app.get(IndexerService),
   });
   worker.start();
 

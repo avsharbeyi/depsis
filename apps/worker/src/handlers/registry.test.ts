@@ -5,6 +5,7 @@ import type {
   AgentService,
   CopyService,
   IdentitySyncService,
+  IndexerService,
   JobsService,
   TrashRetentionService,
 } from '@depsis/api/worker-surface';
@@ -31,9 +32,11 @@ describe('the worker consumes every kind the API enqueues', () => {
       identity: {} as unknown as IdentitySyncService,
       copies: {} as unknown as CopyService,
       retention: {} as unknown as TrashRetentionService,
+      indexer: {} as unknown as IndexerService,
     });
     expect(worker.kinds.sort()).toEqual([
       'files.copy',
+      'files.reconcile',
       'files.trash.purge',
       'identity.sync',
       'permissions.apply',

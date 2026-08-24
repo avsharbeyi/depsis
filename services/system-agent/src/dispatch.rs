@@ -11,7 +11,10 @@
 use crate::acl::{self, AclError};
 use crate::audit::{self, Outcome, Sink};
 use crate::authz::{Decision, Policy};
-use crate::op::{AclEntry, AclType, PosixId, Request, Response, SCHEMA_VERSION, SHARE_ROOT_MODE};
+use crate::op::{
+    AclEntry, AclType, DirEntry, PosixId, Request, Response, SafeComponent, SCHEMA_VERSION,
+    SHARE_ROOT_MODE,
+};
 use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource};
 use crate::transfer::{
     Abandoned, Direction, InsertError, PendingTransfer, TransferRegistry, MAX_PENDING_TRANSFERS,
@@ -664,6 +667,68 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
+    /// One directory's contents, so the API can compare disk against `file_entries`.
+    ///
+    /// Names and metadata only — see `op::Request::ListDirectory` for why that is the whole point.
+    /// The seam drops symlinks and everything that is neither a regular file nor a directory, and
+    /// this drops anything whose name is not a `SafeComponent`: a name DEPSIS could never address
+    /// must not become a row, because the row would be permanently unreachable.
+    fn list_directory(&self, share: &str, path: &[&str]) -> Result<Response, SeamError> {
+        let Some(paths) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+        if Self::touches_agent_state(path) {
+            return Ok(Response::Refused {
+                reason: format!(
+                    "{}/ is the agent's own tree and is not part of the share",
+                    STAGING_DIR[0]
+                ),
+            });
+        }
+
+        let mut relative: Vec<&str> = vec![share];
+        relative.extend_from_slice(path);
+
+        let found = match paths.list_entries(&relative) {
+            Ok(found) => found,
+            Err(SeamError::NotFound(what)) => {
+                return Ok(Response::NotFound {
+                    reason: format!("{what}: no such directory"),
+                });
+            }
+            Err(SeamError::NotADirectory(what)) => {
+                return Ok(Response::NotFound {
+                    reason: format!("{what}: not a directory"),
+                });
+            }
+            Err(other) => return Err(other),
+        };
+
+        let truncated = found.len() > crate::op::MAX_LISTING;
+        let entries = found
+            .into_iter()
+            .take(crate::op::MAX_LISTING)
+            .filter_map(|entry| {
+                // `.depsis` is the agent's own tree and never part of what the API indexes. It is
+                // filtered here as well as refused above, because the share ROOT's listing would
+                // otherwise report it as an ordinary folder for DEPSIS to create a row for.
+                if path.is_empty() && entry.name == STAGING_DIR[0] {
+                    return None;
+                }
+                Some(DirEntry {
+                    name: SafeComponent::parse(entry.name).ok()?,
+                    directory: entry.directory,
+                    size: entry.size,
+                    modified_unix: entry.modified_unix,
+                })
+            })
+            .collect();
+
+        Ok(Response::Listing { entries, truncated })
+    }
+
     fn remove_entry(
         &self,
         share: &str,
@@ -1241,6 +1306,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     owner_uid: owner_uid.get(),
                     owner_gid: owner_gid.get(),
                 })
+            }
+
+            Request::ListDirectory { share, path } => {
+                let parts: Vec<&str> = path.iter().map(|c| c.as_str()).collect();
+                self.list_directory(share.as_str(), &parts)
             }
 
             Request::RemoveEntry {
@@ -2330,6 +2400,133 @@ mod tests {
                 "a refused request must not have chmodded anything: {raw}"
             );
         }
+    }
+
+    // ── ListDirectory ──
+    //
+    // The operation that makes an SMB write visible to DEPSIS at all. What these pin is what the
+    // dispatcher DECIDES: which entries are reported, which are silently dropped, and whether a
+    // caller can tell a complete listing from a clipped one.
+
+    #[test]
+    fn a_listing_reports_files_and_folders_with_their_sizes() {
+        let h = Harness::with_share("alice");
+        std::fs::create_dir(h.share_path(&["alice", "docs"])).expect("mkdir");
+        std::fs::write(h.share_path(&["alice", "not.txt"]), b"seven!!").expect("write");
+
+        let raw = r#"{"op":"list_directory","share":"alice","path":[]}"#;
+        match call(&h, raw) {
+            Response::Listing {
+                mut entries,
+                truncated,
+            } => {
+                assert!(!truncated);
+                entries.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+                assert_eq!(entries.len(), 2, "got {entries:?}");
+                assert_eq!(entries[0].name.as_str(), "docs");
+                assert!(entries[0].directory);
+                assert_eq!(entries[0].size, 0, "a folder has no bytes of its own");
+                assert_eq!(entries[1].name.as_str(), "not.txt");
+                assert!(!entries[1].directory);
+                assert_eq!(entries[1].size, 7);
+            }
+            other => panic!("expected a listing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_listing_never_reports_the_agents_own_tree() {
+        // `.depsis/staging` is inside the share, so the share root's listing would otherwise offer
+        // it as an ordinary folder for DEPSIS to write a row for — and the API would then show
+        // users a folder full of other people's half-finished uploads.
+        let h = Harness::with_share("alice");
+        let raw = r#"{"op":"list_directory","share":"alice","path":[]}"#;
+        match call(&h, raw) {
+            Response::Listing { entries, .. } => {
+                assert!(
+                    entries.iter().all(|e| e.name.as_str() != ".depsis"),
+                    "got {entries:?}"
+                );
+            }
+            other => panic!("expected a listing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listing_inside_the_agents_own_tree_is_refused() {
+        let h = Harness::with_share("alice");
+        let raw = r#"{"op":"list_directory","share":"alice","path":[".depsis","staging"]}"#;
+        assert!(matches!(call(&h, raw), Response::Refused { .. }));
+    }
+
+    #[test]
+    fn listing_something_that_is_not_a_directory_is_a_not_found() {
+        // The API turns this into 404. Arriving as `Failed` would make it a 500 for a case the
+        // caller can act on: the folder it is reconciling was replaced by a file over SMB.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "a.txt"]), b"x").expect("write");
+
+        for raw in [
+            r#"{"op":"list_directory","share":"alice","path":["a.txt"]}"#,
+            r#"{"op":"list_directory","share":"alice","path":["ghost"]}"#,
+        ] {
+            assert!(
+                matches!(call(&h, raw), Response::NotFound { .. }),
+                "must be not_found: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_listing_says_when_it_had_to_stop() {
+        // A caller that could not tell a complete listing from a clipped one would reconcile the
+        // first MAX_LISTING names and conclude everything else had been deleted.
+        let h = Harness::with_share("alice");
+        std::fs::create_dir(h.share_path(&["alice", "many"])).expect("mkdir");
+        for n in 0..(crate::op::MAX_LISTING + 5) {
+            std::fs::write(h.share_path(&["alice", "many"]).join(format!("f{n}")), b"x")
+                .expect("write");
+        }
+
+        let raw = r#"{"op":"list_directory","share":"alice","path":["many"]}"#;
+        match call(&h, raw) {
+            Response::Listing { entries, truncated } => {
+                assert!(truncated, "a clipped listing must say so");
+                assert_eq!(entries.len(), crate::op::MAX_LISTING);
+            }
+            other => panic!("expected a listing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_listing_drops_what_depsis_cannot_represent() {
+        // A symlink is dropped by the seam and a name that is not a `SafeComponent` by the
+        // dispatcher. Both would otherwise become a row naming something the agent itself refuses
+        // to open — a file the interface offers and cannot deliver.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "real.txt"]), b"x").expect("write");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/passwd", h.share_path(&["alice", "escape"]))
+            .expect("link");
+
+        let raw = r#"{"op":"list_directory","share":"alice","path":[]}"#;
+        match call(&h, raw) {
+            Response::Listing { entries, .. } => {
+                assert!(
+                    entries.iter().all(|e| e.name.as_str() != "escape"),
+                    "a symlink must not be reported: {entries:?}"
+                );
+                assert!(entries.iter().any(|e| e.name.as_str() == "real.txt"));
+            }
+            other => panic!("expected a listing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_listing_is_refused_when_no_share_root_is_configured() {
+        let h = Harness::bare();
+        let raw = r#"{"op":"list_directory","share":"alice","path":[]}"#;
+        assert!(matches!(call(&h, raw), Response::Refused { .. }));
     }
 
     // ── CopyFile ──

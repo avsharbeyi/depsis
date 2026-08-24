@@ -44,6 +44,7 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::DiscardTransfer { .. } => "discard_transfer",
         Request::OpenDownload { .. } => "open_download",
         Request::CopyFile { .. } => "copy_file",
+        Request::ListDirectory { .. } => "list_directory",
         Request::MoveEntry { .. } => "move_entry",
         Request::RemoveEntry { .. } => "remove_entry",
         Request::CreateDirectory { .. } => "create_directory",

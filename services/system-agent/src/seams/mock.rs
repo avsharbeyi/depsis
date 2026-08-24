@@ -13,7 +13,10 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use super::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource, Transport};
+use super::{
+    CommandRunner, DirEntryInfo, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource,
+    Transport,
+};
 use crate::op::Response;
 
 /// An in-memory transport: requests are queued up front, responses are collected.
@@ -324,6 +327,43 @@ impl SafePath for MockSafePath {
         }
         names.sort();
         Ok(names)
+    }
+
+    /// A real directory read under the temp root, matching what the kernel implementation drops.
+    ///
+    /// The exclusions are copied deliberately rather than left out: a mock that reported symlinks
+    /// and sockets would make the dispatcher's filtering untestable here, which is the same
+    /// fidelity gap `open_dir` and `open` each had to have fixed.
+    fn list_entries(&self, relative: &[&str]) -> Result<Vec<DirEntryInfo>, SeamError> {
+        let path = self.join(relative)?;
+        let mut found = Vec::new();
+        let reader = std::fs::read_dir(&path)
+            .map_err(|_| SeamError::NotFound(path.display().to_string()))?;
+        for entry in reader {
+            let entry = entry.map_err(|e| SeamError::Io(format!("readdir: {e}")))?;
+            let meta = match std::fs::symlink_metadata(entry.path()) {
+                Ok(meta) => meta,
+                Err(_) => continue,
+            };
+            if !meta.is_dir() && !meta.is_file() {
+                continue;
+            }
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let modified_unix = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs() as i64);
+            found.push(DirEntryInfo {
+                name,
+                directory: meta.is_dir(),
+                size: if meta.is_dir() { 0 } else { meta.len() },
+                modified_unix,
+            });
+        }
+        Ok(found)
     }
 
     fn list_stale_files(

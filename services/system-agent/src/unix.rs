@@ -18,7 +18,7 @@ use depsis_agent::data::DataChannel;
 use depsis_agent::dispatch::Agent;
 use depsis_agent::op::Response;
 use depsis_agent::seams::{
-    CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource,
+    CommandRunner, DirEntryInfo, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource,
 };
 
 /// Path resolution confined by the kernel, not by string inspection.
@@ -461,6 +461,60 @@ impl SafePath for Openat2SafePath {
             |kind| kind == rustix::fs::FileType::Directory,
             None,
         )
+    }
+
+    /// One `getdents` pass plus one `fstatat` per entry, all against a confined descriptor.
+    ///
+    /// The same shape as `entries` above and deliberately not built on it: that one returns names
+    /// only, and threading a second return type through its `keep` predicate would make the
+    /// sweeper's loop — which deletes as root — read less clearly for the sake of sharing twenty
+    /// lines.
+    fn list_entries(&self, relative: &[&str]) -> Result<Vec<DirEntryInfo>, SeamError> {
+        let dir_fd = self.open_dir(relative)?;
+        let mut reader = rustix::fs::Dir::read_from(&dir_fd)
+            .map_err(|e| SeamError::Io(format!("open directory stream: {e}")))?;
+        let mut found = Vec::new();
+
+        while let Some(entry) = reader.read() {
+            let entry = entry.map_err(|e| SeamError::Io(format!("readdir: {e}")))?;
+            let raw = entry.file_name();
+            if raw.to_bytes() == b"." || raw.to_bytes() == b".." {
+                continue;
+            }
+            let stat = match rustix::fs::statat(&dir_fd, raw, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            {
+                Ok(stat) => stat,
+                // Raced with something removing it between the readdir and the stat. Not an error:
+                // a reconciliation is a snapshot, and the next one will see the same absence.
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(e) => return Err(SeamError::Io(format!("stat entry: {e}"))),
+            };
+            let kind = rustix::fs::FileType::from_raw_mode(stat.st_mode);
+            let directory = kind == rustix::fs::FileType::Directory;
+            // Regular files and directories only. A symlink, a socket, a device node — DEPSIS has
+            // no row shape for any of them, and inventing one would produce an entry the agent
+            // itself refuses to open.
+            if !directory && kind != rustix::fs::FileType::RegularFile {
+                continue;
+            }
+            let Ok(name) = raw.to_str() else {
+                // A name that is not UTF-8 cannot be a `SafeComponent`, so nothing downstream
+                // could ever address it. Reported as absent rather than as a fault: it is a real
+                // file, and the honest thing is that DEPSIS cannot represent it.
+                continue;
+            };
+            found.push(DirEntryInfo {
+                name: name.to_string(),
+                directory,
+                size: if directory {
+                    0
+                } else {
+                    stat.st_size.unsigned_abs()
+                },
+                modified_unix: stat.st_mtime as i64,
+            });
+        }
+        Ok(found)
     }
 
     fn list_stale_files(

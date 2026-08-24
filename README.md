@@ -172,8 +172,37 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   gösterip o tarihte hiçbir şey olmaması, çöp kutusunun tutmadığı bir söz olurdu. Çöpe atılmış bir
   klasörün İÇİNDEKİ dosyada da yok: o, kendi tarihinde değil kökünün tarihinde gider.
 
-- Dosya sistemi olaylarından metadata'yı besleyen endeksleyici. Bu olmadan yalnız DEPSIS
-  üzerinden yüklenen dosyalar listede görünür; SMB'den yazılanlar görünmez.
+- **SMB'den yazılan dosyalar artık görünüyor** — ürünün en büyük deliği kapandı.
+
+  `file_entries` yalnız DEPSIS'in kendi yarattığı bir dosyayı öğreniyordu, yani SMB'den yazılan
+  her şey — bir NAS'ın var olma sebebi — web arayüzüne, aramaya ve izin yürüyüşüne görünmezdi.
+  §5.3 ve §18.2 bunu bir kabul kriteri yapıyor.
+
+  Ajanın kapalı işlem kümesine `ListDirectory` eklendi: bir dizini `RESOLVE_BENEATH` altında
+  okuyup her girdiyi `SYMLINK_NOFOLLOW` ile `fstatat`'lıyor. Ad ve üstveri, içerik değil. Tek
+  seviye, ağaç değil — yarıçapını çağıranın seçtiği bir çağrı olmasın diye (§2.2). Sembolik bağ,
+  soket ve aygıt düğümü bildirilmiyor: DEPSIS'in onlar için satır şekli yok ve öyle bir satır,
+  ajanın kendisinin açmayı reddedeceği bir dosyayı arayüzde sunmak olurdu.
+
+  Üstüne `files.reconcile` işi: paylaşımı genişlik-öncelikli yürüyüp veritabanını diske
+  uyduruyor. Diskte olup satırı olmayan öğrenilir, satırı olup diskte olmayan unutulur, boyutu
+  değişmiş olan tazelenir.
+
+  ADR-0011 önüne Samba'nın `vfs_full_audit` akışını koyuyor; o hızlı yol ayrı bir iş. Bu, ALTTAKİ
+  katman ve bilinçli olarak önce yazıldı: diğer her katman buna düşüyor — kaçırılan bir denetim
+  satırı, bir kuyruk taşması, Samba'dan hiç geçmeyen bir yazma — yani yalnız bunun olduğu bir ürün
+  GEÇ, yalnız diğerlerinin olduğu bir ürün SESSİZCE YANLIŞ.
+
+  Hiçbir bayt silinmiyor. Diskte olmayan bir satır VERİTABANINDAN kalkıyor ve hiçbir şey unlink
+  edilmiyor — dosya zaten yok, satırın kalkma sebebi o. Bu sınıftan yıkıcı bir ajan çağrısına yol
+  yok, ve gözetimsiz bir zamanlamada güvenli olmasının sebebi bu.
+
+  İki tuzak testlerle kapandı: kırpılmış bir listeleme altında HİÇBİR ŞEY silinmiyor (yarım bir
+  dizini uzlaştırıp kalan satırları silmek, tek suçu büyük olmak olan bir klasörün indeksini yok
+  ederdi), ve çöpteki bir satır adını "hesaba katıyor" ama başka hiçbir işlem görmüyor — çöp bir
+  sütun, klasör değil, yani baytları hâlâ yerinde ve satırı görmeyen bir yürüyüş kullanıcının
+  zaten sildiği şey için her on beş dakikada bir İKİNCİ satır yazardı.
+
 - ZFS havuzu yaratma. Ajan dataset ve anlık görüntü yaratabiliyor, havuz yaratamıyor — mirror
   sihirbazı bu yüzden yok. `POST /shares` bir dataset açar ama havuzu operatör kurar.
 - Paylaşımı SİLMEK. Grant'ları paylaşımı tutuyor (`ON DELETE RESTRICT`) ve son grant'ı silmek de

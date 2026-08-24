@@ -211,6 +211,14 @@ export type AgentRequest =
       to: SafeComponent[];
     }
   | {
+      op: 'list_directory';
+      /**
+       * Relative to the share root. Empty means the share root itself.
+       */
+      path: SafeComponent[];
+      share: SafeComponent;
+    }
+  | {
       /**
        * Is the entry a directory? The caller knows and has to say.
        */
@@ -551,6 +559,11 @@ export type AgentResponse =
       status: 'out_of_space';
     }
   | {
+      entries: DirEntry[];
+      status: 'listing';
+      truncated: boolean;
+    }
+  | {
       status: 'moved';
     }
   | {
@@ -627,6 +640,27 @@ export type ZeroTierNetworkStatus =
   | 'ACCESS_DENIED'
   | 'UNKNOWN';
 
+/**
+ * One thing in a directory, as the agent found it.
+ *
+ * `size` is 0 for a directory, matching `file_entries_folder_has_no_size`. The database
+ * constraint and the filesystem answer have to agree, or every reconciliation would report a
+ * difference that is not one.
+ */
+export interface DirEntry {
+  directory: boolean;
+  /**
+   * Seconds since the epoch, from the kernel. Fills `updated_at` for a row DEPSIS is learning
+   * about, so a file that arrived over SMB last week does not appear as modified just now.
+   */
+  modified_unix: number;
+  /**
+   * A `SafeComponent`, not a `String`: a name the agent cannot address is a name the API must
+   * not be handed, because a row written for it would be permanently unreachable.
+   */
+  name: string;
+  size: number;
+}
 /**
  * One joined network, as the agent reports it.
  *

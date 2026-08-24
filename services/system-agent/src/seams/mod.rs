@@ -78,6 +78,20 @@ pub enum SeamError {
     },
 }
 
+/// One thing in a directory, as the kernel reports it.
+///
+/// `size` is zero for a directory, matching `file_entries_folder_has_no_size` — the database
+/// constraint and the filesystem answer have to agree or every reconciliation would report a
+/// difference that is not one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntryInfo {
+    pub name: String,
+    pub directory: bool,
+    pub size: u64,
+    /// Seconds since the epoch. Used to fill `updated_at` for a row DEPSIS is learning about.
+    pub modified_unix: i64,
+}
+
 /// What a caller intends to do with a path, so the open can say so up front.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenIntent {
@@ -244,6 +258,24 @@ pub trait SafePath {
     /// root pointing at `/` would otherwise turn the sweeper below into a recursive delete of the
     /// whole filesystem, which is the single worst thing a root daemon can be talked into.
     fn list_dirs(&self, relative: &[&str]) -> Result<Vec<String>, SeamError>;
+
+    /// Everything directly under `relative`: name, kind and size.
+    ///
+    /// The primitive the indexer needs and the two above cannot serve. `list_dirs` drops files and
+    /// `list_stale_files` drops directories and sizes, and a reconciliation has to see both kinds
+    /// together — a name that is a file in the database and a directory on disk is exactly the
+    /// divergence it exists to find.
+    ///
+    /// SYMLINKS ARE DROPPED, as they are for `list_dirs` and for the same reason: the stat is an
+    /// `fstatat` with `SYMLINK_NOFOLLOW`, so a link pointing out of the share is neither followed
+    /// nor reported. An indexer that recorded one would put a row in `file_entries` naming
+    /// something the agent will refuse to open, and the user would see a file that cannot be
+    /// downloaded, moved or deleted.
+    ///
+    /// Anything that is neither a regular file nor a directory — a socket, a fifo, a device node
+    /// somebody dropped in over SSH — is dropped too. DEPSIS has no representation for them and a
+    /// row that claimed otherwise would be a lie the interface then has to act on.
+    fn list_entries(&self, relative: &[&str]) -> Result<Vec<DirEntryInfo>, SeamError>;
 
     /// The names of the regular files directly under `relative` last modified more than
     /// `older_than` ago.

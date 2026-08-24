@@ -73,6 +73,11 @@ describe('the emitted agent schema', () => {
       // Rename and relocate, one `renameat2(RENAME_NOREPLACE)` on two descriptors the agent
       // resolved itself. Named for the entry rather than for the syscall because the API asks for
       // an outcome, and because `rename` in this product already means the metadata-only kind.
+      // What is on disk, so DEPSIS can find out what it does not know. Names and metadata only:
+      // a directory read under RESOLVE_BENEATH plus an fstatat per entry. Without it a file
+      // written over SMB — which is what a NAS is for — was invisible to the web interface, to
+      // search and to the permission walk.
+      'list_directory',
       'move_entry',
       // The bulk data path's control half. `open_transfer` resolves and opens a staging file and
       // returns a one-time token; the bytes travel on a separate socket, because Node cannot
@@ -189,7 +194,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(9);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(10);
   });
 
   it('agrees with the number the agent actually reports', () => {

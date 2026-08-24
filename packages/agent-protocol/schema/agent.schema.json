@@ -367,6 +367,32 @@
       ]
     },
     {
+      "description": "List ONE directory inside a share: names, kinds and sizes.\n\nTHE OPERATION THAT MAKES SMB WRITES VISIBLE. Until now `file_entries` only learned about a\nfile if DEPSIS itself created it, so anything written over SMB — which is what a NAS is for\n— was invisible to the web interface, to search and to the permission walk. ADR-0011 lays\nout four layers for closing that; this is the primitive the reconciliation layer needs, and\nreconciliation is what every other layer degrades to when it misses an event.\n\nREADS NAMES, NEVER CONTENT. A directory listing is metadata: the agent opens the directory\nunder `RESOLVE_BENEATH`, reads its entries and `fstatat`s each one with `SYMLINK_NOFOLLOW`.\nNothing here can be pointed at a file's bytes.\n\nONE LEVEL, never a tree — the same rule as `RemoveEntry` and `CopyFile`, and the same reason\n(§2.2, ADR-0006). A recursive listing is a call whose cost the caller chooses, and the API\nwalks the tree itself because the API is the side that stores it.\n\nSymlinks, sockets, fifos and device nodes are not reported. DEPSIS has no row shape for any\nof them, and a row that claimed otherwise would name something the agent itself refuses to\nopen — a file the interface offers and cannot deliver.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "list_directory"
+        },
+        "path": {
+          "description": "Relative to the share root. Empty means the share root itself.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "path"
+      ]
+    },
+    {
       "description": "Delete exactly ONE entry inside a share. Never a tree.\n\n`directory` is a required operand rather than something the agent works out by stat-ing the\npath, and that is deliberate twice over. `unlinkat` needs `AT_REMOVEDIR` or not, so the\ndistinction has to be made somewhere; making the CALLER state it means a caller that\nbelieves it is deleting a file and finds a directory gets a refusal instead of a surprise.\nDeciding it from a stat would also be check-then-use on the one operation that cannot be\nundone.\n\nThere is no recursive variant and there will not be one. A non-empty directory comes back\nas an error (`ENOTEMPTY`) and the API walks the tree itself. The reason is §2.2 and\nADR-0006: the closed operation set exists so that no single call the agent accepts has a\nblast radius the caller chooses. \"Delete this subtree\" is `rm -rf` behind a typed name — one\nbug in the unprivileged side, or one confused-deputy request, and it is the whole share.\nThe API knows the tree because the API stores the tree; the agent only needs to be able to\nremove a leaf.",
       "type": "object",
       "properties": {
@@ -1028,6 +1054,30 @@
       ]
     },
     {
+      "description": "One directory's contents.\n\n`truncated` is not decoration. A directory with a million entries would make one response\nlarger than the socket's line limit, so the list is capped — and a caller that could not\ntell a complete listing from a clipped one would reconcile the first `MAX_LISTING` names\nand conclude that everything else had been deleted. With the flag, the API knows to leave\nthe rest alone and say so.",
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DirEntry"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "listing"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status",
+        "entries",
+        "truncated"
+      ]
+    },
+    {
       "description": "The entry is at its new name and the destination directory has been fsynced.\n\nNo payload. The caller named both ends of the move and nothing about them changed, so\nechoing them back would only invite a consumer to believe the agent had normalised\nsomething.",
       "type": "object",
       "properties": {
@@ -1331,6 +1381,40 @@
     }
   ],
   "$defs": {
+    "DirEntry": {
+      "description": "One thing in a directory, as the agent found it.\n\n`size` is 0 for a directory, matching `file_entries_folder_has_no_size`. The database\nconstraint and the filesystem answer have to agree, or every reconciliation would report a\ndifference that is not one.",
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "boolean"
+        },
+        "modified_unix": {
+          "description": "Seconds since the epoch, from the kernel. Fills `updated_at` for a row DEPSIS is learning\nabout, so a file that arrived over SMB last week does not appear as modified just now.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "name": {
+          "description": "A `SafeComponent`, not a `String`: a name the agent cannot address is a name the API must\nnot be handed, because a row written for it would be permanently unreachable.",
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "directory",
+        "size",
+        "modified_unix"
+      ]
+    },
+    "SafeComponent": {
+      "description": "A single path component under a share root — never a path, never absolute.\n\nADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access\nto `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle\n`/` or `..` through, so this type refuses them rather than sanitising.",
+      "type": "string"
+    },
     "ZeroTierNetwork": {
       "description": "One joined network, as the agent reports it.\n\nA typed projection, not the daemon's JSON. Passing the raw object through would make every\nfield ZeroTier ever adds part of the DEPSIS contract, and would put the agent in the position\nof forwarding something it has not read.",
       "type": "object",

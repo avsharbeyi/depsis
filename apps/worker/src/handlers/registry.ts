@@ -3,6 +3,7 @@ import type {
   AgentService,
   CopyService,
   IdentitySyncService,
+  IndexerService,
   JobsService,
   TrashRetentionService,
 } from '@depsis/api/worker-surface';
@@ -10,6 +11,7 @@ import type {
 import type { WorkerService } from '../worker.service.js';
 import { applyAclHandler, APPLY_ACL_KIND } from './apply-acl.handler.js';
 import { copyHandler, COPY_KIND } from './copy.handler.js';
+import { reconcileHandler, RECONCILE_KIND } from './reconcile.handler.js';
 import { trashPurgeHandler, TRASH_PURGE_KIND } from './trash-purge.handler.js';
 import { identitySyncHandler, IDENTITY_SYNC_KIND } from './identity-sync.handler.js';
 import { snapshotHandler, SNAPSHOT_KIND } from './snapshot.handler.js';
@@ -32,6 +34,7 @@ export function registerHandlers(
     identity: IdentitySyncService;
     copies: CopyService;
     retention: TrashRetentionService;
+    indexer: IndexerService;
   },
 ): void {
   worker.register(SNAPSHOT_KIND, snapshotHandler(services.agent));
@@ -46,4 +49,7 @@ export function registerHandlers(
   // Self-scheduling: each run queues the next through `run_after`, which is the only durable
   // timer this product has. A `setInterval` would be gone after a restart.
   worker.register(TRASH_PURGE_KIND, trashPurgeHandler(services.retention));
+  // The layer that makes the index TRUE. The fast path in front of it (ADR-0011's Samba
+  // audit stream) is a separate change; this is what every layer degrades to.
+  worker.register(RECONCILE_KIND, reconcileHandler(services.indexer));
 }

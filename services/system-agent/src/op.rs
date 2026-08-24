@@ -725,6 +725,31 @@ pub enum Request {
         owner_gid: PosixId,
     },
 
+    /// List ONE directory inside a share: names, kinds and sizes.
+    ///
+    /// THE OPERATION THAT MAKES SMB WRITES VISIBLE. Until now `file_entries` only learned about a
+    /// file if DEPSIS itself created it, so anything written over SMB — which is what a NAS is for
+    /// — was invisible to the web interface, to search and to the permission walk. ADR-0011 lays
+    /// out four layers for closing that; this is the primitive the reconciliation layer needs, and
+    /// reconciliation is what every other layer degrades to when it misses an event.
+    ///
+    /// READS NAMES, NEVER CONTENT. A directory listing is metadata: the agent opens the directory
+    /// under `RESOLVE_BENEATH`, reads its entries and `fstatat`s each one with `SYMLINK_NOFOLLOW`.
+    /// Nothing here can be pointed at a file's bytes.
+    ///
+    /// ONE LEVEL, never a tree — the same rule as `RemoveEntry` and `CopyFile`, and the same reason
+    /// (§2.2, ADR-0006). A recursive listing is a call whose cost the caller chooses, and the API
+    /// walks the tree itself because the API is the side that stores it.
+    ///
+    /// Symlinks, sockets, fifos and device nodes are not reported. DEPSIS has no row shape for any
+    /// of them, and a row that claimed otherwise would name something the agent itself refuses to
+    /// open — a file the interface offers and cannot deliver.
+    ListDirectory {
+        share: SafeComponent,
+        /// Relative to the share root. Empty means the share root itself.
+        path: Vec<SafeComponent>,
+    },
+
     /// Delete exactly ONE entry inside a share. Never a tree.
     ///
     /// `directory` is a required operand rather than something the agent works out by stat-ing the
@@ -964,6 +989,30 @@ impl SmbPrincipal {
     }
 }
 
+/// One thing in a directory, as the agent found it.
+///
+/// `size` is 0 for a directory, matching `file_entries_folder_has_no_size`. The database
+/// constraint and the filesystem answer have to agree, or every reconciliation would report a
+/// difference that is not one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DirEntry {
+    /// A `SafeComponent`, not a `String`: a name the agent cannot address is a name the API must
+    /// not be handed, because a row written for it would be permanently unreachable.
+    pub name: SafeComponent,
+    pub directory: bool,
+    pub size: u64,
+    /// Seconds since the epoch, from the kernel. Fills `updated_at` for a row DEPSIS is learning
+    /// about, so a file that arrived over SMB last week does not appear as modified just now.
+    pub modified_unix: i64,
+}
+
+/// The most one listing will report.
+///
+/// A directory with more than this comes back `truncated`. The number is bounded by the control
+/// socket's line limit rather than by taste: one response has to fit in one line.
+pub const MAX_LISTING: usize = 5_000;
+
 /// One POSIX ACL entry: a GROUP and the three permission bits.
 ///
 /// There is no `uid` field and there must not be one. ADR-0004 chose the grant model, and this
@@ -1077,6 +1126,17 @@ pub enum Response {
     #[serde(rename = "out_of_space")]
     OutOfSpace {
         reason: String,
+    },
+    /// One directory's contents.
+    ///
+    /// `truncated` is not decoration. A directory with a million entries would make one response
+    /// larger than the socket's line limit, so the list is capped — and a caller that could not
+    /// tell a complete listing from a clipped one would reconcile the first `MAX_LISTING` names
+    /// and conclude that everything else had been deleted. With the flag, the API knows to leave
+    /// the rest alone and say so.
+    Listing {
+        entries: Vec<DirEntry>,
+        truncated: bool,
     },
     /// The entry is at its new name and the destination directory has been fsynced.
     ///
@@ -1260,7 +1320,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///
