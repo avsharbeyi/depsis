@@ -372,7 +372,12 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   ACL'ler BİRLİKTE belirliyor — birini güncelleyip diğerini güncellememek, "izni kaldırdım" ile
   "erişim gerçekten kapandı" arasındaki fark.
 
-- §21'in kalan teslimatları: mimari diyagramlar, Storybook, imzalı build prosedürü,
+- **Mimari diyagramlar yazıldı** — [`docs/architecture.md`](docs/architecture.md): süreçler ve
+  güven sınırı, iki soketin neden iki olduğu, bir dosyanın iki gerçekliği, erişimin iki
+  uygulayıcısı, ve yıkıcı işlemin yolu. ADR'lerin yerini almıyor — burası ne olduğu,
+  `docs/adr/` neden öyle olduğu, ve çelişirlerse ADR'ler haklı.
+
+- §21'in kalan teslimatları: Storybook, imzalı build prosedürü,
   ve test raporlarının artefakt hâli (testler koşuyor; CI hesabı kilitli olduğu için yayımlanmış
   rapor yok).
 
