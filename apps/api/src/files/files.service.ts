@@ -303,6 +303,58 @@ export interface FileEntryPage {
 const ENTRY_COLUMNS = `id, share_id, parent_id, kind, name, path, size_bytes, content_type,
                        trashed_at, created_at, updated_at`;
 
+/** The orders `GET /files` offers. The contract's enum, and nothing outside it. */
+export type SortOrder = 'name' | 'modified' | 'size';
+
+/**
+ * How each sort is expressed, as two fragments that have to agree.
+ *
+ * ONE ENTRY RATHER THAN A `switch`, because `after` and `by` are one decision and splitting them is
+ * how a cursor stops matching its own ORDER BY. `by` produces the order; `after` selects everything
+ * strictly beyond the cursor row in that same order. Get them out of step and a page boundary
+ * repeats or drops rows — the failure cursor pagination was chosen over offset pagination to avoid,
+ * reintroduced through the back door.
+ *
+ * WHY `after` IS WRITTEN OUT INSTEAD OF BEING ONE ROW-VALUE COMPARISON. `(a, b) > (x, y)` is
+ * lexicographic in ONE direction, and two of these orders run in two: `kind` ascends while
+ * `updated_at` and `size_bytes` descend. Folding a mixed order into a single tuple comparison
+ * compares `kind` descending as well, and the second page of a `modified` listing comes back short.
+ * That is measured rather than reasoned about — `conditional.integration.test.ts` failed on it
+ * before this was written out.
+ *
+ * The `c_` prefixes are what let the predicate stay unqualified: every column of the cursor row is
+ * renamed, so a bare `kind` inside the EXISTS can only mean the outer table's.
+ *
+ * `kind` leads all three, so folders and files never interleave. It is text, so it sorts
+ * alphabetically and files come before folders — the order this endpoint has always produced, kept
+ * rather than quietly improved: it is the default listing order and changing it is a separate
+ * decision from implementing `sort`.
+ *
+ * `id` closes all three. `name_fold` is unique per parent so the name sort did not need it, but two
+ * files modified in the same millisecond or holding the same number of bytes are ordinary — and
+ * without a tiebreak the cursor lands inside a group and the page after it is arbitrary.
+ *
+ * DESCENDING for `modified` and `size`, which the contract does not specify. Somebody who sorts by
+ * date is asking what changed last, and somebody who sorts by size is looking for what is filling
+ * the disk; ascending would answer both with the least interesting row in the folder.
+ */
+const SORTS: Readonly<Record<SortOrder, { after: string; by: string }>> = {
+  name: {
+    // Every key ascends, so this one CAN be a single row-value comparison — and is, because it is
+    // both the clearest way to say it and the shape the planner turns into an index scan.
+    after: '(kind, name_fold, id) > (c_kind, c_name_fold, c_id)',
+    by: 'kind, name_fold, id',
+  },
+  modified: {
+    after: 'kind > c_kind OR (kind = c_kind AND (updated_at, id) < (c_updated_at, c_id))',
+    by: 'kind, updated_at DESC, id DESC',
+  },
+  size: {
+    after: 'kind > c_kind OR (kind = c_kind AND (size_bytes, id) < (c_size_bytes, c_id))',
+    by: 'kind, size_bytes DESC, id DESC',
+  },
+};
+
 /**
  * The share this entry lives in, as the caller resolved it from the session.
  *
@@ -697,19 +749,26 @@ export class FilesService {
     parentId: string | null,
     cursor: string | null,
     limit: number,
+    sort: SortOrder = 'name',
   ): Promise<FileEntryPage> {
+    const order = SORTS[sort];
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<FileEntryRow>(
-        `SELECT ${ENTRY_COLUMNS}
+        `WITH cur AS (
+           SELECT kind AS c_kind, name_fold AS c_name_fold, updated_at AS c_updated_at,
+                  size_bytes AS c_size_bytes, id AS c_id
+             FROM public.file_entries
+            WHERE id = $4::uuid
+         )
+         SELECT ${ENTRY_COLUMNS}
            FROM public.file_entries
           WHERE organization_id = $1
             AND share_id = $2
             AND parent_id IS NOT DISTINCT FROM $3
             AND trashed_at IS NULL
-            AND ($4::text IS NULL OR (kind, name_fold) > (SELECT kind, name_fold
-                                                            FROM public.file_entries
-                                                           WHERE id = $4::uuid))
-          ORDER BY kind, name_fold
+            AND ($4::text IS NULL
+                 OR EXISTS (SELECT 1 FROM cur WHERE ${order.after}))
+          ORDER BY ${order.by}
           LIMIT $5`,
         [organizationId, shareId, parentId, cursor, limit + 1],
       ),

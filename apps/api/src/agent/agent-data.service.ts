@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createConnection, type Socket } from 'node:net';
 import { pipeline } from 'node:stream/promises';
+import type { Hash } from 'node:crypto';
 import { Transform, type Readable, type Writable } from 'node:stream';
 
 import { AgentUnavailableError } from './agent.service.js';
@@ -48,7 +49,19 @@ export class AgentDataService {
    * tenant's quota is exhausted, so the tus layer can answer 507 rather than 500; ADR-0008 requires
    * that distinction and the only alternative would be matching on a `strerror` string.
    */
-  async send(token: string, offset: number, length: number, body: Readable): Promise<number> {
+  /**
+   * @param digest optional — updated with every byte forwarded, so a caller can verify a chunk it
+   *   never buffers. The bytes are already on their way to the staging file by the time the digest
+   *   is complete; that is fine, and it is why a mismatch is answered by NOT advancing the offset
+   *   rather than by trying to unwrite anything. The next PATCH rewrites the same region.
+   */
+  async send(
+    token: string,
+    offset: number,
+    length: number,
+    body: Readable,
+    digest?: Hash,
+  ): Promise<number> {
     const path = this.socketPath;
     if (path === null) {
       throw new AgentUnavailableError('DEPSIS_AGENT_DATA_SOCKET is not configured');
@@ -80,7 +93,7 @@ export class AgentDataService {
       // half-closed lost the response entirely on 2 of 5 connections (see the note in
       // `agent.service.ts`). Keeping the write side open costs nothing on Linux and is the
       // difference between an answer and silence on a development machine.
-      await pipeline(body, new ExactLength(length), socket, { end: false });
+      await pipeline(body, new ExactLength(length, digest), socket, { end: false });
 
       const stored = await reader.next();
       if (stored.status !== 'stored') throw toError(stored);
@@ -218,7 +231,10 @@ function toError(reply: DataReply): Error {
 class ExactLength extends Transform {
   private seen = 0;
 
-  constructor(private readonly declared: number) {
+  constructor(
+    private readonly declared: number,
+    private readonly digest?: Hash,
+  ) {
     super();
   }
 
@@ -237,6 +253,10 @@ class ExactLength extends Transform {
       );
       return;
     }
+    // Hashed HERE rather than around the whole body, so the digest covers exactly the bytes that
+    // were forwarded. A hash taken upstream of the length check would include the overrun that
+    // this transform is in the middle of refusing.
+    this.digest?.update(chunk);
     this.push(chunk);
     done();
   }

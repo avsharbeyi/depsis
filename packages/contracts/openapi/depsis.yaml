@@ -433,6 +433,11 @@ paths:
       responses:
         '200':
           description: Girdi
+          headers:
+            ETag:
+              description: |
+                Meta veri doğrulayıcısı. `PATCH /files/{id}` bunu `If-Match` olarak kabul eder.
+              schema: { type: string }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/FileEntryDetail' }

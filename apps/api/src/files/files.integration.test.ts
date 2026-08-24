@@ -1689,7 +1689,7 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     // so `detail` resolves it from the entry. Before this it resolved the default share, the
     // ancestor walk found no chain rooted there, and the answer was 404 — every entry outside the
     // first share unreachable, however wide its grants.
-    expect((await controller.detail(as(alice), folderId)).name).toBe('ikincideki');
+    expect((await controller.detail(as(alice), stubResponse(), folderId)).name).toBe('ikincideki');
 
     await pdb.withTenant(org, async (q) => {
       await q.query(`DELETE FROM public.file_entries WHERE id = $1`, [folderId]);
@@ -1720,7 +1720,9 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     // 404 and not 403: a node a caller cannot `list` must not be confirmed to exist. That is the
     // same rule every other endpoint here applies, and it is why the listing above is empty
     // rather than full of rows with no permissions on them.
-    await expect(controller.detail(as(bob), made.id)).rejects.toBeInstanceOf(NotFoundException);
+    await expect(controller.detail(as(bob), stubResponse(), made.id)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
   });
 
   it('queues an ACL re-apply when a folder moves, because its inherited grants changed', async () => {
@@ -1807,7 +1809,9 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     // appliance's own administrator out of a share nobody had granted them, and it does not.
     const page = await controller.list(as(admin, 'admin'), undefined, undefined, '100', undefined);
     expect(page.items.map((item) => item.name)).toContain('yonetici-gorur');
-    expect((await controller.detail(as(admin, 'admin'), made.id)).permissions).toContain('manage');
+    expect(
+      (await controller.detail(as(admin, 'admin'), stubResponse(), made.id)).permissions,
+    ).toContain('manage');
   });
 
   // ─── the inheritance rule ───────────────────────────────────────────────────
@@ -1832,9 +1836,9 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     ]);
 
     // And the narrowing is real at the endpoint, not merely in the reported set.
-    await expect(controller.update(as(alice), sub.id, { name: 'yeni' })).rejects.toBeInstanceOf(
-      ForbiddenException,
-    );
+    await expect(
+      controller.update(as(alice), stubResponse(), sub.id, { name: 'yeni' }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('unions across principals, so a narrow personal grant cannot clip a wide team one', async () => {
@@ -1867,7 +1871,9 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     expect(listed).toContain('acik-klasor');
     expect(listed).not.toContain('gizli-maas-bilgileri');
     // The id is not a way round it either: a name is information on its own.
-    await expect(controller.detail(as(alice), closed.id)).rejects.toBeInstanceOf(NotFoundException);
+    await expect(controller.detail(as(alice), stubResponse(), closed.id)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
   });
 
   it('answers 404 for an entry the listing hid, and 403 for one it showed', async () => {
@@ -1920,13 +1926,15 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     const entry = await folder(null, 'yeniden-adlandir');
     await grantTo({ user: alice }, entry.id, ['list', 'read']);
 
-    await expect(controller.update(as(alice), entry.id, { name: 'olmaz' })).rejects.toBeInstanceOf(
-      ForbiddenException,
-    );
+    await expect(
+      controller.update(as(alice), stubResponse(), entry.id, { name: 'olmaz' }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
     await expect(controller.trash(as(alice), entry.id)).rejects.toBeInstanceOf(ForbiddenException);
 
     await grantTo({ user: alice }, entry.id, ['list', 'read', 'modify', 'delete']);
-    expect((await controller.update(as(alice), entry.id, { name: 'olur' })).name).toBe('olur');
+    expect(
+      (await controller.update(as(alice), stubResponse(), entry.id, { name: 'olur' })).name,
+    ).toBe('olur');
     expect((await controller.trash(as(alice), entry.id)).id).toBe(entry.id);
   });
 
@@ -1940,21 +1948,23 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     await grantTo({ user: alice }, moving.id, ['list', 'move']);
     await grantTo({ user: alice }, to.id, ['list', 'read']);
     await expect(
-      controller.update(as(alice), moving.id, { parentId: to.id }),
+      controller.update(as(alice), stubResponse(), moving.id, { parentId: to.id }),
     ).rejects.toBeInstanceOf(ForbiddenException);
 
     // `create` where it is going, no `move` where it is.
     await grantTo({ user: alice }, moving.id, ['list', 'read']);
     await grantTo({ user: alice }, to.id, ['list', 'create']);
     await expect(
-      controller.update(as(alice), moving.id, { parentId: to.id }),
+      controller.update(as(alice), stubResponse(), moving.id, { parentId: to.id }),
     ).rejects.toBeInstanceOf(ForbiddenException);
 
     // Neither refusal reached the agent, so neither of them moved anything.
     expect(agentCalls.filter((call) => call['op'] === 'move_entry')).toEqual([]);
 
     await grantTo({ user: alice }, moving.id, ['list', 'move']);
-    const moved = await controller.update(as(alice), moving.id, { parentId: to.id });
+    const moved = await controller.update(as(alice), stubResponse(), moving.id, {
+      parentId: to.id,
+    });
     expect(moved.parentId).toBe(to.id);
     expect(agentCalls.filter((call) => call['op'] === 'move_entry')).toHaveLength(1);
   });
@@ -1967,7 +1977,7 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     // A 403 here would say "that folder exists and you may not put things in it", which is more
     // than the listing was willing to say about it.
     await expect(
-      controller.update(as(alice), moving.id, { parentId: to.id }),
+      controller.update(as(alice), stubResponse(), moving.id, { parentId: to.id }),
     ).rejects.toBeInstanceOf(NotFoundException);
   });
 
@@ -2149,7 +2159,7 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     await grantTo({ user: alice }, null, ['list']);
 
     expect(await names(as(admin, 'admin'))).toContain('yoneticiye-acik');
-    const detail = await controller.detail(as(admin, 'admin'), file.id);
+    const detail = await controller.detail(as(admin, 'admin'), stubResponse(), file.id);
     // Every one of §6.2's eleven, which is what ADR-0021 §5 means by "reaches everything".
     expect(detail.permissions).toHaveLength(11);
     expect(detail.permissions).toContain('manage');

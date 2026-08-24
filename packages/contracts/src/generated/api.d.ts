@@ -817,6 +817,8 @@ export interface paths {
                 /** @description Girdi */
                 200: {
                     headers: {
+                        /** @description Meta veri doğrulayıcısı. `PATCH /files/{id}` bunu `If-Match` olarak kabul eder. */
+                        ETag?: string;
                         [name: string]: unknown;
                     };
                     content: {

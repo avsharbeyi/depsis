@@ -16,11 +16,12 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import type { Response } from 'express';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 
 import { AgentService, expectStatus } from '../agent/agent.service.js';
 import { AgentDataService, AgentOutOfSpaceError } from '../agent/agent-data.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import { ProblemException } from '../common/problem.filter.js';
 import { IdempotencyInterceptor } from '../common/idempotency.interceptor.js';
 import { DbService } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
@@ -166,6 +167,7 @@ export class UploadsController {
     @Param('uploadId') uploadId: string,
     @Headers('upload-offset') uploadOffset?: string,
     @Headers('content-length') contentLength?: string,
+    @Headers('upload-checksum') uploadChecksum?: string,
   ): Promise<void> {
     const session = requireSession(request);
     this.requireAgent();
@@ -229,9 +231,14 @@ export class UploadsController {
       );
     }
 
+    // Parsed BEFORE a byte is forwarded. A malformed header discovered after the chunk is on
+    // disk would mean refusing an upload for a client mistake that cost the appliance the write.
+    const expected = parseChecksum(uploadChecksum);
+    const digest = expected === null ? undefined : createHash('sha256');
+
     let stored: number;
     try {
-      stored = await this.data.send(opened.token, opened.offset, chunkLength, request);
+      stored = await this.data.send(opened.token, opened.offset, chunkLength, request, digest);
     } catch (error) {
       if (error instanceof AgentOutOfSpaceError) {
         // 507, not 500. ADR-0008: a full dataset is a permanent condition the client must not
@@ -239,6 +246,24 @@ export class UploadsController {
         throw new InsufficientStorageException(error.agentReason);
       }
       throw error;
+    }
+
+    if (expected !== null && digest !== undefined) {
+      const actual = digest.digest();
+      if (!timingSafeEqualBuffers(actual, expected)) {
+        // The offset is NOT advanced, and that is the whole mechanism. The bytes reached the
+        // staging file — they were streamed straight through — so there is nothing to undo here;
+        // leaving the recorded offset where it was means the next PATCH is told to resume from the
+        // same place and rewrites the region. tus specifies exactly this: the chunk is discarded
+        // by being overwritten, not by being erased.
+        response.setHeader('Upload-Offset', String(offset));
+        response.setHeader('Tus-Resumable', '1.0.0');
+        throw new ProblemException(
+          'checksum-mismatch',
+          'Gönderilen parçanın sha256 özeti Upload-Checksum ile uyuşmadı; aynı konumdan tekrar ' +
+            'gönderin.',
+        );
+      }
     }
 
     const next = offset + stored;
@@ -431,4 +456,50 @@ export function parseUploadMetadata(header: string): Map<string, string> {
     out.set(key, decoded.toString('utf8'));
   }
   return out;
+}
+
+/**
+ * `Upload-Checksum: sha256 <base64>`, or nothing.
+ *
+ * The tus checksum extension's format: an algorithm name, a space, and the digest in base64. Only
+ * sha256 is accepted, and the contract says why — a browser's SubtleCrypto offers the SHA family
+ * and nothing else, so an algorithm no client can compute would be a parameter nobody could use.
+ *
+ * A HEADER THAT CANNOT BE UNDERSTOOD IS REFUSED, not ignored. Ignoring it would mean a client that
+ * misspelled the algorithm believes its uploads are being checked and they are not — the same
+ * failure this whole change exists to end, one level down.
+ */
+export function parseChecksum(raw: string | undefined): Buffer | null {
+  if (raw === undefined || raw.trim() === '') return null;
+
+  const [algorithm, ...rest] = raw.trim().split(/\s+/);
+  if (algorithm?.toLowerCase() !== 'sha256') {
+    throw new ProblemException(
+      'bad-request',
+      'Upload-Checksum yalnız sha256 kabul ediyor: `sha256 <base64>`.',
+    );
+  }
+
+  const encoded = rest.join('');
+  const decoded = Buffer.from(encoded, 'base64');
+  // `Buffer.from(..., 'base64')` never throws — it stops at the first character it cannot read —
+  // so the length is what says the value was a digest rather than a typo.
+  if (decoded.length !== 32) {
+    throw new ProblemException(
+      'bad-request',
+      'Upload-Checksum bir sha256 özeti olmalı: 32 baytın base64 hâli.',
+    );
+  }
+  return decoded;
+}
+
+/**
+ * Constant-time comparison, for a value that is not a secret.
+ *
+ * Deliberate anyway: `timingSafeEqual` throws on a length mismatch, so the guard has to come
+ * first, and using it everywhere a digest is compared means nobody has to decide case by case
+ * which digests are secret.
+ */
+function timingSafeEqualBuffers(a: Buffer, b: Buffer): boolean {
+  return a.length === b.length && timingSafeEqual(a, b);
 }

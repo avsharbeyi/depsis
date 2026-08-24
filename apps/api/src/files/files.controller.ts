@@ -30,6 +30,7 @@ import { z } from 'zod';
 import { AgentDataService } from '../agent/agent-data.service.js';
 import { AgentRefusedError, AgentUnavailableError } from '../agent/agent.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import { ProblemException } from '../common/problem.filter.js';
 import { IdempotencyInterceptor } from '../common/idempotency.interceptor.js';
 import {
   PosixIdentityUnavailableError,
@@ -54,6 +55,7 @@ import {
   type Caller,
   type FileEntryPage,
   type FileEntryRow,
+  type SortOrder,
 } from './files.service.js';
 
 type Schemas = OpenApi.components['schemas'];
@@ -146,10 +148,12 @@ export class FilesController {
     @Query('limit') limit?: string,
     @Query('trashed') trashed?: string,
     @Query('shareId') shareId?: string,
+    @Query('sort') sort?: string,
   ): Promise<Schemas['FileEntryPage']> {
     const caller = requireSession(request);
     const after = cleanCursor(cursor);
     const share = await this.share(request, shareId);
+    const order = cleanSort(sort);
 
     if (isTrue(trashed)) {
       return this.visible(
@@ -177,6 +181,7 @@ export class FilesController {
         parentId ?? null,
         after,
         clampLimit(limit),
+        order,
       ),
     );
   }
@@ -259,6 +264,7 @@ export class FilesController {
   @Get(':id')
   async detail(
     @Req() request: AuthenticatedRequest,
+    @Res({ passthrough: true }) response: Response,
     @Param('id') id: string,
   ): Promise<Schemas['FileEntryDetail']> {
     const caller = requireSession(request);
@@ -266,6 +272,10 @@ export class FilesController {
     const row = await this.load(caller.organizationId, id);
     const share = await this.shareOfEntry(caller.organizationId, row);
     const effective = await this.permit(caller, share.id, id, 'list');
+    // The validator `PATCH` will compare against. Without it, `If-Match` would be a header a
+    // client could satisfy only by guessing how the server builds one — which is another way of
+    // saying it could not be used.
+    response.setHeader('ETag', metadataEtag(row));
     return { ...toEntry(row, effective), createdAt: row.created_at.toISOString() };
   }
 
@@ -298,11 +308,46 @@ export class FilesController {
    * the source would let anyone who may tidy their own folder drop a file into a folder they have
    * never been given; checking only the destination would let them empty somebody else's.
    */
+  /**
+   * Refuse a `PATCH` whose client is looking at a stale copy.
+   *
+   * `*` means "the resource must exist", which `load` has already established by the time this
+   * returns — so it passes. A list of tags matches if ANY of them does, per RFC 9110; clients that
+   * hold several versions of a resource are rare, and honouring the list costs one `some`.
+   *
+   * Weak tags (`W/"..."`) never match here and that is the specification's rule rather than a
+   * simplification: `If-Match` requires strong comparison, because a weak validator says two
+   * representations are equivalent — not that they are the same one, which is what a conditional
+   * write has to know.
+   */
+  private async requireIfMatch(
+    organizationId: string,
+    id: string,
+    header: string | undefined,
+  ): Promise<void> {
+    if (header === undefined || header.trim() === '') return;
+    const want = header.trim();
+
+    const row = await this.load(organizationId, id);
+    if (want === '*') return;
+
+    const current = metadataEtag(row);
+    const offered = want.split(',').map((tag) => tag.trim());
+    if (offered.some((tag) => tag === current)) return;
+
+    throw new ProblemException(
+      'precondition-failed',
+      'Bu dosya siz görüntüledikten sonra değişti. Yenileyip tekrar deneyin.',
+    );
+  }
+
   @Patch(':id')
   async update(
     @Req() request: AuthenticatedRequest,
+    @Res({ passthrough: true }) response: Response,
     @Param('id') id: string,
     @Body() body: unknown,
+    @Headers('if-match') ifMatch?: string,
   ): Promise<Schemas['FileEntry']> {
     const caller = requireSession(request);
     requireUuid(id);
@@ -310,6 +355,18 @@ export class FilesController {
     if (!parsed.success) {
       throw new BadRequestException('give a name, a parentId (uuid or null), or both');
     }
+
+    // AFTER the body is understood and BEFORE anything is decided. RFC 9110 §13.1.1 puts the
+    // precondition ahead of the method's own semantics, and the practical reason is the one this
+    // route exists for: two people renaming the same file from two tabs. Without this, the second
+    // rename silently wins and the first person's change is gone with no error anywhere.
+    //
+    // The check is deliberately NOT inside the transaction that does the rename. It is a
+    // best-effort guard against a stale client, not a lock — the row could still change between
+    // here and the write. What makes that acceptable is that the database's own constraints
+    // (`file_entries_name_unique`) are what actually keep the tree consistent; `If-Match` is what
+    // turns "somebody else got there first" from a silent overwrite into a 412 the client can show.
+    await this.requireIfMatch(caller.organizationId, id, ifMatch);
 
     const name = parsed.data.name;
 
@@ -851,6 +908,20 @@ export function isTrue(raw: string | undefined): boolean {
   return raw === 'true' || raw === 'TRUE';
 }
 
+/**
+ * The sort the caller asked for, or the contract's default.
+ *
+ * An unknown value falls back to `name` rather than being refused. The contract gives `sort` a
+ * default and an enum, so a value outside it is a client bug — and answering a listing with a 400
+ * because a saved bookmark carries `sort=date` would break a file manager over a preference.
+ * `cleanCursor` refuses instead, and the difference is real: a bad cursor means the caller is
+ * asking for a page that does not exist, while a bad sort means they are asking for the same rows
+ * in an order nobody defined.
+ */
+function cleanSort(raw: string | undefined): SortOrder {
+  return raw === 'modified' || raw === 'size' ? raw : 'name';
+}
+
 function clampLimit(raw: string | undefined): number {
   if (raw === undefined) return DEFAULT_LIMIT;
   const parsed = Number.parseInt(raw, 10);
@@ -994,3 +1065,19 @@ function logged(publicMessage: string, agentReason: string): string {
  * method would mean either an instance per controller or threading one through every call site.
  */
 const translateLogger = new Logger('FilesController');
+
+/**
+ * The validator for a file's METADATA, which is a different thing from its content.
+ *
+ * `etagOf` below builds the tag for `GET /files/{id}/content` and includes the size the agent
+ * measured; this one is about the row — a rename changes it, a byte written over SMB does not.
+ * Two resources, two validators, and conflating them would make a rename look like a content
+ * change to every cache in the path.
+ *
+ * STRONG, for the reason `If-Match` needs it to be: a weak tag asserts equivalence, and a
+ * conditional write has to know it is looking at the same representation rather than an equivalent
+ * one.
+ */
+export function metadataEtag(entry: FileEntryRow): string {
+  return `"m-${entry.id}-${entry.updated_at.getTime().toString(36)}"`;
+}
