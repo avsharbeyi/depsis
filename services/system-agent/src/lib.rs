@@ -43,6 +43,7 @@ pub mod disks;
 pub mod dispatch;
 pub mod identity;
 pub mod op;
+pub mod pools;
 pub mod samba;
 pub mod seams;
 pub mod smart;

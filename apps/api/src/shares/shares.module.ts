@@ -5,6 +5,8 @@ import { AuthModule } from '../auth/auth.module.js';
 import { APP_CONFIG } from '../config.module.js';
 import { SMB_HOST_DEFAULT, type AppConfig } from '../config.js';
 import { DbService } from '../db/db.service.js';
+import { SystemModule } from '../system/system.module.js';
+import { SystemService } from '../system/system.service.js';
 import { JobsModule } from '../jobs/jobs.module.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { OrganizationsModule } from '../organizations/organizations.module.js';
@@ -29,27 +31,38 @@ import { SharesService } from './shares.service.js';
  * `OrganizationsModule` supplies the one question `publish` has to ask about the whole device.
  */
 @Module({
-  imports: [AuthModule, OrganizationsModule, JobsModule],
+  imports: [AuthModule, OrganizationsModule, JobsModule, SystemModule],
   controllers: [SharesController, SmbController],
   providers: [
     {
       provide: SharesService,
-      inject: [DbService, AgentService, OrganizationsService, APP_CONFIG, JobsService],
+      inject: [
+        DbService,
+        AgentService,
+        OrganizationsService,
+        APP_CONFIG,
+        JobsService,
+        SystemService,
+      ],
       useFactory: (
         db: DbService,
         agent: AgentService,
         organizations: OrganizationsService,
         config: AppConfig,
         jobs: JobsService,
+        system: SystemService,
       ) =>
         new SharesService(
           db,
           agent,
           organizations,
           config.smbHost ?? SMB_HOST_DEFAULT,
-          // `?? null` rather than a default: there is no sensible pool name to guess, and a wrong
-          // one produces datasets nothing serves. Absent means `POST /shares` answers 503.
-          config.shareParentDataset ?? null,
+          // A RESOLVER, not a value. `DEPSIS_SHARE_PARENT_DATASET` still wins when it is set —
+          // an operator who wrote it meant it — and when it is not, the box is asked which
+          // dataset is mounted at the shares root. There is still no sensible name to GUESS:
+          // a wrong one produces datasets nothing serves, so an unanswerable question stays
+          // null and `POST /shares` answers 503.
+          (correlationId: string) => system.parentDataset(correlationId),
           jobs,
         ),
     },

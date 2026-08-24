@@ -106,8 +106,16 @@ DEPSIS_CONSOLE_SOCKET=/run/depsis/console.sock
 # Explorer'a yazılacak sunucu adı. Kutunun kendi hostname'i DEĞİL: yalnız `nas.ev` olarak
 # erişilebilen bir cihaz `\\depsis\...` reklamı yapmamalı.
 DEPSIS_SMB_HOST=depsis
-DEPSIS_SHARE_PARENT_DATASET=tank/depsis
-DEPSIS_ZFS_POOLS=tank
+# İKİSİ DE İSTEĞE BAĞLI. Yazılmazlarsa DEPSIS kutuya soruyor: hangi havuzlar var, ve paylaşım
+# köküne hangi veri kümesi bağlı. Yazılırlarsa kazanıyorlar — bir yedek havuzu panoda istemeyen
+# bir kurulumun daraltmak için meşru sebebi var.
+#
+# `DEPSIS_SHARE_PARENT_DATASET` yazacaksanız, `DEPSIS_SHARES_ROOT`'a BAĞLI OLAN veri kümesi
+# olmalı. Başka bir şeyi gösterirse cihaz hiçbir şeyin sunmadığı dataset'ler üretir: satır var,
+# `zfs list` gösteriyor, ve paylaşım dosya yöneticisinde boş. §3.9'daki sihirbaz o eşleşmeyi
+# kendisi kuruyor.
+# DEPSIS_SHARE_PARENT_DATASET=tank/depsis
+# DEPSIS_ZFS_POOLS=tank
 # İSTEĞE BAĞLI, ve boş bırakmak artık doğru cevap: DEPSIS kutuya kendisi soruyor ve
 # çıkarılabilir olmayan her diski izliyor (Diskler ekranı, §3.8). Yalnız BİR ALT KÜMEYİ izlemek
 # isterseniz burada adlandırın.
@@ -406,9 +414,28 @@ değiştirilemez**; yanlış olması havuzun ömrü boyunca yazma başarımını
 Havuz `-m none` ile kuruluyor: dosya sisteminin kökünde `/tank` diye bir şey belirmiyor. Paylaşım
 veri kümelerini DEPSIS kendi yapılandırmasının söylediği yere bağlıyor.
 
-Son adım elle: yeni havuzu `/etc/depsis/api.env`'deki `DEPSIS_ZFS_POOLS`'a ekleyin ve API'yi
-yeniden başlatın, yoksa telemetride görünmez. (Ajanın kapalı işlem kümesinde "havuzları listele"
-yok — §2.4'teki not bunu anlatıyor.)
+#### Paylaşım ağacı
+
+Havuz `-m none` ile kuruluyor, yani kendi başına hiçbir yere bağlanmıyor. Paylaşımların açılacağı
+veri kümesi ayrı bir şey, ve sihirbazdaki **"Paylaşım ağacını da kur"** kutusu onu yapıyor:
+`<havuz>/depsis`'i açıp `DEPSIS_SHARES_ROOT`'a bağlıyor.
+
+Bunu atlarsanız havuz kurulur ama **paylaşım açılamaz** — DEPSIS paylaşımları hangi veri kümesinin
+altında açacağını bilmez ve `POST /shares` 503 verir. Sonradan kabuktan:
+
+```bash
+zfs create -o mountpoint=/srv/depsis -o acltype=posixacl -o xattr=sa tank/depsis
+```
+
+Bağlanacak yer **çağıranın seçtiği bir şey değil**: ajanın kendi `DEPSIS_SHARES_ROOT`'u, ve veri
+kümesi adı havuzdan türetiliyor. Ajan, oraya zaten bir veri kümesi bağlıysa ya da **dizin boş
+değilse** reddediyor — bir veri kümesini dolu bir dizinin üstüne bağlamak altındakini silmeden
+görünmez yapar, ve bu, hiçbir şeyin silinmediği için teşhisi uzun süren bir veri kaybı raporudur.
+
+Elle yapılacak bir şey **kalmadı**: DEPSIS artık hem havuzları hem paylaşım kökünü kutuya
+soruyor, yani yeni havuz telemetride kendiliğinden görünüyor ve yeni paylaşım kendiliğinden
+açılabiliyor. `api.env`'i düzenlemek ve API'yi yeniden başlatmak yalnız o iki değeri DARALTMAK
+isterseniz gerekiyor (§2.4).
 
 ### 3.10 Konsol
 
@@ -477,7 +504,8 @@ Bunlar eksik değil, karar:
 - **Özyinelemeli ajan işlemleri.** Ne özyinelemeli silme, ne özyinelemeli kopyalama, ne
   `mkdir -p`. Ağacı API yürür, çünkü ağacı saklayan taraf o — ve hiçbir çağrının yarıçapını
   çağıran seçmemeli (§2.2, ADR-0006).
-- **Anlık görüntü listesi havuzun envanteri değil.** Ajanda "listele" işlemi yok, o yüzden
+- **Anlık görüntü listesi havuzun envanteri değil.** Ajanda anlık görüntü için "listele" işlemi
+  yok, o yüzden
   `/backups` yalnız DEPSIS'in kendi aldıklarını gösterir ve yanıtta `complete: false` ile söyler.
 
 ---

@@ -43,6 +43,7 @@ const bodySchema = z.object({
     .array(z.object({ byId: z.string().min(1).max(255), wwn: z.string().min(1).max(255) }))
     .min(1)
     .max(24),
+  prepareShareRoot: z.boolean().default(false),
   confirm: z.string(),
   password: z.string().min(1).max(1024),
 });
@@ -122,6 +123,7 @@ export class PoolsController {
         name: plan.name,
         topology: plan.topology,
         disks: plan.disks,
+        prepareShareRoot: plan.prepareShareRoot,
         requestedBy: session.userId,
       },
       // ONE attempt. Every other job kind in this product is safe to retry; this one runs `zpool

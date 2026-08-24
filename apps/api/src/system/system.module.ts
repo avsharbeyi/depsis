@@ -25,7 +25,13 @@ import { SystemService } from './system.service.js';
       // `ListDisks` closed that half — and `config.smartDisks` is now a narrowing rather than
       // the only source; empty means ask the box (see `SystemService.smartTargets`).
       useFactory: (agent: AgentService, db: DbService, config: AppConfig) =>
-        new SystemService(agent, db, config.zfsPools, config.smartDisks),
+        new SystemService(
+          agent,
+          db,
+          config.zfsPools,
+          config.smartDisks,
+          config.shareParentDataset ?? null,
+        ),
     },
     // An ordinary provider, unlike SystemService, because nothing about it comes from
     // configuration — which datasets may be snapshotted is read from the tenant's own shares
@@ -33,5 +39,10 @@ import { SystemService } from './system.service.js';
     // answer differs per organisation and changes whenever a share is created.
     BackupsService,
   ],
+  // `SystemService` is exported for `SharesModule`, which asks it where new datasets go. That used
+  // to be a string fixed at construction from `DEPSIS_SHARE_PARENT_DATASET`, so the only way to
+  // change it was to edit a file and restart — the last shell step in the flow the pool wizard
+  // exists to remove.
+  exports: [SystemService],
 })
 export class SystemModule {}

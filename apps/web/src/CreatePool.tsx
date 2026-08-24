@@ -6,6 +6,7 @@ import { formatBytes } from './Dashboard.js';
 
 type Disk = OpenApi.components['schemas']['DiskInventoryEntry'];
 type Topology = OpenApi.components['schemas']['CreatePoolRequest']['topology'];
+type Storage = OpenApi.components['schemas']['StorageSetup'];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
 
 /** The fewest disks each arrangement means anything with. Mirrors `PoolTopology::minimum_disks`. */
@@ -33,10 +34,19 @@ const DESCRIBED: Record<Topology, string> = {
  */
 export function CreatePool({
   disks,
+  storage,
   notify,
   onCreated,
 }: {
   disks: Disk[];
+  /**
+   * What the box already has. `null` while it is being read.
+   *
+   * The wizard needs it to decide whether to offer the second half — creating the dataset shares
+   * are served from. Offering that on a box where it already exists would be an operation the
+   * agent refuses, presented as a checkbox somebody ticked.
+   */
+  storage: Storage | null;
   notify: Notify;
   onCreated: () => void;
 }): React.JSX.Element {
@@ -45,6 +55,7 @@ export function CreatePool({
   const [chosen, setChosen] = useState<string[]>([]);
   const [confirm, setConfirm] = useState('');
   const [password, setPassword] = useState('');
+  const [prepare, setPrepare] = useState(true);
   const [busy, setBusy] = useState(false);
   /**
    * What was just asked for, if anything.
@@ -81,6 +92,14 @@ export function CreatePool({
   // The smallest disk decides a mirror's or raidz's capacity, so a mismatched set is worth saying
   // out loud before somebody builds a 4 TB mirror out of a 4 TB and a 1 TB disk.
   const sizes = new Set(selected.map((disk) => disk.sizeBytes));
+  // The second half is on offer only when the box genuinely lacks it: a shares root that is
+  // configured, has no dataset mounted on it, and is empty. All three are also checked by the
+  // agent, which refuses rather than mounting over somebody's files.
+  const root = storage?.shareRoot;
+  const offerPrepare =
+    root !== undefined && root.path !== undefined && root.dataset === undefined && root.empty;
+  const rootBlocked =
+    root !== undefined && root.path !== undefined && root.dataset === undefined && !root.empty;
 
   function toggle(byId: string): void {
     setChosen((current) =>
@@ -99,6 +118,9 @@ export function CreatePool({
         disks: selected.map((disk) => ({ byId: disk.byId as string, wwn: disk.wwn as string })),
         confirm,
         password,
+        // Only when there is something to prepare. Sending it on a box that already has a share
+        // tree would make the job fail on a step the operator did not ask for.
+        prepareShareRoot: offerPrepare && prepare,
       },
     });
     setBusy(false);
@@ -283,6 +305,34 @@ export function CreatePool({
           <code>single</code> tam olarak bir disk alıyor. Birden fazla diski yedeklilik olmadan
           birleştirmek — bir stripe — bu üründe bilerek yok: herhangi bir diski kaybetmek her şeyi
           kaybettirir.
+        </div>
+      )}
+
+      {offerPrepare && (
+        <label className="netrow" style={{ cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={prepare}
+            onChange={(event) => setPrepare(event.target.checked)}
+          />
+          <span className="lbl">Paylaşım ağacını da kur</span>
+          <span className="val m">
+            {root?.path} → <b>{name === '' ? '<havuz>' : name}/depsis</b>
+          </span>
+        </label>
+      )}
+      {offerPrepare && !prepare && (
+        <div className="note">
+          Bunu atlarsanız havuz kurulur ama <b>paylaşım açılamaz</b>: DEPSIS paylaşımları hangi veri
+          kümesinin altında açacağını bilmez ve <code>POST /shares</code> 503 verir. Sonradan
+          kabuktan kurmanız gerekir.
+        </div>
+      )}
+      {rootBlocked && (
+        <div className="note">
+          <b>{root?.path}</b> boş değil, o yüzden paylaşım ağacı buradan kurulamıyor. Bir veri
+          kümesini dolu bir dizinin üstüne bağlamak, altındakini silmeden görünmez yapar — ajan bunu
+          reddediyor. Dizini kabuktan boşaltın ya da taşıyın.
         </div>
       )}
 

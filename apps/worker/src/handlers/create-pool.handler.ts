@@ -13,6 +13,8 @@ export interface CreatePoolPayload {
   name: string;
   topology: 'single' | 'mirror' | 'raidz1' | 'raidz2';
   disks: { byId: string; wwn: string }[];
+  /** Also create `<pool>/depsis` and mount it where shares are served from. */
+  prepareShareRoot: boolean;
   requestedBy: string;
 }
 
@@ -118,6 +120,26 @@ export function createPoolHandler(agent: AgentService): JobHandler {
     // that was confirmed" is not a sentence to paraphrase.
     const created = expectStatus(response, 'pool_created');
     logger.log(`'${payload.name}' created: ${created.detail.trim() || 'no output'}`);
+
+    // The second half, and the reason it is in the same job: without it the operator finishes the
+    // wizard, has a pool, and still cannot create a share. Two separate actions for one intent is
+    // how the second one gets forgotten.
+    //
+    // AFTER the pool and never instead of it. A failure here leaves a perfectly good pool behind
+    // and is reported as its own sentence — the disks are not at risk either way, and telling the
+    // operator the pool failed when it did not would send them to look at the wrong thing.
+    if (payload.prepareShareRoot) {
+      const prepared = await agent.call(
+        { op: 'prepare_share_root', pool: payload.name },
+        `prepare the share tree on '${payload.name}' for job ${job.id}`,
+        job.id,
+      );
+      // A refusal here is ordinary and specific — a dataset already mounted there, or a directory
+      // with files in it — so it reaches the operator with the agent's own words.
+      const root = expectStatus(prepared, 'share_root_prepared');
+      logger.log(`share tree prepared at ${root.dataset}`);
+    }
+
     await report(1);
   };
 }
@@ -189,6 +211,9 @@ function parse(payload: unknown): CreatePoolPayload {
     name,
     topology: topology as CreatePoolPayload['topology'],
     disks: parsed,
+    // Absent reads as FALSE. An older row, or one written by a fixture, must not acquire a step
+    // that mounts a filesystem because a field it never had defaulted the other way.
+    prepareShareRoot: (payload as Record<string, unknown>)['prepareShareRoot'] === true,
     requestedBy: typeof requestedBy === 'string' ? requestedBy : 'unknown',
   };
 }

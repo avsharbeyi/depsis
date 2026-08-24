@@ -212,7 +212,19 @@ export class SharesService {
      * yet has nowhere to put a share, and `create` says so with a 503 rather than assembling a
      * dataset name against a pool that may not exist and letting the agent discover it.
      */
-    private readonly parentDataset: string | null,
+    /**
+     * Where new datasets go, ASKED rather than fixed.
+     *
+     * It was a string handed in at construction, read from `DEPSIS_SHARE_PARENT_DATASET` — so the
+     * only way to change it was to edit `api.env` and restart the API. That was the last shell step
+     * in the flow the pool wizard exists to remove: an operator finished the wizard and still could
+     * not create a share. The resolver answers with the configured value when there is one and
+     * otherwise with whatever the box reports as mounted at the shares root.
+     *
+     * Still nullable, and still for the same reason: there is no sensible name to guess, and a
+     * wrong one produces datasets nothing serves.
+     */
+    private readonly parentDataset: (correlationId: string) => Promise<string | null>,
     /** Queues the POSIX re-application after a share's first grant lands. See `create`. */
     private readonly jobs: JobsService,
   ) {}
@@ -265,7 +277,8 @@ export class SharesService {
     },
     correlationId: string,
   ): Promise<{ share: ShareView; applyingJobId: string | null }> {
-    if (this.parentDataset === null) throw new ShareStorageUnconfiguredError();
+    const parent = await this.parentDataset(correlationId);
+    if (parent === null) throw new ShareStorageUnconfiguredError();
 
     // Before anything else, because the agent refuses these too — and it refuses the WHOLE publish,
     // so one badly named share would stop every other share on the box from being served. `publish`
@@ -287,7 +300,7 @@ export class SharesService {
       { userId: actorId, teamId: null, permissions: [...ALL_PERMISSIONS] },
     ];
 
-    const dataset = `${this.parentDataset}/${input.name}`;
+    const dataset = `${parent}/${input.name}`;
 
     // The pre-check RACES — two requests can both pass it — and it is worth having anyway, because
     // the race is rare and the case it catches is not: the same name submitted twice. What makes

@@ -93,6 +93,11 @@ describe('the emitted agent schema', () => {
       // `DEPSIS_SMART_DISKS` a list of `/dev/disk/by-id` names an operator typed in by hand, with
       // nothing to type them from.
       'list_disks',
+      // What pools the box has. `DEPSIS_ZFS_POOLS` was a list an operator typed into `api.env`,
+      // which was defensible while the pool was made from a shell at install time and stopped
+      // being so the moment the product could create one: the wizard finished and the pool
+      // appeared nowhere until somebody edited a file and restarted the API.
+      'list_pools',
       'move_entry',
       // The bulk data path's control half. `open_transfer` resolves and opens a staging file and
       // returns a one-time token; the bytes travel on a separate socket, because Node cannot
@@ -106,6 +111,14 @@ describe('the emitted agent schema', () => {
       'open_transfer',
       'ping',
       'pool_status',
+      // Create `<pool>/depsis` and mount it where this agent serves shares from. THE MOUNTPOINT IS
+      // NOT AN OPERAND — it is the agent's own `DEPSIS_SHARES_ROOT`, and the dataset name is
+      // derived. `CreateDataset` refuses a mountpoint operand because a caller that could choose
+      // one could mount a tenant's data anywhere on the box; here the caller chooses the POOL.
+      // Refused when a dataset is already mounted there, and refused when the directory is not
+      // empty: `zfs create -o mountpoint=X` mounts over X without complaint, and everything
+      // underneath vanishes from view while still occupying the disk.
+      'prepare_share_root',
       'publish_samba_config',
       'publish_transfer',
       'read_smart_summary',
@@ -135,6 +148,10 @@ describe('the emitted agent schema', () => {
       // (`apps/api/src/auth/nt-hash.ts`), because `tools/poc/p2-b-smb-password.sh` measured that a
       // precomputed hash installs and authenticates — so the user's actual password, which they
       // may have reused elsewhere, stays on the unprivileged side.
+      // Which dataset is mounted where shares are served from, and whether anything is there.
+      // The question `DEPSIS_SHARE_PARENT_DATASET` was configuration for — and getting that
+      // pairing wrong produces an appliance that creates datasets nothing serves.
+      'share_root_status',
       'sync_posix_identity',
       // ADR-0020's four, and the shape of them is the point. A general `ZeroTierRequest { path }`
       // proxy would have been the network form of the free-form command §2.2 forbids: one variant
@@ -209,7 +226,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(12);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(13);
   });
 
   it('agrees with the number the agent actually reports', () => {

@@ -1031,6 +1031,34 @@ paths:
           # bir havuz sihirbazının önünde durduğu farkın ta kendisi.
           $ref: '#/components/responses/Problem'
 
+  /system/storage:
+    get:
+      tags: [system]
+      summary: Depolamanın kurulu olup olmadığı
+      description: |
+        Havuz sihirbazının bilmesi gereken her şey, tek çağrıda: kutuda hangi havuzlar var,
+        paylaşımların sunulduğu dizin nerede, ve oraya bir veri kümesi bağlı mı.
+
+        Bu uç iki yapılandırma değişkeninin cevabını **soruyor**: `DEPSIS_ZFS_POOLS` ve
+        `DEPSIS_SHARE_PARENT_DATASET`. İkisi de hâlâ yazılabiliyor ve yazıldıklarında
+        kazanıyorlar — ama artık zorunlu değiller, çünkü ürün havuzu kendisi kurabildiği andan
+        sonra "sihirbazı bitir, sonra bir dosyayı düzenle ve API'yi yeniden başlat" savunulabilir
+        bir akış değil.
+
+        `parentDataset` boşsa `POST /shares` 503 veriyor. **Tahmin yok**: yanlış bir veri kümesi
+        adı, hiçbir şeyin sunmadığı dataset'ler üretir — satır var, `zfs list` gösteriyor, ve
+        paylaşım dosya yöneticisinde boş.
+
+        Yalnız yöneticiye.
+      responses:
+        '200':
+          description: Durum
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StorageSetup' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
   /storage/pools:
     post:
       tags: [system]
@@ -2867,6 +2895,43 @@ components:
         healthy: { type: boolean }
         temperatureCelsius: { type: integer }
 
+    StorageSetup:
+      type: object
+      required: [pools, shareRoot]
+      properties:
+        pools:
+          type: array
+          items: { type: string }
+          description: Kutudaki havuzlar. `DEPSIS_ZFS_POOLS` yazılıysa yalnız oradakiler.
+        shareRoot: { $ref: '#/components/schemas/ShareRoot' }
+        parentDataset:
+          type: string
+          description: |
+            Yeni paylaşımların altında açılacağı veri kümesi. `DEPSIS_SHARE_PARENT_DATASET`
+            yazılıysa o, yoksa paylaşım kökünde bağlı olan. Yoksa `POST /shares` 503 veriyor.
+
+    ShareRoot:
+      type: object
+      required: [empty]
+      properties:
+        path:
+          type: string
+          description: |
+            Ajanın `DEPSIS_SHARES_ROOT`'u. Çağıran bir dizin adlandıramıyor — bu alan ajanın
+            kendi yapılandırmasından geliyor.
+        dataset:
+          type: string
+          description: |
+            Tam olarak oraya bağlı veri kümesi. **Tam olarak**, "içeren" değil: `/srv`'e bağlı bir
+            veri kümesi `/srv/depsis`'i tutan değildir, ve öyle saymak paylaşım ağacını kurulmuş
+            gibi gösterirdi.
+        empty:
+          type: boolean
+          description: |
+            Dizinde hiç girdi var mı. Bildiriliyor, çünkü `zfs create -o mountpoint=X` X'in
+            üstüne şikâyet etmeden bağlanıyor: altındaki her şey görünmez oluyor, silinmeden,
+            diski işgal etmeye devam ederek.
+
     CreatePoolRequest:
       type: object
       required: [name, topology, disks, confirm, password]
@@ -2893,6 +2958,16 @@ components:
           minItems: 1
           maxItems: 24
           items: { $ref: '#/components/schemas/PoolDisk' }
+        prepareShareRoot:
+          type: boolean
+          default: false
+          description: |
+            Havuz kurulduktan sonra `<havuz>/depsis` veri kümesini açıp paylaşım köküne bağla.
+
+            Bu, sihirbazdan sonra kalan son kabuk adımını kaldırıyor: onsuz havuz var ama
+            `POST /shares` hâlâ 503 veriyor. Bağlanacak yer ÇAĞIRANIN SEÇTİĞİ BİR ŞEY DEĞİL —
+            ajanın kendi `DEPSIS_SHARES_ROOT`'u — ve ajan, oraya zaten bir veri kümesi bağlıysa ya
+            da dizin boş değilse reddediyor.
         confirm:
           type: string
           description: |

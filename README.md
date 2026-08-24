@@ -300,6 +300,37 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   söylemeyi unutan her veri kümesini ACL'siz bırakırdı — ADR-0004'ün yeniden yazılmasına sebep
   olan hata. `ashift=12` sabit, çünkü DÜZELTİLEMEZ.
 
+- **Sihirbazdan sonra kabuk gerekmiyor** — ve gerekmesi, sihirbazın kendi amacını yarıda
+  bırakmasıydı.
+
+  Havuz kuruluyordu ve cihaz hâlâ paylaşım açamıyordu: `DEPSIS_ZFS_POOLS` yeni havuzu bilmediği
+  için telemetride görünmüyor, `DEPSIS_SHARE_PARENT_DATASET` bir şey adlandırmadığı için
+  `POST /shares` 503 veriyordu. İkisi de bir dosya düzenleyip API'yi yeniden başlatmak demekti —
+  yani sihirbazın ortadan kaldırmak için var olduğu şeyin tam ortasında bir kabuk.
+
+  Üç işlem daha, ve ikisi operandsız: `ListPools` (`zpool list -H -o name`), `ShareRootStatus`
+  (`zfs list -H -o name,mountpoint`, ve cevap Rust'ta süzülüyor — komut satırında çağırandan gelen
+  hiçbir şey yok), ve `PrepareShareRoot`.
+
+  `PrepareShareRoot`'ta **bağlanma noktası operand DEĞİL**: ajanın kendi `DEPSIS_SHARES_ROOT`'u, ve
+  veri kümesi adı `<havuz>/depsis` diye türetiliyor. `CreateDataset` mountpoint operandını tam da
+  bu yüzden reddediyor — onu seçebilen bir çağıran bir kiracının verisini kutunun herhangi bir
+  yerine bağlayabilirdi — ve burada çağıranın seçtiği tek şey HAVUZ.
+
+  İki reddediş: oraya zaten bir veri kümesi bağlıysa, ve **dizin boş değilse**. İkincisi asıl
+  olanı: `zfs create -o mountpoint=X` X'in üstüne şikâyet etmeden bağlanıyor, altındaki her şey
+  görünmez oluyor — silinmeden, diski işgal etmeye devam ederek. Hiçbir şey silinmediği için
+  teşhisi uzun süren bir veri kaybı raporu.
+
+  `DEPSIS_ZFS_POOLS` ve `DEPSIS_SHARE_PARENT_DATASET` artık DARALTMA. Yazılırsa kazanıyorlar —
+  yedek havuzunu panoda istemeyen bir kurulumun meşru sebebi var — yazılmazsa kutuya soruluyor.
+  Aynı değişikliği `DEPSIS_SMART_DISKS` de geçirmişti; üç değişkenin üçü de "ajanın kapalı işlem
+  kümesinde bunu soracak bir şey yok" diye yapılandırmaydı, ve üçünün de sebebi artık yok.
+
+  `POST /shares`'in üst veri kümesi de bu yüzden artık ÇAĞRI BAŞINA soruluyor: `SharesService`
+  onu yapımda sabitlenmiş bir dizge olarak alıyordu, yani değiştirmenin tek yolu API'yi yeniden
+  başlatmaktı.
+
 - Paylaşımı SİLMEK. Grant'ları paylaşımı tutuyor (`ON DELETE RESTRICT`) ve son grant'ı silmek de
   reddediliyor. Bilinçli: paylaşımı silmek dataset'i silmek demek, ve ADR-0007 yıkıcı havuz
   işlemlerini üründen dışarıda tutuyor. Kapatmanın yolu, kimseyi adlandırmayan bir kök izni.

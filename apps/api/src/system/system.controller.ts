@@ -11,7 +11,12 @@ import { randomUUID } from 'node:crypto';
 
 import { AgentUnavailableError } from '../agent/agent.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
-import { SystemService, type DiskInventory, type Telemetry } from './system.service.js';
+import {
+  SystemService,
+  type DiskInventory,
+  type StorageSetup,
+  type Telemetry,
+} from './system.service.js';
 
 @Controller('system')
 @UseGuards(SessionGuard)
@@ -32,6 +37,36 @@ export class SystemController {
    * `AdminGuard` and therefore admits a wider set for a more privileged operation. See the note on
    * `SystemService.isSystemAdministrator` — the two want reconciling as one decision.
    */
+  /**
+   * GET /system/storage — is this box's storage set up, and with what?
+   *
+   * The same gate as the rest of `system/`. It reports pool names and a dataset path, which are
+   * facts about the appliance rather than about anybody's files, but they are still the shape of
+   * thing an operator is shown and a member is not.
+   */
+  @Get('storage')
+  async storage(@Req() request: AuthenticatedRequest): Promise<StorageSetup> {
+    const session = request.depsis;
+    if (session === undefined) throw new UnauthorizedException();
+    if (!(await this.system.isSystemAdministrator(session.userId))) {
+      throw new ForbiddenException();
+    }
+
+    try {
+      return await this.system.storageSetup(randomUUID());
+    } catch (error) {
+      if (error instanceof AgentUnavailableError) {
+        // Not a 200 with everything absent. "Nothing is set up" is what a fresh appliance looks
+        // like and is the state the wizard acts on; "we could not ask" must not render as it, or
+        // the wizard offers to prepare a share root that already exists.
+        throw new ServiceUnavailableException(
+          'Depolama durumu okunamadı: sistem ajanına ulaşılamıyor.',
+        );
+      }
+      throw error;
+    }
+  }
+
   /**
    * GET /system/disks — what is physically in the box.
    *

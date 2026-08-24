@@ -57,6 +57,16 @@ export type AgentRequest =
       op: 'list_disks';
     }
   | {
+      op: 'list_pools';
+    }
+  | {
+      op: 'share_root_status';
+    }
+  | {
+      op: 'prepare_share_root';
+      pool: SafeComponent;
+    }
+  | {
       /**
        * The members, each named twice.
        */
@@ -578,6 +588,37 @@ export type AgentResponse =
       raw: string;
       status: 'smart';
       temperature_celsius?: number | null;
+    }
+  | {
+      pools: string[];
+      status: 'pools';
+    }
+  | {
+      /**
+       * The dataset mounted EXACTLY there, or absent.
+       *
+       * Exactly, not "containing": a dataset mounted at `/srv` is not the one holding
+       * `/srv/depsis`, and reporting it as such would make the API believe the share tree was
+       * prepared when nothing had been created for it.
+       */
+      dataset?: string | null;
+      /**
+       * Does the directory have any entries?
+       *
+       * Reported so that `PrepareShareRoot`'s refusal can be explained BEFORE it is attempted.
+       * A caller that cannot tell "not set up" from "set up with files in it" would offer to
+       * mount over somebody's data.
+       */
+      empty: boolean;
+      /**
+       * The agent's configured shares root, or absent when it has none.
+       */
+      path?: string | null;
+      status: 'share_root';
+    }
+  | {
+      dataset: string;
+      status: 'share_root_prepared';
     }
   | {
       /**

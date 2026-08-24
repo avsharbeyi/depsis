@@ -13,6 +13,8 @@ type PoolHealth = PoolStatus['health'];
 type DiskStatus = Schemas['DiskStatus'];
 export type DiskInventory = Schemas['DiskInventory'];
 type DiskInventoryEntry = Schemas['DiskInventoryEntry'];
+export type ShareRoot = Schemas['ShareRoot'];
+export type StorageSetup = Schemas['StorageSetup'];
 
 /**
  * The health strings the API is willing to repeat.
@@ -40,14 +42,19 @@ export class SystemService {
     /**
      * Which pools to report on.
      *
-     * Configuration, not discovery, because the agent's operation set is closed and has no "list
-     * pools" — adding one is a change to the Rust-side contract (ADR-0006), not something the API
-     * gets to decide. It is also not wrong for a deployment to state its own pools: which disks
-     * form which pool is a deployment fact, and ADR-0007 already keeps pool CREATION out of any
-     * generic interface for the same reason.
+     * A NARROWING NOW, NOT THE ONLY SOURCE — the same change `diskIds` went through, for the same
+     * reason and at the same moment. It was configuration because the closed operation set had no
+     * "list pools", which was defensible while the pool was made from a shell at install time. It
+     * stopped being defensible when the product grew a pool wizard: the operator finished it and
+     * the pool they had just built appeared nowhere until they edited `api.env` and restarted the
+     * API.
      *
-     * If the name is wrong the agent refuses and the refusal is reported, which is the failure mode
-     * to want: visible, not a silently empty list.
+     * Empty means ASK THE BOX. Naming pools still overrides that, because a deployment with a
+     * backup pool it does not want on the dashboard has a legitimate reason to narrow — and
+     * because an operator who has already written the list should not find it ignored.
+     *
+     * If a named pool does not exist the agent refuses and the refusal is reported, which is the
+     * failure mode to want: visible, not a silently empty list.
      */
     private readonly poolNames: readonly string[],
     /**
@@ -65,6 +72,16 @@ export class SystemService {
      * because an operator who has already written the list should not find it ignored.
      */
     private readonly diskIds: readonly string[] = [],
+    /**
+     * `DEPSIS_SHARE_PARENT_DATASET`, when a deployment set it.
+     *
+     * A NARROWING, like the two above it. When it is absent the box is asked which dataset is
+     * mounted at the shares root — the question the variable was configuration for. It still wins
+     * when it is set, because an operator who wrote a dataset name meant that one; the pairing it
+     * records (this dataset must be the one MOUNTED AT the shares root) is exactly what
+     * `ShareRootStatus` now checks rather than trusts.
+     */
+    private readonly shareParentDataset: string | null = null,
   ) {}
 
   /**
@@ -102,9 +119,11 @@ export class SystemService {
   /**
    * Hardware and storage status.
    *
-   * Throws AgentUnavailableError when the pools cannot be read. The caller turns that into a 503,
-   * because an empty `pools` array would make "there are no pools" and "we could not find out"
-   * indistinguishable — and those are the two answers an operator most needs to tell apart.
+   * Throws AgentUnavailableError when a CONFIGURED pool cannot be read. The caller turns that into
+   * a 503, because an empty `pools` array would make "there are no pools" and "we could not find
+   * out" indistinguishable — and those are the two answers an operator most needs to tell apart.
+   *
+   * Not being able to ENUMERATE pools is a different thing and does not throw; see `poolTargets`.
    */
   async telemetry(correlationId: string): Promise<Telemetry> {
     const memory = readMemory();
@@ -181,19 +200,24 @@ export class SystemService {
    * branch exists for, is empty. Telemetry then reports no disks, exactly as it did before this
    * existed, rather than taking the pool status down with it.
    */
-  private async smartTargets(correlationId: string): Promise<readonly string[]> {
-    if (this.diskIds.length > 0) return this.diskIds;
+  private async smartTargets(
+    correlationId: string,
+  ): Promise<{ ids: readonly string[]; configured: boolean }> {
+    if (this.diskIds.length > 0) return { ids: this.diskIds, configured: true };
 
     try {
       const { disks } = await this.inventory(correlationId);
-      return disks
-        .filter((disk) => !disk.removable && disk.byId !== undefined)
-        .map((disk) => disk.byId as string);
+      return {
+        ids: disks
+          .filter((disk) => !disk.removable && disk.byId !== undefined)
+          .map((disk) => disk.byId as string),
+        configured: false,
+      };
     } catch (error) {
       this.logger.warn(
         `could not enumerate disks for SMART: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return [];
+      return { ids: [], configured: false };
     }
   }
 
@@ -216,10 +240,110 @@ export class SystemService {
     return response.status === 'pool_status';
   }
 
+  /**
+   * Every pool on the box.
+   *
+   * Throws `AgentUnavailableError` when the list cannot be read, for the same reason `inventory`
+   * does: an empty list would make "this box has no pools" and "we could not ask" the same answer,
+   * and the first is a screen telling the operator to create one.
+   */
+  async listPools(correlationId: string): Promise<string[]> {
+    const response = await this.agent.call(
+      { op: 'list_pools' },
+      'which pools exist',
+      correlationId,
+    );
+    if (response.status === 'refused' || response.status === 'failed') {
+      throw new AgentUnavailableError(`pool list: ${response.reason}`);
+    }
+    if (response.status !== 'pools') {
+      throw new AgentUnavailableError(
+        `pool list: expected a pools answer, got '${response.status}'`,
+      );
+    }
+    return response.pools;
+  }
+
+  /**
+   * Where shares are served from, and whether the tree is prepared.
+   *
+   * `dataset` is what `DEPSIS_SHARE_PARENT_DATASET` was configuration for. The variable had to name
+   * the dataset MOUNTED AT the shares root, and getting the pairing wrong produces an appliance
+   * that creates datasets nothing serves — the row exists, `zfs list` shows it, and the share is
+   * empty in the file manager because the agent resolves a directory that was never created.
+   * Asking the box removes the chance to get it wrong.
+   */
+  async shareRoot(correlationId: string): Promise<ShareRoot> {
+    const response = await this.agent.call(
+      { op: 'share_root_status' },
+      'is the share tree prepared',
+      correlationId,
+    );
+    if (response.status === 'refused' || response.status === 'failed') {
+      throw new AgentUnavailableError(`share root: ${response.reason}`);
+    }
+    if (response.status !== 'share_root') {
+      throw new AgentUnavailableError(
+        `share root: expected a share_root answer, got '${response.status}'`,
+      );
+    }
+    return {
+      ...(response.path === null ? {} : { path: response.path }),
+      ...(response.dataset === null ? {} : { dataset: response.dataset }),
+      empty: response.empty,
+    };
+  }
+
+  /**
+   * Is this box's storage set up, and with what?
+   *
+   * One call rather than three, because the wizard needs all of it to decide what to offer and a
+   * screen assembled from three round trips can show a state the box was never in.
+   *
+   * The pool list is allowed to fail INTO AN EMPTY LIST here, unlike in `telemetry`. The two
+   * callers want opposite things from the same failure: telemetry must not report "no pools" about
+   * a machine it could not ask, while this endpoint's caller is deciding whether to offer a wizard
+   * — and refusing the whole answer because one of three questions could not be reached would hide
+   * the share-root half, which is the part that says whether shares can be created at all.
+   */
+  async storageSetup(correlationId: string): Promise<StorageSetup> {
+    const shareRoot = await this.shareRoot(correlationId);
+    const pools =
+      this.poolNames.length > 0
+        ? [...this.poolNames]
+        : await this.listPools(correlationId).catch(() => []);
+    const parent = this.shareParentDataset ?? shareRoot.dataset ?? null;
+
+    return {
+      pools,
+      shareRoot,
+      ...(parent === null ? {} : { parentDataset: parent }),
+    };
+  }
+
+  /**
+   * The dataset new shares are created under.
+   *
+   * The configured value when there is one, otherwise whatever is mounted at the shares root. The
+   * fallback is null, and `FilesService` turns that into the 503 it always did — a box with no
+   * pool yet is a box that cannot make a share, and saying so is better than inventing a dataset
+   * name against a pool that may not exist.
+   */
+  async parentDataset(correlationId: string): Promise<string | null> {
+    if (this.shareParentDataset !== null) return this.shareParentDataset;
+    try {
+      return (await this.shareRoot(correlationId)).dataset ?? null;
+    } catch {
+      // Discovery is a convenience over a configured value. An agent that cannot be reached leaves
+      // the answer unknown, and the caller's own 503 says so better than a guess would.
+      return null;
+    }
+  }
+
   private async pools(correlationId: string): Promise<PoolStatus[]> {
     const statuses: PoolStatus[] = [];
 
-    for (const name of this.poolNames) {
+    for (const name of await this.poolTargets(correlationId)) {
       // Sequential, not Promise.all. The agent serialises anyway, so concurrency would only queue
       // inside AgentService — and a failure here should stop rather than leave a partial list that
       // reads as complete.
@@ -253,6 +377,34 @@ export class SystemService {
     }
 
     return statuses;
+  }
+
+  /**
+   * Which pools telemetry should report on.
+   *
+   * The configured list when there is one; otherwise every pool the box has.
+   *
+   * DISCOVERY FAILING IS NOT FATAL, and the distinction from the `pools` loop below is worth
+   * stating because the two look contradictory. A CONFIGURED pool the agent refuses is a real
+   * fault — a typo, or a pool that has gone away — and dropping it would present a partial list as
+   * complete, so that one fails the whole call. Not being able to ENUMERATE is different: it is
+   * the ordinary state of a box with no ZFS installed yet, and a `zpool` that is not there would
+   * otherwise take the CPU and memory cards down with it on a dashboard that was working
+   * perfectly well before this feature existed.
+   *
+   * What does not collapse as a result: `GET /system/storage` still distinguishes the two, because
+   * its caller is a wizard deciding whether to offer to create a pool.
+   */
+  private async poolTargets(correlationId: string): Promise<readonly string[]> {
+    if (this.poolNames.length > 0) return this.poolNames;
+    try {
+      return await this.listPools(correlationId);
+    } catch (error) {
+      this.logger.warn(
+        `could not enumerate pools: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
   }
 
   /**
@@ -292,7 +444,8 @@ export class SystemService {
   private async disks(correlationId: string): Promise<DiskStatus[]> {
     const statuses: DiskStatus[] = [];
 
-    for (const id of await this.smartTargets(correlationId)) {
+    const { ids, configured } = await this.smartTargets(correlationId);
+    for (const id of ids) {
       // Sequential for the same reason as the pool loop: the agent serialises anyway, so
       // concurrency here would only move the queue from its accept loop into AgentService.
       const response = await this.agent.call(
@@ -307,7 +460,15 @@ export class SystemService {
             ? response.reason
             : `expected a smart answer, got '${response.status}'`;
         this.logger.warn(`disk '${id}': SMART summary unavailable: ${detail}`);
-        statuses.push({ id, healthy: false });
+        // A CONFIGURED disk keeps its row. An operator who named it asked to be told about it, and
+        // its silence is a fact — the long note above is about exactly that trade, and it stands.
+        //
+        // A DISCOVERED disk does not. Nobody asked about it: it is here because the box has it,
+        // and the overwhelmingly common reason its summary cannot be read is that `smartctl` is
+        // not installed. Painting every disk in the machine red for that would be a wall of false
+        // alarms produced by a convenience — and it would teach an operator that the health column
+        // means nothing, which is worse than an empty column.
+        if (configured) statuses.push({ id, healthy: false });
         continue;
       }
 

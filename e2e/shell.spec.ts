@@ -32,6 +32,12 @@ test.beforeEach(({ consoleWatch }) => {
     /401 \(Unauthorized\)/,
     'Oturum açılmadan önce /me sorulur ve 401 döner; tarayıcı her 4xx yanıtı konsola yazar.',
   );
+  consoleWatch.tolerate(
+    /503 \(Service Unavailable\)/,
+    'Bu yığında ZFS yok: /system/telemetry ve /system/storage havuzları soramıyor ve 503 ' +
+      'dönüyor. Ürünün doğru cevabı — "bilmiyoruz" ile "havuz yok" aynı şey değil — ve ' +
+      'tarayıcı her hata durumunu konsola yazıyor. Gerçek bir cihazda bu satır çıkmaz.',
+  );
 });
 
 /** The tile row across the top of the desk. Located by class because the tiles are `role=button`

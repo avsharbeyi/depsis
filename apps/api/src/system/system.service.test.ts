@@ -151,14 +151,72 @@ describe('telemetry', () => {
     await expect(system.telemetry('c')).rejects.toThrow(/gone.*no such pool/);
   });
 
-  it('reports no pools when none are configured, and asks about no pool', async () => {
-    const { agent, calls } = stubAgent({});
+  it('reports no pools when the box has none, having asked', async () => {
+    // Not "the agent is never called" any more, and the change is the point: `DEPSIS_ZFS_POOLS`
+    // empty used to mean "report nothing", which on an appliance whose pool was made through the
+    // wizard meant reporting nothing about the pool it had just created.
+    const { agent, calls } = stubAgent({ list_pools: { status: 'pools', pools: [] } });
     const system = new SystemService(agent, stubDb(null), []);
 
     expect((await system.telemetry('c')).pools).toEqual([]);
-    // Not "the agent is never called": telemetry asks the box which disks it has when no disk list
-    // was configured. What must not happen is a pool_status for a pool nobody named.
-    expect(calls.map((c) => c.key)).toEqual(['list_disks']);
+    expect(calls.map((c) => c.key).sort()).toEqual(['list_disks', 'list_pools']);
+  });
+
+  it('reports every pool the box has when nobody configured a list', async () => {
+    const { agent } = stubAgent({
+      list_pools: { status: 'pools', pools: ['tank', 'yedek'] },
+      tank: ONLINE,
+      yedek: ONLINE,
+      list_disks: { status: 'disks', truncated: false, disks: [] },
+    });
+    const telemetry = await new SystemService(agent, stubDb(null), []).telemetry('c');
+    expect(telemetry.pools.map((p) => p.name)).toEqual(['tank', 'yedek']);
+  });
+
+  it('keeps a configured disk red when its SMART cannot be read', async () => {
+    // An operator who named a disk asked to be told about it, and its silence is a fact. The long
+    // note in `disks` is about exactly this trade and it stands for the configured case.
+    const { agent } = stubAgent({
+      list_pools: { status: 'pools', pools: [] },
+      read_smart_summary: { status: 'failed', reason: 'smartctl exited 127' },
+    });
+    const system = new SystemService(agent, stubDb(null), [], ['ata-NAMED']);
+    expect((await system.telemetry('c')).disks).toEqual([{ id: 'ata-NAMED', healthy: false }]);
+  });
+
+  it('omits a DISCOVERED disk whose SMART cannot be read rather than painting it red', async () => {
+    // Nobody asked about it: it is here because the box has it, and the overwhelmingly common
+    // reason smartctl says nothing is that it is not installed. A wall of false alarms produced by
+    // a convenience teaches an operator that the health column means nothing.
+    const { agent } = stubAgent({
+      list_pools: { status: 'pools', pools: [] },
+      list_disks: INVENTORY,
+      read_smart_summary: { status: 'failed', reason: 'smartctl exited 127' },
+    });
+    expect((await new SystemService(agent, stubDb(null), []).telemetry('c')).disks).toEqual([]);
+  });
+
+  it('does not ask which pools exist when a list was configured', async () => {
+    // An operator who narrowed the list — a backup pool they do not want on the dashboard — must
+    // not find it widened back.
+    const { agent, calls } = stubAgent({
+      tank: ONLINE,
+      list_disks: { status: 'disks', truncated: false, disks: [] },
+    });
+    const telemetry = await new SystemService(agent, stubDb(null), ['tank']).telemetry('c');
+    expect(telemetry.pools.map((p) => p.name)).toEqual(['tank']);
+    expect(calls.some((c) => c.key === 'list_pools')).toBe(false);
+  });
+
+  it('keeps the rest of telemetry when the pool list cannot be enumerated', async () => {
+    // Deliberately NOT the same rule as a configured pool the agent refuses. That one is a real
+    // fault — a typo, or a pool that has gone away — and dropping it would present a partial list
+    // as complete. Not being able to ENUMERATE is the ordinary state of a box with no ZFS
+    // installed yet, and a missing `zpool` must not take the CPU and memory cards down with it.
+    const { agent } = stubAgent({});
+    const telemetry = await new SystemService(agent, stubDb(null), []).telemetry('c');
+    expect(telemetry.pools).toEqual([]);
+    expect(telemetry.memory).toBeDefined();
   });
 
   it('finds the disks to read SMART for when nobody configured a list', async () => {
@@ -166,6 +224,7 @@ describe('telemetry', () => {
     // and there was nothing to type it FROM — so the common case was an appliance reporting no
     // disk health at all while having disks.
     const { agent, calls } = stubAgent({
+      list_pools: { status: 'pools', pools: [] },
       list_disks: INVENTORY,
       read_smart_summary: { status: 'smart', healthy: true, temperature_celsius: 31, raw: '{}' },
     });
@@ -181,6 +240,7 @@ describe('telemetry', () => {
     // A USB stick is a disk and it is not part of the appliance's storage. On a health dashboard
     // an operator reads as "the array is fine", a card reader with no card in it is noise.
     const { agent } = stubAgent({
+      list_pools: { status: 'pools', pools: [] },
       list_disks: {
         status: 'disks',
         truncated: false,
@@ -209,6 +269,7 @@ describe('telemetry', () => {
   it('does not discover when a list was configured', async () => {
     // An operator who narrowed the list on purpose must not find it widened back.
     const { agent, calls } = stubAgent({
+      list_pools: { status: 'pools', pools: [] },
       read_smart_summary: { status: 'smart', healthy: true, temperature_celsius: 30, raw: '{}' },
     });
     const system = new SystemService(agent, stubDb(null), [], ['ata-ONLY_THIS_ONE']);
@@ -230,6 +291,86 @@ describe('telemetry', () => {
 
     expect(telemetry.pools).toHaveLength(1);
     expect(telemetry.disks).toEqual([]);
+  });
+
+  it('reports the share tree as prepared when a dataset is mounted at the root', async () => {
+    const { agent } = stubAgent({
+      share_root_status: {
+        status: 'share_root',
+        path: '/srv/depsis',
+        dataset: 'tank/depsis',
+        empty: true,
+      },
+      list_pools: { status: 'pools', pools: ['tank'] },
+    });
+    const setup = await new SystemService(agent, stubDb(null), []).storageSetup('c');
+
+    expect(setup.shareRoot).toEqual({ path: '/srv/depsis', dataset: 'tank/depsis', empty: true });
+    expect(setup.parentDataset).toBe('tank/depsis');
+    expect(setup.pools).toEqual(['tank']);
+  });
+
+  it('reports no parent dataset when nothing is mounted at the root', async () => {
+    // The state a fresh box is in. `POST /shares` answers 503 for it, and the wizard offers to fix
+    // it — so it has to be absent rather than an empty string, which would be a dataset name.
+    const { agent } = stubAgent({
+      share_root_status: { status: 'share_root', path: '/srv/depsis', dataset: null, empty: true },
+      list_pools: { status: 'pools', pools: [] },
+    });
+    const setup = await new SystemService(agent, stubDb(null), []).storageSetup('c');
+    expect(setup).not.toHaveProperty('parentDataset');
+    expect(setup.shareRoot).not.toHaveProperty('dataset');
+  });
+
+  it('lets the configured dataset win over what the box reports', async () => {
+    // An operator who wrote `DEPSIS_SHARE_PARENT_DATASET` meant that one. Discovery is a fallback,
+    // and a fallback that overrode the setting would be a setting that silently stopped working.
+    const { agent } = stubAgent({
+      share_root_status: {
+        status: 'share_root',
+        path: '/srv/depsis',
+        dataset: 'tank/depsis',
+        empty: true,
+      },
+      list_pools: { status: 'pools', pools: ['tank'] },
+    });
+    const system = new SystemService(agent, stubDb(null), [], [], 'baska/havuz');
+    expect((await system.storageSetup('c')).parentDataset).toBe('baska/havuz');
+    expect(await system.parentDataset('c')).toBe('baska/havuz');
+  });
+
+  it('answers the parent dataset from the box when nothing was configured', async () => {
+    // The whole point: an operator who created a pool through the wizard can create a share
+    // without editing `api.env` and restarting the API.
+    const { agent } = stubAgent({
+      share_root_status: {
+        status: 'share_root',
+        path: '/srv/depsis',
+        dataset: 'tank/depsis',
+        empty: true,
+      },
+    });
+    expect(await new SystemService(agent, stubDb(null), []).parentDataset('c')).toBe('tank/depsis');
+  });
+
+  it('answers null rather than guessing when the box cannot be asked', async () => {
+    // There is no sensible dataset name to invent: a wrong one produces datasets nothing serves —
+    // the row exists, `zfs list` shows it, and the share is empty in the file manager.
+    const { agent } = stubAgent({});
+    expect(await new SystemService(agent, stubDb(null), []).parentDataset('c')).toBeNull();
+  });
+
+  it('still reports the share root when the pool list cannot be read', async () => {
+    // The two callers of this data want opposite things from the same failure. Telemetry must not
+    // report "no pools" about a machine it could not ask; this endpoint's caller is deciding
+    // whether to offer a wizard, and refusing the whole answer would hide the half that says
+    // whether shares can be created at all.
+    const { agent } = stubAgent({
+      share_root_status: { status: 'share_root', path: '/srv/depsis', dataset: null, empty: true },
+    });
+    const setup = await new SystemService(agent, stubDb(null), []).storageSetup('c');
+    expect(setup.pools).toEqual([]);
+    expect(setup.shareRoot.path).toBe('/srv/depsis');
   });
 
   it('carries every field the wizard needs, and an absent serial as absent', async () => {
@@ -275,7 +416,7 @@ describe('telemetry', () => {
   });
 
   it('omits what it cannot measure instead of inventing it', async () => {
-    const { agent } = stubAgent({});
+    const { agent } = stubAgent({ list_pools: { status: 'pools', pools: [] } });
     const telemetry = await new SystemService(agent, stubDb(null), []).telemetry('c');
 
     // Nothing in the agent's operation set reports CPU temperature. `read_smart_summary` returns a

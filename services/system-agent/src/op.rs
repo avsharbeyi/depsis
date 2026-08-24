@@ -559,6 +559,41 @@ pub enum Request {
     /// and the argv is a constant in this crate.
     ListDisks {},
 
+    /// What pools this machine has.
+    ///
+    /// NO OPERANDS, for the same reason `ListDisks` has none. It exists because
+    /// `DEPSIS_ZFS_POOLS` was a comma-separated list an operator typed into `api.env` — defensible
+    /// while the pool was made at install time from a shell, and indefensible the moment the
+    /// product could create one: the wizard finished and the pool it had just built appeared
+    /// nowhere until somebody edited a file and restarted the API.
+    ListPools {},
+
+    /// Where DEPSIS serves shares from, and whether anything is there yet.
+    ///
+    /// NO OPERANDS. The path is the agent's OWN `DEPSIS_SHARES_ROOT` — a caller cannot ask about a
+    /// directory of its choosing, which is what keeps this from being a filesystem probe.
+    ///
+    /// It answers the question `DEPSIS_SHARE_PARENT_DATASET` was configuration for. That variable
+    /// had to name the dataset MOUNTED AT the shares root, and getting the pairing wrong produces
+    /// an appliance that creates datasets nothing serves: the row exists, `zfs list` shows it, and
+    /// the share is empty in the file manager. Asking the box removes the chance to get it wrong.
+    ShareRootStatus {},
+
+    /// Create the dataset DEPSIS serves shares from, on a pool, and mount it at the shares root.
+    ///
+    /// THE MOUNTPOINT IS NOT AN OPERAND. It is the agent's own `DEPSIS_SHARES_ROOT`, and the
+    /// dataset name is derived as `<pool>/depsis`. That is the whole reason this exists as its own
+    /// operation rather than as a flag on `CreateDataset`: ADR-0007 and `CreateDataset`'s own
+    /// documentation refuse a mountpoint operand, because a caller that could choose one could
+    /// mount a tenant's data anywhere on the box. Here the caller chooses the POOL and nothing
+    /// else.
+    ///
+    /// Refused when the shares root already has a dataset mounted on it, and refused when the
+    /// directory is not empty. The second is the one that matters: `zfs create -o mountpoint=X`
+    /// happily mounts over a directory with files in it, and everything underneath disappears from
+    /// view while still occupying the disk it is on.
+    PrepareShareRoot { pool: SafeComponent },
+
     /// Create a ZFS pool. THE ONE DESTRUCTIVE STORAGE OPERATION IN THE SET.
     ///
     /// ADR-0007 does not forbid this — it keeps destructive operations out of a GENERIC storage
@@ -1281,6 +1316,28 @@ pub enum Response {
         temperature_celsius: Option<i32>,
         raw: String,
     },
+    Pools {
+        pools: Vec<String>,
+    },
+    ShareRoot {
+        /// The agent's configured shares root, or absent when it has none.
+        path: Option<String>,
+        /// The dataset mounted EXACTLY there, or absent.
+        ///
+        /// Exactly, not "containing": a dataset mounted at `/srv` is not the one holding
+        /// `/srv/depsis`, and reporting it as such would make the API believe the share tree was
+        /// prepared when nothing had been created for it.
+        dataset: Option<String>,
+        /// Does the directory have any entries?
+        ///
+        /// Reported so that `PrepareShareRoot`'s refusal can be explained BEFORE it is attempted.
+        /// A caller that cannot tell "not set up" from "set up with files in it" would offer to
+        /// mount over somebody's data.
+        empty: bool,
+    },
+    ShareRootPrepared {
+        dataset: String,
+    },
     /// The pool exists.
     PoolCreated {
         /// What `zpool` printed, kept so an operator can see the real words on a bad day.
@@ -1546,7 +1603,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

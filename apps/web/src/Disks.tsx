@@ -9,6 +9,7 @@ import { Empty } from './ui.js';
 
 type Disk = OpenApi.components['schemas']['DiskInventoryEntry'];
 type Inventory = OpenApi.components['schemas']['DiskInventory'];
+type Storage = OpenApi.components['schemas']['StorageSetup'];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
 
 interface Props {
@@ -34,6 +35,14 @@ interface Props {
  */
 export function Disks({ notify, snapshot }: Props): React.JSX.Element {
   const [inventory, setInventory] = useState<Inventory | null>(null);
+  /**
+   * What the box's storage already is.
+   *
+   * Read beside the inventory rather than inside the wizard, because it is also worth SAYING on
+   * this screen: an appliance with a pool and no share tree looks completely healthy here and
+   * cannot serve a single file.
+   */
+  const [storage, setStorage] = useState<Storage | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'forbidden' | 'unavailable' | 'failed'>(
     'loading',
   );
@@ -64,6 +73,10 @@ export function Disks({ notify, snapshot }: Props): React.JSX.Element {
       }
       setInventory(data);
       setState('ready');
+      // Separately, and its failure is not this screen's failure: the inventory is worth showing
+      // even when the storage question could not be answered.
+      const setup = await api.GET('/system/storage', {});
+      if (alive) setStorage(setup.data ?? null);
     })();
     return () => {
       alive = false;
@@ -148,7 +161,25 @@ export function Disks({ notify, snapshot }: Props): React.JSX.Element {
       {/* The wizard renders inside the inventory rather than in a window of its own: §8.1 wants the
           analysis in front of the operator while they confirm, and a dialogue that covers the table
           it was opened from takes it away at exactly the wrong moment. */}
-      <CreatePool disks={disks} notify={notify} onCreated={reload} />
+      {storage !== null && storage.parentDataset === undefined && storage.pools.length > 0 && (
+        <div className="warn">
+          <span className="ic" aria-hidden>
+            ⚠
+          </span>
+          <span className="tx">
+            <b>Bu kutuda havuz var ama paylaşım ağacı yok.</b>
+            DEPSIS paylaşımları hangi veri kümesinin altında açacağını bilmiyor, o yüzden yeni
+            paylaşım açılamıyor. Aşağıdaki sihirbaz yeni bir havuzla birlikte kurabilir; var olan
+            bir havuz için kabuktan:{' '}
+            <code>
+              zfs create -o mountpoint={storage.shareRoot.path ?? '/srv/depsis'} -o acltype=posixacl
+              -o xattr=sa {storage.pools[0]}/depsis
+            </code>
+          </span>
+        </div>
+      )}
+
+      <CreatePool disks={disks} storage={storage} notify={notify} onCreated={reload} />
     </>
   );
 }

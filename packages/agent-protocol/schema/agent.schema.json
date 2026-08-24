@@ -146,6 +146,52 @@
       ]
     },
     {
+      "description": "What pools this machine has.\n\nNO OPERANDS, for the same reason `ListDisks` has none. It exists because\n`DEPSIS_ZFS_POOLS` was a comma-separated list an operator typed into `api.env` — defensible\nwhile the pool was made at install time from a shell, and indefensible the moment the\nproduct could create one: the wizard finished and the pool it had just built appeared\nnowhere until somebody edited a file and restarted the API.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "list_pools"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "Where DEPSIS serves shares from, and whether anything is there yet.\n\nNO OPERANDS. The path is the agent's OWN `DEPSIS_SHARES_ROOT` — a caller cannot ask about a\ndirectory of its choosing, which is what keeps this from being a filesystem probe.\n\nIt answers the question `DEPSIS_SHARE_PARENT_DATASET` was configuration for. That variable\nhad to name the dataset MOUNTED AT the shares root, and getting the pairing wrong produces\nan appliance that creates datasets nothing serves: the row exists, `zfs list` shows it, and\nthe share is empty in the file manager. Asking the box removes the chance to get it wrong.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "share_root_status"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "Create the dataset DEPSIS serves shares from, on a pool, and mount it at the shares root.\n\nTHE MOUNTPOINT IS NOT AN OPERAND. It is the agent's own `DEPSIS_SHARES_ROOT`, and the\ndataset name is derived as `<pool>/depsis`. That is the whole reason this exists as its own\noperation rather than as a flag on `CreateDataset`: ADR-0007 and `CreateDataset`'s own\ndocumentation refuse a mountpoint operand, because a caller that could choose one could\nmount a tenant's data anywhere on the box. Here the caller chooses the POOL and nothing\nelse.\n\nRefused when the shares root already has a dataset mounted on it, and refused when the\ndirectory is not empty. The second is the one that matters: `zfs create -o mountpoint=X`\nhappily mounts over a directory with files in it, and everything underneath disappears from\nview while still occupying the disk it is on.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "prepare_share_root"
+        },
+        "pool": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "pool"
+      ]
+    },
+    {
       "description": "Create a ZFS pool. THE ONE DESTRUCTIVE STORAGE OPERATION IN THE SET.\n\nADR-0007 does not forbid this — it keeps destructive operations out of a GENERIC storage\ninterface and requires them to be written explicitly per backend, which is what this is —\nand §8.1 prescribes the sequence around it: analysis, plan, the serial/WWN list of the\naffected disks, written confirmation, re-authentication, job. `ListDisks` is the analysis;\nthe API owns the middle; this is the end.\n\nTHREE REFUSALS LIVE HERE AND NOT IN A DIALOGUE, because a dialogue is a thing somebody\ngets past:\n\n1. A disk carrying `/`, `/boot` or `/boot/efi` is never a member. There is no confirmation\n   that makes overwriting the appliance's own disk a thing the operator meant.\n\n2. The WWN named for each disk must match what the box reports at the moment the pool is\n   created. This closes the gap that risk R1 is really about: between the screen that\n   listed the disks and the button that creates the pool, a disk can be pulled and another\n   put in its place, and `/dev/disk/by-id` names identify a DEVICE rather than a slot — so\n   the same name can be a different disk. Checking the name alone would confirm nothing.\n\n3. `-f` is never passed. `zpool create` refuses a device that already holds a filesystem\n   unless forced, and this operation does not force. Clearing a disk stays something an\n   operator does themselves, deliberately, with a shell — the product does not offer a\n   button for it, and an operation that could be talked into one would make the other two\n   refusals decorative.\n\nThe pool is created with ADR-0004's properties as POOL-LEVEL defaults, so every dataset\nmade in it inherits them. `CreateDataset` sets `acltype` per dataset; a pool whose default\nis `off` makes every dataset that forgets to say so a dataset with no ACLs, which is the\nfailure ADR-0004 was rewritten about.",
       "type": "object",
       "properties": {
@@ -995,6 +1041,72 @@
         "status",
         "healthy",
         "raw"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "pools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "pools"
+        }
+      },
+      "required": [
+        "status",
+        "pools"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "dataset": {
+          "description": "The dataset mounted EXACTLY there, or absent.\n\nExactly, not \"containing\": a dataset mounted at `/srv` is not the one holding\n`/srv/depsis`, and reporting it as such would make the API believe the share tree was\nprepared when nothing had been created for it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "empty": {
+          "description": "Does the directory have any entries?\n\nReported so that `PrepareShareRoot`'s refusal can be explained BEFORE it is attempted.\nA caller that cannot tell \"not set up\" from \"set up with files in it\" would offer to\nmount over somebody's data.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "The agent's configured shares root, or absent when it has none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "const": "share_root"
+        }
+      },
+      "required": [
+        "status",
+        "empty"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "dataset": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "share_root_prepared"
+        }
+      },
+      "required": [
+        "status",
+        "dataset"
       ]
     },
     {

@@ -429,6 +429,113 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         path.first() == Some(&STAGING_DIR[0])
     }
 
+    /// Where shares are served from, and whether anything is there yet.
+    ///
+    /// The path is the agent's own, never a caller's. Every field is reported rather than reduced
+    /// to a "ready" boolean, because the three states the API has to tell apart — no root
+    /// configured, a root with nothing on it, a root that already has a dataset — need different
+    /// sentences on screen and a boolean would collapse two of them.
+    fn share_root_status(&self) -> Result<Response, SeamError> {
+        let Ok(root) = crate::acl::shares_root_from_env() else {
+            return Ok(Response::ShareRoot {
+                path: None,
+                dataset: None,
+                empty: false,
+            });
+        };
+        let path = root.to_string_lossy().to_string();
+
+        // `zfs list` with NO operand, filtered here. See `crate::pools` for why the filtering is in
+        // Rust rather than in the command line.
+        let listing = self
+            .runner
+            .run(bin::ZFS, &crate::pools::list_filesystems_argv())?;
+        let filesystems = crate::pools::parse_filesystems(&listing);
+        let dataset = crate::pools::mounted_at(&filesystems, &path).map(str::to_string);
+
+        // Through the confined root rather than by reading the path again: this is the same
+        // directory the agent resolves every share under, and asking it twice by two routes is how
+        // the two answers start to disagree.
+        let empty = match self.paths {
+            Some(paths) => paths
+                .list_entries(&[])
+                .map(|e| e.is_empty())
+                .unwrap_or(false),
+            None => false,
+        };
+
+        Ok(Response::ShareRoot {
+            path: Some(path),
+            dataset,
+            empty,
+        })
+    }
+
+    /// Create `<pool>/depsis` and mount it where this agent serves shares from.
+    ///
+    /// The two refusals are the whole of it. A dataset already mounted there means the box is
+    /// already set up and doing this again would stack a second filesystem on the same directory.
+    /// A NON-EMPTY directory is the dangerous one: `zfs create -o mountpoint=X` mounts over X
+    /// without complaint, and everything underneath vanishes from view while still occupying the
+    /// disk it is on — a data-loss report that takes a long time to diagnose because nothing was
+    /// actually deleted.
+    fn prepare_share_root(&self, pool: &str) -> Result<Response, SeamError> {
+        let Ok(root) = crate::acl::shares_root_from_env() else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+        let path = root.to_string_lossy().to_string();
+        crate::pools::check_shares_root(&path)?;
+
+        let listing = self
+            .runner
+            .run(bin::ZFS, &crate::pools::list_filesystems_argv())?;
+        let filesystems = crate::pools::parse_filesystems(&listing);
+        if let Some(existing) = crate::pools::mounted_at(&filesystems, &path) {
+            return Ok(Response::Refused {
+                reason: format!("{existing} is already mounted at {path}"),
+            });
+        }
+
+        match self.paths {
+            Some(paths) => {
+                if !paths.list_entries(&[])?.is_empty() {
+                    return Ok(Response::Refused {
+                        reason: format!(
+                            "{path} is not empty; mounting a dataset over it would hide what is \
+                             there without deleting it"
+                        ),
+                    });
+                }
+            }
+            None => {
+                return Ok(Response::Refused {
+                    reason: "no share root is configured; storage is not set up".to_string(),
+                })
+            }
+        }
+
+        // Derived, never chosen. ADR-0004's two properties are set here as well as on the pool,
+        // because this dataset can also be created on a pool made outside DEPSIS.
+        let dataset = crate::pools::share_dataset(pool);
+        let mountpoint = format!("mountpoint={path}");
+        self.runner.run(
+            bin::ZFS,
+            &[
+                "create",
+                "-o",
+                &mountpoint,
+                "-o",
+                "acltype=posixacl",
+                "-o",
+                "xattr=sa",
+                &dataset,
+            ],
+        )?;
+        Ok(Response::ShareRootPrepared { dataset })
+    }
+
     /// Create a ZFS pool, after checking the disks against what the box reports RIGHT NOW.
     ///
     /// THE INVENTORY IS RE-READ HERE and not taken from the request. That ordering is the entire
@@ -1305,6 +1412,19 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 disks,
             } => self.create_pool(pool.as_str(), *topology, disks),
 
+            Request::ListPools {} => {
+                let out = self
+                    .runner
+                    .run(bin::ZPOOL, &crate::pools::list_pools_argv())?;
+                Ok(Response::Pools {
+                    pools: crate::pools::parse_pools(&out),
+                })
+            }
+
+            Request::ShareRootStatus {} => self.share_root_status(),
+
+            Request::PrepareShareRoot { pool } => self.prepare_share_root(pool.as_str()),
+
             Request::ReadSmartSummary { disk_by_id } => {
                 // Built from a validated single component, so the caller cannot reach outside
                 // /dev/disk/by-id or smuggle a flag (risk R1).
@@ -1617,6 +1737,23 @@ mod tests {
             }
         }
 
+        /// A share root that exists and is EMPTY — the state of a box whose storage has been
+        /// installed and never used, which is exactly the state `prepare_share_root` is for.
+        fn empty_root() -> Self {
+            let root = tempfile::tempdir().expect("tempdir");
+            let paths = Some(MockSafePath::new(root.path()));
+            Self {
+                transfers: Mutex::new(TransferRegistry::new()),
+                tokens: MockTokenSource::default(),
+                root,
+                paths,
+            }
+        }
+
+        fn root_path(&self) -> std::path::PathBuf {
+            self.root.path().to_path_buf()
+        }
+
         /// A share root with `<share>/.depsis/staging` already in place.
         fn with_share(share: &str) -> Self {
             let root = tempfile::tempdir().expect("tempdir");
@@ -1923,6 +2060,179 @@ mod tests {
             assert!(matches!(resp, Response::Refused { .. }), "{evil}");
         }
         // Not one command ran: these are refused while parsing the operands.
+        assert!(r.calls.borrow().is_empty());
+    }
+
+    /// What `zfs list -H -o name,mountpoint` says on a box whose share tree is not set up.
+    const NO_SHARE_DATASET: &str = "tank\tnone\ntank/other\t/mnt/other\n";
+
+    #[test]
+    fn the_pool_list_runs_one_fixed_argv() {
+        let r = MockCommandRunner::with_responses(["tank\nyedek\n".into()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"list_pools"}"#,
+            peer(API_UID),
+            "lp1",
+            "which pools does this box have",
+        );
+        match resp {
+            Response::Pools { pools } => assert_eq!(pools, ["tank", "yedek"]),
+            other => panic!("expected a pool list, got {other:?}"),
+        }
+        let argv = r.call(0).expect("zpool ran");
+        assert_eq!(argv[0], bin::ZPOOL);
+        assert_eq!(&argv[1..], crate::pools::list_pools_argv().as_slice());
+    }
+
+    #[test]
+    fn preparing_the_share_root_refuses_a_directory_that_is_not_empty() {
+        // THE REFUSAL THAT MATTERS. `zfs create -o mountpoint=X` mounts over X without complaint,
+        // and everything underneath vanishes from view while still occupying the disk — a
+        // data-loss report that takes a long time to diagnose because nothing was deleted.
+        let h = Harness::empty_root();
+        std::fs::write(h.root_path().join("bir-dosya.txt"), b"somebody's file").expect("fixture");
+
+        let r = MockCommandRunner::with_responses([NO_SHARE_DATASET.into()]);
+        let s = MemorySink::default();
+        with_shares_root(&h.root_path(), || {
+            let resp = agent(&r, &s, &h).handle(
+                r#"{"op":"prepare_share_root","pool":"tank"}"#,
+                peer(API_UID),
+                "sr1",
+                "prepare the share tree",
+            );
+            match resp {
+                Response::Refused { reason } => assert!(reason.contains("not empty"), "{reason}"),
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        });
+        // Only the listing ran: `zfs create` was never reached.
+        assert_eq!(r.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn preparing_the_share_root_refuses_when_a_dataset_is_already_mounted_there() {
+        let h = Harness::empty_root();
+        let mounted = format!("tank/depsis\t{}\n", h.root_path().display());
+        let r = MockCommandRunner::with_responses([mounted]);
+        let s = MemorySink::default();
+        with_shares_root(&h.root_path(), || {
+            let resp = agent(&r, &s, &h).handle(
+                r#"{"op":"prepare_share_root","pool":"tank"}"#,
+                peer(API_UID),
+                "sr2",
+                "prepare the share tree",
+            );
+            match resp {
+                Response::Refused { reason } => {
+                    assert!(reason.contains("already mounted"), "{reason}");
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        });
+        assert_eq!(r.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn preparing_the_share_root_derives_the_dataset_and_the_mountpoint() {
+        // Neither is a caller operand. `CreateDataset` refuses a mountpoint precisely because a
+        // caller that could choose one could mount a tenant's data anywhere on the box; here the
+        // caller chooses the POOL and the agent supplies the rest from its own environment.
+        let h = Harness::empty_root();
+        let r = MockCommandRunner::with_responses([NO_SHARE_DATASET.into(), String::new()]);
+        let s = MemorySink::default();
+        with_shares_root(&h.root_path(), || {
+            let resp = agent(&r, &s, &h).handle(
+                r#"{"op":"prepare_share_root","pool":"tank"}"#,
+                peer(API_UID),
+                "sr3",
+                "prepare the share tree",
+            );
+            match resp {
+                Response::ShareRootPrepared { dataset } => assert_eq!(dataset, "tank/depsis"),
+                other => panic!("expected a prepared root, got {other:?}"),
+            }
+        });
+        let argv = r.call(1).expect("zfs create ran");
+        assert_eq!(argv[0], bin::ZFS);
+        assert_eq!(argv[1], "create");
+        assert!(argv.contains(&format!("mountpoint={}", h.root_path().display())));
+        // ADR-0004's pair, set here as well as on the pool, because this dataset can also be
+        // created on a pool that DEPSIS did not make.
+        assert!(argv.contains(&"acltype=posixacl".to_string()));
+        assert!(argv.contains(&"xattr=sa".to_string()));
+        assert_eq!(argv.last().map(String::as_str), Some("tank/depsis"));
+    }
+
+    #[test]
+    fn the_share_root_status_reports_the_agents_own_path_and_nothing_a_caller_chose() {
+        let h = Harness::empty_root();
+        let mounted = format!("tank\tnone\ntank/depsis\t{}\n", h.root_path().display());
+        let r = MockCommandRunner::with_responses([mounted]);
+        let s = MemorySink::default();
+        with_shares_root(&h.root_path(), || {
+            let resp = agent(&r, &s, &h).handle(
+                r#"{"op":"share_root_status"}"#,
+                peer(API_UID),
+                "sr4",
+                "is the share tree set up",
+            );
+            match resp {
+                Response::ShareRoot {
+                    path,
+                    dataset,
+                    empty,
+                } => {
+                    assert_eq!(path, Some(h.root_path().display().to_string()));
+                    assert_eq!(dataset.as_deref(), Some("tank/depsis"));
+                    assert!(empty);
+                }
+                other => panic!("expected a share root, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn the_share_root_status_says_so_when_no_dataset_is_mounted_there() {
+        // The state a fresh box is in, and the one the wizard offers to fix. It has to be
+        // distinguishable from "we could not tell", which is why `dataset` is an option rather
+        // than an empty string.
+        let h = Harness::empty_root();
+        let r = MockCommandRunner::with_responses([NO_SHARE_DATASET.into()]);
+        let s = MemorySink::default();
+        with_shares_root(&h.root_path(), || {
+            let resp = agent(&r, &s, &h).handle(
+                r#"{"op":"share_root_status"}"#,
+                peer(API_UID),
+                "sr5",
+                "is the share tree set up",
+            );
+            match resp {
+                Response::ShareRoot { dataset, empty, .. } => {
+                    assert_eq!(dataset, None);
+                    assert!(empty);
+                }
+                other => panic!("expected a share root, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn neither_new_read_takes_an_operand() {
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        for evil in [
+            r#"{"op":"list_pools","pool":"tank"}"#,
+            r#"{"op":"share_root_status","path":"/etc"}"#,
+            r#"{"op":"prepare_share_root","pool":"tank","mountpoint":"/etc"}"#,
+            r#"{"op":"prepare_share_root","pool":"tank/child"}"#,
+        ] {
+            let resp = agent(&r, &s, &h).handle(evil, peer(API_UID), "sr6", "attack");
+            assert!(matches!(resp, Response::Refused { .. }), "{evil}");
+        }
         assert!(r.calls.borrow().is_empty());
     }
 
@@ -3933,6 +4243,29 @@ mod tests {
         }
     }
 
+    /// Run `f` with `DEPSIS_SHARES_ROOT` pointing at `root`, then restore it.
+    ///
+    /// The operations that read the environment rather than taking a path — `share_root_status`
+    /// and `prepare_share_root` — cannot be driven through `handle` any other way, and that is the
+    /// property being tested as much as the answers: a caller cannot name the directory.
+    fn with_shares_root(root: &std::path::Path, f: impl FnOnce()) {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let saved = std::env::var(acl::SHARES_ROOT_ENV).ok();
+        std::env::set_var(acl::SHARES_ROOT_ENV, root);
+        f();
+        match saved {
+            Some(value) => std::env::set_var(acl::SHARES_ROOT_ENV, value),
+            None => std::env::remove_var(acl::SHARES_ROOT_ENV),
+        }
+    }
+
+    /// `std::env::set_var` is process-global and Rust runs tests in threads. Shared by both
+    /// helpers below, so one cannot run while the other is halfway through restoring.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     /// Run `f` with `DEPSIS_SHARES_ROOT` unset, then restore it.
     ///
     /// `std::env::set_var` is process-global and Rust runs tests in threads, so the mutex is not
@@ -3940,8 +4273,7 @@ mod tests {
     /// two test modules are in different files and a helper that crossed them would have to be
     /// public in a crate whose whole point is a small surface.
     fn without_shares_root(f: impl FnOnce()) {
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK
+        let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 

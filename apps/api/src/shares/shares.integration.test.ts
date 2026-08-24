@@ -215,7 +215,7 @@ describeDb('shares, against a real PostgreSQL', () => {
         agent,
         stubSoleOrganization(sole),
         SMB_HOST,
-        PARENT_DATASET,
+        () => Promise.resolve(PARENT_DATASET),
         new JobsService(db),
       ),
       calls,
@@ -476,7 +476,7 @@ describeDb('shares, against a real PostgreSQL', () => {
       ).agent,
       stubSoleOrganization(orgA),
       SMB_HOST,
-      PARENT_DATASET,
+      () => Promise.resolve(PARENT_DATASET),
       new JobsService(db),
     );
     await expect(absent.publish(orgA, 'corr-8')).rejects.toBeInstanceOf(SmbUnavailableError);
@@ -606,7 +606,10 @@ describeDb('opening a share', () => {
         agent,
         stubSoleOrganization(org),
         SMB_HOST,
-        parentDataset,
+        // A resolver, matching the service: the value is asked for per call now rather than
+        // fixed at construction, so that a pool created through the wizard is usable without an
+        // `api.env` edit and a restart.
+        () => Promise.resolve(parentDataset),
         jobs,
       ),
       calls,
