@@ -749,13 +749,6 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         Ok(Response::Removed {})
     }
 
-    /// Create ONE directory inside a share, owned by the user, durably.
-    ///
-    /// The operation that was missing while `FilesService.createFolder` wrote a row and nothing
-    /// else. What it must not become is `mkdir -p`: the API keeps one row per directory, so the
-    /// agent creating intermediate nodes silently would leave directories on disk that nothing in
-    /// the database names — invisible to the UI, unmovable, undeletable. A missing parent is an
-    /// error the API needs to hear about, not one to work around here.
     /// Close a share root to everyone its ACL does not name.
     ///
     /// One `openat2` and one `fchmod`, and both halves matter. The resolution is the ordinary
@@ -797,6 +790,17 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         })
     }
 
+    /// Create ONE directory inside a share, owned by the user, durably.
+    ///
+    /// The operation that was missing while `FilesService.createFolder` wrote a row and nothing
+    /// else. What it must not become is `mkdir -p`: the API keeps one row per directory, so the
+    /// agent creating intermediate nodes silently would leave directories on disk that nothing in
+    /// the database names — invisible to the UI, unmovable, undeletable. A missing parent is an
+    /// error the API needs to hear about, not one to work around here.
+    ///
+    /// `CopyService.plan` depends on the no-implicit-mkdir rule: it walks breadth-first precisely
+    /// so that every folder exists before anything inside it is copied. A silent `mkdir -p` here
+    /// would make that ordering unnecessary and its absence undetectable.
     fn create_directory(
         &self,
         share: &str,

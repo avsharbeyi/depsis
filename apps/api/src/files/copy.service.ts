@@ -146,8 +146,36 @@ export class CopyService {
     organizationId: string,
     shareId: string,
     sourceIds: readonly string[],
-  ): Promise<number> {
-    return (await this.plan(organizationId, shareId, sourceIds)).length;
+  ): Promise<{ entries: number; bytes: number }> {
+    const plan = await this.plan(organizationId, shareId, sourceIds);
+    return {
+      entries: plan.length,
+      bytes: plan.reduce((total, node) => total + Number(node.size_bytes), 0),
+    };
+  }
+
+  /**
+   * What the pool has left, or `null` when the agent cannot say.
+   *
+   * `null` and not a throw, because this is a courtesy check and not a guarantee. It cannot be a
+   * guarantee under concurrency — another upload can take the space between the answer and the
+   * copy, which is exactly why the agent classifies `ENOSPC`/`EDQUOT` into its own response as
+   * well. What it converts is the common case: a user duplicating 400 GB onto a pool with 200 GB
+   * free is told the two numbers immediately instead of watching a job fail an hour later with
+   * half a tree copied.
+   */
+  async availableBytes(dataset: string, reason: string): Promise<number | null> {
+    // The POOL, not the dataset: `zfs get available` on a dataset already accounts for its
+    // refquota, and the pool name is its first component.
+    const pool = dataset.split('/')[0] ?? dataset;
+    try {
+      const response = await this.agent.call({ op: 'pool_status', pool }, reason);
+      return response.status === 'pool_status' ? response.available_bytes : null;
+    } catch {
+      // An unreachable agent must not block a copy from being QUEUED. The job itself will refuse
+      // for the same reason a moment later, and with a better message.
+      return null;
+    }
   }
 
   /** Copy everything the payload names. Runs to completion; `report` keeps the lease alive. */

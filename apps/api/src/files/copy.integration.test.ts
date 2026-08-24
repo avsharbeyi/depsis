@@ -437,7 +437,9 @@ describeDb('copying a tree', () => {
     // in the worker instead is a deterministic failure the queue retries and then reports `dead`
     // to somebody who was told the copy had started.
     const { copies, calls } = service();
-    expect(await copies.size(org, share, [docs])).toBe(4);
+    // Bytes as well as entries: the endpoint uses the weight to refuse a copy the pool cannot
+    // hold, which turns an hour-long half-finished failure into an immediate 507.
+    expect(await copies.size(org, share, [docs])).toEqual({ entries: 4, bytes: 22 });
     expect(calls).toEqual([]);
   });
 

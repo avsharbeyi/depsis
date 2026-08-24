@@ -1193,6 +1193,21 @@ export interface paths {
                 404: components["responses"]["Problem"];
                 409: components["responses"]["Problem"];
                 422: components["responses"]["Problem"];
+                /**
+                 * @description Seçimin toplam boyutu havuzda kalan yerden büyük. Bir garanti değil bir nezaket
+                 *     kontrolü — eşzamanlılık altında yer, bu cevapla kopyalama arasında başka bir yükleme
+                 *     tarafından alınabilir; ajanın ENOSPC/EDQUOT sınıflandırması bu yüzden ayrıca var.
+                 *     Dönüştürdüğü şey yaygın durum: bir saat sonra yarısı kopyalanmış bir ağaçla
+                 *     başarısız olmak yerine, iki sayıyı hemen söylemek.
+                 */
+                507: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["ProblemDetails"];
+                    };
+                };
             };
         };
         delete?: never;

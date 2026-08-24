@@ -9,7 +9,7 @@ import { ProblemException } from '../common/problem.filter.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { COPY_KIND, COPY_MAX_ATTEMPTS, CopyService, type CopyPayload } from './copy.service.js';
 import { FilesService, permissionsOf, type Caller } from './files.service.js';
-import { requireSession, requireUuid, translate } from './files.controller.js';
+import { requireSession, requireUuid } from './files.controller.js';
 
 type Schemas = OpenApi.components['schemas'];
 
@@ -86,43 +86,40 @@ export class FileOperationsController {
     for (const id of sourceIds) requireUuid(id);
     if (destinationId !== null) requireUuid(destinationId);
 
+    // ONE ANSWER FOR EVERY WAY A SOURCE CAN BE UNUSABLE, and it is not cosmetic.
+    // `FilesService.find` is scoped by organisation and nothing narrower, so it runs before any
+    // grant is consulted — and three different bodies used to come back from it: Nest's bare
+    // "Not Found" for an id in no share at all, one sentence for an id in another share, another
+    // for an id the caller has no grant on. An organisation member holding a uuid from a log line
+    // could tell those apart and learn that an entry exists, which is the existence oracle §14 and
+    // ADR-0013 §2.2 both refuse.
+    const missing = (): never => {
+      throw new ProblemException('not-found', 'Kaynak bulunamadı.');
+    };
+
     // The share comes from the FIRST SOURCE and every other id is checked against it. A copy
     // spanning two shares is two datasets and a different operation; letting the ids disagree
     // would make the destination's share the tiebreak, which is the one the caller did not name.
-    const first = await this.files
-      .find(caller.organizationId, sourceIds[0] ?? '')
-      .catch((error: unknown) => {
-        throw translate(error);
-      });
-    const shareId = first.share_id;
-
     const sources = await Promise.all(
-      sourceIds.map((id) =>
-        this.files.find(caller.organizationId, id).catch((error: unknown) => {
-          throw translate(error);
-        }),
-      ),
+      sourceIds.map((id) => this.files.find(caller.organizationId, id).catch(missing)),
     );
+    const shareId = sources[0]?.share_id ?? missing();
     for (const source of sources) {
-      // Absent rather than refused, which is what every other per-entry route does for an id in
-      // another share: the caller must not learn that it exists.
-      if (source.share_id !== shareId || source.trashed_at !== null) {
-        throw new ProblemException('not-found', 'Kaynaklardan biri bu paylaşımda değil.');
-      }
+      if (source.share_id !== shareId || source.trashed_at !== null) missing();
     }
 
     if (destinationId !== null) {
       const destination = await this.files
         .find(caller.organizationId, destinationId)
-        .catch((error: unknown) => {
-          throw translate(error);
-        });
+        .catch(missing);
       if (
         destination.share_id !== shareId ||
         destination.kind !== 'folder' ||
         destination.trashed_at !== null
       ) {
-        throw new ProblemException('not-found', 'Hedef klasör bu paylaşımda değil.');
+        // The same single answer: a destination in another share, one that is a file, and one that
+        // does not exist are one outcome here for the same reason.
+        missing();
       }
       // Copying a folder into itself or into its own descendant is an infinite tree. The database
       // would not stop it — each step is a legal create — so it is stopped here.
@@ -146,11 +143,28 @@ export class FileOperationsController {
     // job that throws it retries on every attempt, burns its budget, and reports `dead` to
     // somebody who was told the copy had started. One extra walk on the click buys a 422 the user
     // can act on.
-    const entries = await this.copies.size(caller.organizationId, shareId, sourceIds);
+    const { entries, bytes } = await this.copies.size(caller.organizationId, shareId, sourceIds);
     if (entries > CopyService.MAX_ENTRIES) {
       throw new ProblemException(
         'validation-failed',
         `Bu seçim ${entries} girdi içeriyor; en fazla ${CopyService.MAX_ENTRIES} kopyalanabilir.`,
+      );
+    }
+
+    // A courtesy, not a guarantee — another upload can take the space between this answer and the
+    // copy, which is why the agent classifies a full pool into its own response as well. What it
+    // converts is the common case: a copy is one of two operations in the product that can multiply
+    // stored bytes without a single upload, and being told the two numbers on the click beats
+    // watching a job fail an hour later with half a tree copied.
+    const share = await this.files.shareFor(caller.organizationId, shareId);
+    const available = await this.copies.availableBytes(
+      share.dataset,
+      `space check before copying ${bytes} bytes`,
+    );
+    if (available !== null && bytes > available) {
+      throw new ProblemException(
+        'insufficient-storage',
+        `Bu kopyalama ${formatBytes(bytes)} yer istiyor; havuzda ${formatBytes(available)} boş.`,
       );
     }
 
@@ -206,3 +220,15 @@ export class FileOperationsController {
 
 /** Re-exported so the job's kind has one spelling. */
 export { COPY_KIND };
+
+/** Bytes, as a person reads them. Base 10, matching what a disk's label claims. */
+function formatBytes(value: number): string {
+  const units = ['B', 'kB', 'MB', 'GB', 'TB', 'PB'];
+  let n = value;
+  let unit = 0;
+  while (n >= 1000 && unit < units.length - 1) {
+    n /= 1000;
+    unit += 1;
+  }
+  return `${n < 10 && unit > 0 ? n.toFixed(1) : Math.round(n)} ${units[unit] ?? 'B'}`;
+}
