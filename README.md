@@ -381,27 +381,36 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   ve test raporlarının artefakt hâli (testler koşuyor; CI hesabı kilitli olduğu için yayımlanmış
   rapor yok).
 
-## CI şu an hiç koşmuyor — hesap kilitli
+## CI koşuyor, ve ilk tamamlanan koşumunda beş kusur buldu
 
-Bu depoda GitHub Actions çalışmıyor, ve sebebi kodda değil:
+Hesap kilidi kalkana kadar bu depoda GitHub Actions hiç çalışmadı — koşular oluşuyor, işler
+listeleniyor, her biri **sıfır adımla** beş saniyede düşüyordu. Kilit kalktı, 41 commit tek seferde
+itildi, ve iş akışı hayatında ilk kez tamamlandı.
 
-```
-The job was not started because your account is locked due to a billing issue.
-```
+Altı işin altısı yeşil. Oraya varmak beş düzeltme aldı, ve **beşi de aynı aileden**: bu makinede
+doğru olduğu için hiç sınanmamış varsayımlar.
 
-Koşular oluşuyor, işler listeleniyor, sonra her biri **sıfır adımla** beş saniyede düşüyor —
-GitHub runner atamıyor. Depoyu public yapmak da çözmedi (public depolarda Actions ücretsiz, ama
-kilit hesap düzeyinde). Ödeme yöntemi düzelene kadar buradan ölçüm gelmeyecek.
+| Ne                                                                     | Neden yerelde görünemezdi                                                                                        |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `identity.rs` `std::os::unix`'i doğrudan çağırıyordu (ADR-0006 ihlali) | Linux'ta `cargo test` diğer platformu hiç denemiyor. Kapı `cargo check --target x86_64-pc-windows-msvc`.         |
+| Tenant işi paketleri derlemeden test koşuyordu                         | `dist/` bir geliştirici makinesinde zaten duruyor. turbo.json bu tuzağı `lint` üstünde geçmiş zamanla anlatıyor. |
+| e2e ajanı ayrıcalıksız koşuyordu, DEPSIS uid'sine chown edemiyordu     | WSL'de script zaten root; varsayım yalnız doğru olduğu yerde deneniyordu.                                        |
+| Raporu okuyan kapı raporun yolunu bilmiyordu                           | O adıma hiç ulaşılmamıştı; iş her zaman daha önce düşüyordu.                                                     |
+| Keşif her telemetri poll'ünde aynı uyarıyı yazıyordu                   | ZFS'i olan bir kutuda hiç tetiklenmiyor.                                                                         |
 
-Bu yüzden **doğrulama bugün tamamen yerel**, ve sırası şu:
+Yerel kapılar hâlâ geçerli ve hâlâ ilk savunma hattı — CI'a itmeden önce:
 
 ```bash
 pnpm check                                   # format · lint · typecheck · generate · unit
 bash tools/ci/permissions-schema-check.sh    # izin şemasının kısıtları gerçekten ısırıyor mu
-DB_NAME=depsis_gate_ci bash tools/ci/migration-check.sh
-pnpm --filter @depsis/api exec vitest run    # DEPSIS_TEST_*_URL ayarlıyken
-bash tools/dev/e2e-stack.sh && pnpm test:e2e
+DB_NAME=depsis_gate_ci bash tools/dev/wsl-migration-check.sh
+bash tools/dev/wsl-itest.sh                  # dört veritabanı URL'siyle tümleşik süitler
+bash tools/dev/wsl-e2e-stack.sh && pnpm test:e2e --workers=3
+bash tools/wsl-cargo-windows-check.sh        # ADR-0006'nın çekirdek iddiası
 ```
+
+Koşumu izlemek için `bash tools/dev/ci-watch.sh` — kimliksiz API saatte altmış istek, ve otuz
+saniyelik bir yoklama onu bir koşumda bitiriyor.
 
 ## CI dosyasını değiştirdiysen
 
