@@ -19,6 +19,7 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import { sortPermissions, type Permission } from '@depsis/authz';
 import type { OpenApi } from '@depsis/contracts';
@@ -29,6 +30,7 @@ import { z } from 'zod';
 import { AgentDataService } from '../agent/agent-data.service.js';
 import { AgentRefusedError, AgentUnavailableError } from '../agent/agent.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import { IdempotencyInterceptor } from '../common/idempotency.interceptor.js';
 import {
   PosixIdentityUnavailableError,
   PosixIdentityUnknownUserError,
@@ -204,6 +206,10 @@ export class FilesController {
    * for the change that introduced these, and adding 401/503 to this operation is the next turn's
    * job.
    */
+  // §8's `Idempotency-Key`, on the route the contract declares it on. Without a key the request
+  // behaves exactly as before; with one, a client that lost the response and retried gets the
+  // first answer back instead of a second folder.
+  @UseInterceptors(IdempotencyInterceptor)
   @Post('folders')
   async createFolder(
     @Req() request: AuthenticatedRequest,

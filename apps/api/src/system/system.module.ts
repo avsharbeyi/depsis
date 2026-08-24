@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { AgentService } from '../agent/agent.service.js';
 import { AuthModule } from '../auth/auth.module.js';
+import { IdempotencyModule } from '../common/idempotency.module.js';
 import { APP_CONFIG } from '../config.module.js';
 import type { AppConfig } from '../config.js';
 import { DbService } from '../db/db.service.js';
@@ -11,7 +12,7 @@ import { SystemController } from './system.controller.js';
 import { SystemService } from './system.service.js';
 
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, IdempotencyModule],
   controllers: [SystemController, BackupsController],
   providers: [
     {

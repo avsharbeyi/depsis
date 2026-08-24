@@ -13,6 +13,7 @@ import {
   Res,
   ServiceUnavailableException,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { randomUUID } from 'node:crypto';
@@ -20,6 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { AgentService, expectStatus } from '../agent/agent.service.js';
 import { AgentDataService, AgentOutOfSpaceError } from '../agent/agent-data.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import { IdempotencyInterceptor } from '../common/idempotency.interceptor.js';
 import { DbService } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import { assertValidName, FilesService } from './files.service.js';
@@ -59,6 +61,10 @@ export class UploadsController {
     private readonly posix: PosixIdentityService,
   ) {}
 
+  // §8's `Idempotency-Key`, on the route the contract declares it on. Without a key the request
+  // behaves exactly as before; with one, a client that lost the response and retried gets the
+  // first answer back instead of a second upload session.
+  @UseInterceptors(IdempotencyInterceptor)
   @Post()
   @HttpCode(201)
   async create(

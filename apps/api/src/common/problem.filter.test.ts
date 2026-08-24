@@ -84,7 +84,10 @@ describe('the error body', () => {
     app.useLogger(false);
     await app.listen(0);
     base = await app.getUrl();
-  });
+    // Generous, because this suite starts a real HTTP server and the repository is on a Windows
+    // filesystem when the tests run under WSL — Nest's boot alone can pass vitest's 10s default
+    // there, and a hook timeout would read as the filter being broken.
+  }, 60_000);
 
   afterAll(async () => {
     await app?.close();

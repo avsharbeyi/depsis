@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module.js';
+import { IdempotencyModule } from '../common/idempotency.module.js';
 import { JobsModule } from '../jobs/jobs.module.js';
 import { FilesController } from './files.controller.js';
 import { FilesService } from './files.service.js';
@@ -22,7 +23,7 @@ import { UploadsController } from './uploads.controller.js';
  * supplies `SessionGuard`, which every route in all four controllers sits behind.
  */
 @Module({
-  imports: [AuthModule, JobsModule],
+  imports: [AuthModule, JobsModule, IdempotencyModule],
   controllers: [FilesController, UploadsController, SearchController, TransfersController],
   providers: [FilesService, TransfersService],
   exports: [FilesService],

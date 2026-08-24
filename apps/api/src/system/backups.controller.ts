@@ -11,6 +11,7 @@ import {
   UnauthorizedException,
   UnprocessableEntityException,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import type { OpenApi } from '@depsis/contracts';
 import { randomUUID } from 'node:crypto';
@@ -18,6 +19,7 @@ import { z } from 'zod';
 
 import { AgentRefusedError, AgentUnavailableError } from '../agent/agent.service.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import { IdempotencyInterceptor } from '../common/idempotency.interceptor.js';
 import {
   BackupsService,
   InvalidSnapshotNameError,
@@ -74,6 +76,10 @@ export class BackupsController {
     };
   }
 
+  // §8's `Idempotency-Key`, on the route the contract declares it on. Without a key the request
+  // behaves exactly as before; with one, a client that lost the response and retried gets the
+  // first answer back instead of a second snapshot.
+  @UseInterceptors(IdempotencyInterceptor)
   @Post()
   async create(
     @Req() request: AuthenticatedRequest,
