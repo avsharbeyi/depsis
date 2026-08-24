@@ -413,6 +413,9 @@ function Desktop({
   onSignedOut: (note: string | null) => void;
 }): React.JSX.Element {
   const [me, setMe] = useState<CurrentUser | null>(null);
+  /** Bumped to re-read `/me`. Enrolling a second factor changes `mfaEnrolled` and the remaining
+   *  recovery-code count, and a stale copy of those is a screen that lies about the account. */
+  const [meKey, setMeKey] = useState(0);
   const [failed, setFailed] = useState(false);
   const [pane, setPane] = useState<PaneId | null>(paneFromHash);
   const [dockOpen, setDockOpen] = useState(false);
@@ -462,7 +465,7 @@ function Desktop({
         setFailed(true);
       }
     })();
-  }, [onUnauthenticated]);
+  }, [onUnauthenticated, meKey]);
 
   useEffect(() => {
     const onHashChange = (): void => setPane(paneFromHash());
@@ -768,6 +771,7 @@ function Desktop({
           onClose={closePane}
         >
           <PaneBody
+            onAccountChanged={() => setMeKey((k) => k + 1)}
             pane={visiblePane}
             me={me}
             isAdmin={isAdmin}
@@ -800,6 +804,7 @@ function PaneBody({
   prefs,
   prefsLoaded,
   save,
+  onAccountChanged,
   notify,
   onUnauthenticated,
 }: {
@@ -813,6 +818,8 @@ function PaneBody({
   notify: Notify;
   /** `note` replaces the default sign-out sentence — see `onUnauthenticated` on the desk. */
   onUnauthenticated: (note?: string) => void;
+  /** Ask the shell to re-read `/me`. See `meKey`. */
+  onAccountChanged: () => void;
 }): React.JSX.Element {
   switch (pane) {
     case 'files':
@@ -828,7 +835,7 @@ function PaneBody({
     case 'teams':
       return <Teams notify={notify} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />;
     case 'account':
-      return <Account me={me} notify={notify} />;
+      return <Account me={me} notify={notify} onChanged={onAccountChanged} />;
     case 'transfers':
       return <Transfers notify={notify} />;
     case 'backups':

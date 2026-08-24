@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useState } from 'react';
 
 import { api, problemMessage } from './api.js';
+import { Mfa } from './Mfa.js';
 
 type CurrentUser = OpenApi.components['schemas']['CurrentUser'];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
@@ -13,13 +14,27 @@ const AVATAR: Record<CurrentUser['role'], React.CSSProperties> = {
 };
 
 /**
- * The account, and the one thing a person does to it — POST /me/password.
+ * The account: a password change, and the second factor.
  *
- * There is no two-factor panel here. The endpoints for it exist and are tested, because §6.3 asks
- * for the capability, but leading a household appliance's account screen with a QR code and ten
- * recovery codes is answering a question nobody in this house asked.
+ * THE MFA PANEL USED TO BE ABSENT ON PURPOSE, and the reasoning here said so — a household
+ * appliance should not open its account screen with a QR code and ten recovery codes. That was a
+ * defensible call about EMPHASIS and it produced an indefensible outcome: `SignIn.tsx` has always
+ * handled the `mfa_required` branch, so the appliance could challenge a second factor that nobody
+ * had any way to turn on. A login step nobody can reach is a dead branch, not a decision.
+ *
+ * So it is here, and it is placed BELOW the password form rather than above it: the emphasis
+ * argument was right, only the omission was wrong.
  */
-export function Account({ me, notify }: { me: CurrentUser; notify: Notify }): React.JSX.Element {
+export function Account({
+  me,
+  notify,
+  onChanged,
+}: {
+  me: CurrentUser;
+  notify: Notify;
+  /** Re-read `/me`, so the enrolled state and the remaining-code count stop being stale. */
+  onChanged: () => void;
+}): React.JSX.Element {
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [again, setAgain] = useState('');
@@ -117,6 +132,8 @@ export function Account({ me, notify }: { me: CurrentUser; notify: Notify }): Re
         alan biri oturuma sahiptir ama parolaya sahip değildir. Değişiklikten sonra diğer bütün
         oturumlarınız kapanır; bu sekme açık kalır.
       </div>
+
+      <Mfa me={me} notify={notify} onChanged={onChanged} />
     </>
   );
 }
