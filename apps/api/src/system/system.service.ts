@@ -36,6 +36,31 @@ const KNOWN_HEALTH: readonly string[] = [
 export class SystemService {
   private readonly logger = new Logger(SystemService.name);
 
+  /**
+   * Warnings already said once.
+   *
+   * Telemetry is POLLED — every open dashboard asks every few seconds — so a condition that does
+   * not change writes the same line forever. CI's first e2e run produced a screenful of
+   * "spawn /usr/sbin/zpool: No such file or directory" and the identical smartctl line beside it,
+   * which is a box with no ZFS installed saying so several times a second.
+   *
+   * Discovery failures are exactly the kind that persist: the binary is absent or it is not, and
+   * it will not appear between two polls. Said once, the line is information; said on a loop it
+   * teaches whoever greps this log that warnings here mean nothing, which is the same failure as
+   * a health column that is always red.
+   *
+   * A Set and not a flag, so a NEW reason still gets through — a `zpool` that starts failing for
+   * a different cause is not the condition already reported.
+   */
+  private readonly saidOnce = new Set<string>();
+
+  /** Say it the first time, and only then. */
+  private warnOnce(key: string, message: string): void {
+    if (this.saidOnce.has(key)) return;
+    this.saidOnce.add(key);
+    this.logger.warn(`${message} (further identical warnings suppressed)`);
+  }
+
   constructor(
     private readonly agent: AgentService,
     private readonly db: DbService,
@@ -214,9 +239,8 @@ export class SystemService {
         configured: false,
       };
     } catch (error) {
-      this.logger.warn(
-        `could not enumerate disks for SMART: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      const detail = error instanceof Error ? error.message : String(error);
+      this.warnOnce(`disks:${detail}`, `could not enumerate disks for SMART: ${detail}`);
       return { ids: [], configured: false };
     }
   }
@@ -400,9 +424,8 @@ export class SystemService {
     try {
       return await this.listPools(correlationId);
     } catch (error) {
-      this.logger.warn(
-        `could not enumerate pools: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      const detail = error instanceof Error ? error.message : String(error);
+      this.warnOnce(`pools:${detail}`, `could not enumerate pools: ${detail}`);
       return [];
     }
   }
@@ -459,7 +482,10 @@ export class SystemService {
           response.status === 'refused' || response.status === 'failed'
             ? response.reason
             : `expected a smart answer, got '${response.status}'`;
-        this.logger.warn(`disk '${id}': SMART summary unavailable: ${detail}`);
+        this.warnOnce(
+          `smart:${id}:${detail}`,
+          `disk '${id}': SMART summary unavailable: ${detail}`,
+        );
         // A CONFIGURED disk keeps its row. An operator who named it asked to be told about it, and
         // its silence is a fact — the long note above is about exactly that trade, and it stands.
         //

@@ -62,10 +62,21 @@
 # box this repository targets. The socket mode the unit files declare (root:depsis-api 0660) has no
 # --option here and is applied with chgrp/chmod after the listeners appear.
 #
-# WHAT IS NOT PRODUCTION, said out loud. The agent runs as whoever ran this script rather than as
-# root, so everything it does is bounded by that account's own permissions. That is enough for the
-# tree under $RUN/shares, which is all the suite drives; it is NOT enough for the share, ACL and
-# ZeroTier operations, and no test here touches those.
+# THE AGENT RUNS AS ROOT, like the unit file it stands in for, and the earlier version of this
+# comment claimed the opposite was fine: "everything it does is bounded by that account's own
+# permissions. That is enough for the tree under $RUN/shares, which is all the suite drives."
+#
+# It is not enough, and CI said so the first time it ever reached this suite: `create_dir` chowns
+# the new directory to the DEPSIS-issued posix uid (300001 and up), and an unprivileged process
+# cannot chown to another uid. Every file-manager test failed with EPERM. Nobody had looked because
+# the sentence read as a decision rather than as an assumption, and because on a WSL box this
+# script runs as root already — so the assumption was only ever exercised where it happened to
+# hold.
+#
+# `sudo` when there is one and this is not already root. A box with neither gets the unprivileged
+# agent and the honest warning below.
+#
+# What is STILL not production: the ACL and ZeroTier operations are untouched by any test here.
 #
 # THE UID GATE. `Policy { api_uid }` compares SO_PEERCRED against DEPSIS_API_UID and refuses uid 0
 # outright — otherwise the root-refusal in `authz` would be unreachable and every root process on
@@ -301,9 +312,23 @@ launch_agent() {
   rm -f "$AGENT_SOCKET" "$AGENT_DATA_SOCKET"
   install -d -m 0770 "$RUN/shares" 2>/dev/null
 
+  # Privileged, because `create_dir` chowns to a DEPSIS uid and only root may. See the note at the
+  # top of this file for the failure that made it explicit. `--preserve-env` and not `-E`: the
+  # latter needs a sudoers rule most images do not carry, and naming the two variables is the
+  # smaller thing to ask for anyway.
+  AS_ROOT=()
+  if [ "$(id -u)" -ne 0 ]; then
+    if sudo -n true 2>/dev/null; then
+      AS_ROOT=(sudo --preserve-env=DEPSIS_API_UID,DEPSIS_SHARES_ROOT)
+    else
+      echo '  ! no passwordless sudo: the agent will run unprivileged and cannot chown, so every'
+      echo '    folder and upload will fail with EPERM rather than being refused for a reason'
+    fi
+  fi
+
   DEPSIS_API_UID="$API_UID" \
     DEPSIS_SHARES_ROOT="$RUN/shares" \
-    start_bg agent systemd-socket-activate \
+    start_bg agent ${AS_ROOT[@]+"${AS_ROOT[@]}"} systemd-socket-activate \
     -l "$AGENT_SOCKET" --fdname=control \
     -l "$AGENT_DATA_SOCKET" --fdname=data \
     -E DEPSIS_API_UID -E DEPSIS_SHARES_ROOT \
@@ -323,8 +348,9 @@ launch_agent() {
   # mode is not decoration: connecting to an AF_UNIX socket needs WRITE permission on the file, so
   # the DAC is the gate that refuses every other account on the box before the agent reads a byte.
   # `systemd-socket-activate` has no equivalent option, so the same gate is applied by hand.
-  chgrp "$API_GID" "$AGENT_SOCKET" "$AGENT_DATA_SOCKET" 2>/dev/null || true
-  chmod 0660 "$AGENT_SOCKET" "$AGENT_DATA_SOCKET" || return 1
+  ${AS_ROOT[@]+"${AS_ROOT[@]}"} chgrp "$API_GID" "$AGENT_SOCKET" "$AGENT_DATA_SOCKET" 2>/dev/null ||
+    true
+  ${AS_ROOT[@]+"${AS_ROOT[@]}"} chmod 0660 "$AGENT_SOCKET" "$AGENT_DATA_SOCKET" || return 1
 
   # The default share's own directory, which nothing in this flow would otherwise create.
   #

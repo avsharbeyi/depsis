@@ -208,6 +208,26 @@ describe('telemetry', () => {
     expect(calls.some((c) => c.key === 'list_pools')).toBe(false);
   });
 
+  it('says an unchanging failure once, not on every poll', async () => {
+    // Telemetry is polled by every open dashboard. CI's first e2e run produced a screenful of the
+    // same "spawn /usr/sbin/zpool: No such file or directory" line, several a second, which is a
+    // box with no ZFS installed saying so forever. Said once it is information; on a loop it
+    // teaches whoever greps the log that warnings here mean nothing.
+    const { agent } = stubAgent({});
+    const system = new SystemService(agent, stubDb(null), []);
+    const warn = vi.spyOn(
+      (system as unknown as { logger: { warn: (m: string) => void } }).logger,
+      'warn',
+    );
+
+    await system.telemetry('c');
+    await system.telemetry('c');
+    await system.telemetry('c');
+
+    // Two distinct conditions — the pool list and the disk inventory — each once.
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the rest of telemetry when the pool list cannot be enumerated', async () => {
     // Deliberately NOT the same rule as a configured pool the agent refuses. That one is a real
     // fault — a typo, or a pool that has gone away — and dropping it would present a partial list
