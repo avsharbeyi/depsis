@@ -248,7 +248,62 @@ Beş binden fazla girdisi olan bir klasörün listelemesi kırpılır ve o klas�
 silinmez** — yarım bir dizini uzlaştırıp kalan satırları silmek, tek suçu büyük olmak olan bir
 klasörün indeksini yok ederdi. Böyle bir durumda worker günlüğüne uyarı düşer.
 
-### 3.7 Konsol
+### 3.7 SMB olay akışı — hızlı indeksleme (isteğe bağlı)
+
+§3.6'daki mutabakat doğru ama on beş dakikalık. Samba, bir istemci bir şeyi değiştirdiği anda
+söyleyebiliyor; DEPSIS'in ürettiği her paylaşım bölümü zaten bunu istiyor:
+
+```ini
+vfs objects = full_audit
+full_audit:prefix = %u|%I|%S
+full_audit:success = create_file renameat unlinkat mkdirat close ftruncate linkat symlinkat
+full_audit:failure = none
+full_audit:facility = local5
+full_audit:priority = notice
+```
+
+Eksik olan tek şey, o satırları worker'ın okuyabileceği bir dosyaya yönlendirmek:
+
+```bash
+install -d -m 0750 -o root -g depsis-api /var/log/depsis
+cp deploy/rsyslog/depsis-smb-audit.conf /etc/rsyslog.d/49-depsis-smb-audit.conf
+cp deploy/logrotate/depsis-smb-audit    /etc/logrotate.d/depsis-smb-audit
+systemctl restart rsyslog
+systemctl restart depsis-worker
+```
+
+Bunu yapmazsanız ürün **çalışmaya devam eder** — yalnız SMB yazmaları on beş dakikalık yürüyüşle
+indekslenir. Worker açılışta bunu bir kez söylüyor:
+
+> `/var/log/depsis/smb-audit.log does not exist: SMB writes will be indexed by the periodic walk
+only.`
+
+#### Bunu doğrulayın
+
+Bu adımın çalıştığını **kanıtlayan** tek dizi:
+
+```bash
+# 1. Satırlar akıyor mu? Windows'tan bir dosya kaydedin, sonra:
+tail -f /var/log/depsis/smb-audit.log
+#    Beklenen biçim:  ... smbd_audit: kullanıcı|10.0.0.5|paylaşım|close|ok|klasor/dosya.txt
+
+# 2. Kuyruğa düşüyor mu?
+psql -d depsis -c 'SELECT share_id, path, actor, seen_at FROM index_queue ORDER BY seen_at DESC LIMIT 5'
+
+# 3. Boşalıyor mu? Birkaç saniye içinde satır gitmeli, ve dosya web arayüzünde görünmeli.
+journalctl -u depsis-worker -f | grep 'smb audit'
+```
+
+> ⚠ **`full_audit` bir paylaşımı tamamen erişilemez yapabilir.** Samba'nın bilmediği bir opname,
+> "denetim çalışmaz" demek değil: smbd **bağlantıyı reddeder**, ve `testparm` bunu yakalamaz —
+> liste yalnız bağlantı anında doğrulanıyor. P0-B bunu `rmdir` ile ölçtü (Samba 4.22'de böyle bir
+> opname yok; dizin silme `unlinkat` üzerinden gider).
+>
+> Bu yüzden yayım `testparm`'dan sonra **gerçek bir bağlantı denemesi** yapıyor ve
+> kanıtlayamadığında geri alıyor. Yukarıdaki listeye elle bir ad eklemeyin; ajanın testleri o
+> listeyi tam eşleşmeyle sabitliyor, tam da bu yüzden.
+
+### 3.8 Konsol
 
 Yalnız yönetici, ve her oturum parola onayı ister. Bir oturum, birinin açık bırakılmış dizüstünü
 ödünç alan kişinin sahip olduğu şeydir; kabuk erişimi için yetmez (ADR-0018).

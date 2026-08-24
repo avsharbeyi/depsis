@@ -395,6 +395,47 @@ pub fn render(sections: &[Section]) -> String {
                 section.valid_users.join(" ")
             ));
         }
+        // ── ADR-0011 Layer 1: tell somebody when a client changes something ──
+        //
+        // WHY THIS IS HERE AT ALL. `file_entries` only learns about a file DEPSIS itself created,
+        // so a file written from Windows is invisible until the reconciliation walk finds it —
+        // fifteen minutes later. §5.3 asks for an SLA, and a quarter of an hour is not one. Samba
+        // already knows the moment it happens, along with the user and the client address, in its
+        // own process, with zero kernel privilege and zero ZFS dependency. Going two abstraction
+        // layers down to fanotify and asking for CAP_SYS_ADMIN to recover what Samba is holding
+        // out is reverse engineering (ADR-0011 §4).
+        //
+        // ⚠ ONE BAD OPNAME TAKES THE SHARE OFFLINE. Not "auditing stops" — smbd refuses the
+        // CONNECT: `init_bitmap: Could not find opname rmdir` / `Invalid success operations list.
+        // Failing connect`. And `testparm` does NOT catch it: the list is validated at connection
+        // time, so the config parses cleanly, `testparm -s` is silent, the service starts, and the
+        // share is dead from the first client onwards. P0-B measured exactly this with `rmdir`,
+        // which Samba 4.22 does not have — directory removal goes through `unlinkat` since the
+        // move to `*at()` VFS operations.
+        //
+        // The list below is the one P0-B measured ACCEPTED on Samba 4.22.10 / Debian 13, and
+        // nothing may be added to it without measuring first. What makes shipping it safe at all
+        // is that `publish` proves the configuration with a real client connection after
+        // `testparm` and rolls back when it cannot — the gate ADR-0011 says this class of error
+        // requires, because `testparm` is not one.
+        //
+        // `close` and not `write`/`pwrite`/`open`. Those fire per syscall and would drown the box;
+        // `close` is the correct content-changed trigger — one event per file, after the data is
+        // written. `create_file` is a placeholder: a client whose transfer is interrupted still
+        // emits it.
+        //
+        // `acl_xattr` is deliberately NOT in `vfs objects`. ADR-0011's sketch includes it, but
+        // ADR-0004 makes the POSIX ACL the one enforced substrate, and `acl_xattr` would have
+        // Samba store NT ACLs in xattrs beside it — a second answer to who may read a file. That
+        // is an ADR-0004 decision, not something to acquire as a side effect of adding auditing.
+        out.push_str("\tvfs objects = full_audit\n");
+        out.push_str("\tfull_audit:prefix = %u|%I|%S\n");
+        out.push_str("\tfull_audit:success = create_file renameat unlinkat mkdirat close ftruncate linkat symlinkat\n");
+        // `failure = none`: a refused operation changed nothing, so indexing it would be work with
+        // no result — and a share somebody is probing would generate one line per attempt.
+        out.push_str("\tfull_audit:failure = none\n");
+        out.push_str("\tfull_audit:facility = local5\n");
+        out.push_str("\tfull_audit:priority = notice\n");
         // `.depsis/staging` holds half-finished uploads. A user who can see it can see other
         // people's in-flight files and can delete a transfer the API still believes in, so it is
         // vetoed rather than merely hidden — `hide files` would still let a client open it by
@@ -819,6 +860,91 @@ mod tests {
         let sections = plan(&[spec], &host).expect("plan");
         let only = sections.first().expect("one section");
         assert_eq!(only.valid_users, vec!["ayse".to_string()]);
+    }
+
+    // ── full_audit (ADR-0011 Layer 1) ──
+
+    #[test]
+    fn every_section_carries_the_audit_module() {
+        let text = render(&[Section {
+            name: "belgeler".to_string(),
+            path: "/srv/belgeler".to_string(),
+            read_only: false,
+            valid_users: Vec::new(),
+        }]);
+        assert!(text.contains("\tvfs objects = full_audit\n"), "got: {text}");
+        assert!(
+            text.contains("\tfull_audit:prefix = %u|%I|%S\n"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains("\tfull_audit:failure = none\n"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains("\tfull_audit:facility = local5\n"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains("\tfull_audit:priority = notice\n"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn the_audited_operations_are_exactly_the_ones_p0_b_measured() {
+        // THE SHARPEST EDGE IN THIS FILE. An opname Samba does not know makes smbd refuse the
+        // CONNECT — not merely stop auditing — and `testparm` does not catch it, because the list
+        // is validated when a client connects and not when the config is parsed. P0-B measured
+        // that with `rmdir`, which Samba 4.22 does not have: directory removal goes through
+        // `unlinkat` since the move to `*at()` VFS operations.
+        //
+        // Pinned as an exact string rather than a `contains` per name, so ADDING one is a test
+        // failure. A name added here without being measured against a real smbd is a name that
+        // takes every share offline the next time anybody connects.
+        let text = render(&[Section {
+            name: "belgeler".to_string(),
+            path: "/srv/belgeler".to_string(),
+            read_only: false,
+            valid_users: Vec::new(),
+        }]);
+        const MEASURED: &str =
+            "create_file renameat unlinkat mkdirat close ftruncate linkat symlinkat";
+        assert!(
+            text.contains(&format!("\tfull_audit:success = {MEASURED}\n")),
+            "the audited operation list changed; measure it against a real smbd before shipping. \
+             got: {text}"
+        );
+    }
+
+    #[test]
+    fn the_operation_list_never_contains_rmdir() {
+        // Its own test because it is the one name that has already done the damage once. Samba
+        // 4.22 has no `rmdir` opname; adding it back is a share that answers no client at all.
+        let text = render(&[Section {
+            name: "belgeler".to_string(),
+            path: "/srv/belgeler".to_string(),
+            read_only: false,
+            valid_users: Vec::new(),
+        }]);
+        assert!(
+            !text.contains("rmdir"),
+            "`rmdir` is not an opname in Samba 4.22 and makes smbd refuse every connection"
+        );
+    }
+
+    #[test]
+    fn the_audit_module_does_not_bring_acl_xattr_with_it() {
+        // ADR-0011's sketch lists `acl_xattr full_audit`. ADR-0004 makes the POSIX ACL the one
+        // enforced substrate, and `acl_xattr` would have Samba keep NT ACLs in xattrs beside it —
+        // a second answer to who may read a file, acquired as a side effect of adding auditing.
+        let text = render(&[Section {
+            name: "belgeler".to_string(),
+            path: "/srv/belgeler".to_string(),
+            read_only: false,
+            valid_users: Vec::new(),
+        }]);
+        assert!(!text.contains("acl_xattr"), "got: {text}");
     }
 
     #[test]

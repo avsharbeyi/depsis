@@ -71,8 +71,8 @@ yazan da aynı sonucu alır, ve `cagri` yazmak `Çağrı` dosyalarını bulur.
 
 1. **Erişim izniniz yok.** DEPSIS erişemediğiniz satırları göstermez — soluk da göstermez, hiç
    göstermez. Bir dosya adı tek başına bilgidir.
-2. **Yeni geldi.** SMB'den (Windows'tan) yazılan dosyalar web arayüzüne birkaç dakika içinde
-   düşer, anında değil.
+2. **Yeni geldi.** SMB'den (Windows'tan) yazılan dosyalar web arayüzüne birkaç saniye içinde
+   düşer. Yöneticiniz hızlı indekslemeyi kurmadıysa on beş dakikaya kadar sürebilir.
 3. **Yanlış paylaşımdasınız.** Birden fazla paylaşım varsa dosya yöneticisinin üstündeki
    seçiciden değiştirin.
 

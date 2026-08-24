@@ -34,6 +34,25 @@ interface Row {
 
 export const RECONCILE_KIND = 'files.reconcile';
 
+/** Draining what Samba's audit stream reported. ADR-0011 Layer 1's consumer. */
+export const INDEX_DRAIN_KIND = 'files.index-drain';
+
+/**
+ * Where a path resolved to.
+ *
+ * Three outcomes, and the middle one is why this is not `string | null`: the share ROOT is a real
+ * destination whose id is null, while a path DEPSIS does not know is not a destination at all.
+ * Collapsing them would make an event for a deleted folder reconcile the share root instead.
+ */
+type Resolved = { at: 'root' } | { at: 'folder'; id: string } | { at: 'nowhere' };
+
+/** One directory somebody changed, as the audit reader recorded it. */
+export interface QueuedPath {
+  shareId: string;
+  path: string;
+  actor: string | null;
+}
+
 /**
  * What is on disk, into `file_entries`.
  *
@@ -68,6 +87,23 @@ export class IndexerService implements OnModuleInit {
   /** How often a share is reconciled when nothing asked for it. */
   static readonly INTERVAL_MS = 15 * 60_000;
 
+  /**
+   * Directories per drain pass.
+   *
+   * Higher than the walk's batch because each is one listing rather than a subtree, and this is
+   * the path a person is waiting on: a file saved from Word should appear in the web interface in
+   * seconds, not at the next quarter hour.
+   */
+  static readonly DRAIN_BATCH = 200;
+
+  /**
+   * How often the queue is looked at when it was empty last time.
+   *
+   * Five seconds. That is the actual latency of §5.3's acceptance criterion in the common case,
+   * and an empty queue costs exactly one indexed query — this is not a poll over the filesystem.
+   */
+  static readonly DRAIN_INTERVAL_MS = 5_000;
+
   private readonly logger = new Logger(IndexerService.name);
 
   constructor(
@@ -98,6 +134,10 @@ export class IndexerService implements OnModuleInit {
         for (const shareId of await this.shares(organizationId)) {
           await this.schedule(organizationId, shareId, new Date());
         }
+        // The fast path's own chain, seeded the same way and for the same reason: a drain that
+        // died without queueing its successor would leave the audit stream piling up in a table
+        // nobody reads, and the only symptom would be files appearing fifteen minutes late.
+        await this.scheduleDrain(organizationId, new Date());
       }
     } catch (error) {
       this.logger.error(
@@ -151,6 +191,7 @@ export class IndexerService implements OnModuleInit {
 
       const listing = await this.listing(share.name, folder.components, reason);
       result.scanned += 1;
+      if (listing !== 'gone' && listing.truncated) result.truncated += 1;
 
       if (listing === 'gone') {
         // The folder is in the database and not on disk. Its row goes — along with everything
@@ -160,70 +201,233 @@ export class IndexerService implements OnModuleInit {
         }
         continue;
       }
-      if (listing.truncated) {
-        // A clipped listing tells us nothing about the names it did not report, so NOTHING under
-        // this folder is removed on the strength of it. Reconciling half a directory and deleting
-        // the rest of the rows is the one mistake this pass must never make.
-        result.truncated += 1;
-      }
-
-      const known = await this.rowsUnder(organizationId, shareId, folder.id);
-      const onDisk = new Map(listing.entries.map((entry) => [entry.name, entry]));
-
-      for (const row of known) {
-        const found = onDisk.get(row.name);
-
-        // A TRASHED row is not part of the comparison, and taking it out of `onDisk` is the whole
-        // point of visiting it. Its bytes are still exactly where they were — the trash is a
-        // column, not a folder — so leaving the name in `onDisk` would make the walk decide DEPSIS
-        // did not know about the file and write a SECOND row for something the user has already
-        // deleted. The bin would refill itself on every pass.
-        //
-        // Nothing else happens to it: it is not removed when the file is gone (the purge owns
-        // that), not refreshed, and not descended into, because everything under it is in the bin
-        // as well.
-        if (row.trashed) {
-          if (found !== undefined) onDisk.delete(row.name);
-          continue;
-        }
-
-        if (found === undefined) {
-          if (!listing.truncated) result.removed += await this.forget(organizationId, row.id);
-          continue;
-        }
-        onDisk.delete(row.name);
-
-        if (found.directory !== (row.kind === 'folder')) {
-          // A name that is a file in the database and a directory on disk, or the reverse. The
-          // row describes something that no longer exists; the disk is the authority.
-          result.removed += await this.forget(organizationId, row.id);
-          const made = await this.remember(organizationId, shareId, folder, found);
-          if (made !== null) {
-            result.discovered += 1;
-            if (found.directory)
-              queue.push({ id: made, components: [...folder.components, found.name] });
-          }
-          continue;
-        }
-
-        if (await this.refresh(organizationId, row, found)) result.updated += 1;
-        if (found.directory) {
-          queue.push({ id: row.id, components: [...folder.components, found.name] });
-        }
-      }
-
-      // Whatever is left on disk is what DEPSIS did not know about — the SMB writes.
-      for (const entry of onDisk.values()) {
-        const made = await this.remember(organizationId, shareId, folder, entry);
-        if (made === null) continue;
-        result.discovered += 1;
-        if (entry.directory)
-          queue.push({ id: made, components: [...folder.components, entry.name] });
-      }
+      await this.compare(organizationId, shareId, folder, listing, result, queue);
     }
 
     await report(1);
     return { ...result, more: queue.length > 0 };
+  }
+
+  /**
+   * One directory: make the rows under it agree with what the listing reported.
+   *
+   * ONE COPY, used by both the full walk and the audit-driven fast path. Two copies of this
+   * comparison would be two answers to "did this file change", and the fast path — which runs
+   * hundreds of times more often — would be the one nobody noticed drifting.
+   *
+   * `queue` is where folders to descend into go, or `null` when the caller does not descend.
+   * `reconcileOne` passes `null`: one audit event must not become an unbounded walk.
+   */
+  private async compare(
+    organizationId: string,
+    shareId: string,
+    folder: { id: string | null; components: string[] },
+    listing: {
+      entries: Array<{ name: string; directory: boolean; size: number; modified_unix: number }>;
+      truncated: boolean;
+    },
+    result: ReconcileResult,
+    queue: Array<{ id: string | null; components: string[] }> | null,
+  ): Promise<void> {
+    const known = await this.rowsUnder(organizationId, shareId, folder.id);
+    const onDisk = new Map(listing.entries.map((entry) => [entry.name, entry]));
+    const descend = (id: string | null, name: string): void => {
+      queue?.push({ id, components: [...folder.components, name] });
+    };
+
+    for (const row of known) {
+      const found = onDisk.get(row.name);
+
+      // A TRASHED row is not part of the comparison, and taking it out of `onDisk` is the whole
+      // point of visiting it. Its bytes are still exactly where they were — the trash is a column,
+      // not a folder — so leaving the name in `onDisk` would make the walk decide DEPSIS did not
+      // know about the file and write a SECOND row for something the user has already deleted. The
+      // bin would refill itself on every pass.
+      //
+      // Nothing else happens to it: it is not removed when the file is gone (the purge owns that),
+      // not refreshed, and not descended into, because everything under it is in the bin as well.
+      if (row.trashed) {
+        if (found !== undefined) onDisk.delete(row.name);
+        continue;
+      }
+
+      if (found === undefined) {
+        // A clipped listing tells us nothing about the names it did not report, so NOTHING is
+        // removed on the strength of it. Reconciling half a directory and deleting the rest of the
+        // rows is the one mistake this pass must never make.
+        if (!listing.truncated) result.removed += await this.forget(organizationId, row.id);
+        continue;
+      }
+      onDisk.delete(row.name);
+
+      if (found.directory !== (row.kind === 'folder')) {
+        // A name that is a file in the database and a directory on disk, or the reverse. The row
+        // describes something that no longer exists; the disk is the authority.
+        result.removed += await this.forget(organizationId, row.id);
+        const made = await this.remember(organizationId, shareId, folder, found);
+        if (made !== null) {
+          result.discovered += 1;
+          if (found.directory) descend(made, found.name);
+        }
+        continue;
+      }
+
+      if (await this.refresh(organizationId, row, found)) result.updated += 1;
+      if (found.directory) descend(row.id, found.name);
+    }
+
+    // Whatever is left on disk is what DEPSIS did not know about — the SMB writes.
+    for (const entry of onDisk.values()) {
+      const made = await this.remember(organizationId, shareId, folder, entry);
+      if (made === null) continue;
+      result.discovered += 1;
+      if (entry.directory) descend(made, entry.name);
+    }
+  }
+
+  /**
+   * Reconcile ONE directory, without walking the tree below it.
+   *
+   * The fast path. A Samba audit line says which directory a client changed, so re-reading the
+   * whole share to find one new file is work nobody asked for — a copy of ten thousand files into
+   * one folder would otherwise trigger ten thousand full walks.
+   *
+   * A folder DISCOVERED here is not descended into. The audit stream will report its contents as
+   * they are written, and the fifteen-minute walk catches anything it missed. Descending would
+   * make one event an unbounded amount of work, which is the property the queue exists to avoid.
+   */
+  async reconcileOne(
+    organizationId: string,
+    shareId: string,
+    components: readonly string[],
+    reason: string,
+  ): Promise<ReconcileResult> {
+    const share = await this.files.shareFor(organizationId, shareId);
+    const result: ReconcileResult = {
+      discovered: 0,
+      updated: 0,
+      removed: 0,
+      truncated: 0,
+      scanned: 1,
+    };
+
+    const folder = await this.folderAt(organizationId, shareId, components);
+    if (folder.at === 'nowhere') {
+      // The directory the event named is not in the database at all. Nothing to compare against;
+      // the walk will find it, or its parent's own event will.
+      return result;
+    }
+    const folderId = folder.at === 'folder' ? folder.id : null;
+
+    const listing = await this.listing(share.name, components, reason);
+    if (listing === 'gone') {
+      if (folderId !== null) result.removed += await this.forget(organizationId, folderId);
+      return result;
+    }
+    if (listing.truncated) result.truncated += 1;
+
+    await this.compare(
+      organizationId,
+      shareId,
+      { id: folderId, components: [...components] },
+      listing,
+      result,
+      // No queue: a folder found here is not descended into.
+      null,
+    );
+    return result;
+  }
+
+  /**
+   * Where a share-relative path resolves to.
+   *
+   * Walked one component at a time rather than matched on `path`, because `path` is a denormalised
+   * convenience and the parent chain is the authority — a rename that had not propagated would
+   * make the two disagree, and the walk must follow the one the rest of the product uses.
+   */
+  private async folderAt(
+    organizationId: string,
+    shareId: string,
+    components: readonly string[],
+  ): Promise<Resolved> {
+    let parentId: string | null = null;
+    for (const part of components) {
+      const rows = await this.db.withTenant(organizationId, (q) =>
+        q.query<{ id: string }>(
+          `SELECT id::text AS id FROM public.file_entries
+            WHERE organization_id = $1 AND share_id = $2
+              AND parent_id IS NOT DISTINCT FROM $3
+              AND kind = 'folder' AND name = $4 AND trashed_at IS NULL`,
+          [organizationId, shareId, parentId, part],
+        ),
+      );
+      const found = rows[0];
+      if (found === undefined) return { at: 'nowhere' };
+      parentId = found.id;
+    }
+    return parentId === null ? { at: 'root' } : { at: 'folder', id: parentId };
+  }
+
+  /** Everything the audit reader has reported and nobody has looked at yet. */
+  async queued(organizationId: string, limit: number): Promise<QueuedPath[]> {
+    return this.db.withTenant(organizationId, (q) =>
+      q.query<QueuedPath>(
+        // Oldest first. A directory somebody is writing to continuously would otherwise hold the
+        // front of the queue forever and starve everything behind it.
+        `SELECT share_id::text AS "shareId", path, actor
+           FROM public.index_queue
+          WHERE organization_id = $1
+          ORDER BY seen_at
+          LIMIT $2`,
+        [organizationId, limit],
+      ),
+    );
+  }
+
+  /**
+   * Take one entry off the queue.
+   *
+   * Deleted AFTER the directory has been reconciled, never before. The other order loses the event
+   * when the pass dies part-way, and the fifteen-minute walk would be the only thing that ever
+   * noticed — which is exactly the latency this layer exists to remove.
+   *
+   * `seen_at` is compared, so an event that arrived WHILE the reconciliation was running is not
+   * thrown away: the row stays, with the newer timestamp, and is picked up next time.
+   */
+  async dequeue(
+    organizationId: string,
+    shareId: string,
+    path: string,
+    notNewerThan: Date,
+  ): Promise<void> {
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `DELETE FROM public.index_queue
+          WHERE organization_id = $1 AND share_id = $2 AND path = $3 AND seen_at <= $4`,
+        [organizationId, shareId, path, notNewerThan],
+      ),
+    );
+  }
+
+  /** Record that a directory changed. Called by the audit reader, once per distinct directory. */
+  async enqueuePath(
+    organizationId: string,
+    shareId: string,
+    path: string,
+    actor: string | null,
+    client: string | null,
+  ): Promise<void> {
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        // One row per directory, whatever the event count. A copy of ten thousand files into one
+        // folder is one row whose `seen_at` moves, not ten thousand rows.
+        `INSERT INTO public.index_queue (organization_id, share_id, path, actor, client)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (organization_id, share_id, path) DO UPDATE
+           SET seen_at = now(), actor = EXCLUDED.actor, client = EXCLUDED.client`,
+        [organizationId, shareId, path, actor, client],
+      ),
+    );
   }
 
   /** One directory, or `gone` when it is not there any more. */
@@ -386,6 +590,36 @@ export class IndexerService implements OnModuleInit {
         [organizationId, RECONCILE_KIND, shareId, runAfter],
       ),
     );
+  }
+
+  /** Put a drain pass on the queue, unless one is already waiting. */
+  async scheduleDrain(organizationId: string, runAfter: Date): Promise<void> {
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `INSERT INTO public.job_queue (organization_id, kind, payload, run_after, max_attempts)
+         VALUES ($1, $2, '{}'::jsonb, $3, 3)
+         ON CONFLICT DO NOTHING`,
+        [organizationId, INDEX_DRAIN_KIND, runAfter],
+      ),
+    );
+  }
+
+  /**
+   * A share by the name Samba knows it as.
+   *
+   * The audit stream names the SHARE, not its id — that is the only identifier smbd has. Folded
+   * through `fold_identity` because `shares_name_unique` is, and because SMB clients treat
+   * `Belgeler` and `belgeler` as one name.
+   */
+  async shareByName(organizationId: string, name: string): Promise<string | null> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ id: string }>(
+        `SELECT id::text AS id FROM public.shares
+          WHERE organization_id = $1 AND public.fold_identity(name) = public.fold_identity($2)`,
+        [organizationId, name],
+      ),
+    );
+    return rows[0]?.id ?? null;
   }
 
   /** Every share on the box, so the boot-time seed can cover them. */

@@ -1,0 +1,21 @@
+# The audit log is a transport, not a record.  Nothing reads it after the worker has, and on a busy
+# share it grows fast, so it is rotated aggressively and kept briefly.
+#
+# `copytruncate` rather than `create`, deliberately: rsyslog holds the file open, and rotating by
+# rename without telling it leaves it writing to an unlinked inode until the next restart.  The
+# reader handles both — it notices a changed inode AND a size that went backwards — but the one
+# that keeps rsyslog working without a signal is this one.
+#
+#     cp deploy/logrotate/depsis-smb-audit /etc/logrotate.d/depsis-smb-audit
+
+/var/log/depsis/smb-audit.log {
+    hourly
+    rotate 4
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su root depsis-api
+    create 0640 root depsis-api
+}

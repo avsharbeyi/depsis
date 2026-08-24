@@ -18,9 +18,12 @@ import {
   TrashRetentionService,
   IndexerModule,
   IndexerService,
+  OrganizationsModule,
+  OrganizationsService,
 } from '@depsis/api/worker-surface';
 
 import { registerHandlers } from './handlers/registry.js';
+import { SmbAuditReader } from './smb-audit.reader.js';
 import { WorkerService } from './worker.service.js';
 
 /**
@@ -46,6 +49,7 @@ import { WorkerService } from './worker.service.js';
     CopyModule,
     TrashRetentionModule,
     IndexerModule,
+    OrganizationsModule,
   ],
 })
 class WorkerAppModule {}
@@ -72,6 +76,16 @@ async function bootstrap(): Promise<void> {
     retention: app.get(TrashRetentionService),
     indexer: app.get(IndexerService),
   });
+  // ADR-0011 Layer 1. Started after the handlers so an event that arrives immediately has a
+  // consumer registered; the reader only writes to `index_queue`, so the ordering is a courtesy
+  // rather than a correctness requirement.
+  const audit = new SmbAuditReader(
+    process.env['DEPSIS_SMB_AUDIT_LOG'] ?? '/var/log/depsis/smb-audit.log',
+    app.get(IndexerService),
+    app.get(OrganizationsService),
+  );
+  audit.start();
+
   worker.start();
 
   const shutdown = (signal: string): void => {

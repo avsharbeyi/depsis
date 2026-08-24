@@ -188,10 +188,21 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   uyduruyor. Diskte olup satırı olmayan öğrenilir, satırı olup diskte olmayan unutulur, boyutu
   değişmiş olan tazelenir.
 
-  ADR-0011 önüne Samba'nın `vfs_full_audit` akışını koyuyor; o hızlı yol ayrı bir iş. Bu, ALTTAKİ
-  katman ve bilinçli olarak önce yazıldı: diğer her katman buna düşüyor — kaçırılan bir denetim
-  satırı, bir kuyruk taşması, Samba'dan hiç geçmeyen bir yazma — yani yalnız bunun olduğu bir ürün
-  GEÇ, yalnız diğerlerinin olduğu bir ürün SESSİZCE YANLIŞ.
+  ADR-0011'in birinci katmanı — Samba'nın `full_audit` akışı — da yazıldı: ajan her paylaşım
+  bölümüne P0-B'nin ölçtüğü opname listesini yazıyor, worker rsyslog'un dosyasını `tail -F` gibi
+  izliyor, ve DEĞİŞEN DİZİNİ `index_queue`'ya koyuyor. Boşaltma işi o dizini — yalnız onu, altına
+  inmeden — yeniden okuyor. Saniyeler, on beş dakika değil.
+
+  Alttaki yürüyüş kalıyor ve kalmalı: diğer her katman ona düşüyor — kaçırılan bir denetim satırı,
+  bir kuyruk taşması, Samba'dan hiç geçmeyen bir yazma. Yalnız yürüyüşü olan bir ürün GEÇ, yalnız
+  hızlı yolu olan bir ürün SESSİZCE YANLIŞ.
+
+  Bir uyarı, ve ürünün en keskin kenarı: Samba'nın bilmediği bir opname "denetim çalışmaz" demek
+  değil — smbd **bağlantıyı reddeder**, ve `testparm` bunu yakalamaz. Liste ajanın testlerinde tam
+  eşleşmeyle sabitlenmiş durumda ve yayım `testparm`'dan sonra gerçek bir bağlantı denemesi yapıp
+  kanıtlayamadığında geri alıyor. rsyslog tarafı elle kurulur; kurulmazsa ürün çalışmaya devam
+  eder, yalnız yavaş indeksler ve worker bunu açılışta söyler
+  ([yönetici kılavuzu §3.7](docs/operations/01-yonetici-kilavuzu.md)).
 
   Hiçbir bayt silinmiyor. Diskte olmayan bir satır VERİTABANINDAN kalkıyor ve hiçbir şey unlink
   edilmiyor — dosya zaten yok, satırın kalkma sebebi o. Bu sınıftan yıkıcı bir ajan çağrısına yol

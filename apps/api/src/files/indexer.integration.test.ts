@@ -109,6 +109,7 @@ describeDb('reconciling a share with the disk', () => {
   beforeEach(async () => {
     await owner.withoutTenant('migration-status', async (q) => {
       await q.query(`DELETE FROM job_queue WHERE organization_id = $1`, [org]);
+      await q.query(`DELETE FROM index_queue WHERE organization_id = $1`, [org]);
       await q.query(`DELETE FROM file_entries WHERE organization_id = $1`, [org]);
     });
   });
@@ -335,6 +336,118 @@ describeDb('reconciling a share with the disk', () => {
     };
     const result = await indexer(disk).reconcile(org, share, report, 'test');
     expect(result.more).toBe(true);
+  });
+
+  // ── the fast path: ADR-0011 Layer 1 ──
+
+  it('reconciles ONE directory without walking below it', async () => {
+    // The whole point of the fast path. A Samba audit line names one directory; re-reading the
+    // share to find one new file would make a ten-thousand-file copy into ten thousand full walks.
+    const disk: Disk = new Map([
+      ['', { entries: [{ name: 'proje', directory: true, size: 0 }] }],
+      ['proje', { entries: [{ name: 'yeni.txt', directory: false, size: 5 }] }],
+      ['proje/alt', { entries: [{ name: 'derin.txt', directory: false, size: 5 }] }],
+    ]);
+    const folder = await row(null, 'folder', 'proje', '/proje');
+    const service = indexer(disk);
+
+    const result = await service.reconcileOne(org, share, ['proje'], 'test');
+
+    expect(result).toMatchObject({ discovered: 1, scanned: 1 });
+    // The new file landed under `proje`, and nothing under `proje/alt` was touched — the fake disk
+    // has a `derin.txt` there and no row was written for it.
+    expect(await paths()).toEqual(['/proje', '/proje/yeni.txt']);
+    expect(folder).not.toBe('');
+  });
+
+  it('does not descend into a folder it discovers', async () => {
+    // One event must not become an unbounded walk. The folder gets a row; its contents wait for
+    // their own events, or for the periodic walk.
+    const disk: Disk = new Map([
+      ['', { entries: [{ name: 'yeni-klasor', directory: true, size: 0 }] }],
+      ['yeni-klasor', { entries: [{ name: 'ic.txt', directory: false, size: 3 }] }],
+    ]);
+
+    const result = await indexer(disk).reconcileOne(org, share, [], 'test');
+    expect(result.discovered).toBe(1);
+    expect(await paths()).toEqual(['/yeni-klasor']);
+  });
+
+  it('does nothing for a directory DEPSIS has never heard of', async () => {
+    // The event names a path with no row anywhere in the chain. Nothing to compare against; the
+    // parent's own event, or the walk, will create it.
+    const disk: Disk = new Map([['bilinmeyen', { entries: [] }]]);
+    const result = await indexer(disk).reconcileOne(org, share, ['bilinmeyen'], 'test');
+    expect(result).toMatchObject({ discovered: 0, removed: 0 });
+  });
+
+  it('removes a folder whose directory is gone', async () => {
+    const folder = await row(null, 'folder', 'silinmis', '/silinmis');
+    await row(folder, 'file', 'a.txt', '/silinmis/a.txt', 3);
+    // Not in the fake disk at all: the listing answers `not_found`.
+    const result = await indexer(new Map()).reconcileOne(org, share, ['silinmis'], 'test');
+    expect(result.removed).toBe(2);
+    expect(await paths()).toEqual([]);
+  });
+
+  it('keeps one row per directory however many events arrive', async () => {
+    // A copy of ten thousand files into one folder is one queue row whose timestamp moves, not ten
+    // thousand rows. The queue grows with CHANGED DIRECTORIES, not with events.
+    const service = indexer(new Map());
+    for (let n = 0; n < 5; n += 1) {
+      await service.enqueuePath(org, share, 'docs', 'ayse', '10.0.0.5');
+    }
+    await service.enqueuePath(org, share, 'baska', 'veli', '10.0.0.6');
+
+    const queued = await service.queued(org, 50);
+    expect(queued.map((q) => q.path).sort()).toEqual(['baska', 'docs']);
+    expect(queued.find((q) => q.path === 'baska')?.actor).toBe('veli');
+  });
+
+  it('hands out the oldest change first', async () => {
+    // A directory somebody is writing to continuously would otherwise hold the front of the queue
+    // forever and starve everything behind it.
+    const service = indexer(new Map());
+    await service.enqueuePath(org, share, 'eski', null, null);
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE index_queue SET seen_at = now() - interval '1 hour' WHERE path = 'eski'`),
+    );
+    await service.enqueuePath(org, share, 'yeni', null, null);
+
+    const queued = await service.queued(org, 50);
+    expect(queued.map((q) => q.path)).toEqual(['eski', 'yeni']);
+  });
+
+  it('does not lose an event that arrived while the directory was being read', async () => {
+    // The reason `dequeue` compares the timestamp. A client that saved a file again while the
+    // reconciliation was running must not have that second change thrown away by the delete that
+    // follows the first.
+    const service = indexer(new Map());
+    await service.enqueuePath(org, share, 'docs', null, null);
+    const startedAt = new Date();
+
+    // ...and while the pass was running, another event for the same directory.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await service.enqueuePath(org, share, 'docs', 'ayse', null);
+
+    await service.dequeue(org, share, 'docs', startedAt);
+    expect((await service.queued(org, 50)).map((q) => q.path)).toEqual(['docs']);
+  });
+
+  it('takes the entry off once nothing newer has arrived', async () => {
+    const service = indexer(new Map());
+    await service.enqueuePath(org, share, 'docs', null, null);
+    await service.dequeue(org, share, 'docs', new Date(Date.now() + 1000));
+    expect(await service.queued(org, 50)).toEqual([]);
+  });
+
+  it('finds a share by the name Samba knows it as, folded', async () => {
+    // The audit stream names the SHARE — that is the only identifier smbd has — and SMB clients
+    // treat `Belgeler` and `belgeler` as one name, which is why `shares_name_unique` folds.
+    const service = indexer(new Map());
+    expect(await service.shareByName(org, 'idx')).toBe(share);
+    expect(await service.shareByName(org, 'IDX')).toBe(share);
+    expect(await service.shareByName(org, 'boyle-bir-sey-yok')).toBeNull();
   });
 
   it('refuses to be scheduled twice for one share, and allows a second share', async () => {

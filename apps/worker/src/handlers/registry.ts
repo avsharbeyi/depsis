@@ -11,6 +11,7 @@ import type {
 import type { WorkerService } from '../worker.service.js';
 import { applyAclHandler, APPLY_ACL_KIND } from './apply-acl.handler.js';
 import { copyHandler, COPY_KIND } from './copy.handler.js';
+import { indexDrainHandler, INDEX_DRAIN_KIND } from './index-drain.handler.js';
 import { reconcileHandler, RECONCILE_KIND } from './reconcile.handler.js';
 import { trashPurgeHandler, TRASH_PURGE_KIND } from './trash-purge.handler.js';
 import { identitySyncHandler, IDENTITY_SYNC_KIND } from './identity-sync.handler.js';
@@ -52,4 +53,7 @@ export function registerHandlers(
   // The layer that makes the index TRUE. The fast path in front of it (ADR-0011's Samba
   // audit stream) is a separate change; this is what every layer degrades to.
   worker.register(RECONCILE_KIND, reconcileHandler(services.indexer));
+  // ADR-0011 Layer 1's consumer: what Samba said, acted on within seconds. The walk above
+  // stays — it is what this degrades to when an event is missed.
+  worker.register(INDEX_DRAIN_KIND, indexDrainHandler(services.indexer));
 }

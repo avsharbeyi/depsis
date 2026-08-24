@@ -36,6 +36,7 @@ describe('the worker consumes every kind the API enqueues', () => {
     });
     expect(worker.kinds.sort()).toEqual([
       'files.copy',
+      'files.index-drain',
       'files.reconcile',
       'files.trash.purge',
       'identity.sync',

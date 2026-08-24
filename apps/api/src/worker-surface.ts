@@ -62,10 +62,22 @@ export { TrashRetentionModule } from './files/trash-retention.module.js';
 export { IndexerModule } from './files/indexer.module.js';
 export {
   RECONCILE_KIND,
+  INDEX_DRAIN_KIND,
   IndexerService,
+  type QueuedPath,
   type ReconcilePayload,
   type ReconcileResult,
 } from './files/indexer.service.js';
+
+/**
+ * `resolveSoleId`, for the SMB audit reader.
+ *
+ * Samba's audit stream names a SHARE, not an organisation — that is the only identifier smbd has.
+ * On a claimed appliance the box holds exactly one organisation and the share name is enough; when
+ * it does not, the reader refuses rather than guessing which tenant's tree to write into.
+ */
+export { OrganizationsModule } from './organizations/organizations.module.js';
+export { OrganizationsService } from './organizations/organizations.service.js';
 export {
   TRASH_PURGE_KIND,
   TrashRetentionService,
