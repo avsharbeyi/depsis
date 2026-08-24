@@ -323,7 +323,12 @@ jobs:
           # Outside the workspace. Written into it, the report is an untracked JSON file that
           # `pnpm format:check` then reports as unformatted — harmless across CI's separate jobs,
           # but it broke a local full-pipeline run and would break any step added after this one.
-          report="${RUNNER_TEMP:-/tmp}/vitest-report.json"
+          # PAKET BAŞINA bir dosya. Tek bir yol `rm -f` ile döngünün başında siliniyordu, yani
+          # `@depsis/worker` koştuğunda `@depsis/api`'nin raporu çoktan yoktu — kapı yine de
+          # doğru çalışıyordu (her turda okuyor) ama geriye tek bir paketin raporu kalıyordu, ve
+          # §21 ikisini de istiyor.
+          reports="${RUNNER_TEMP:-/tmp}/reports"
+          mkdir -p "$reports"
           # agent.integration.test.ts is excluded, not tolerated. It needs a running privileged
           # agent on a Unix socket, which this job has no way to provide, so it would skip here for
           # a legitimate reason — and "zero skipped" has to stay an absolute rule to be worth
@@ -334,6 +339,7 @@ jobs:
           # were never looked at here — a guard with a blind spot the size of a whole package.
           for package in @depsis/api @depsis/worker; do
           echo "── $package"
+          report="$reports/vitest-${package#@depsis/}.json"
           rm -f "$report"
           pnpm --filter "$package" exec vitest run \
             --exclude '**/agent.integration.test.ts' \
@@ -404,6 +410,18 @@ jobs:
             }
           ' "$report"
           done
+
+      - name: Test reports
+        # §21'in 7. teslimatı. `always()` ve `failure()` DEĞİL: yeşil bir koşumun sayıları da
+        # teslimatın parçası — "testler geçti" bir cümle, teslimat o cümlenin dayandığı sayıların
+        # dışarıdan okunabilmesi. Hata durumunda zaten daha fazlası yükleniyor.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-migrations
+          path: ${{ runner.temp }}/reports/
+          retention-days: 30
+          if-no-files-found: warn
 
   e2e:
     name: e2e (Playwright — desktop + mobile-360)
@@ -694,6 +712,19 @@ jobs:
           note "agent audit tail" "$(tail -25 /tmp/depsis-e2e/agent.log 2>&1)"
           note "api errors" "$(grep -a -i error /tmp/depsis-e2e/main-api.log 2>/dev/null |
             tail -20 | cut -c1-300)"
+
+      - name: Test reports
+        # Aynı sebep, tarayıcı tarafı için. JSON makine tarafından okunabilen hâli — altındaki
+        # kapı da onu okuyor — HTML ise bir insanın açıp bakabileceği hâli.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-e2e
+          path: |
+            ${{ runner.temp }}/playwright-report.json
+            e2e/playwright-report/
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Traces and screenshots
         # `retain-on-failure` and `only-on-failure` in the config mean these directories hold

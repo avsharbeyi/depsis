@@ -1,7 +1,8 @@
 # DEPSIS Tehdit Modeli
 
-- **Sürüm:** Faz 0 (2026-08-14)
-- **Kapsam:** Faz 0'da karara bağlanan mimari. Faz 1 kodu yazıldıkça güncellenir.
+- **Sürüm:** Faz 1 (2026-08-25). Faz 0 tabanı 2026-08-14.
+- **Kapsam:** Faz 1 sonunda çalışan sistem. Faz 0'da karara bağlanan mimari §1–§10'da; o tarihten
+  sonra eklenen altı yüzey ve Faz 1'de BULUNAN açıklar §11'de.
 - **İlgili:** [ADR dizini](../adr/README.md), [Faz 0 kickoff](../plan/phase-0-kickoff.md)
 
 Bu belge jenerik bir STRIDE tablosu değildir. Faz 0 araştırması, güvenlik açısından **yedi
@@ -282,3 +283,87 @@ P0-E'nin asıl çıktısı yeşil satırlar değil, tasarımı değiştiren üç
 sertleştirme direktifi ajanın oluşturduğu mount'ları görünmez yapıyordu, serde bilinmeyen alanı
 sessizce yutuyordu, ve boyut sınırı sıradan bir istemciyi reddediyordu. Üçü de **hiçbir hata
 mesajı üretmeyen** türdendi — Faz 0'ın baştan beri aradığı imza.
+
+---
+
+## 11. Faz 1 eki
+
+Yukarıdaki on bölüm Faz 0'da yazıldı ve "Faz 1 kodu yazıldıkça güncellenir" diyordu. Bu bölüm o
+güncelleme. Ayrı tutuluyor çünkü Faz 0 bulgularının hangi kanıta dayandığı önemli ve onları
+yeniden yazmak o izi bulanıklaştırırdı.
+
+### 11.1 Faz 0'dan sonra eklenen yüzeyler
+
+Altı tanesi var ve hiçbirinin yukarıda karşılığı yok.
+
+| Yüzey                               | Ne getirdi                                                             | Sınır nerede                                                                                                                                                                                                    |
+| ----------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Bulk veri kanalı** (ADR-0017)     | İkinci bir AF_UNIX soketi, on altı iş parçacığı, tek kullanımlık token | Token bir DESCRIPTOR'ı adlandırıyor, dosyayı değil: yol çözümlemesi kontrol soketinde bir kez oluyor ve veri soketinden gelen hiçbir şey hedefi değiştiremiyor. Token sahibi uid'e bağlı; başkası kullanamıyor. |
+| **Konsol** (ADR-0018)               | Cihazda gerçek bir kabuk                                               | AYRI SÜREÇ, ajanın kapalı kümesinin dışında — §2.2 dokunulmadı. Yalnız yönetici, ve oturum varken bile parola isteniyor. Yazılan her komut `console_commands`'a düşüyor.                                        |
+| **Konteyner kataloğu** (ADR-0019)   | Podman soketi, kullanıcı imajları                                      | Rootless soket; bağlama yolları İSTEKTEN gelmiyor, paylaşım kökü + paylaşım adından türetiliyor.                                                                                                                |
+| **ZeroTier** (ADR-0020)             | Cihazı bir overlay ağa katma                                           | Ajan yalnız durum okuyor, katılıyor ve ayrılıyor; controller barındırmıyor.                                                                                                                                     |
+| **SMB denetim akışı** (ADR-0011 K1) | Worker bir log dosyasını izliyor                                       | Dosya GÜVENİLMİYOR: bozuk satır düşüyor, tanınmayan paylaşım adı düşüyor, ve iyi biçimli bir satırın yapabileceği tek şey bir dizinin yeniden okunması — idempotent bir işlem.                                  |
+| **Havuz oluşturma**                 | Disk silen tek yol                                                     | §11.2'de ayrı.                                                                                                                                                                                                  |
+
+### 11.2 Havuz oluşturma: tehdit modelinin yeni en riskli işlemi
+
+Risk R1'in (yanlış diski silmek) ilk kez gerçekleşebilir olduğu yer. Sıra §8.1'in: analiz → plan →
+seri/WWN listesi → yazılı onay → yeniden kimlik doğrulama → iş.
+
+**Kontrollerin nerede olduğu, tehdit modelinin asıl konusu.** Adımlar API'de; üç DOĞRULAMA ajanda,
+ve bu bir tercih değil zorunluluk: API'de yapılan bir kontrol API'ye VERİLMİŞ bir listeye karşı
+yapılır — istemcinin kendi ekranını doğru kopyaladığını kanıtlar, diskin ne olduğunu değil.
+
+1. `/`, `/boot`, `/boot/efi` ya da `/efi` taşıyan disk hiçbir onayla üye olamaz.
+2. Üstünde bir şey olan ve bağlı olan disk üye olamaz; ikisi `lsblk`'in FARKLI sütunlarından
+   türüyor, yani birini atlatan bir aygıtın diğerlerini de atlatması gerekiyor.
+3. Çıkarılabilir disk üye olamaz.
+4. Her diskin WWN'i havuz kurulduğu ANDA yeniden okunan envanterle karşılaştırılıyor. Bu, ekranla
+   düğme arasında disk değiştirilmesine dayanan tek kontrol: `/dev/disk/by-id` bir YUVAYI değil
+   bir AYGITI adlandırıyor, yani aynı ad başka bir disk olabilir.
+5. `-f` hiç geçilmiyor, yani `zpool`'un kendi reddi yerinde duruyor.
+
+ADR-0007'nin "bu sıra API katmanındadır ve backend'e devredilmez" cümlesi bu yüzden düzeltildi.
+
+### 11.3 Faz 1'de bulunan sessiz açıklar
+
+Faz 0 yedi varsayım çürütmüştü. Faz 1'de bulunanlar aynı imzayı taşıyor — **hiçbir hata mesajı
+üretmeyen**, kapalı görünüp bir şey uygulamayan kontroller.
+
+| #   | Açık                                                                                                                                                                                                                                                                                                                | Nasıl bulundu                 |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| 1   | **Yeniden kimlik doğrulama kısıtsız ve kayıtsızdı.** `POST /console` ve `POST /storage/pools` parolayı kendileri doğruluyordu, `LoginThrottleService`'e uğramadan. Çalınmış bir çerezle parola tam hızda denenebilir, ve `login_attempts`'te hiçbir satır kalmazdı — yöneticinin bunu öğrenmek için bakacağı tablo. | Düşman incelemesi             |
+| 2   | **`holds_system` tek bir `lsblk` sütununa dayanıyordu.** Btrfs subvolume düzeninde tekil `MOUNTPOINT` kökü taşıyan diskin `/home`'unu bildiriyor, yani cihazın kendi açılış diski "sistem diski değil" görünüyordu.                                                                                                 | Düşman incelemesi             |
+| 3   | **"Disk boş olmalı" yalnız tarayıcıdaki JavaScript'te uygulanıyordu.** Doğrudan bir API çağrısı, üstünde veri olan bir diski `zpool create`'e kadar taşıyabiliyordu.                                                                                                                                                | Düşman incelemesi             |
+| 4   | **`execute`'un içinden dönen bir refüzasyon denetlenmiyordu.** WWN uyuşmazlığı — yani "birisi disk değiştirdi" — denetim izinde `outcome: allowed` olarak görünüyordu.                                                                                                                                              | Düşman incelemesi             |
+| 5   | **Şema uyuşmazlığı hiçbir şeyi reddetmiyordu.** `available = false` kuruluyor ve `call()` ona hiç bakmıyordu; uyuşmayan çift istek alışverişine devam ediyordu.                                                                                                                                                     | Düşman incelemesi             |
+| 6   | **`identity.rs` `std::os::unix`'i kütüphanede doğrudan çağırıyordu.** ADR-0006'nın "çekirdek her yerde derlenir, platforma özgü her şey seam'de" iddiası yanlıştı.                                                                                                                                                  | CI'ın Windows çapraz kontrolü |
+
+Hepsi kapatıldı. Altısının ortak dersi: **bir kontrolün belgelenmiş olması, uygulandığı anlamına
+gelmiyor** — 2, 3 ve 5'te belge doğruydu ve kod onu yapmıyordu.
+
+### 11.4 Sertleştirme kontrol listesine eklenenler
+
+§9'un listesine, Faz 1'de eklenen yüzeyler için:
+
+- [ ] `/etc/depsis/api.env` hem API hem worker tarafından okunuyor; iki kopya tutulmuyor.
+- [ ] `depsis-worker.service` hiçbir port dinlemiyor (`RestrictAddressFamilies` yalnız AF_UNIX +
+      PostgreSQL için AF_INET).
+- [ ] rsyslog denetim dosyası `0640 root:depsis-api` — worker OKUYOR, yazmıyor.
+- [ ] `full_audit:success` listesi ajanın testinde tam eşleşmeyle sabit. **Samba'nın bilmediği bir
+      opname bağlantıyı reddettirir ve `testparm` bunu yakalamaz.**
+- [ ] Konsol yalnız yöneticiye, ve oturum varken bile parola istiyor.
+- [ ] Podman soketi ROOTLESS; `DEPSIS_PODMAN_ALLOW_ROOTFUL` açık değil.
+- [ ] Yeniden kimlik doğrulama `ReauthService`'ten geçiyor — kendi kopyasını yazan bir controller
+      yok.
+
+### 11.5 Hâlâ kanıt değil
+
+§10'un listesi duruyor, ve şunlar eklendi:
+
+- **`zpool create` gerçek disklerde koşmadı.** Komutun önündeki her şey testli; komutun kendisi
+  Debian VM'de doğrulanmalı.
+- **`full_audit` akışının host tarafı** (rsyslog kuralı, gerçek smbd) burada koşmadı.
+- **Kısıtlama eşikleri ölçülmedi.** On hata ve bir saniye tavan gerekçelendirildi, kalibre
+  edilmedi.
+- **§18.2'nin p95 hedefleri hâlâ hiç ölçülmedi.**

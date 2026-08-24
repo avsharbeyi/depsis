@@ -377,9 +377,20 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   uygulayıcısı, ve yıkıcı işlemin yolu. ADR'lerin yerini almıyor — burası ne olduğu,
   `docs/adr/` neden öyle olduğu, ve çelişirlerse ADR'ler haklı.
 
-- §21'in kalan teslimatları: Storybook, imzalı build prosedürü,
-  ve test raporlarının artefakt hâli (testler koşuyor; CI hesabı kilitli olduğu için yayımlanmış
-  rapor yok).
+- **Bilinen sınırlamalar, teknik borç ve backlog yazıldı** —
+  [`docs/bilinen-sinirlamalar.md`](docs/bilinen-sinirlamalar.md). Üç AYRI liste, ve ayrı
+  olmaları önemli: sınırlama bilerek yapılmadı, borç yanlış yerde yapıldı, backlog'un sırası
+  gelmedi. Hepsini bir listeye koymak, kimsenin bakmadığı bir liste üretir.
+
+- **Tehdit modeli Faz 1'e getirildi** — [`docs/threat-model/`](docs/threat-model/README.md)
+  §11. Faz 0'dan sonra eklenen altı yüzeyin hiçbirinin modelde karşılığı yoktu; havuz
+  oluşturma ayrı bir bölüm, ve Faz 1'de bulunan altı sessiz açık — üçünde belge doğruydu ve
+  kod onu yapmıyordu — kendi tablosunda.
+
+- **Test raporları artefakt oluyor.** Yeşil koşumda da: "testler geçti" bir cümle, teslimat o
+  cümlenin dayandığı sayıların dışarıdan okunabilmesi.
+
+- §21'in kalan teslimatları: Storybook ve imzalı build prosedürü.
 
 ## CI koşuyor, ve ilk tamamlanan koşumunda beş kusur buldu
 
