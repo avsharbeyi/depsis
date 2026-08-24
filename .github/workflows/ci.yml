@@ -462,6 +462,22 @@ jobs:
       DEPSIS_E2E_REQUIRE_AGENT: '1'
     steps:
       - uses: actions/checkout@v5
+
+      - name: Where the JSON report goes
+        # THE STEP THE JOB-LEVEL COMMENT ABOVE PROMISES. It existed only in the `migrations` job,
+        # and `$GITHUB_ENV` is per-job — so `DEPSIS_E2E_JSON_REPORT` was empty here, Playwright
+        # added no JSON reporter (the config only adds one when the variable is set), and the gate
+        # near the end of this job failed with `open ''`.
+        #
+        # It could not be noticed until today: this job had never got as far as running the suite,
+        # so the gate had never been reached. The first run in which the suite passed — 62 passed,
+        # 2 skipped — failed on this instead.
+        #
+        # A step and not a job-level `env:` because a job-level value is a literal string: the
+        # variable would hold the eight characters `$RUNNER_TEMP` and Playwright would create a
+        # directory by that name inside the working tree, which is what the comment above is about.
+        run: echo "DEPSIS_E2E_JSON_REPORT=$RUNNER_TEMP/playwright-report.json" >> "$GITHUB_ENV"
+
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
