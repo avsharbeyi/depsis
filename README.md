@@ -123,18 +123,28 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   açıyor, kullanıcı parolayı kendisi yazıyor, ve bilet tek kullanımlık olduğu için yönetici
   kullanırsa kurban durumu öğreniyor. İkinci faktör atlanmıyor.
 
-- **Kopyalama yok** (`POST /file-operations`).
+- **Kopyalama var** (`POST /file-operations`), ve `contract.test.ts`'in
+  "ilan edilmiş ama sunulmuyor" listesi artık boş.
 
-  Sözleşme ilan ediyor, sunucu sunmuyor. Tasarımı çıkarıldı ve bir ölçüm onu değiştirdi:
-  ajanın veri soketi `MAX_DATA_CONNECTIONS = 16` iş parçacığını `sync_channel(0)` üzerinden
-  dağıtıyor, yani bağlantı ancak bir işçi boşta olduğunda kabul ediliyor. Bugünkü her işlem tek
-  bağlantı tutuyor; bir kopyalama İKİ tanesini aynı anda tutar. Önce `receive` bağlantısını alan
-  on altı eşzamanlı kopyalama, hiçbir işçinin kabul edemeyeceği bir `send` bekler — soketin
-  tamamı kilitlenir. Yani ilk sürümün cihaz genelinde en fazla 7 eşzamanlı kopyalamaya
-  sınırlanması ya da iki yarımın bir kuyrukla sıralanması gerekiyor, ve o sayı
-  `MAX_DATA_CONNECTIONS`'a karşı yazılmalı. Ayrıca `publish` ile `recordPublishedFile` arasında
-  ölen bir worker, diskte adı olan ve `file_entries`'te satırı olmayan bir dosya bırakır —
-  yüklemeyi bundan koruyan `upload_sessions` satırının kopyalamada karşılığı yok.
+  Tasarımı bir ölçüm belirledi. Bariz olan — API'nin veri kanalından okuyup geri yazması — ajanın
+  veri soketinde iki bağlantıyı aynı anda tutar, ve o soket bağlantıları on altı iş parçacığına
+  bir randevu kanalıyla dağıtıyor: on altı eşzamanlı kopyalama, hiçbir işçinin kabul edemeyeceği
+  bir yazma bağlantısı bekleyerek cihazdaki HER yüklemeyi ve indirmeyi kilitlerdi. İki uç da aynı
+  kökün altında olduğu için ajan iki descriptor arasında kendisi kopyalıyor (`copy_file_range`) ve
+  baytlar süreç sınırını hiç geçmiyor.
+
+  Ağacı API yürüyor — klasör başına bir `CreateDirectory`, dosya başına bir `CopyFile` — çünkü
+  ajanın kapalı işlem kümesinde yarıçapını çağıranın seçtiği bir işlem olamaz (§2.2).
+
+  Yeniden teslimi soğurmak `copied_from_entry_id` sütununu gerektirdi (0022): `keep_both` adı
+  hedefte o an ne olduğuna göre türetiyor ve ilk deneme tam da onu değiştiriyor, yani "bunu buraya
+  zaten kopyaladım mı" sorusunun ADLA cevabı yok. Aynı bağ, dosya sistemine ulaşıp veritabanına
+  ulaşamamış bir kopyayı da kurtarıyor.
+
+  Şu an yalnız `operation: copy` ve `conflictPolicy: keep_both`. Diğerleri 422 ile reddediliyor;
+  hangisinin neden reddedildiği ucun kendi açıklamasında yazıyor — `replace` ajana sahip olmadığı
+  bir üzerine-yazma vermek demek olurdu, `version` var olmayan bir sürüm deposu istiyor, `skip`
+  savunulabilir ve yazılmadı.
 
 - **Çöp kutusunun saklama süresi ve temizleme politikası yok.** Tasarımında iki tuzak ölçüldü:
   `preview`'ün bayt toplamı yalan olurdu (`file_entries_folder_has_no_size`, klasörlerin

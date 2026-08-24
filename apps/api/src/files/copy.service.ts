@@ -25,6 +25,16 @@ export interface CopyPayload {
   doneIds?: string[];
 }
 
+/**
+ * Where each copied folder ended up, for the duration of ONE chunk.
+ *
+ * Per call, never a field on the service. `CopyService` is a Nest singleton, so a map held on the
+ * instance would be shared by every job the process runs: it would never empty, and a stale entry
+ * left by a finished job would be preferred over re-resolving from the database — which is how a
+ * child ends up under the wrong folder in a tree that has since been renamed.
+ */
+type Placed = Map<string, { parentId: string | null; name: string }>;
+
 /** What one chunk accomplished. */
 export interface CopyProgress {
   copied: number;
@@ -114,13 +124,14 @@ export class CopyService {
 
     const plan = await this.plan(organizationId, payload);
     const done = new Set(payload.doneIds ?? []);
+    const placed: Placed = new Map();
     const chunk = plan.filter((step) => !done.has(step.node.id)).slice(0, CopyService.CHUNK);
 
     let copied = 0;
     let skipped = 0;
 
     for (const step of chunk) {
-      const outcome = await this.one(organizationId, ref, step, payload, ownerUid, reason);
+      const outcome = await this.one(organizationId, ref, step, payload, ownerUid, placed, reason);
       if (outcome === 'copied') copied += 1;
       else skipped += 1;
       done.add(step.node.id);
@@ -195,9 +206,10 @@ export class CopyService {
     step: { node: Node; destinationParentId: string | null },
     payload: CopyPayload,
     ownerUid: number,
+    placed: Placed,
     reason: string,
   ): Promise<'copied' | 'skipped'> {
-    const parentId = await this.destinationParent(organizationId, step, payload);
+    const parentId = await this.destinationParent(organizationId, step, payload, placed);
 
     // FIRST, and before a name is chosen. The queue is at-least-once, so this chunk may have run
     // before; if it did, the row it wrote names this source and the work is done. Resolving a name
@@ -210,7 +222,7 @@ export class CopyService {
     } else {
       const made = await this.folderCopiedFrom(organizationId, payload, step.node.id);
       if (made !== null) {
-        this.copiedFolders.set(step.node.id, made);
+        placed.set(step.node.id, made);
         return 'skipped';
       }
     }
@@ -231,7 +243,7 @@ export class CopyService {
         randomUUID(),
         reason,
       );
-      this.copiedFolders.set(step.node.id, { parentId, name });
+      placed.set(step.node.id, { parentId, name });
       return 'copied';
     }
 
@@ -291,22 +303,21 @@ export class CopyService {
    * Where a node's copy goes.
    *
    * A root's parent is the destination the caller named. A descendant's parent is the copy of ITS
-   * parent, which an earlier step in this same plan created — remembered in `copiedFolders` rather
-   * than looked up by name, because two folders in one destination can end up with different names
+   * parent, which an earlier step in this same chunk created — remembered in `placed` rather than
+   * looked up by name, because two folders in one destination can end up with different names
    * after conflict resolution and matching by name would put children under the wrong one.
    */
-  private readonly copiedFolders = new Map<string, { parentId: string | null; name: string }>();
-
   private async destinationParent(
     organizationId: string,
     step: { node: Node; destinationParentId: string | null },
     payload: CopyPayload,
+    placed: Placed,
   ): Promise<string | null> {
     const sourceParent = step.destinationParentId;
     if (sourceParent === null || payload.sourceIds.includes(step.node.id)) {
       return payload.destinationId;
     }
-    const made = this.copiedFolders.get(sourceParent);
+    const made = placed.get(sourceParent);
     if (made === undefined) {
       // The parent's copy is not in this process's memory: a continuation job is running the tail
       // of a plan whose head another chunk did. Resolve it from the database instead.
