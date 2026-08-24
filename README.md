@@ -366,7 +366,13 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   — yani onunla alınan bir yedekten dönen sistemde kimsenin ikinci faktörü ve kimsenin SMB
   erişimi olmaz. Geri yüklenebilir döküm `depsis_owner` ile alınır.
 
-- §21'in kalan teslimatları: mimari diyagramlar, ER diyagramı, Storybook, imzalı build prosedürü,
+- **ER diyagramı yazıldı** — [`docs/er-diagram.md`](docs/er-diagram.md), yirmi beş göçten
+  çıkarıldı. Mermaid ile üç diyagram, ve diyagramın TAŞIYAMADIĞI iki şey yazıyla: kiracı
+  yalıtımını çizilen oklar değil RLS yapıyor, ve klasör erişimini `folder_grants` ile POSIX
+  ACL'ler BİRLİKTE belirliyor — birini güncelleyip diğerini güncellememek, "izni kaldırdım" ile
+  "erişim gerçekten kapandı" arasındaki fark.
+
+- §21'in kalan teslimatları: mimari diyagramlar, Storybook, imzalı build prosedürü,
   ve test raporlarının artefakt hâli (testler koşuyor; CI hesabı kilitli olduğu için yayımlanmış
   rapor yok).
 
