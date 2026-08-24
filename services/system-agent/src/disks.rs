@@ -39,8 +39,14 @@ pub const BY_ID_DIR: &str = "/dev/disk/by-id";
 /// the short name an operator reads on a chassis label. Measured against lsblk 2.41, which prints
 /// `"kname": "/dev/sda"` under `--paths` — so the flag would have quietly changed what that column
 /// means rather than adding one.
+/// `MOUNTPOINTS` (plural) is asked for as well as `MOUNTPOINT`, and the plural one is the
+/// authority. The singular column reports AT MOST ONE of a device's mount points, and which one is
+/// decided by libmount's fs-root fixup: on the standard btrfs subvolume layout — Debian and Ubuntu
+/// `@`/`@home`, openSUSE, Fedora — the partition is mounted at `/` with `subvol=@` and at `/home`
+/// with `subvol=@home`, neither entry has fs-root `/`, and the singular column answers `/home`.
+/// The appliance's own boot disk then reports `holds_system: false`.
 pub const COLUMNS: &str =
-    "KNAME,TYPE,SIZE,MODEL,SERIAL,WWN,ROTA,RM,TRAN,FSTYPE,PTTYPE,MOUNTPOINT,ID-LINK";
+    "KNAME,TYPE,SIZE,MODEL,SERIAL,WWN,ROTA,RM,TRAN,FSTYPE,PTTYPE,MOUNTPOINT,MOUNTPOINTS,ID-LINK";
 
 pub fn argv() -> [&'static str; 4] {
     ["--json", "--bytes", "--output", COLUMNS]
@@ -50,7 +56,10 @@ pub fn argv() -> [&'static str; 4] {
 ///
 /// A disk holding any of these is not a pool candidate under any confirmation, so the check is
 /// here and not in a dialogue somebody can click through.
-const SYSTEM_MOUNTS: [&str; 3] = ["/", "/boot", "/boot/efi"];
+///
+/// `/efi` is in the list because systemd-gpt-auto mounts the ESP there on an XBOOTLDR layout, where
+/// `/boot` is a separate partition and the ESP is not under it.
+const SYSTEM_MOUNTS: [&str; 4] = ["/", "/boot", "/boot/efi", "/efi"];
 
 /// lsblk's own shape. Only the fields [`COLUMNS`] asks for, and every one optional: lsblk omits a
 /// column it has no value for rather than emitting null, and older builds spell some of them
@@ -79,10 +88,14 @@ struct Node {
     fstype: Option<String>,
     #[serde(default)]
     pttype: Option<String>,
-    /// A string on lsblk 2.38, and still a string on 2.41 — `MOUNTPOINTS` (plural) is the array
-    /// form and is not asked for, because one mount point is enough to answer "is this in use".
+    /// The singular column: AT MOST ONE mount point, chosen by libmount. Kept as a fallback for a
+    /// build of lsblk that does not carry the plural one, and never preferred over it.
     #[serde(default)]
     mountpoint: Option<String>,
+    /// The plural column, which is the authority. lsblk emits `[null]` for an unmounted device,
+    /// hence the inner `Option`.
+    #[serde(default)]
+    mountpoints: Option<Vec<Option<String>>>,
     #[serde(default, rename = "id-link")]
     id_link: Option<String>,
     #[serde(default)]
@@ -163,12 +176,7 @@ fn collect(node: &Node, holds: &mut Vec<String>, mounted: &mut bool, system: &mu
                 holds.push(fstype);
             }
         }
-        if let Some(point) = clean(child.mountpoint.as_deref()) {
-            *mounted = true;
-            if SYSTEM_MOUNTS.contains(&point.as_str()) {
-                *system = true;
-            }
-        }
+        note_mounts(child, mounted, system);
         collect(child, holds, mounted, system);
     }
 
@@ -178,7 +186,19 @@ fn collect(node: &Node, holds: &mut Vec<String>, mounted: &mut bool, system: &mu
             holds.push(fstype);
         }
     }
-    if let Some(point) = clean(node.mountpoint.as_deref()) {
+    note_mounts(node, mounted, system);
+}
+
+/// Every place this device is mounted, not just the first one lsblk happened to report.
+///
+/// The plural column when it is there, the singular one only as a fallback — see [`COLUMNS`] for
+/// the layout on which the singular one answers `/home` about the disk holding `/`.
+fn note_mounts(node: &Node, mounted: &mut bool, system: &mut bool) {
+    let points: Vec<String> = match node.mountpoints.as_ref() {
+        Some(list) => list.iter().filter_map(|p| clean(p.as_deref())).collect(),
+        None => clean(node.mountpoint.as_deref()).into_iter().collect(),
+    };
+    for point in points {
         *mounted = true;
         if SYSTEM_MOUNTS.contains(&point.as_str()) {
             *system = true;
@@ -233,6 +253,12 @@ pub enum PoolPlanError {
     },
     #[error("{by_id} holds this machine's own system; it can never be part of a pool")]
     SystemDisk { by_id: String },
+    #[error("{by_id} already holds {holds}; clear it deliberately before using it in a pool")]
+    NotBlank { by_id: String, holds: String },
+    #[error("{by_id} is mounted; it cannot be part of a pool while it is in use")]
+    Mounted { by_id: String },
+    #[error("{by_id} is removable; a disk that can be unplugged takes its vdev with it")]
+    Removable { by_id: String },
 }
 
 /// Check a proposed pool against what the box reports RIGHT NOW, and build the argv.
@@ -302,6 +328,36 @@ pub fn plan<'a>(
         // it is the system disk, not that it was named twice.
         if found.holds_system {
             return Err(PoolPlanError::SystemDisk {
+                by_id: by_id.to_string(),
+            });
+        }
+
+        // THREE INDEPENDENT SIGNALS, and that is the point rather than belt-and-braces. Until this
+        // was written the only content check here was `holds_system`, which is derived from one
+        // probe — and a review found the layout on which that probe answers wrongly about the
+        // appliance's own boot disk. "The disk must be blank" is a sentence the wizard, the OpenAPI
+        // description and the README all state; it was enforced only in browser JavaScript, so a
+        // direct API call naming a disk full of data reached `zpool create` with nothing but
+        // zpool's own blkid probe left in the way.
+        //
+        // `mounted` and `holds` come from different lsblk columns than `holds_system` does, so a
+        // device that defeats one of them still has to defeat the others.
+        if found.mounted {
+            return Err(PoolPlanError::Mounted {
+                by_id: by_id.to_string(),
+            });
+        }
+        if !found.holds.is_empty() {
+            return Err(PoolPlanError::NotBlank {
+                by_id: by_id.to_string(),
+                holds: found.holds.join(", "),
+            });
+        }
+        // Documented as a refusal in op.rs and in the OpenAPI description long before anything
+        // refused it. A USB stick is a disk, and a vdev that can be unplugged by someone tidying a
+        // desk is not redundancy.
+        if found.removable {
+            return Err(PoolPlanError::Removable {
                 by_id: by_id.to_string(),
             });
         }
@@ -413,6 +469,126 @@ mod tests {
         assert!(!blank.holds_system);
         assert_eq!(blank.by_id.as_deref(), Some("ata-WDC_WD40EFRX_WD-WCC4E123"));
         assert!(blank.rotational);
+    }
+
+    #[test]
+    fn the_system_disk_is_found_when_it_has_several_mount_points() {
+        // THE FAILURE THIS FILE SHIPPED WITH. On the standard btrfs subvolume layout — Debian and
+        // Ubuntu `@`/`@home`, openSUSE, Fedora — the root partition is mounted at `/` with
+        // `subvol=@` and at `/home` with `subvol=@home`. Neither mountinfo entry has fs-root `/`,
+        // so lsblk's SINGULAR column falls through its fixup and answers `/home`, and the
+        // appliance's own boot disk came back `holds_system: false`.
+        let json = r#"{"blockdevices":[
+          {"kname":"nvme0n1","type":"disk","size":512110190592,"pttype":"gpt","children":[
+            {"kname":"nvme0n1p2","type":"part","size":511573319680,"fstype":"btrfs",
+             "mountpoint":"/home","mountpoints":["/home","/","/var/log"],"children":[]}]}]}"#;
+        let (disks, _) = parse(json).expect("parses");
+        assert!(
+            disks[0].holds_system,
+            "the disk carrying / must be reported as the system disk however many places it is \
+             also mounted"
+        );
+        assert!(disks[0].mounted);
+    }
+
+    #[test]
+    fn the_singular_column_is_still_read_when_the_plural_one_is_absent() {
+        // A build of lsblk without MOUNTPOINTS must degrade to the old behaviour rather than to
+        // "nothing is mounted anywhere", which would be the dangerous direction.
+        let json = r#"{"blockdevices":[
+          {"kname":"sda","type":"disk","size":1,"children":[
+            {"kname":"sda1","type":"part","size":1,"fstype":"ext4","mountpoint":"/",
+             "children":[]}]}]}"#;
+        let (disks, _) = parse(json).expect("parses");
+        assert!(disks[0].holds_system);
+    }
+
+    #[test]
+    fn an_unmounted_device_reporting_a_null_entry_is_not_mounted() {
+        // lsblk writes `"mountpoints":[null]` rather than an empty array for a device that is not
+        // mounted. Read naively that is one mount point, and every blank disk would look in use.
+        let json = r#"{"blockdevices":[
+          {"kname":"sdb","type":"disk","size":1,"mountpoints":[null],"children":[]}]}"#;
+        let (disks, _) = parse(json).expect("parses");
+        assert!(!disks[0].mounted);
+        assert!(!disks[0].holds_system);
+    }
+
+    #[test]
+    fn the_esp_at_slash_efi_counts_as_the_system() {
+        // systemd-gpt-auto mounts the ESP at /efi on an XBOOTLDR layout, where /boot is a separate
+        // partition and the ESP is not underneath it.
+        let json = r#"{"blockdevices":[
+          {"kname":"sdc","type":"disk","size":1,"children":[
+            {"kname":"sdc1","type":"part","size":1,"fstype":"vfat","mountpoints":["/efi"],
+             "children":[]}]}]}"#;
+        let (disks, _) = parse(json).expect("parses");
+        assert!(disks[0].holds_system);
+    }
+
+    #[test]
+    fn a_disk_with_anything_on_it_is_refused_by_the_agent_and_not_only_by_the_wizard() {
+        // "The disk must be blank" is stated by the wizard, by the OpenAPI description and by the
+        // README. Until a review said so it was enforced ONLY in browser JavaScript: a direct API
+        // call naming a disk full of data passed the route, which checks nothing by design, passed
+        // this function, and reached `zpool create`.
+        let mut disk = present("ata-A", "0xA", false);
+        disk.holds = vec!["ext4".into()];
+        let error = plan(
+            "tank",
+            PoolTopology::Single,
+            &[named("ata-A", "0xA")],
+            &[disk],
+        )
+        .expect_err("must refuse");
+        assert!(matches!(error, PoolPlanError::NotBlank { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_mounted_disk_is_refused() {
+        let mut disk = present("ata-A", "0xA", false);
+        disk.mounted = true;
+        let error = plan(
+            "tank",
+            PoolTopology::Single,
+            &[named("ata-A", "0xA")],
+            &[disk],
+        )
+        .expect_err("must refuse");
+        assert!(matches!(error, PoolPlanError::Mounted { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_removable_disk_is_refused() {
+        // Described as a refusal in op.rs and in the OpenAPI document long before anything refused
+        // it. A vdev that can be unplugged by someone tidying a desk is not redundancy.
+        let mut disk = present("ata-USB", "0xU", false);
+        disk.removable = true;
+        let error = plan(
+            "tank",
+            PoolTopology::Single,
+            &[named("ata-USB", "0xU")],
+            &[disk],
+        )
+        .expect_err("must refuse");
+        assert!(matches!(error, PoolPlanError::Removable { .. }), "{error}");
+    }
+
+    #[test]
+    fn the_system_disk_is_named_as_such_even_when_it_also_has_content() {
+        // Ordering inside the loop. A system disk always has a partition table, so a `NotBlank`
+        // check placed first would tell the operator to clear their boot disk.
+        let mut disk = present("ata-SYS", "0xS", true);
+        disk.holds = vec!["gpt".into(), "ext4".into()];
+        disk.mounted = true;
+        let error = plan(
+            "tank",
+            PoolTopology::Single,
+            &[named("ata-SYS", "0xS")],
+            &[disk],
+        )
+        .expect_err("must refuse");
+        assert!(matches!(error, PoolPlanError::SystemDisk { .. }), "{error}");
     }
 
     #[test]

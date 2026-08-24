@@ -173,8 +173,12 @@ const schema = z.object({
   // refuses without it.
   //
   // Configuration rather than discovery, for the same reason as DEPSIS_ZFS_POOLS below: the
-  // agent's operation set is closed and has no "list datasets", and ADR-0007 keeps pool creation
-  // out of the product entirely. The pool is the operator's, made at install time.
+  // agent's operation set is closed and has no "list datasets", so there is nothing to enumerate.
+  //
+  // NOT because the pool is out of the product — it no longer is. `POST /storage/pools` creates
+  // one, under §8.1's sequence. What is still the operator's is this PAIRING: the pool is created
+  // with `-m none`, so the dataset that shares live under has to be created and mounted at
+  // `DEPSIS_SHARES_ROOT` deliberately, and this variable is where that decision is recorded.
   //
   // IT MUST BE THE DATASET MOUNTED AT `DEPSIS_SHARES_ROOT`, and that pairing is the whole design.
   // `CreateDataset` sets no mountpoint — deliberately, because a mountpoint operand would let the

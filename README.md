@@ -246,18 +246,29 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   analiz → plan → seri/WWN listesi → yazılı onay → yeniden kimlik doğrulama → iş. `ListDisks`
   analiz; gerisi `POST /storage/pools` ile Diskler ekranının altındaki sihirbaz.
 
-  **Üç reddediş ajanın içinde, diyaloğun içinde değil** — çünkü diyalog geçilen bir şeydir:
+  **Reddedişler ajanın içinde, diyaloğun içinde değil** — çünkü diyalog geçilen bir şeydir, ve
+  API'de yapılan bir kontrol API'ye VERİLMİŞ bir listeye karşı yapılır:
 
-  1. `/`, `/boot` ya da `/boot/efi` taşıyan bir disk hiçbir onayla üye olamaz.
-  2. Her diskin WWN'i, havuz kurulduğu ANDA kutunun bildirdiğiyle karşılaştırılıyor. Ajan
+  1. `/`, `/boot`, `/boot/efi` ya da `/efi` taşıyan bir disk hiçbir onayla üye olamaz.
+  2. Üstünde bir şey olan bir disk, ve bağlı bir disk, üye olamaz. Bu ikisi `lsblk`'in FARKLI
+     sütunlarından türüyor, yani birini atlatan bir aygıtın diğerlerini de atlatması gerekiyor.
+  3. Çıkarılabilir bir disk üye olamaz.
+  4. Her diskin WWN'i, havuz kurulduğu ANDA kutunun bildirdiğiyle karşılaştırılıyor. Ajan
      envanteri kendisi, tam o anda okuyor. Bu, risk R1'in asıl olduğu şeyi kapatan tek kontrol:
      sihirbazın diskleri listelediği ekranla düğmeye basıldığı an arasında bir disk çıkarılıp
      yerine başkası takılabilir, ve `/dev/disk/by-id` bir YUVAYI değil bir AYGITI adlandırır —
      yani aynı ad başka bir disk olabilir. Adı kontrol etmek hiçbir şeyi doğrulamazdı.
-  3. `-f` hiç geçilmiyor. `zpool create`, üstünde dosya sistemi olan bir aygıtı zorlanmadıkça
+  5. `-f` hiç geçilmiyor. `zpool create`, üstünde dosya sistemi olan bir aygıtı zorlanmadıkça
      reddediyor, ve bu ürün o reddi geçersiz kılmıyor. **Üstünde bir şey olan bir diski
      temizlemek, operatörün kabuktan bilerek yaptığı bir iş olarak kalıyor** — ve bunu böyle
-     bırakmak, diğer iki reddedişi süs olmaktan kurtaran şey.
+     bırakmak, diğer reddedişleri süs olmaktan kurtaran şey.
+
+  Liste (2) ve (3) ile bir inceleme sonrası uzadı, ve uzama sebebi öğreticiydi: (1) tek bir
+  `lsblk` sütununa dayanıyordu. Btrfs subvolume düzeninde — Debian/Ubuntu `@`/`@home`, openSUSE,
+  Fedora — kökü taşıyan bölümün hiçbir mountinfo girdisinin fs-root'u `/` değil, o yüzden tekil
+  `MOUNTPOINT` sütunu `/home` cevaplıyor ve cihazın kendi açılış diski `holds_system: false` diye
+  çıkıyordu. "Disk boş olmalı" cümlesini ise sihirbaz, OpenAPI açıklaması ve bu README söylüyordu
+  ama YALNIZ tarayıcıdaki JavaScript uyguluyordu.
 
   ADR-0007 "bu sıra API katmanındadır ve backend'e devredilmez" diyordu; o cümle düzeltildi. Sıranın
   ADIMLARI API'de, ama bu üç DOĞRULAMA ajanda olmak zorunda: API'de yapılan bir kontrol, API'ye
@@ -268,9 +279,21 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   kaybettirdiği düzen, dosya saklamak için var olan bir cihazda bir listeden yanlış maddeyi
   seçerek ulaşılabilecek bir şey olmamalı. `single` var ve ne olduğunu söylüyor.
 
-  İş kuyruğa `maxAttempts: 1` ile giriyor. Buradaki diğer her iş türü iki kez koşmaya dayanıklı —
-  kuyruğun at-least-once teslimi bu yüzden kabul edilebilir — bu değil. Belirsiz bir hatadan sonra
-  yeniden deneme, kimsenin adına iki kez yapılmasını istemeyeceği istek.
+  İş kuyruğa `maxAttempts: 1` ile giriyor, ama bu **bir kez koşacağı anlamına gelmiyor** ve öyle
+  sanmak bir hataydı: `claim_job`, kirası dolmuş RUNNING bir işi `max_attempts`'e hiç bakmadan
+  geri alıyor — sayaç yalnız `finish_job`'da, `failed` ile `dead` arasında seçim yapmak için
+  okunuyor. Yani `maxAttempts: 1` yalnız BİLDİRİLMİŞ bir hatadan sonraki yeniden denemeyi
+  engelliyor; `zpool create`'in ortasında öldürülen bir worker'ın işi altmış saniye sonra geri
+  alınıyor, ki kuyruğun çökmüş worker'ı fark etme yolu tam olarak bu.
+
+  İkinci bir `zpool create`'i durduran şey bu yüzden işleyicinin varlık kontrolü, ve o kontrolün
+  iki durumu ayırması gerekiyor: BİRİNCİ denemede var olan bir havuz bu işten önce vardı — başarı
+  demek, operatöre dokunulmamış disklerinin kullanıldığını söylemek olurdu — İKİNCİ denemede var
+  olan bir havuzu ise bir önceki deneme kurmuş ve cevabı kaybolmuştur.
+
+  Ajan çağrısı zaman aşımına uğrarsa işleyici havuzun var olup olmadığına BAKIYOR: "cevap
+  kayboldu" ile "iş olmadı" aynı şey değil, ve diskleri çoktan gitmiş bir operatöre "olmadı"
+  demek en kötü cevap.
 
   Havuz ADR-0004'ün özellikleriyle ve HAVUZ düzeyinde kuruluyor (`acltype=posixacl`, `xattr=sa`):
   `CreateDataset` bunları veri kümesi başına ayarlıyor, ve varsayılanı `off` olan bir havuz,

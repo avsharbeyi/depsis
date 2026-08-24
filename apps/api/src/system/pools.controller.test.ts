@@ -6,9 +6,8 @@ import {
 } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { PasswordService } from '../auth/password.service.js';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
-import type { DbService } from '../db/db.service.js';
+import type { ReauthService } from '../auth/reauth.service.js';
 import type { JobsService } from '../jobs/jobs.service.js';
 import { PoolsController } from './pools.controller.js';
 import type { SystemService } from './system.service.js';
@@ -58,16 +57,17 @@ function controller(options: {
         : () => Promise.resolve(options.poolExists ?? false),
   } as unknown as SystemService;
   const jobs = { enqueue } as unknown as JobsService;
-  const db = {
-    withTenant: (_org: string, fn: (q: unknown) => Promise<unknown>) =>
-      fn({ query: () => Promise.resolve([{ password_hash: 'hash' }]) }),
-  } as unknown as DbService;
-  const passwords = {
-    verify: (_hash: string | null, given: string) =>
-      Promise.resolve((options.passwordOk ?? true) && given === VALID.password),
-  } as unknown as PasswordService;
+  // A stub for the SHARED re-authentication, which is measured on its own in
+  // `reauth.service.test.ts` — including the throttling and the recording, which is the half this
+  // route used to be missing entirely.
+  const reauth = {
+    require: (_org: string, _user: string, given: string) =>
+      (options.passwordOk ?? true) && given === VALID.password
+        ? Promise.resolve()
+        : Promise.reject(new UnauthorizedException('the password is wrong')),
+  } as unknown as ReauthService;
 
-  return { controller: new PoolsController(system, jobs, db, passwords), enqueue };
+  return { controller: new PoolsController(system, jobs, reauth), enqueue };
 }
 
 describe('POST /storage/pools', () => {

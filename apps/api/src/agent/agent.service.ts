@@ -78,6 +78,23 @@ export class AgentService implements OnModuleInit {
   private available = false;
 
   /**
+   * Why this agent must not be used, when the handshake found a reason.
+   *
+   * SEPARATE FROM `available`, because the two mean different things and only one of them is
+   * fatal. `available === false` also covers "the socket was not there at startup", which is the
+   * ordinary state of a development machine and must not stop the API — endpoints that need the
+   * agent answer 503 and everything else works. A VERSION MISMATCH is different: the socket is
+   * there, it answers, and it means something other than intended by what this build sends. That
+   * one fails closed.
+   *
+   * It was not enforced at all until a review pointed at it: `onModuleInit` logged the mismatch
+   * and `call()` gated only on `socketPath === null` and queue depth, so the pair that
+   * `packages/agent-protocol/src/index.test.ts` describes as failing at the handshake went on to
+   * exchange requests.
+   */
+  private refuseBecause: string | null = null;
+
+  /**
    * `budgetMs` is a real parameter rather than a test seam: the default is sized for `zfs create`
    * on a busy pool, and a deployment that knows its pools are slower has a legitimate reason to
    * raise it. Tests lower it so that a timeout assertion takes milliseconds instead of a minute.
@@ -113,6 +130,9 @@ export class AgentService implements OnModuleInit {
         throw new AgentUnavailableError(`ping answered '${response.status}'`);
       }
       if (response.schema_version !== EXPECTED_SCHEMA_VERSION) {
+        this.refuseBecause =
+          `the agent speaks schema ${response.schema_version}, this build was generated against ` +
+          `${EXPECTED_SCHEMA_VERSION}; one of the two is stale`;
         throw new AgentUnavailableError(
           `schema version mismatch: the agent speaks ${response.schema_version}, this build was ` +
             `generated against ${EXPECTED_SCHEMA_VERSION}. One of the two is stale, and running ` +
@@ -147,6 +167,12 @@ export class AgentService implements OnModuleInit {
   ): Promise<AgentResponse> {
     if (this.socketPath === null) {
       throw new AgentUnavailableError('DEPSIS_AGENT_SOCKET is not configured');
+    }
+    // Fails CLOSED, unlike the absent-socket case above, which is merely 503. A mismatched pair
+    // exchanges requests that parse and mean something other than intended — and one of the
+    // operations on that wire erases disks.
+    if (this.refuseBecause !== null) {
+      throw new AgentUnavailableError(this.refuseBecause);
     }
     if (this.depth >= AgentService.MAX_QUEUE_DEPTH) {
       throw new AgentUnavailableError(

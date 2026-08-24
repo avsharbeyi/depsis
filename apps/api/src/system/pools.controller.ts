@@ -13,9 +13,8 @@ import {
 import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
-import { PasswordService } from '../auth/password.service.js';
+import { ReauthService } from '../auth/reauth.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
-import { DbService } from '../db/db.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { SystemService } from './system.service.js';
 
@@ -48,10 +47,6 @@ const bodySchema = z.object({
   password: z.string().min(1).max(1024),
 });
 
-interface UserRow {
-  password_hash: string | null;
-}
-
 /**
  * Pool creation — the one route in this API that destroys data.
  *
@@ -72,8 +67,7 @@ export class PoolsController {
   constructor(
     private readonly system: SystemService,
     private readonly jobs: JobsService,
-    private readonly db: DbService,
-    private readonly passwords: PasswordService,
+    private readonly reauth: ReauthService,
   ) {}
 
   @Post()
@@ -105,7 +99,10 @@ export class PoolsController {
       );
     }
 
-    await this.reauthenticate(session.organizationId, session.userId, plan.password);
+    // §0.5, through the SHARED check: throttled and recorded exactly as a login is. This route
+    // used to verify the password itself, which meant a stolen session cookie could be used to
+    // guess it here at full speed and leave nothing in `login_attempts`.
+    await this.reauth.require(session.organizationId, session.userId, plan.password, request);
 
     // A pool this box already has. Checked here because the answer is a 409 the operator can act
     // on, and because the alternative is a job that fails with `zpool`'s own words two seconds
@@ -135,24 +132,6 @@ export class PoolsController {
     );
 
     return { jobId };
-  }
-
-  /** §0.5: an operation carrying this much risk is not performed on the strength of a cookie. */
-  private async reauthenticate(
-    organizationId: string,
-    userId: string,
-    password: string,
-  ): Promise<void> {
-    const rows = await this.db.withTenant(organizationId, (q) =>
-      q.query<UserRow>(`SELECT password_hash FROM users WHERE id = $1`, [userId]),
-    );
-    const user = rows[0];
-    // The guard resolved this session a moment ago, so a missing row means the account went away
-    // in between. A dead session, not a server error.
-    if (user === undefined) throw new UnauthorizedException();
-    if (!(await this.passwords.verify(user.password_hash, password))) {
-      throw new UnauthorizedException('the password is wrong');
-    }
   }
 
   /**

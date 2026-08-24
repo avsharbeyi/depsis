@@ -224,8 +224,9 @@ Kaydettikten sonra arayüz iki şeyden birini söyler:
 
 ### 3.3 Paylaşımlar
 
-`POST /shares` bir dataset açar. Havuzu **operatör kurar** — ajan havuz yaratamaz ve ADR-0007
-yıkıcı havuz işlemlerini üründen dışarıda tutuyor.
+`POST /shares` bir dataset açar; hangi veri kümesinin altında açacağını
+`DEPSIS_SHARE_PARENT_DATASET` söylüyor (§2.4). Havuzun kendisi §3.9'daki sihirbazla ya da
+kabuktan kurulur.
 
 Paylaşım açmak onu yayımlamaz. **Paylaşımlar → Yayımla** `smb.conf` tarafını yazar, ve yazdığını
 kanıtlar: `testparm`'dan sonra gerçek bir bağlantı denemesi yapar. Kanıtlanamayan bir yayım geri
@@ -373,16 +374,28 @@ olmamalı. Tek diskli havuz (`single`) var ve ne olduğunu söylüyor.
 **En az disk sayısı zorunlu:** `mirror` 2, `raidz1` 3, `raidz2` 4. İki diskli bir `raidz1` bir
 aynanın yedekliliğini başka bir şey vaat eden bir kelimeyle anlatır.
 
-#### Üç reddediş ajanın içinde
+#### Reddedişler ajanın içinde
 
-Bunlar sihirbazda değil, **ajanda** — çünkü bir diyalog geçilen bir şeydir:
+Bunlar sihirbazda da var ama orada **nezaket**. Uygulayan taraf ajan, çünkü bir diyalog geçilen bir
+şeydir — ve API'de yapılan bir kontrol, API'ye VERİLMİŞ bir listeye karşı yapılır:
 
-1. `/`, `/boot` ya da `/boot/efi` taşıyan bir disk hiçbir onayla üye olamaz.
-2. Her diskin **WWN'i havuz kurulduğu anda** kutunun bildirdiğiyle karşılaştırılıyor. Ajan
+1. `/`, `/boot`, `/boot/efi` ya da `/efi` taşıyan bir disk hiçbir onayla üye olamaz.
+2. **Üstünde bir şey olan bir disk** üye olamaz, ve **bağlı** bir disk üye olamaz. Bu iki kontrol
+   `lsblk`'in farklı sütunlarından geliyor, yani birini atlatan bir aygıtın diğerlerini de
+   atlatması gerekir.
+3. **Çıkarılabilir** bir disk üye olamaz. Biri masasını toplarken çıkarabildiği bir vdev,
+   yedeklilik değildir.
+4. Her diskin **WWN'i havuz kurulduğu anda** kutunun bildirdiğiyle karşılaştırılıyor. Ajan
    envanteri kendisi, tam o anda okuyor. Sihirbazı açtığınızla düğmeye bastığınız an arasında bir
    disk çıkarılıp yerine başkası takılmışsa işlem reddediliyor — `/dev/disk/by-id` bir YUVAYI
    değil bir AYGITI adlandırdığı için ad tek başına bunu yakalamaz.
-3. `-f` yok.
+5. `-f` yok.
+
+> Bu liste bir incelemeden sonra uzadı. Önce yalnız (1), (4) ve (5) vardı, ve (1) tek bir `lsblk`
+> sütununa dayanıyordu: btrfs subvolume düzeninde — Debian/Ubuntu `@`/`@home`, openSUSE, Fedora —
+> o sütun kökü taşıyan diskin `/home`'unu bildiriyor, yani cihazın kendi açılış diski "sistem
+> diski değil" diye görünüyordu. Şimdi hem çoğul sütun okunuyor hem de (2) ve (3) bağımsız
+> sinyaller olarak duruyor.
 
 #### Havuz oluşturulduktan sonra
 
@@ -454,7 +467,10 @@ kadar kapalı. Dosyayı düzeltin ya da boşaltın, `systemctl reload smbd`, son
 
 Bunlar eksik değil, karar:
 
-- **ZFS havuzu yaratma.** Ajan dataset ve anlık görüntü yaratır, havuz yaratmaz (ADR-0007).
+- **Havuzu yok etmek, bir vdev'i değiştirmek, bir diski temizlemek.** Havuz OLUŞTURMA §3.9'da
+  var; yıkıcı olan diğer her şey yok. Özellikle: ajan `zpool`'a hiçbir zaman `-f` geçmiyor, yani
+  üstünde bir şey olan bir disk havuza katılamıyor — o diski temizlemek kabuktan bilerek yapılan
+  bir iş, ve öyle kalması diğer korumaları süs olmaktan kurtaran şey.
 - **Paylaşım silme.** Grant'lar paylaşımı tutuyor (`ON DELETE RESTRICT`) ve son grant'ı silmek de
   reddediliyor: paylaşımı silmek dataset'i silmek demek. Kapatmanın yolu, kimseyi adlandırmayan
   bir kök izni.

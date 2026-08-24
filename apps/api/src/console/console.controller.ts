@@ -20,9 +20,8 @@ import type { OpenApi } from '@depsis/contracts';
 import { map, type Observable } from 'rxjs';
 import { z } from 'zod';
 
-import { PasswordService } from '../auth/password.service.js';
+import { ReauthService } from '../auth/reauth.service.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
-import { DbService } from '../db/db.service.js';
 import {
   ConsoleRefusedError,
   ConsoleUnavailableError,
@@ -57,10 +56,6 @@ const inputSchema = z.object({ data: z.string().max(MAX_INPUT_BASE64) });
 const resizeSchema = z.object(geometry);
 const idSchema = z.uuid();
 
-interface UserRow {
-  password_hash: string | null;
-}
-
 /**
  * The administrator console (ADR-0018).
  *
@@ -77,8 +72,7 @@ interface UserRow {
 export class ConsoleController {
   constructor(
     private readonly console: ConsoleService,
-    private readonly db: DbService,
-    private readonly passwords: PasswordService,
+    private readonly reauth: ReauthService,
   ) {}
 
   /**
@@ -103,7 +97,16 @@ export class ConsoleController {
       );
     }
 
-    await this.reauthenticate(session.organizationId, session.userId, parsed.data.password);
+    // Through the SHARED check, which throttles and records exactly as a login does. This
+    // controller used to verify the password itself, which meant a stolen session cookie could be
+    // used to guess it here at full speed — against the endpoint that opens a shell — and leave
+    // nothing at all in `login_attempts`.
+    await this.reauth.require(
+      session.organizationId,
+      session.userId,
+      parsed.data.password,
+      request,
+    );
 
     try {
       return await this.console.open(
@@ -217,24 +220,6 @@ export class ConsoleController {
         .pipe(map(toMessageEvent));
     } catch (error) {
       throw translate(error);
-    }
-  }
-
-  /** §0.5: an operation carrying this much risk is not performed on the strength of a cookie. */
-  private async reauthenticate(
-    organizationId: string,
-    userId: string,
-    password: string,
-  ): Promise<void> {
-    const rows = await this.db.withTenant(organizationId, (q) =>
-      q.query<UserRow>(`SELECT password_hash FROM users WHERE id = $1`, [userId]),
-    );
-    const user = rows[0];
-    // The guard resolved this session a moment ago, so a missing row means the account went away
-    // in between. A dead session, not a server error.
-    if (user === undefined) throw new UnauthorizedException();
-    if (!(await this.passwords.verify(user.password_hash, password))) {
-      throw new UnauthorizedException('the password is wrong');
     }
   }
 }

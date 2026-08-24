@@ -11,6 +11,7 @@ import { MfaService } from './mfa.service.js';
 import { PasswordResetService } from './password-reset.service.js';
 import { PasswordService } from './password.service.js';
 import { PendingLoginService } from './pending-login.service.js';
+import { ReauthService } from './reauth.service.js';
 import { loadSecretBox, type SecretBox } from './secret-box.js';
 import { AdminGuard, SessionGuard } from './session.guard.js';
 import { SessionService } from './session.service.js';
@@ -40,6 +41,7 @@ function secretBoxFor(config: AppConfig): SecretBox | null {
     },
     PendingLoginService,
     PasswordResetService,
+    ReauthService,
     SessionGuard,
     AdminGuard,
   ],
@@ -54,6 +56,10 @@ function secretBoxFor(config: AppConfig): SecretBox | null {
   // `UsersModule` — the administrator's half needs the session store and the hasher, the user's
   // half needs to write a password — and putting them the other way round would make the two
   // modules import each other.
+  // `ReauthService` is exported for the same reason `PasswordService` is, and after the same
+  // mistake in a smaller form: two controllers had each written their own re-authentication, and
+  // neither of the two went through the login throttle. A shared instance is the only version of
+  // that check nobody can accidentally write a weaker copy of.
   exports: [
     SessionService,
     SessionGuard,
@@ -61,6 +67,7 @@ function secretBoxFor(config: AppConfig): SecretBox | null {
     MfaService,
     PasswordService,
     PasswordResetService,
+    ReauthService,
   ],
 })
 export class AuthModule {}

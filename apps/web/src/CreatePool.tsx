@@ -1,7 +1,7 @@
 import type { OpenApi } from '@depsis/contracts';
 import { useState } from 'react';
 
-import { api, problemMessage } from './api.js';
+import { api, isTransportFailure, problemMessage } from './api.js';
 import { formatBytes } from './Dashboard.js';
 
 type Disk = OpenApi.components['schemas']['DiskInventoryEntry'];
@@ -46,17 +46,32 @@ export function CreatePool({
   const [confirm, setConfirm] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
+  /**
+   * What was just asked for, if anything.
+   *
+   * The screen used to reload the inventory the moment the job was enqueued and go straight back to
+   * offering the same disks as empty — which they still are, for the few seconds before the worker
+   * picks the job up. Two clicks in that window are two `zpool create` requests for one intent, and
+   * the second one's refusal ("a pool called tank already exists") reads as a bug rather than as a
+   * rescue.
+   */
+  const [queued, setQueued] = useState<{ name: string; jobId: string; disks: number } | null>(null);
 
-  // A candidate is a disk with a stable id, a WWN, nothing on it, and no part of the appliance.
-  // Every one of those is also checked by the agent against an inventory it reads itself; this is
-  // the courteous half, not the enforcing one.
+  // A candidate is a disk with a stable id, a WWN, nothing on it, not mounted, not removable, and
+  // no part of the appliance. Every one of those is also checked by the agent against an inventory
+  // it reads itself; this is the courteous half, not the enforcing one.
+  //
+  // `removable` was in this list nowhere until a review pointed out that it was described as a
+  // refusal in `op.rs`, described as a refusal in the OpenAPI document, and enforced by nothing —
+  // so a USB stick was on offer as a mirror member.
   const candidates = disks.filter(
     (disk) =>
       disk.byId !== undefined &&
       disk.wwn !== undefined &&
       !disk.holdsSystem &&
       disk.holds.length === 0 &&
-      !disk.mounted,
+      !disk.mounted &&
+      !disk.removable,
   );
   const blocked = disks.filter((disk) => !candidates.includes(disk));
 
@@ -88,8 +103,23 @@ export function CreatePool({
     });
     setBusy(false);
 
+    // THE ONLY HONEST ANSWER WHEN THE REPLY IS LOST. The request may have been received, the job
+    // may be committed, and the disks may be being erased right now — "could not create the pool"
+    // is a claim this screen has no basis for. Every other screen can say "it failed" about a
+    // dropped connection; this one cannot.
+    if (isTransportFailure(response)) {
+      notify(
+        'error',
+        'Sunucudan yanıt gelmedi. Havuz oluşturma işi BAŞLATILMIŞ OLABİLİR — tekrar denemeden ' +
+          'önce Sistem işleri panelinden bakın.',
+      );
+      return;
+    }
     if (response.status === 401) {
-      notify('error', 'Parola yanlış. Havuz oluşturulmadı.');
+      // 401 is also what an expired session produces, and this is an admin-only pane: a
+      // wrong-password message on a screen the operator is no longer signed in to sends them
+      // looking for the wrong thing. The API distinguishes the two in its problem body.
+      notify('error', problemMessage(error, 'Parola doğrulanamadı. Havuz oluşturulmadı.'));
       setPassword('');
       return;
     }
@@ -98,19 +128,68 @@ export function CreatePool({
       return;
     }
     notify('ok', `"${name}" oluşturuluyor. İlerlemesi Sistem işleri panelinde.`);
+    setQueued({ name, jobId: data.jobId, disks: selected.length });
     setName('');
     setConfirm('');
     setPassword('');
     setChosen([]);
-    onCreated();
+    // NOT `onCreated()` here. Reloading now re-reads an inventory the job has not touched yet, so
+    // the disks come back blank and immediately on offer again. The operator reloads when they
+    // have seen the job finish.
+  }
+
+  if (queued !== null) {
+    return (
+      <div className="note">
+        <b>&quot;{queued.name}&quot; kuyruğa alındı.</b> {queued.disks} disk üzerinde çalışacak.
+        İlerlemesini <b>Sistem işleri</b> panelinden izleyin (iş {queued.jobId.slice(0, 8)}).
+        <p>
+          Bu ekran diskleri yeniden okumadı: iş bitene kadar aynı diskler hâlâ boş görünür, ve
+          ikinci bir istek göndermenin bir faydası olmaz.
+        </p>
+        <button
+          type="button"
+          className="b"
+          onClick={() => {
+            setQueued(null);
+            onCreated();
+          }}
+        >
+          Diskleri yeniden oku
+        </button>
+      </div>
+    );
   }
 
   if (candidates.length === 0) {
+    // The per-disk reasons, NOT a sentence asserting one. This branch used to hard-code "the disks
+    // have something on them" and return above the `blocked` list, so in the one case where those
+    // reasons are the only diagnosis the operator gets, none of them was shown — and the asserted
+    // reason was wrong for a disk that is perfectly blank and merely reports no WWN.
     return (
       <div className="note">
-        <b>Havuz kurulabilecek boş disk yok.</b> DEPSIS üstünde bir şey olan bir diski kullanamıyor
-        — <code>zpool</code>&apos;a hiçbir zaman <code>-f</code> geçmiyor, ve bir diski temizlemek
-        kabuktan bilerek yapılan bir iş.
+        <b>Havuz kurulabilecek disk yok.</b>
+        {blocked.length === 0 ? (
+          ' Ajan bu kutuda hiç disk bulamadı.'
+        ) : (
+          <>
+            {' '}
+            Aşağıdaki diskler kullanılamıyor:
+            <div style={{ marginTop: 6 }}>
+              {blocked.map((disk) => (
+                <div className="netrow" key={disk.byId ?? disk.kname}>
+                  <span className="lbl">{disk.model ?? disk.kname}</span>
+                  <span className="val m">{why(disk)}</span>
+                </div>
+              ))}
+            </div>
+            <p>
+              Üstünde bir şey olan bir diski DEPSIS kullanamıyor: <code>zpool</code>&apos;a hiçbir
+              zaman <code>-f</code> geçmiyor, ve bir diski temizlemek kabuktan bilerek yapılan bir
+              iş.
+            </p>
+          </>
+        )}
       </div>
     );
   }
@@ -250,6 +329,7 @@ export function CreatePool({
 function why(disk: Disk): string {
   if (disk.holdsSystem) return 'bu makinenin sistem diski';
   if (disk.mounted) return 'bir bölümü bağlı';
+  if (disk.removable) return 'çıkarılabilir — giden bir disk vdev’i de götürür';
   if (disk.holds.length > 0) return `üstünde ${disk.holds.join(', ')} var`;
   if (disk.byId === undefined) return 'kararlı bir adı yok';
   if (disk.wwn === undefined) return 'WWN bildirmiyor, doğrulanamaz';

@@ -1,5 +1,10 @@
 import { Logger } from '@nestjs/common';
-import { CREATE_POOL_KIND, expectStatus, type AgentService } from '@depsis/api/worker-surface';
+import {
+  AgentUnavailableError,
+  CREATE_POOL_KIND,
+  expectStatus,
+  type AgentService,
+} from '@depsis/api/worker-surface';
 
 import type { JobHandler } from '../worker.service.js';
 
@@ -18,16 +23,22 @@ export { CREATE_POOL_KIND };
 /**
  * Create a ZFS pool through the privileged agent. THE ONE DESTRUCTIVE HANDLER.
  *
- * Every other job kind in this product is safe to run twice — that is why the queue's at-least-once
- * delivery is acceptable for them. This one is not, and it does not rely on being made so: the
- * route enqueues it with `maxAttempts: 1`, so a failure is reported rather than retried. A pool
- * that did not get created is something an operator asks for again, having looked at the box.
+ * `maxAttempts: 1` DOES NOT MEAN THIS RUNS ONCE, and believing it did was a mistake worth writing
+ * down. `claim_job` reclaims a RUNNING job whose lease has expired without consulting
+ * `max_attempts` — the counter is read only by `finish_job`, to choose between `failed` and
+ * `dead`. So `maxAttempts: 1` prevents a retry after a REPORTED failure and nothing else: a worker
+ * killed mid-`zpool create` has its job reclaimed sixty seconds later, by design, because that is
+ * how the queue detects a crashed worker at all.
  *
- * The existence check below is therefore not a retry mechanism. It is for the one sequence the
- * single attempt does not cover: the agent created the pool and the answer never came back — a
- * killed worker, a closed socket — leaving a job that is about to be marked failed for a pool that
- * exists. Reporting that as a failure would send an operator to investigate a machine that is
- * fine, and the obvious next thing they would try is running it again.
+ * The existence check below is therefore the thing that stops a second `zpool create`, not a
+ * courtesy. And it has to distinguish two cases that look identical afterwards:
+ *
+ *   * ATTEMPT 1 finding the pool already there means it existed before this job ran. The route's
+ *     409 check should have caught it and did not — most likely because the agent was unreachable
+ *     at that moment and `exists()` swallows the error. Reporting success here would tell the
+ *     operator their disks had been used when nothing touched them.
+ *   * ATTEMPT 2 OR LATER finding the pool there means the previous attempt created it and died
+ *     before the answer came back. That is a success whose receipt was lost.
  *
  * WHAT THIS HANDLER DOES NOT CHECK. Not whether the disks are blank, not whether they exist, not
  * whether one of them holds the running system. All three live in the agent, checked against an
@@ -45,13 +56,23 @@ export function createPoolHandler(agent: AgentService): JobHandler {
     // `zpool create` is not a command to issue twice concurrently.
     if (!(await report(0.1))) return;
 
-    const existing = await agent.call(
-      { op: 'pool_status', pool: payload.name },
-      `does the pool '${payload.name}' already exist, for job ${job.id}`,
-      job.id,
-    );
-    if (existing.status === 'pool_status') {
-      logger.log(`'${payload.name}' already exists; nothing to do for job ${job.id}`);
+    if (await exists(agent, payload.name, job.id)) {
+      if (job.attempt <= 1) {
+        // Not ours. See the note on this handler: on the first attempt a pool that is already
+        // there existed before this job ran, and calling that a success would tell the operator
+        // their disks had been used.
+        throw new Error(
+          `a pool called '${payload.name}' already exists on this machine and was not created by ` +
+            `this job; nothing was done to the disks named`,
+        );
+      }
+      // A previous attempt created it and died before the answer came back. Reporting a failure
+      // here would send an operator to investigate a machine that is fine, and the obvious next
+      // thing they would try is running it again.
+      logger.log(
+        `'${payload.name}' already exists on attempt ${job.attempt}; a previous attempt created ` +
+          `it and lost the answer. Recording the success.`,
+      );
       await report(1);
       return;
     }
@@ -61,18 +82,36 @@ export function createPoolHandler(agent: AgentService): JobHandler {
         `${payload.disks.map((disk) => disk.byId).join(', ')} for job ${job.id}`,
     );
 
-    const response = await agent.call(
-      {
-        op: 'create_pool',
-        pool: payload.name,
-        topology: payload.topology,
-        disks: payload.disks.map((disk) => ({ by_id: disk.byId, wwn: disk.wwn })),
-      },
-      // Reaches the agent's audit trail. §16 wants a privileged action explicable afterwards, and
-      // for the one operation that erases disks the account that asked belongs in that sentence.
-      `pool creation requested by ${payload.requestedBy}, job ${job.id}`,
-      job.id,
-    );
+    let response;
+    try {
+      response = await agent.call(
+        {
+          op: 'create_pool',
+          pool: payload.name,
+          topology: payload.topology,
+          disks: payload.disks.map((disk) => ({ by_id: disk.byId, wwn: disk.wwn })),
+        },
+        // Reaches the agent's audit trail. §16 wants a privileged action explicable afterwards, and
+        // for the one operation that erases disks the account that asked belongs in that sentence.
+        `pool creation requested by ${payload.requestedBy}, job ${job.id}`,
+        job.id,
+      );
+    } catch (error) {
+      // THE ANSWER WAS LOST, WHICH IS NOT THE SAME AS THE WORK NOT HAPPENING. The agent call has a
+      // sixty-second budget covering the queue wait as well as the exchange, and `zpool create`
+      // against a slow controller can outrun it. Reporting a failure without looking would tell
+      // the operator nothing happened to disks that are already gone.
+      if (!(error instanceof AgentUnavailableError)) throw error;
+      if (await exists(agent, payload.name, job.id)) {
+        logger.warn(
+          `the agent did not answer in time for job ${job.id}, but '${payload.name}' now exists: ` +
+            `the pool was created and the answer was lost`,
+        );
+        await report(1);
+        return;
+      }
+      throw error;
+    }
 
     // Throws AgentRefusedError on a refusal, which the worker records with the agent's own reason.
     // Those reasons are the ones an operator most needs verbatim here — "that disk is not the one
@@ -81,6 +120,23 @@ export function createPoolHandler(agent: AgentService): JobHandler {
     logger.log(`'${payload.name}' created: ${created.detail.trim() || 'no output'}`);
     await report(1);
   };
+}
+
+/**
+ * Does a pool by this name exist right now?
+ *
+ * A refused `pool_status` is "no such pool", which is what ZFS says about a name it does not know.
+ * A transport failure PROPAGATES rather than reading as absent: this predicate is used to decide
+ * whether a `zpool create` may run and whether a lost answer meant success, and "we could not ask"
+ * must not answer either question.
+ */
+async function exists(agent: AgentService, name: string, jobId: string): Promise<boolean> {
+  const response = await agent.call(
+    { op: 'pool_status', pool: name },
+    `does the pool '${name}' already exist, for job ${jobId}`,
+    jobId,
+  );
+  return response.status === 'pool_status';
 }
 
 const TOPOLOGIES = ['single', 'mirror', 'raidz1', 'raidz2'] as const;

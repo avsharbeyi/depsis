@@ -45,6 +45,7 @@ pub mod identity;
 pub mod op;
 pub mod samba;
 pub mod seams;
+pub mod smart;
 pub mod sweep;
 pub mod transfer;
 pub mod zerotier;

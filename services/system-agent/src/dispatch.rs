@@ -461,8 +461,9 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             Ok(argv) => argv,
             // A refusal, not a failure. Every one of these is a fact about the request that the
             // operator can act on — a disk that is not there, a disk that is not the one they
-            // confirmed, an arrangement that needs more disks — and `handle` audits a refusal with
-            // its reason attached.
+            // confirmed, an arrangement that needs more disks — and `handle` records it with its
+            // reason attached, which for the WWN mismatch is the whole point: the audit trail is
+            // where "the disk in that slot changed" has to survive.
             Err(error) => {
                 return Ok(Response::Refused {
                     reason: error.to_string(),
@@ -1145,6 +1146,26 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         ));
 
         match self.execute(&request, peer, correlation_id, reason) {
+            // A refusal decided by the OPERATION rather than by the policy, and it gets its own
+            // entry for the same reason a failure does. The line above says the request was
+            // allowed to proceed, which is true and is not the outcome — and the refusals that
+            // reach here are the ones most worth having in an append-only log: a WWN that no
+            // longer matches means somebody swapped a disk between the confirmation and the
+            // button, and without this the trail records that as `allowed` and nothing else.
+            //
+            // TWO ENTRIES FOR ONE REQUEST, deliberately. The first is written before the work
+            // starts, so an agent that dies mid-operation still leaves the attempt behind; this
+            // one carries the answer. They share a correlation id.
+            Ok(Response::Refused { reason: why }) => {
+                self.audit.record(audit::entry(
+                    correlation_id,
+                    peer,
+                    &request,
+                    reason,
+                    Outcome::Refused(why.clone()),
+                ));
+                Response::Refused { reason: why }
+            }
             Ok(response) => response,
             Err(e) => {
                 let msg = e.to_string();
@@ -1291,10 +1312,10 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 let out = self
                     .runner
                     .run(bin::SMARTCTL, &["-H", "-A", "--json=c", &path])?;
-                let healthy = out.contains("\"passed\": true") || out.contains("PASSED");
+                let summary = crate::smart::parse(&out);
                 Ok(Response::Smart {
-                    healthy,
-                    temperature_celsius: None,
+                    healthy: summary.healthy,
+                    temperature_celsius: summary.temperature_celsius,
                     raw: out,
                 })
             }
@@ -1747,7 +1768,12 @@ mod tests {
 
     #[test]
     fn smart_reads_are_confined_to_dev_disk_by_id() {
-        let r = MockCommandRunner::with_responses(["PASSED".into()]);
+        // The fixture is what `--json=c` actually writes. It used to be the bare word `PASSED`,
+        // which smartctl cannot produce under the flags this code passes — so the test agreed with
+        // the substring check and neither agreed with the program. See `crate::smart`.
+        let r = MockCommandRunner::with_responses([
+            r#"{"smart_status":{"passed":true},"temperature":{"current":34}}"#.into(),
+        ]);
         let s = MemorySink::default();
         let h = Harness::bare();
         let resp = agent(&r, &s, &h).handle(
@@ -1756,7 +1782,17 @@ mod tests {
             "c7",
             "telemetry",
         );
-        assert!(matches!(resp, Response::Smart { healthy: true, .. }));
+        assert!(
+            matches!(
+                resp,
+                Response::Smart {
+                    healthy: true,
+                    temperature_celsius: Some(34),
+                    ..
+                }
+            ),
+            "{resp:?}"
+        );
         let argv = r.call(0).expect("smartctl was run");
         assert!(argv
             .last()
