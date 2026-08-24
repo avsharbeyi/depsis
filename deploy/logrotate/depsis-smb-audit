@@ -17,5 +17,4 @@
     delaycompress
     copytruncate
     su root depsis-api
-    create 0640 root depsis-api
 }

@@ -39,7 +39,23 @@ RestartSec=5s
 # database; it does not need the TOTP key, and does not get it.
 LoadCredential=db-url:/etc/depsis/db-url
 Environment=DEPSIS_DATABASE_URL_FILE=%d/db-url
-EnvironmentFile=/etc/depsis/worker.env
+
+# ─── settings ─────────────────────────────────────────────────────────────────
+#
+# The API's file, and not a worker-specific copy of it. Every non-secret setting here — the agent
+# sockets, the shares root, the parent dataset — has to mean the SAME thing in both processes: the
+# worker writes files the API then serves, into paths derived from these. Two files would let an
+# operator change `DEPSIS_SHARES_ROOT` in one of them, restart both, and get a worker quietly
+# indexing a tree the API does not serve. The name says `api` because that is what the file has
+# always been called; what it holds is the appliance's configuration.
+#
+# `DEPSIS_API_PORT` is in it and ignored here — this process opens no port.
+EnvironmentFile=/etc/depsis/api.env
+
+# Worker-only settings, and OPTIONAL: the one thing in it (`DEPSIS_SMB_AUDIT_LOG`, ADR-0011 Layer 1)
+# has a working default, so a box without the file boots. The leading `-` is the difference between
+# "the fast path is not configured" and "the worker does not start".
+EnvironmentFile=-/etc/depsis/worker.env
 
 # ─── hardening ────────────────────────────────────────────────────────────────
 #

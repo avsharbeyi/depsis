@@ -111,6 +111,20 @@ DEPSIS_ZFS_POOLS=tank
 DEPSIS_SMART_DISKS=/dev/sda,/dev/sdb
 ```
 
+Bu dosyayı **hem API hem worker** okuyor, ve bu bilerek böyle: buradaki her ayar — ajan soketleri,
+paylaşım kökü, üst veri kümesi — iki süreçte de AYNI şeyi göstermek zorunda. Worker'ın yazdığı
+dosyaları API sunuyor. İki ayrı dosya olsaydı, birinde `DEPSIS_SHARES_ROOT` değiştirip ikisini de
+yeniden başlatmak, worker'ı API'nin sunmadığı bir ağaca indeksleme yapar hâle getirirdi — hata
+vermeden. `DEPSIS_API_PORT` worker'da yok sayılıyor; o süreç hiçbir port açmıyor.
+
+`/etc/depsis/worker.env` — **isteğe bağlı**, ve yalnız worker'a ait olan tek ayar:
+
+```ini
+# ADR-0011 Katman 1: Samba denetim akışının dosyası (§3.7). Varsayılanı budur; dosya yoksa da
+# worker açılır, yalnız SMB yazmalarını on beş dakikalık yürüyüşle indeksler.
+DEPSIS_SMB_AUDIT_LOG=/var/log/depsis/smb-audit.log
+```
+
 `/etc/depsis/agent.env` — ajanın tek zorunlu ayarı:
 
 ```ini
