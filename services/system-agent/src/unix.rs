@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -1187,6 +1187,31 @@ fn split_envelope(line: &str) -> Result<(String, String, String), String> {
     Ok((correlation_id, reason, request_json))
 }
 
+/// Write a file only its owner can read, mode BEFORE content.
+///
+/// The Unix half of [`crate::identity::PrivateWriter`]. It lives here because this file is where
+/// every platform-specific thing in the agent lives — ADR-0006's claim about the core — and it did
+/// not, until CI's Windows cross-check said so: `identity.rs` called
+/// `std::os::unix::fs::OpenOptionsExt` inline, and the library therefore did not compile for
+/// Windows. `cargo test` on Linux cannot notice that, which is the whole reason the cross-check is
+/// in `ci.yml`.
+///
+/// THE ORDERING IS THE POINT and is unchanged: `mode` is passed to `open`, not applied afterwards.
+/// Creating the file world-readable and chmodding it once the hashes are in leaves a window in
+/// which they can be read, and a window is all an attacker on the box needs.
+pub fn write_private(path: &Path, body: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(body.as_bytes())
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -2248,6 +2273,7 @@ mod tests {
             None,
             &fixtures.tokens,
             &fixtures.transfers,
+            write_private,
         )
     }
 

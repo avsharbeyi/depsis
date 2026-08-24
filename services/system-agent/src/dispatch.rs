@@ -101,6 +101,15 @@ pub struct Agent<'a, R: CommandRunner, S: Sink, P: SafePath> {
     /// control loop is deliberately serial (ADR-0006), but bulk transfers must not be: a 10 GB
     /// upload holding the control socket would block every other privileged call for its duration.
     pub transfers: &'a Mutex<TransferRegistry>,
+    /// How a file only its owner can read is written. See [`crate::identity::PrivateWriter`].
+    ///
+    /// A FIFTH THING SUPPLIED FROM OUTSIDE, and it is here for the reason the other four are:
+    /// setting a file's mode is platform-specific, and ADR-0006 says the core contains none of
+    /// that. `identity.rs` used `std::os::unix::fs::OpenOptionsExt` inline instead, so the library
+    /// did not compile for Windows and no local gate could tell — `cargo test` on Linux never
+    /// tries. CI's `cargo check --target x86_64-pc-windows-msvc` does, and CI had never completed
+    /// a run until the day this was found.
+    pub private_writer: crate::identity::PrivateWriter,
 }
 
 impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
@@ -111,6 +120,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         paths: Option<&'a P>,
         tokens: &'a dyn TokenSource,
         transfers: &'a Mutex<TransferRegistry>,
+        private_writer: crate::identity::PrivateWriter,
     ) -> Self {
         Self {
             policy,
@@ -119,6 +129,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             paths,
             tokens,
             transfers,
+            private_writer,
         }
     }
 
@@ -1592,7 +1603,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                         members: g.members.clone(),
                     })
                     .collect();
-                match crate::identity::sync(self.runner, &specs, &want) {
+                match crate::identity::sync(self.runner, self.private_writer, &specs, &want) {
                     Ok(outcome) => Ok(Response::PosixIdentitySynced {
                         users_created: outcome.users_created,
                         groups_created: outcome.groups_created,
@@ -1792,6 +1803,9 @@ mod tests {
                 self.paths.as_ref(),
                 &self.tokens,
                 &self.transfers,
+                // Portable, because these tests run on every developer box. The mode is the Unix
+                // implementation's business and is asserted where that implementation lives.
+                |path, body| std::fs::write(path, body),
             )
         }
     }

@@ -279,6 +279,21 @@ jobs:
           export DEPSIS_TEST_OWNER_DATABASE_URL="postgresql://depsis_owner:ci-owner@127.0.0.1:5432/depsis_ci"
           export DEPSIS_TEST_SETUP_DATABASE_URL="postgresql://depsis_app:ci-app@127.0.0.1:5432/depsis_setup_ci"
           export DEPSIS_TEST_SETUP_OWNER_DATABASE_URL="postgresql://depsis_owner:ci-owner@127.0.0.1:5432/depsis_setup_ci"
+
+          # THE WORKSPACE PACKAGES FIRST. `@depsis/contracts`, `@depsis/agent-protocol` and
+          # `@depsis/authz` all resolve through their `dist/`, and the line below invokes vitest
+          # DIRECTLY rather than through turbo — so `test:unit`'s `dependsOn: ["^build"]` does not
+          # apply and every import of them fails with "Failed to resolve entry for package".
+          #
+          # turbo.json's note on `lint` describes this exact trap in the past tense: "It never
+          # failed on a developer machine because a previous build had left dist/ behind." It has
+          # now failed on the first CI run this repository ever completed, for the same reason,
+          # one job over. `tools/dev/wsl-itest.sh` had the same hole and was fixed with it.
+          #
+          # Not routed through turbo instead, deliberately: turbo would hash this task without the
+          # DEPSIS_TEST_* variables and could replay a cached run from the `static` job, where they
+          # are unset — reporting success having skipped every database test.
+          pnpm build
           pnpm --filter @depsis/api test:unit
 
       - name: Prove the integration tests were not silently skipped

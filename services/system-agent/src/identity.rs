@@ -39,7 +39,6 @@
 //! `smbpasswd` is not used at all, and could not be: it reads the password from stdin and
 //! `CommandRunner` has no stdin.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::op::{NtHash, PosixId, PosixName};
@@ -150,6 +149,10 @@ pub fn private_group_name(uid: PosixId) -> String {
 /// passdb is a database and rewriting it once per user would be a write amplification for no gain.
 pub fn sync<R: CommandRunner>(
     runner: &R,
+    // `write`: how a file only its owner can read gets written. See `PrivateWriter` — it is a
+    // parameter so that this module contains nothing platform-specific, which is ADR-0006's claim
+    // about the whole core and was untrue here until CI could finally say so.
+    write: PrivateWriter,
     users: &[UserSpec],
     groups: &[GroupSpec],
 ) -> Result<SyncOutcome, IdentityError> {
@@ -221,7 +224,7 @@ pub fn sync<R: CommandRunner>(
         set_members(runner, &name, &logins)?;
     }
 
-    outcome.passwords_set = set_passwords(runner, users)?;
+    outcome.passwords_set = set_passwords(runner, write, users)?;
     Ok(outcome)
 }
 
@@ -318,7 +321,11 @@ fn set_members<R: CommandRunner>(
 /// Returns how many were set. Zero is an ordinary answer: a user who has not changed their password
 /// since this existed has no hash to install, and an account with no passdb entry simply cannot
 /// reach SMB yet.
-fn set_passwords<R: CommandRunner>(runner: &R, users: &[UserSpec]) -> Result<usize, IdentityError> {
+fn set_passwords<R: CommandRunner>(
+    runner: &R,
+    write: PrivateWriter,
+    users: &[UserSpec],
+) -> Result<usize, IdentityError> {
     let with_hash: Vec<&UserSpec> = users.iter().filter(|u| u.nt_hash.is_some()).collect();
     if with_hash.is_empty() {
         return Ok(0);
@@ -358,7 +365,7 @@ fn set_passwords<R: CommandRunner>(runner: &R, users: &[UserSpec]) -> Result<usi
     }
 
     let path = PathBuf::from(IMPORT_PATH);
-    write_private(&path, &body)?;
+    write_private(write, &path, &body)?;
     let spec = format!("smbpasswd:{}", path.display());
     let result = runner.run(PDBEDIT, &["-i", &spec, "-e", "tdbsam"]);
     // Removed whatever happened. The file holds password-equivalent material and there is no
@@ -369,27 +376,32 @@ fn set_passwords<R: CommandRunner>(runner: &R, users: &[UserSpec]) -> Result<usi
     Ok(with_hash.len())
 }
 
+/// Create a file that only its owner can read, and write `body` into it.
+///
+/// A FUNCTION POINTER RATHER THAN A `cfg`, and rather than the `std::os::unix::fs::OpenOptionsExt`
+/// this used to call directly. ADR-0006's central claim is that the agent's core contains no
+/// platform-specific code at all — everything of that kind lives behind a seam, implemented in
+/// `unix.rs`, which the library never compiles. That claim was false here for as long as this
+/// function has existed, and no local gate could say so: `cargo test` on Linux never tries the
+/// other platform. `cargo check --target x86_64-pc-windows-msvc` does, it is in `ci.yml`, and CI
+/// had never completed a run.
+///
+/// `acl.rs` already uses exactly this pattern — `present: fn(&str) -> bool`, so the portable tests
+/// can drive every branch on a box with no `setfacl` — so this is the crate's own answer rather
+/// than a new one.
+pub type PrivateWriter = fn(&Path, &str) -> std::io::Result<()>;
+
 /// Write 0600, creating the parent if it is missing.
 ///
 /// Mode BEFORE content: creating the file world-readable and chmodding afterwards leaves a window
-/// in which the hashes are readable, and a window is all an attacker on the box needs.
-fn write_private(path: &Path, body: &str) -> Result<(), IdentityError> {
-    use std::os::unix::fs::OpenOptionsExt;
-
+/// in which the hashes are readable, and a window is all an attacker on the box needs. The
+/// implementation in `unix.rs` keeps that ordering; this indirection only moves WHERE it lives.
+fn write_private(write: PrivateWriter, path: &Path, body: &str) -> Result<(), IdentityError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| IdentityError::Io(format!("{}: {e}", parent.display())))?;
     }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| IdentityError::Io(format!("{}: {e}", path.display())))?;
-    file.write_all(body.as_bytes())
-        .map_err(|e| IdentityError::Io(format!("{}: {e}", path.display())))?;
-    Ok(())
+    write(path, body).map_err(|e| IdentityError::Io(format!("{}: {e}", path.display())))
 }
 
 #[cfg(test)]
@@ -401,6 +413,15 @@ fn write_private(path: &Path, body: &str) -> Result<(), IdentityError> {
     reason = "The crate-level denials exist because a panic in a root daemon is a denial of               service on the one component that cannot be restarted casually. In tests the               opposite is true: a failed assertion SHOULD panic, and indexing a fixture is               clearer than unwrapping an Option."
 )]
 mod tests {
+    /// A portable stand-in for the Unix writer.
+    ///
+    /// These tests run on every developer box, including the Windows one this crate is written on.
+    /// The mode is the Unix implementation's business and belongs to `unix.rs`, which is exactly
+    /// the split that was missing before CI's Windows cross-check found it.
+    fn portable_write(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+        std::fs::write(path, body)
+    }
+
     use super::*;
     use crate::seams::SeamError;
     use std::cell::RefCell;
@@ -472,7 +493,8 @@ mod tests {
             "/usr/bin/getent passwd postgres",
             "postgres:x:114:120::/var/lib/postgresql:/bin/bash",
         )]);
-        let err = sync(&runner, &[user(300001, "postgres")], &[]).expect_err("must refuse");
+        let err = sync(&runner, portable_write, &[user(300001, "postgres")], &[])
+            .expect_err("must refuse");
         assert!(
             matches!(err, IdentityError::NotOurs { found: 114, .. }),
             "{err:?}"
@@ -493,7 +515,8 @@ mod tests {
             "/usr/bin/getent passwd 300001",
             "baskabiri:x:300001:300001::/nonexistent:/usr/sbin/nologin",
         )]);
-        let err = sync(&runner, &[user(300001, "ali")], &[]).expect_err("must refuse");
+        let err =
+            sync(&runner, portable_write, &[user(300001, "ali")], &[]).expect_err("must refuse");
         assert!(matches!(err, IdentityError::UidTaken { .. }), "{err:?}");
         assert!(runner.ran(USERADD).is_empty());
     }
@@ -501,7 +524,7 @@ mod tests {
     #[test]
     fn a_new_user_gets_a_private_group_a_nologin_shell_and_no_home() {
         let runner = Scripted::new(&[]);
-        let outcome = sync(&runner, &[user(300001, "ali")], &[]).expect("sync");
+        let outcome = sync(&runner, portable_write, &[user(300001, "ali")], &[]).expect("sync");
         assert_eq!(outcome.users_created, 1);
         assert_eq!(outcome.groups_created, 1);
 
@@ -552,7 +575,7 @@ mod tests {
             ),
             ("/usr/bin/getent group 300001", "depsis-p-300001:x:300001:"),
         ]);
-        let outcome = sync(&runner, &[user(300001, "ali")], &[]).expect("sync");
+        let outcome = sync(&runner, portable_write, &[user(300001, "ali")], &[]).expect("sync");
         assert_eq!(outcome, SyncOutcome::default());
         assert!(runner.ran(USERADD).is_empty());
         assert!(runner.ran(GROUPADD).is_empty());
@@ -565,6 +588,7 @@ mod tests {
         let runner = Scripted::new(&[]);
         sync(
             &runner,
+            portable_write,
             &[user(300001, "ali"), user(300002, "veli")],
             &[GroupSpec {
                 gid: uid(300010),
@@ -594,6 +618,7 @@ mod tests {
         let runner = Scripted::new(&[]);
         sync(
             &runner,
+            portable_write,
             &[user(300001, "ali")],
             &[GroupSpec {
                 gid: uid(300010),
@@ -611,6 +636,7 @@ mod tests {
         let runner = Scripted::new(&[]);
         sync(
             &runner,
+            portable_write,
             &[user(300001, "ali")],
             &[GroupSpec {
                 gid: uid(300010),
@@ -634,6 +660,7 @@ mod tests {
         let runner = Scripted::new(&[]);
         sync(
             &runner,
+            portable_write,
             &[user(300001, "ali")],
             &[GroupSpec {
                 gid: uid(300010),
@@ -650,7 +677,7 @@ mod tests {
         // since this existed has no hash to install. Running `pdbedit` with an empty file would
         // need Samba installed for no reason.
         let runner = Scripted::new(&[]);
-        let outcome = sync(&runner, &[user(300001, "ali")], &[]).expect("sync");
+        let outcome = sync(&runner, portable_write, &[user(300001, "ali")], &[]).expect("sync");
         assert_eq!(outcome.passwords_set, 0);
         assert!(runner.ran(PDBEDIT).is_empty());
     }

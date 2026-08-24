@@ -122,6 +122,7 @@ fn serve() -> std::process::ExitCode {
         shares.as_ref(),
         &tokens,
         &transfers,
+        unix::write_private,
     );
 
     // How long an untouched staging file survives. Configuration rather than a constant, because
