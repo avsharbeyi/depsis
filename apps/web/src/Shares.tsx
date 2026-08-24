@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
 import { Empty, Win } from './ui.js';
+import { Permissions, type PermissionTarget } from './Permissions.js';
 
 type SharePage = OpenApi.components['schemas']['SharePage'];
 type SmbPublishResult = OpenApi.components['schemas']['SmbPublishResult'];
@@ -55,6 +56,8 @@ export function Shares({ notify, isAdmin, onUnauthenticated }: Props): React.JSX
   const [result, setResult] = useState<SmbPublishResult | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [creating, setCreating] = useState(false);
+  /** The share whose root permissions are open. The root is a node like any other (§6.2). */
+  const [permissionsFor, setPermissionsFor] = useState<PermissionTarget | null>(null);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
 
@@ -245,6 +248,15 @@ export function Shares({ notify, isAdmin, onUnauthenticated }: Props): React.JSX
 
       {creating && <NewShare onCancel={() => setCreating(false)} onCreate={create} />}
 
+      {permissionsFor !== null && (
+        <Permissions
+          target={permissionsFor}
+          notify={notify}
+          onClose={() => setPermissionsFor(null)}
+          onUnauthenticated={onUnauthenticated}
+        />
+      )}
+
       {shares.length === 0 ? (
         <Empty
           glyph="💽"
@@ -289,6 +301,18 @@ export function Shares({ notify, isAdmin, onUnauthenticated }: Props): React.JSX
               >
                 {share.uncPath}
               </button>
+              {isAdmin && (
+                <button
+                  type="button"
+                  className="b"
+                  title="Bu paylaşımın kök izinleri"
+                  onClick={() =>
+                    setPermissionsFor({ kind: 'share', id: share.id, name: share.name })
+                  }
+                >
+                  🔑 İzinler
+                </button>
+              )}
               <span className="st2 dn">{share.readOnly ? 'salt okunur' : 'yazılabilir'}</span>
               {share.published ? (
                 <span className="st2 up">yayımlandı</span>
@@ -432,7 +456,7 @@ function NewShare({
 
         <p className="note">
           Paylaşım <b>kapalı</b> açılır: başta yalnız siz ve diğer yöneticiler görür. Başkalarına
-          açmak için İzinler panelinden bir kök izni yazın.
+          açmak için listedeki <b>İzinler</b> düğmesinden bir kök izni yazın.
         </p>
 
         <div className="row">

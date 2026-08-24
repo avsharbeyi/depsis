@@ -5,6 +5,7 @@ import { api, API_BASE_URL, problemMessage } from './api.js';
 import { formatBytes } from './Dashboard.js';
 import type { Tone } from './ui.js';
 import { Bar, ConfirmBox, Empty, FolderPicker, PromptBox, TONES, toneRgb, Win } from './ui.js';
+import { Permissions, type PermissionTarget } from './Permissions.js';
 
 type FileEntry = OpenApi.components['schemas']['FileEntry'];
 type FileEntryPage = OpenApi.components['schemas']['FileEntryPage'];
@@ -36,6 +37,13 @@ const ROOT: Loc = { trashed: false, trail: [] };
 /** The maximum the contract allows on one page. This screen has no cursor pagination, so it asks
  *  for as much as it is permitted and says "+" when the server admits there is more, rather than
  *  silently drawing a truncated folder as if it were the whole thing. */
+/** One row of the share picker. Only what the switcher needs — the rest of `Share` is the
+ *  Shares screen's business. */
+interface SharePick {
+  id: string;
+  name: string;
+}
+
 const PAGE = 200;
 
 type Modal =
@@ -288,6 +296,30 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
     return () => window.clearTimeout(timer);
   }, [query]);
 
+  /* ── which share ──
+     Undefined means the tenant's default, which is what the API assumes when the parameter is
+     absent — so the first render behaves exactly as it did before shares could be created.
+
+     This exists because `POST /shares` could open a share that nothing in the web app could ever
+     show: every file route resolved the FIRST share and there was no way to name another. */
+  /** The folder whose permissions panel is open, if any. */
+  const [permissionsFor, setPermissionsFor] = useState<PermissionTarget | null>(null);
+  const [shares, setShares] = useState<SharePick[] | null>(null);
+  const [shareId, setShareId] = useState<string | undefined>(undefined);
+  const shareQuery = shareId === undefined ? {} : { shareId };
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const { data } = await api.GET('/shares', {});
+      if (cancelled || data === undefined) return;
+      setShares(data.items.map((item) => ({ id: item.id, name: item.name })));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   /* ── the listing ── */
   useEffect(() => {
     let cancelled = false;
@@ -297,13 +329,13 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
       const q = trashed ? '' : term.trim();
       const result =
         q !== ''
-          ? await api.GET('/search', { params: { query: { q, limit: PAGE } } })
+          ? await api.GET('/search', { params: { query: { q, limit: PAGE, ...shareQuery } } })
           : await api.GET('/files', {
               params: {
                 query: trashed
-                  ? { trashed: true, limit: PAGE }
+                  ? { trashed: true, limit: PAGE, ...shareQuery }
                   : parentId === undefined
-                    ? { limit: PAGE }
+                    ? { limit: PAGE, ...shareQuery }
                     : { parentId, limit: PAGE },
               },
             });
@@ -328,7 +360,9 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [parentId, trashed, term, reloadKey, notify, onUnauthenticated]);
+    // `shareId` is a dependency: switching share has to re-read, and `parentId` is cleared by the
+    // handler that sets it so a folder from the old share cannot survive the switch.
+  }, [parentId, trashed, term, reloadKey, shareId, notify, onUnauthenticated]);
 
   /* ── the two counters in the sidebar strip ──
      Deliberately their own pair of requests: the strip claims a number for both places at once,
@@ -338,8 +372,8 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
     let cancelled = false;
     void (async () => {
       const [home, bin] = await Promise.all([
-        api.GET('/files', { params: { query: { limit: PAGE } } }),
-        api.GET('/files', { params: { query: { trashed: true, limit: PAGE } } }),
+        api.GET('/files', { params: { query: { limit: PAGE, ...shareQuery } } }),
+        api.GET('/files', { params: { query: { trashed: true, limit: PAGE, ...shareQuery } } }),
       ]);
       if (cancelled) return;
       setCounts({ home: countOf(home.data), trash: countOf(bin.data) });
@@ -347,7 +381,7 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [reloadKey]);
+  }, [reloadKey, shareId]);
 
   /* ── the capacity line in the footer ── */
   useEffect(() => {
@@ -768,14 +802,17 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
 
   async function ensureFolder(name: string, parent: string | undefined): Promise<string | null> {
     const { data } = await api.POST('/files/folders', {
-      body: parent === undefined ? { name } : { name, parentId: parent },
+      // `shareId` only for a TOP-LEVEL folder: with a parent, the parent decides the share and the
+      // API refuses to be told twice.
+      body: parent === undefined ? { name, ...shareQuery } : { name, parentId: parent },
     });
     if (data !== undefined) return data.id;
     // 409 is the ordinary case, not a fault: the user is re-uploading a folder they already have,
     // or two files from the same subdirectory raced. Adopt the existing folder and carry on.
     const listing = await api.GET('/files', {
       params: {
-        query: parent === undefined ? { limit: PAGE } : { parentId: parent, limit: PAGE },
+        query:
+          parent === undefined ? { limit: PAGE, ...shareQuery } : { parentId: parent, limit: PAGE },
       },
     });
     const match = listing.data?.items.find((item) => item.kind === 'folder' && item.name === name);
@@ -1115,6 +1152,31 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
         </span>
       </div>
 
+      {shares !== null && shares.length > 1 && (
+        <div className="netrow" style={{ marginBottom: 10 }}>
+          <span className="lbl">Paylaşım</span>
+          <select
+            className="b"
+            aria-label="Hangi paylaşım"
+            value={shareId ?? ''}
+            onChange={(event) => {
+              // The folder trail belongs to the old share — a parent id from it would 404 against
+              // the new one, and a breadcrumb pointing at a folder in another share is worse than
+              // no breadcrumb. Going home is the only honest reset.
+              setShareId(event.target.value === '' ? undefined : event.target.value);
+              go(ROOT);
+            }}
+          >
+            <option value="">Varsayılan</option>
+            {shares.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       <div className="quick">
         <button type="button" className={!trashed ? 'qf on' : 'qf'} onClick={() => go(ROOT)}>
           <span className="g" style={tint('iris', 0.2)} aria-hidden>
@@ -1165,6 +1227,23 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
           </>
         ) : (
           <>
+            {/* ONE folder, and only a folder. Permissions are set on folders — a file inherits
+                the one it sits in, which is what `NotAFolderError` says at the endpoint — and a
+                panel that opened for a multi-selection would have to invent a meaning for
+                "the permissions of these four things". */}
+            <button
+              type="button"
+              className="sb"
+              disabled={busy || selected.length !== 1 || selected[0]?.kind !== 'folder'}
+              onClick={() => {
+                const only = selected[0];
+                if (only !== undefined) {
+                  setPermissionsFor({ kind: 'entry', id: only.id, name: only.name });
+                }
+              }}
+            >
+              🔑 İzinler
+            </button>
             <button
               type="button"
               className="sb"
@@ -1533,6 +1612,15 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
           yesLabel="Taşı"
           onYes={() => void move(modal.entries, modal.target.id, modal.target.name)}
           onNo={() => setModal({ kind: 'none' })}
+        />
+      )}
+
+      {permissionsFor !== null && (
+        <Permissions
+          target={permissionsFor}
+          notify={notify}
+          onClose={() => setPermissionsFor(null)}
+          onUnauthenticated={onUnauthenticated}
         />
       )}
     </section>
