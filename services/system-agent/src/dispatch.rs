@@ -60,6 +60,22 @@ fn zerotier_error(e: ZeroTierError) -> Result<Response, SeamError> {
     }
 }
 
+/// One slice of one copy, as a named record rather than nine positional arguments.
+///
+/// The same argument `AclEntry` makes about its three booleans: a call site with two `u64`s and two
+/// `u32`s in a row invites a silent swap, and swapping `offset` with `max_bytes` here would produce
+/// a file that looks complete and is not.
+struct CopySlice<'a> {
+    share: &'a str,
+    from: &'a [&'a str],
+    to: &'a [&'a str],
+    staging_name: &'a str,
+    offset: u64,
+    max_bytes: u64,
+    owner_uid: u32,
+    owner_gid: u32,
+}
+
 pub struct Agent<'a, R: CommandRunner, S: Sink, P: SafePath> {
     pub policy: Policy,
     pub runner: &'a R,
@@ -500,17 +516,17 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// A FAILURE MID-COPY LEAVES A STAGING FILE, deliberately. The caller can resume it by passing
     /// the same staging name and the offset it was told, and if it never does, the agent's own
     /// sweeper walks `.depsis/staging` in every share and unlinks by mtime (`sweep.rs`).
-    fn copy_file(
-        &self,
-        share: &str,
-        from: &[&str],
-        to: &[&str],
-        staging_name: &str,
-        offset: u64,
-        max_bytes: u64,
-        owner_uid: u32,
-        owner_gid: u32,
-    ) -> Result<Response, SeamError> {
+    fn copy_file(&self, spec: &CopySlice<'_>) -> Result<Response, SeamError> {
+        let &CopySlice {
+            share,
+            from,
+            to,
+            staging_name,
+            offset,
+            max_bytes,
+            owner_uid,
+            owner_gid,
+        } = spec;
         let Some(paths) = self.paths else {
             return Ok(Response::Refused {
                 reason: "no share root is configured; storage is not set up".to_string(),
@@ -587,7 +603,12 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
 
         let copied = match std::io::copy(&mut window, &mut staging_file) {
             Ok(n) => n,
-            Err(e) if matches!(crate::data::classify(&e), crate::data::FailureKind::OutOfSpace) => {
+            Err(e)
+                if matches!(
+                    crate::data::classify(&e),
+                    crate::data::FailureKind::OutOfSpace
+                ) =>
+            {
                 // Its own answer, not `Failed`. ADR-0008: a full dataset is permanent and the
                 // caller must not retry — and twenty retries would park twenty more part-files
                 // against the refquota that is already exhausted.
@@ -608,7 +629,10 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
 
         paths.set_owner(&staging_file, owner_uid, owner_gid)?;
         if let Err(e) = staging_file.sync_all() {
-            if matches!(crate::data::classify(&e), crate::data::FailureKind::OutOfSpace) {
+            if matches!(
+                crate::data::classify(&e),
+                crate::data::FailureKind::OutOfSpace
+            ) {
                 // ZFS accounts quota at transaction-group commit, so this is where a full dataset
                 // most often shows up — `data.rs` says the same about uploads.
                 return Ok(Response::OutOfSpace {
@@ -1203,16 +1227,16 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             } => {
                 let from: Vec<&str> = from.iter().map(|c| c.as_str()).collect();
                 let to: Vec<&str> = to.iter().map(|c| c.as_str()).collect();
-                self.copy_file(
-                    share.as_str(),
-                    &from,
-                    &to,
-                    staging_name.as_str(),
-                    *offset,
-                    *max_bytes,
-                    owner_uid.get(),
-                    owner_gid.get(),
-                )
+                self.copy_file(&CopySlice {
+                    share: share.as_str(),
+                    from: &from,
+                    to: &to,
+                    staging_name: staging_name.as_str(),
+                    offset: *offset,
+                    max_bytes: *max_bytes,
+                    owner_uid: owner_uid.get(),
+                    owner_gid: owner_gid.get(),
+                })
             }
 
             Request::RemoveEntry {
@@ -2468,18 +2492,39 @@ mod tests {
             "the destination must not exist until the copy is whole"
         );
         assert_eq!(
-            std::fs::metadata(h.share_path(&["alice", STAGING_DIR[0], STAGING_DIR[1], "part.part"]))
-                .expect("stat staged")
-                .len(),
+            std::fs::metadata(h.share_path(&[
+                "alice",
+                STAGING_DIR[0],
+                STAGING_DIR[1],
+                "part.part"
+            ]))
+            .expect("stat staged")
+            .len(),
             256
         );
     }
 
     #[test]
-    fn the_agent_clamps_a_slice_the_caller_asked_to_make_huge() {
-        // A caller that asks for the whole file must not get it: the clamp is what makes "no single
-        // agent call can be made long" true rather than a convention the API is trusted to follow.
-        assert!(crate::op::MAX_COPY_SLICE <= 64 * 1024 * 1024);
+    fn a_slice_the_caller_asked_to_make_huge_is_handled_rather_than_overflowing() {
+        // A caller that asks for the whole file must not get it — the clamp is what makes "no
+        // single agent call can be made long" true rather than a convention the API is trusted to
+        // follow. Measured against the behaviour, not the constant: asserting the constant equals
+        // itself would pass with the clamp deleted. What this pins is that `u64::MAX` is neither
+        // refused nor overflowed by `offset.saturating_add(slice)`.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "big.bin"]), vec![3u8; 400]).expect("write");
+
+        let raw = format!(
+            r#"{{"op":"copy_file","share":"alice","from":["big.bin"],"to":["copy.bin"],"staging_name":"clamp.part","offset":0,"max_bytes":{},"owner_uid":300001,"owner_gid":300001}}"#,
+            u64::MAX
+        );
+        match call(&h, &raw) {
+            Response::Copied { offset, done } => {
+                assert_eq!(offset, 400);
+                assert!(done);
+            }
+            other => panic!("expected a completed copy, got {other:?}"),
+        }
     }
 
     #[test]
