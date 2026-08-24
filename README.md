@@ -214,8 +214,34 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   sütun, klasör değil, yani baytları hâlâ yerinde ve satırı görmeyen bir yürüyüş kullanıcının
   zaten sildiği şey için her on beş dakikada bir İKİNCİ satır yazardı.
 
-- ZFS havuzu yaratma. Ajan dataset ve anlık görüntü yaratabiliyor, havuz yaratamıyor — mirror
-  sihirbazı bu yüzden yok. `POST /shares` bir dataset açar ama havuzu operatör kurar.
+- **Kutuda hangi disklerin olduğu artık biliniyor** — ve bu, olmadığı sürece havuz sihirbazının
+  yazılamayacağı parçaydı.
+
+  Ajanın kapalı işlem kümesinde `ReadSmartSummary` vardı, "diskleri listele" yoktu. İki sonucu
+  oldu. `DEPSIS_SMART_DISKS` bir operatörün `api.env`'e ELLE yazdığı `/dev/disk/by-id` adları
+  listesiydi, ve o adları alacak bir yer yoktu — kılavuzun kendi örneği bile `/dev/sda` yazıyordu,
+  ajanın yapı gereği reddettiği bir biçim. Ve §8.1 her yıkıcı depolama işleminden önce etkilenen
+  diskleri SERİ/WWN ile adlandıran bir analiz istiyor; envanter olmadan o analiz üretilemez.
+
+  `ListDisks` OPERANDSIZ, ve güvenlik argümanının tamamı bu: çağıran bir aygıt, bir yol ya da bir
+  bayrak adlandıramıyor, yani içinden bir `-d` geçirilebilecek hiçbir şey yok. Ajan tek bir sabit
+  argv koşuyor (`lsblk --json --bytes`) ve söylediğini bildiriyor.
+
+  `serial` NULL OLABİLİR ve bu bir eksiklik değil: ADR-0000 ölçtü, SCSI VPD sayfa 0x80 Hyper-V'de
+  bozuk. Kimlik zinciri sayfa 0x83 — yani WWN — sonra partuuid, sonra ZFS etiket GUID'i. Yalnız
+  seriye dayanan bir onay kutusu, projenin geliştirildiği hipervizörde boş bir alan gösterirdi.
+
+  Diskler ekranı yalnız yöneticiye açık ve okunacak sütun **üstünde ne var**: boş, tek güvenli
+  durum. `/`, `/boot` ya da `/boot/efi` taşıyan bir disk kendi etiketini alıyor, çünkü bu asla bir
+  yorum meselesi olmamalı — o diski silmek cihazın kendisini siler.
+
+  `DEPSIS_SMART_DISKS` artık bir DARALTMA, tek kaynak değil: boş bırakılırsa DEPSIS kutuya soruyor
+  ve çıkarılabilir olmayan her diski izliyor. Çıkarılabilirler bilerek dışarıda — giden bir USB
+  belleği "dizi sağlıklı" diye okunan bir panoda gürültüdür.
+
+- ZFS havuzu yaratma. Ajan dataset ve anlık görüntü yaratabiliyor, havuz yaratamıyor. Sihirbazın
+  eksik olan yarısı artık envanter değil, `CreatePool` işleminin kendisi. `POST /shares` bir
+  dataset açar ama havuzu hâlâ operatör kurar.
 - Paylaşımı SİLMEK. Grant'ları paylaşımı tutuyor (`ON DELETE RESTRICT`) ve son grant'ı silmek de
   reddediliyor. Bilinçli: paylaşımı silmek dataset'i silmek demek, ve ADR-0007 yıkıcı havuz
   işlemlerini üründen dışarıda tutuyor. Kapatmanın yolu, kimseyi adlandırmayan bir kök izni.

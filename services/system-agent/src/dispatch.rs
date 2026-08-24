@@ -33,6 +33,7 @@ pub mod bin {
     pub const ZPOOL: &str = "/usr/sbin/zpool";
     pub const SMARTCTL: &str = "/usr/sbin/smartctl";
     pub const TESTPARM: &str = "/usr/bin/testparm";
+    pub const LSBLK: &str = crate::disks::LSBLK;
 }
 
 /// Where staging files live inside a share.
@@ -1223,6 +1224,14 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 })
             }
 
+            Request::ListDisks {} => {
+                // A constant argv. The operation has no operands, so there is nothing here that
+                // came from the caller — see `Request::ListDisks` for why that is the point.
+                let out = self.runner.run(bin::LSBLK, &crate::disks::argv())?;
+                let (disks, truncated) = crate::disks::parse(&out)?;
+                Ok(Response::Disks { disks, truncated })
+            }
+
             Request::ReadSmartSummary { disk_by_id } => {
                 // Built from a validated single component, so the caller cannot reach outside
                 // /dev/disk/by-id or smuggle a flag (risk R1).
@@ -1701,6 +1710,72 @@ mod tests {
             .last()
             .expect("path arg")
             .starts_with("/dev/disk/by-id/"));
+    }
+
+    #[test]
+    fn the_disk_inventory_runs_one_fixed_argv() {
+        // The security property of `list_disks`, and the only one it has: the request carries no
+        // operands, so every element of the command line is a literal in this crate. A future
+        // field on this variant would show up here as an argv that stopped matching.
+        let r = MockCommandRunner::with_responses([
+            r#"{"blockdevices":[{"kname":"sda","type":"disk","size":100,"id-link":"ata-X"}]}"#
+                .into(),
+        ]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"list_disks"}"#,
+            peer(API_UID),
+            "c9",
+            "disk inventory",
+        );
+
+        match resp {
+            Response::Disks { disks, truncated } => {
+                assert!(!truncated);
+                assert_eq!(disks.len(), 1);
+                assert_eq!(disks[0].by_id.as_deref(), Some("ata-X"));
+            }
+            other => panic!("expected an inventory, got {other:?}"),
+        }
+
+        let argv = r.call(0).expect("lsblk was run");
+        assert_eq!(argv[0], crate::disks::LSBLK);
+        assert_eq!(&argv[1..], crate::disks::argv().as_slice());
+    }
+
+    #[test]
+    fn the_disk_inventory_takes_no_operands() {
+        // `deny_unknown_fields`, exercised on the one variant where a stray field would be an
+        // argument to a command. A caller that could add `"device":"-d"` here would be choosing
+        // part of a privileged command line.
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"list_disks","device":"/dev/sda"}"#,
+            peer(API_UID),
+            "c9",
+            "attack",
+        );
+        assert!(matches!(resp, Response::Refused { .. }));
+        assert!(r.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn unreadable_lsblk_output_is_a_failure_and_not_an_empty_box() {
+        // "There are no disks in this machine" is the most dangerous wrong answer this operation
+        // can give, because its caller is about to offer disks to overwrite.
+        let r = MockCommandRunner::with_responses(["<html>404</html>".into()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"list_disks"}"#,
+            peer(API_UID),
+            "c9",
+            "disk inventory",
+        );
+        assert!(matches!(resp, Response::Failed { .. }), "{resp:?}");
     }
 
     #[test]

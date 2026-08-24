@@ -999,6 +999,38 @@ paths:
           # operatörün görmesi gereken en önemli farkı siler.
           $ref: '#/components/responses/Problem'
 
+  /system/disks:
+    get:
+      tags: [system]
+      summary: Kutudaki fiziksel diskler
+      description: |
+        `/system/telemetry` "bana söylenen diskler nasıl" sorusunu cevaplıyor ve bir operatörün
+        `DEPSIS_SMART_DISKS`'e elle yazdığı listeye dayanıyor. Bu uç farklı bir soruyu
+        cevaplıyor: **kutuda ne var.**
+
+        §8.1 her yıkıcı depolama işleminden önce, etkilenen diskleri SERİ/WWN ile adlandıran bir
+        analiz istiyor. Envanter olmadan o analiz üretilemez — havuz oluşturma sihirbazının
+        olmamasının sebebi buydu.
+
+        `serial` NULL OLABİLİR ve bu bir eksiklik değil: ADR-0000 ölçtü, SCSI VPD sayfa 0x80
+        Hyper-V'de bozuk. Kimlik zinciri sayfa 0x83 (yani `wwn`), sonra partuuid, sonra ZFS
+        etiket GUID'i. Yalnız seriye dayanan bir onay kutusu, projenin geliştirildiği
+        hipervizörde boş bir alan gösterirdi.
+
+        Yalnız yöneticiye. Diskin modeli, serisi ve neyin bağlı olduğu, bir kullanıcının
+        görmesi gereken bir şey değil.
+      responses:
+        '200':
+          description: Envanter
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiskInventory' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503':
+          # Boş bir `disks` dizisi DEĞİL. "Bu kutuda disk yok" ile "soramadık" arasındaki fark,
+          # bir havuz sihirbazının önünde durduğu farkın ta kendisi.
+          $ref: '#/components/responses/Problem'
+
   /jobs:
     get:
       tags: [system]
@@ -2789,6 +2821,62 @@ components:
             reddediyor, çünkü sdX yeniden başlatmada başka bir diski gösterebilir (risk R1).
         healthy: { type: boolean }
         temperatureCelsius: { type: integer }
+
+    DiskInventory:
+      type: object
+      required: [disks, complete]
+      properties:
+        disks:
+          type: array
+          items: { $ref: '#/components/schemas/DiskInventoryEntry' }
+        complete:
+          type: boolean
+          description: |
+            Liste tam mı. Ajan `MAX_DISKS`'te kesiyor; kesilmiş bir envanterden yazılan bir onay
+            metni, etkileyeceği disklerin bir alt kümesini adlandırırdı.
+
+    DiskInventoryEntry:
+      type: object
+      required: [kname, sizeBytes, rotational, removable, holds, mounted, holdsSystem]
+      properties:
+        byId:
+          type: string
+          description: |
+            `/dev/disk/by-id` altındaki kararlı ad — `DEPSIS_SMART_DISKS`'e yazılacak olan, ve
+            `ReadSmartSummary`'nin aldığı. Çekirdek kararlı bir bağ vermediyse yok.
+        kname:
+          type: string
+          description: |
+            Çekirdek adı (`sda`, `nvme0n1`). Kararlı adın YANINDA gösterilmek için — operatör
+            kasadaki etikette bunu okuyor — ama kimlik olarak asla: `/dev/sdX` yeniden
+            başlatmada başka bir fiziksel diski gösterebilir (risk R1).
+        sizeBytes: { type: integer, format: int64, minimum: 0 }
+        model: { type: string }
+        serial:
+          type: string
+          description: |
+            Yok olabilir. VPD sayfa 0x80 Hyper-V'de bozuk (ADR-0000); kimlik için `wwn`
+            kullanılır.
+        wwn: { type: string, description: SCSI VPD sayfa 0x83. Kimlik zincirinin ilk halkası. }
+        rotational: { type: boolean }
+        removable:
+          type: boolean
+          description: Çıkarılabilir. Giden bir USB belleği, bir vdev'i de götürür.
+        transport: { type: string, description: '`sata`, `nvme`, `usb`, …' }
+        holds:
+          type: array
+          items: { type: string }
+          description: |
+            Diskte hâlihazırda ne var: bölüm tablosu türü ve bulunan dosya sistemi imzaları.
+            **BOŞ, tek güvenli durum.** Buradaki her şey, bu diske havuz kurmanın bir şeyi yok
+            edeceği anlamına geliyor.
+        mounted: { type: boolean, description: Bir bölümü bir yere bağlı. }
+        holdsSystem:
+          type: boolean
+          description: |
+            `/`, `/boot` ya da `/boot/efi` bu diskte. Kendi alanı, çünkü bu asla bir yorum
+            meselesi olmamalı: bu diski silmek cihazın kendisini siler, ve API onu bir onay
+            metniyle değil doğrudan reddediyor.
 
     OpenConsoleRequest:
       type: object

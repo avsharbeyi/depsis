@@ -78,6 +78,14 @@ describe('the emitted agent schema', () => {
       // written over SMB — which is what a NAS is for — was invisible to the web interface, to
       // search and to the permission walk.
       'list_directory',
+      // What disks the box has. NO OPERANDS, which is the whole of its security argument: nothing
+      // in the request reaches the command line, so there is no `-d` and no second device to
+      // smuggle. It exists because §8.1 requires a destructive storage operation to be preceded by
+      // an analysis naming the affected disks by serial or WWN — an analysis nothing could produce
+      // while the set had `read_smart_summary` and no way to enumerate. The same gap made
+      // `DEPSIS_SMART_DISKS` a list of `/dev/disk/by-id` names an operator typed in by hand, with
+      // nothing to type them from.
+      'list_disks',
       'move_entry',
       // The bulk data path's control half. `open_transfer` resolves and opens a staging file and
       // returns a one-time token; the bytes travel on a separate socket, because Node cannot
@@ -194,7 +202,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(10);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(11);
   });
 
   it('agrees with the number the agent actually reports', () => {

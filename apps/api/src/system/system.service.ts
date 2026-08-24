@@ -10,6 +10,8 @@ export type Telemetry = Schemas['Telemetry'];
 type PoolStatus = Schemas['PoolStatus'];
 type PoolHealth = PoolStatus['health'];
 type DiskStatus = Schemas['DiskStatus'];
+export type DiskInventory = Schemas['DiskInventory'];
+type DiskInventoryEntry = Schemas['DiskInventoryEntry'];
 
 /**
  * The health strings the API is willing to repeat.
@@ -50,13 +52,16 @@ export class SystemService {
     /**
      * Which disks to ask for a SMART summary, by their `/dev/disk/by-id` name.
      *
-     * Configuration for the same reason as `poolNames`: `ReadSmartSummary` exists in the agent's
-     * closed operation set, "list disks" does not, so there is nothing to enumerate from.
+     * AN OVERRIDE NOW, NOT THE ONLY SOURCE. It used to be the only one — the agent's closed
+     * operation set had `ReadSmartSummary` and nothing that enumerates, so there was nothing to
+     * discover from and the list had to be typed into `api.env` by hand. `ListDisks` closed that,
+     * and leaving the hand-typed list as the sole authority would have kept its two failure modes
+     * for no reason: a mistyped name graphs the temperature of nothing, and a name left behind
+     * after a disk swap shows a permanent red row for a disk that is no longer in the box.
      *
-     * Defaulted rather than required, and the default is the honest one — a deployment that names
-     * no disks reports no disks, which is what an appliance nobody has configured SMART for should
-     * say. It also keeps a caller that only cares about pools from having to pass an empty array to
-     * express "the same as before".
+     * So: empty means ASK THE BOX (see `smartTargets`). Naming disks still overrides that, because
+     * a deployment with twenty disks and two it cares about has a legitimate reason to narrow, and
+     * because an operator who has already written the list should not find it ignored.
      */
     private readonly diskIds: readonly string[] = [],
   ) {}
@@ -113,6 +118,82 @@ export class SystemService {
       cpu: loadAverage === undefined ? {} : { loadAverage },
       memory,
     };
+  }
+
+  /**
+   * What is physically in the box.
+   *
+   * Throws `AgentUnavailableError` when the inventory cannot be read, for the same reason `pools`
+   * does: an empty list would make "this box has no disks" and "we could not ask" the same answer,
+   * and the caller of this one is a wizard that is about to offer disks to overwrite.
+   */
+  async inventory(correlationId: string): Promise<DiskInventory> {
+    const response = await this.agent.call({ op: 'list_disks' }, 'disk inventory', correlationId);
+
+    if (response.status === 'refused' || response.status === 'failed') {
+      throw new AgentUnavailableError(`disk inventory: ${response.reason}`);
+    }
+    if (response.status !== 'disks') {
+      throw new AgentUnavailableError(
+        `disk inventory: expected a disks answer, got '${response.status}'`,
+      );
+    }
+
+    return {
+      disks: response.disks.map((disk): DiskInventoryEntry => ({
+        // `??` rather than spreading a conditional: the contract marks these optional and
+        // `exactOptionalPropertyTypes` refuses an explicit `undefined`, so each one is written
+        // only when the agent gave a value.
+        ...(disk.by_id === null ? {} : { byId: disk.by_id }),
+        kname: disk.kname,
+        sizeBytes: disk.size_bytes,
+        ...(disk.model === null ? {} : { model: disk.model }),
+        ...(disk.serial === null ? {} : { serial: disk.serial }),
+        ...(disk.wwn === null ? {} : { wwn: disk.wwn }),
+        rotational: disk.rotational,
+        removable: disk.removable,
+        ...(disk.transport === null ? {} : { transport: disk.transport }),
+        holds: disk.holds,
+        mounted: disk.mounted,
+        holdsSystem: disk.holds_system,
+      })),
+      complete: !response.truncated,
+    };
+  }
+
+  /**
+   * Which disks telemetry should read a SMART summary for.
+   *
+   * The configured list when there is one; otherwise every non-removable disk the box reports with
+   * a stable `/dev/disk/by-id` name.
+   *
+   * REMOVABLE ONES ARE LEFT OUT of the discovered set. A USB stick is a disk and it is not part of
+   * the appliance's storage; a card reader with no card in it is a block device that answers
+   * nothing. Neither belongs on a health dashboard that an operator is meant to read as "the array
+   * is fine". A deployment that genuinely wants one names it, which is what the override is for.
+   *
+   * A disk with no `by_id` is left out too, and there is no alternative: `ReadSmartSummary` takes a
+   * by-id name by construction, precisely so that `/dev/sdX` cannot reach it (risk R1).
+   *
+   * Failure here is NOT fatal to telemetry. Discovery is a convenience over a configured list, so
+   * an inventory that cannot be read falls back to the configured one — which, in the case this
+   * branch exists for, is empty. Telemetry then reports no disks, exactly as it did before this
+   * existed, rather than taking the pool status down with it.
+   */
+  private async smartTargets(correlationId: string): Promise<readonly string[]> {
+    if (this.diskIds.length > 0) return this.diskIds;
+
+    try {
+      const { disks } = await this.inventory(correlationId);
+      return disks
+        .filter((disk) => !disk.removable && disk.byId !== undefined)
+        .map((disk) => disk.byId as string);
+    } catch (error) {
+      this.logger.warn(
+        `could not enumerate disks for SMART: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
   }
 
   private async pools(correlationId: string): Promise<PoolStatus[]> {
@@ -191,7 +272,7 @@ export class SystemService {
   private async disks(correlationId: string): Promise<DiskStatus[]> {
     const statuses: DiskStatus[] = [];
 
-    for (const id of this.diskIds) {
+    for (const id of await this.smartTargets(correlationId)) {
       // Sequential for the same reason as the pool loop: the agent serialises anyway, so
       // concurrency here would only move the queue from its accept loop into AgentService.
       const response = await this.agent.call(

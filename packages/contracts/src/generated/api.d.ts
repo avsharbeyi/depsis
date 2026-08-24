@@ -1697,6 +1697,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/disks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Kutudaki fiziksel diskler
+         * @description `/system/telemetry` "bana söylenen diskler nasıl" sorusunu cevaplıyor ve bir operatörün
+         *     `DEPSIS_SMART_DISKS`'e elle yazdığı listeye dayanıyor. Bu uç farklı bir soruyu
+         *     cevaplıyor: **kutuda ne var.**
+         *
+         *     §8.1 her yıkıcı depolama işleminden önce, etkilenen diskleri SERİ/WWN ile adlandıran bir
+         *     analiz istiyor. Envanter olmadan o analiz üretilemez — havuz oluşturma sihirbazının
+         *     olmamasının sebebi buydu.
+         *
+         *     `serial` NULL OLABİLİR ve bu bir eksiklik değil: ADR-0000 ölçtü, SCSI VPD sayfa 0x80
+         *     Hyper-V'de bozuk. Kimlik zinciri sayfa 0x83 (yani `wwn`), sonra partuuid, sonra ZFS
+         *     etiket GUID'i. Yalnız seriye dayanan bir onay kutusu, projenin geliştirildiği
+         *     hipervizörde boş bir alan gösterirdi.
+         *
+         *     Yalnız yöneticiye. Diskin modeli, serisi ve neyin bağlı olduğu, bir kullanıcının
+         *     görmesi gereken bir şey değil.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Envanter */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DiskInventory"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/jobs": {
         parameters: {
             query?: never;
@@ -4168,6 +4223,56 @@ export interface components {
             id: string;
             healthy: boolean;
             temperatureCelsius?: number;
+        };
+        DiskInventory: {
+            disks: components["schemas"]["DiskInventoryEntry"][];
+            /**
+             * @description Liste tam mı. Ajan `MAX_DISKS`'te kesiyor; kesilmiş bir envanterden yazılan bir onay
+             *     metni, etkileyeceği disklerin bir alt kümesini adlandırırdı.
+             */
+            complete: boolean;
+        };
+        DiskInventoryEntry: {
+            /**
+             * @description `/dev/disk/by-id` altındaki kararlı ad — `DEPSIS_SMART_DISKS`'e yazılacak olan, ve
+             *     `ReadSmartSummary`'nin aldığı. Çekirdek kararlı bir bağ vermediyse yok.
+             */
+            byId?: string;
+            /**
+             * @description Çekirdek adı (`sda`, `nvme0n1`). Kararlı adın YANINDA gösterilmek için — operatör
+             *     kasadaki etikette bunu okuyor — ama kimlik olarak asla: `/dev/sdX` yeniden
+             *     başlatmada başka bir fiziksel diski gösterebilir (risk R1).
+             */
+            kname: string;
+            /** Format: int64 */
+            sizeBytes: number;
+            model?: string;
+            /**
+             * @description Yok olabilir. VPD sayfa 0x80 Hyper-V'de bozuk (ADR-0000); kimlik için `wwn`
+             *     kullanılır.
+             */
+            serial?: string;
+            /** @description SCSI VPD sayfa 0x83. Kimlik zincirinin ilk halkası. */
+            wwn?: string;
+            rotational: boolean;
+            /** @description Çıkarılabilir. Giden bir USB belleği, bir vdev'i de götürür. */
+            removable: boolean;
+            /** @description `sata`, `nvme`, `usb`, … */
+            transport?: string;
+            /**
+             * @description Diskte hâlihazırda ne var: bölüm tablosu türü ve bulunan dosya sistemi imzaları.
+             *     **BOŞ, tek güvenli durum.** Buradaki her şey, bu diske havuz kurmanın bir şeyi yok
+             *     edeceği anlamına geliyor.
+             */
+            holds: string[];
+            /** @description Bir bölümü bir yere bağlı. */
+            mounted: boolean;
+            /**
+             * @description `/`, `/boot` ya da `/boot/efi` bu diskte. Kendi alanı, çünkü bu asla bir yorum
+             *     meselesi olmamalı: bu diski silmek cihazın kendisini siler, ve API onu bir onay
+             *     metniyle değil doğrudan reddediyor.
+             */
+            holdsSystem: boolean;
         };
         OpenConsoleRequest: {
             /** @description Mevcut parola. Oturum varken de isteniyor (ADR-0018). */

@@ -108,7 +108,15 @@ DEPSIS_CONSOLE_SOCKET=/run/depsis/console.sock
 DEPSIS_SMB_HOST=depsis
 DEPSIS_SHARE_PARENT_DATASET=tank/depsis
 DEPSIS_ZFS_POOLS=tank
-DEPSIS_SMART_DISKS=/dev/sda,/dev/sdb
+# İSTEĞE BAĞLI, ve boş bırakmak artık doğru cevap: DEPSIS kutuya kendisi soruyor ve
+# çıkarılabilir olmayan her diski izliyor (Diskler ekranı, §3.8). Yalnız BİR ALT KÜMEYİ izlemek
+# isterseniz burada adlandırın.
+#
+# Değerler `/dev/disk/by-id` ADLARIDIR, `/dev/sdX` DEĞİL. Ajan bu operandı o dizin altında tek
+# bir bileşen olarak tipliyor ve içinde `/` geçen bir değeri yapı gereği reddediyor — `sdb`
+# yeniden başlatmada başka bir fiziksel diski gösterebilir (risk R1). Doğru adları Diskler
+# ekranından kopyalayın.
+# DEPSIS_SMART_DISKS=ata-Samsung_SSD_860_S3Z8NB0K,ata-WDC_WD40EFRX_WD-WCC4E123
 ```
 
 Bu dosyayı **hem API hem worker** okuyor, ve bu bilerek böyle: buradaki her ayar — ajan soketleri,
@@ -317,7 +325,31 @@ journalctl -u depsis-worker -f | grep 'smb audit'
 > kanıtlayamadığında geri alıyor. Yukarıdaki listeye elle bir ad eklemeyin; ajanın testleri o
 > listeyi tam eşleşmeyle sabitliyor, tam da bu yüzden.
 
-### 3.8 Konsol
+### 3.8 Diskler
+
+**Diskler** ekranı (yalnız yöneticiye) kutuda fiziksel olarak ne olduğunu gösteriyor: kararlı ad,
+model, seri, WWN, boyut, ve — okunacak asıl sütun — **üstünde ne var**.
+
+`/system/telemetry` farklı bir soruyu cevaplıyor: "bana söylenen diskler nasıl". Bu ekran "kutuda
+ne var" diyor, ve ikisi tam da önemli olan durumda ayrışıyor — kimsenin yapılandırmadığı bir disk
+birincisine görünmez, ikincisinin ise bütün konusudur.
+
+| Sütun                      | Ne demek                                                                         |
+| -------------------------- | -------------------------------------------------------------------------------- |
+| **boş**                    | Ajanın bulabildiği hiçbir şey yok. Bir havuza katmanın güvenli olduğu tek durum. |
+| bölüm/dosya sistemi adları | Diskte bir şey var. Kullanmak onu yok eder.                                      |
+| **bağlı**                  | Bir bölümü şu anda bir yere bağlı.                                               |
+| **sistem diski**           | `/`, `/boot` ya da `/boot/efi` burada. **Bu diske dokunmayın.**                  |
+
+Bir diskin **serisi boş görünebilir** ve bu bir arıza değil: SCSI VPD sayfa 0x80 bazı
+hipervizörlerde bozuk bilgi veriyor (ADR-0000'de ölçüldü). Kimlik için WWN kullanılır.
+
+§8.1, her yıkıcı depolama işleminden önce etkilenen diskleri seri/WWN ile adlandıran bir analiz
+istiyor. Bu ekran o analizdir — ve bilerek, onaylanacak bir şey olmadan önce, kendi başına
+duruyor: cihaz hâlâ güvendeyken okunabilen bir envanter, aynı listeyi geçilmeye çalışılan bir
+onay kutusunun içinde göstermekten daha değerli.
+
+### 3.9 Konsol
 
 Yalnız yönetici, ve her oturum parola onayı ister. Bir oturum, birinin açık bırakılmış dizüstünü
 ödünç alan kişinin sahip olduğu şeydir; kabuk erişimi için yetmez (ADR-0018).

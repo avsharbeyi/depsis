@@ -541,6 +541,24 @@ pub enum Request {
         disk_by_id: SafeComponent,
     },
 
+    /// What disks are in this box.
+    ///
+    /// NO OPERANDS, and that is the whole security argument for it: the caller cannot name a
+    /// device, a path or a flag, so there is nothing here through which a `--force` or a second
+    /// device could be smuggled. The agent runs one fixed argv and reports what it said.
+    ///
+    /// It exists because the closed set had no way to answer "what is in this box", and two
+    /// things depended on the answer. `DEPSIS_SMART_DISKS` is a comma-separated list of
+    /// `/dev/disk/by-id` names an operator types into a file by hand — a mistyped one graphs the
+    /// temperature of nothing, and there was no way to offer a list to choose from. And §8.1
+    /// requires every destructive storage operation to be preceded by an analysis naming the
+    /// affected disks BY SERIAL/WWN; without an inventory that analysis cannot be produced, which
+    /// is why pool creation has no wizard.
+    ///
+    /// READ ONLY, and structurally so rather than by intention: `lsblk` has no destructive mode
+    /// and the argv is a constant in this crate.
+    ListDisks {},
+
     /// Validate and atomically publish a Samba configuration.
     ///
     /// P0-B measured why `testparm` alone is not a sufficient gate: an invalid
@@ -1013,6 +1031,80 @@ pub struct DirEntry {
 /// socket's line limit rather than by taste: one response has to fit in one line.
 pub const MAX_LISTING: usize = 5_000;
 
+/// One whole disk, as `ListDisks` found it.
+///
+/// Partitions are not reported as disks. They appear only through `holds`, `mounted` and
+/// `holds_system` — which is what a caller about to overwrite the device needs to know, and a
+/// per-partition inventory is not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DiskInfo {
+    /// The `/dev/disk/by-id` name, when the kernel gave the device a stable link.
+    ///
+    /// THE ONLY IDENTITY WORTH STORING, and the one `ReadSmartSummary` takes. `kname` is reported
+    /// beside it because an operator reads `sdb` on a chassis label, but a `/dev/sdX` name can
+    /// belong to a different physical disk after a reboot — risk R1, and the reason
+    /// `ReadSmartSummary` refuses to take one.
+    ///
+    /// Optional because a device can genuinely have no stable link: a loopback device, or a
+    /// virtual disk whose backend supplies no identity page.
+    pub by_id: Option<String>,
+
+    /// The kernel name — `sda`, `nvme0n1`. For display beside the stable id, never as identity.
+    pub kname: String,
+
+    pub size_bytes: u64,
+
+    pub model: Option<String>,
+
+    /// The device serial, which is NULLABLE ON PURPOSE and not because it is uninteresting.
+    ///
+    /// ADR-0000 recorded the measurement: SCSI VPD page 0x80 is broken under Hyper-V — the
+    /// `storvsc_drv.c` workaround exists for it — so a serial read there is absent or wrong. The
+    /// identity chain the baseline settled on is page 0x83 (the WWN below) first, then partuuid,
+    /// then the ZFS label GUID. A confirmation dialogue that keyed on the serial alone would show
+    /// an empty field on exactly the hypervisor the project develops against.
+    pub serial: Option<String>,
+
+    /// The World Wide Name — SCSI VPD page 0x83. The first link in that chain.
+    pub wwn: Option<String>,
+
+    /// Spinning rust, as the kernel reports it (`queue/rotational`).
+    pub rotational: bool,
+
+    /// A device that can be unplugged. Never a pool candidate without the operator saying so
+    /// twice: a USB stick that goes away takes a vdev with it.
+    pub removable: bool,
+
+    /// `sata`, `nvme`, `usb`, … as the kernel names the transport.
+    pub transport: Option<String>,
+
+    /// What is already on the disk: partition table type and filesystem signatures found on it or
+    /// on its partitions, deduplicated.
+    ///
+    /// EMPTY IS THE ONLY SAFE STATE. Anything in this list means creating a pool on this device
+    /// destroys something, and §8.1's written confirmation exists for exactly that sentence.
+    pub holds: Vec<String>,
+
+    /// Any partition of this disk is mounted, anywhere.
+    pub mounted: bool,
+
+    /// A filesystem of this disk is mounted at `/`, `/boot` or `/boot/efi`.
+    ///
+    /// Its own flag rather than something a caller derives from `holds`, because it is the one
+    /// answer that must never be a judgement call: overwriting this disk destroys the appliance
+    /// itself, and the API refuses it outright rather than asking for a confirmation somebody
+    /// could type.
+    pub holds_system: bool,
+}
+
+/// The most `ListDisks` will report.
+///
+/// Bounded for the same reason `MAX_LISTING` is — one response is one line on the control socket —
+/// and set far above any real appliance. A box presenting more block devices than this is
+/// presenting something other than disks.
+pub const MAX_DISKS: usize = 256;
+
 /// One POSIX ACL entry: a GROUP and the three permission bits.
 ///
 /// There is no `uid` field and there must not be one. ADR-0004 chose the grant model, and this
@@ -1068,6 +1160,15 @@ pub enum Response {
         healthy: bool,
         temperature_celsius: Option<i32>,
         raw: String,
+    },
+    Disks {
+        disks: Vec<DiskInfo>,
+        /// More devices than `MAX_DISKS`, so the list is a prefix.
+        ///
+        /// Reported rather than silently cut for the same reason `Listing` reports it: a caller
+        /// about to write a confirmation dialogue from a truncated inventory would be naming a
+        /// subset of the disks it is about to affect.
+        truncated: bool,
     },
     /// The Samba configuration was written AND proved.
     ///
@@ -1320,7 +1421,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

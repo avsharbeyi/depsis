@@ -5,6 +5,7 @@ import { Account } from './Account.js';
 import { api } from './api.js';
 import { Apps } from './Apps.js';
 import { Backups } from './Backups.js';
+import { Disks } from './Disks.js';
 import { Background } from './Background.js';
 import { formatBytes } from './Dashboard.js';
 import { Files } from './Files.js';
@@ -60,6 +61,7 @@ export type PaneId =
   | 'teams'
   | 'jobs'
   | 'shares'
+  | 'disks'
   | 'account'
   | 'transfers'
   | 'backups'
@@ -128,6 +130,17 @@ const PANES: Record<PaneId, PaneMeta> = {
     tone: 'cool',
     wide: false,
     adminOnly: false,
+  },
+  disks: {
+    // Admin-only, matching `GET /system/disks`. The endpoint reports every disk's model, serial
+    // and what is stored on it; none of that is a member's business, and a dock entry that only
+    // ever produces a 403 is a button that lies about what the appliance can do for them.
+    slug: 'diskler',
+    label: 'Diskler',
+    glyph: '🖴',
+    tone: 'cool',
+    wide: false,
+    adminOnly: true,
   },
   notes: {
     slug: 'notlar',
@@ -212,6 +225,7 @@ const PANES: Record<PaneId, PaneMeta> = {
 const DOCK_ORDER: PaneId[] = [
   'files',
   'shares',
+  'disks',
   'notes',
   'tasks',
   'transfers',
@@ -865,6 +879,15 @@ function PaneBody({
         <p className="note">Cihaz durumu okunuyor…</p>
       ) : (
         <Backups notify={notify} snapshot={snapshot} />
+      );
+    case 'disks':
+      // Waits for the first telemetry answer for the same reason Backups does — it joins SMART
+      // health onto the inventory by id, and a table whose health column is empty for every row
+      // reads as "no SMART data" rather than as "not asked yet".
+      return snapshot === null ? (
+        <p className="note">Cihaz durumu okunuyor…</p>
+      ) : (
+        <Disks notify={notify} snapshot={snapshot} />
       );
     case 'apps':
       return <Apps notify={notify} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />;

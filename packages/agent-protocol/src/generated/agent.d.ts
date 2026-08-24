@@ -54,6 +54,9 @@ export type AgentRequest =
       op: 'read_smart_summary';
     }
   | {
+      op: 'list_disks';
+    }
+  | {
       op: 'publish_samba_config';
       shares: ShareSpec[];
     }
@@ -527,6 +530,18 @@ export type AgentResponse =
       temperature_celsius?: number | null;
     }
   | {
+      disks: DiskInfo[];
+      status: 'disks';
+      /**
+       * More devices than `MAX_DISKS`, so the list is a prefix.
+       *
+       * Reported rather than silently cut for the same reason `Listing` reports it: a caller
+       * about to write a confirmation dialogue from a truncated inventory would be naming a
+       * subset of the disks it is about to affect.
+       */
+      truncated: boolean;
+    }
+  | {
       shares: number;
       status: 'published';
       verified: boolean;
@@ -640,6 +655,81 @@ export type ZeroTierNetworkStatus =
   | 'ACCESS_DENIED'
   | 'UNKNOWN';
 
+/**
+ * One whole disk, as `ListDisks` found it.
+ *
+ * Partitions are not reported as disks. They appear only through `holds`, `mounted` and
+ * `holds_system` — which is what a caller about to overwrite the device needs to know, and a
+ * per-partition inventory is not.
+ */
+export interface DiskInfo {
+  /**
+   * The `/dev/disk/by-id` name, when the kernel gave the device a stable link.
+   *
+   * THE ONLY IDENTITY WORTH STORING, and the one `ReadSmartSummary` takes. `kname` is reported
+   * beside it because an operator reads `sdb` on a chassis label, but a `/dev/sdX` name can
+   * belong to a different physical disk after a reboot — risk R1, and the reason
+   * `ReadSmartSummary` refuses to take one.
+   *
+   * Optional because a device can genuinely have no stable link: a loopback device, or a
+   * virtual disk whose backend supplies no identity page.
+   */
+  by_id?: string | null;
+  /**
+   * What is already on the disk: partition table type and filesystem signatures found on it or
+   * on its partitions, deduplicated.
+   *
+   * EMPTY IS THE ONLY SAFE STATE. Anything in this list means creating a pool on this device
+   * destroys something, and §8.1's written confirmation exists for exactly that sentence.
+   */
+  holds: string[];
+  /**
+   * A filesystem of this disk is mounted at `/`, `/boot` or `/boot/efi`.
+   *
+   * Its own flag rather than something a caller derives from `holds`, because it is the one
+   * answer that must never be a judgement call: overwriting this disk destroys the appliance
+   * itself, and the API refuses it outright rather than asking for a confirmation somebody
+   * could type.
+   */
+  holds_system: boolean;
+  /**
+   * The kernel name — `sda`, `nvme0n1`. For display beside the stable id, never as identity.
+   */
+  kname: string;
+  model?: string | null;
+  /**
+   * Any partition of this disk is mounted, anywhere.
+   */
+  mounted: boolean;
+  /**
+   * A device that can be unplugged. Never a pool candidate without the operator saying so
+   * twice: a USB stick that goes away takes a vdev with it.
+   */
+  removable: boolean;
+  /**
+   * Spinning rust, as the kernel reports it (`queue/rotational`).
+   */
+  rotational: boolean;
+  /**
+   * The device serial, which is NULLABLE ON PURPOSE and not because it is uninteresting.
+   *
+   * ADR-0000 recorded the measurement: SCSI VPD page 0x80 is broken under Hyper-V — the
+   * `storvsc_drv.c` workaround exists for it — so a serial read there is absent or wrong. The
+   * identity chain the baseline settled on is page 0x83 (the WWN below) first, then partuuid,
+   * then the ZFS label GUID. A confirmation dialogue that keyed on the serial alone would show
+   * an empty field on exactly the hypervisor the project develops against.
+   */
+  serial?: string | null;
+  size_bytes: number;
+  /**
+   * `sata`, `nvme`, `usb`, … as the kernel names the transport.
+   */
+  transport?: string | null;
+  /**
+   * The World Wide Name — SCSI VPD page 0x83. The first link in that chain.
+   */
+  wwn?: string | null;
+}
 /**
  * One thing in a directory, as the agent found it.
  *

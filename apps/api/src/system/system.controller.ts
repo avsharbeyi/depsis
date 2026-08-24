@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 
 import { AgentUnavailableError } from '../agent/agent.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
-import { SystemService, type Telemetry } from './system.service.js';
+import { SystemService, type DiskInventory, type Telemetry } from './system.service.js';
 
 @Controller('system')
 @UseGuards(SessionGuard)
@@ -32,6 +32,35 @@ export class SystemController {
    * `AdminGuard` and therefore admits a wider set for a more privileged operation. See the note on
    * `SystemService.isSystemAdministrator` — the two want reconciling as one decision.
    */
+  /**
+   * GET /system/disks — what is physically in the box.
+   *
+   * The same gate as telemetry, and for a stronger reason: this reports the model and serial of
+   * every disk, and — through `holds` — what is on them. Neither is a user's business.
+   */
+  @Get('disks')
+  async disks(@Req() request: AuthenticatedRequest): Promise<DiskInventory> {
+    const session = request.depsis;
+    if (session === undefined) throw new UnauthorizedException();
+    if (!(await this.system.isSystemAdministrator(session.userId))) {
+      throw new ForbiddenException();
+    }
+
+    try {
+      return await this.system.inventory(randomUUID());
+    } catch (error) {
+      if (error instanceof AgentUnavailableError) {
+        // Not a 200 with an empty list, for the same reason telemetry refuses one: the caller of
+        // this endpoint is choosing disks to overwrite, and "there are none" is the most
+        // dangerous wrong answer it could be given.
+        throw new ServiceUnavailableException(
+          'Disk envanteri okunamadı: sistem ajanına ulaşılamıyor.',
+        );
+      }
+      throw error;
+    }
+  }
+
   @Get('telemetry')
   async telemetry(@Req() request: AuthenticatedRequest): Promise<Telemetry> {
     const session = request.depsis;
