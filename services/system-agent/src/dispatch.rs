@@ -472,32 +472,42 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// Not a tree. A directory with children comes back as `Conflict`, and the API — which stores
     /// the tree and therefore knows it — walks the children itself. See `op::Request::RemoveEntry`
     /// for why the agent must not be given an operation whose blast radius the caller chooses.
-    /// Copy one file to one new name inside a share, without the bytes leaving the agent.
+    /// Copy at most one SLICE of a file into staging, and publish when the source is exhausted.
     ///
-    /// The order is the contract, and it is the same order `publish_transfer` follows for the same
-    /// reasons:
+    /// WHY THE AGENT DOES THE COPY AT ALL. The obvious shape is for the API to read the source over
+    /// the data channel and write the destination back — the two halves already exist. That shape
+    /// has a measured hazard: `unix.rs` hands data connections to `MAX_DATA_CONNECTIONS` worker
+    /// threads over a rendezvous `sync_channel(0)`, so a connection is only accepted once a thread
+    /// is free. Every operation that exists today holds exactly ONE. A copy done that way holds two
+    /// at once, and that many concurrent copies each holding their read connection while waiting
+    /// for a write connection no thread is free to accept is a hard deadlock of the entire data
+    /// socket — every upload and every download on the appliance.
     ///
-    ///   1. Open the source read-only under `RESOLVE_BENEATH`.
-    ///   2. Exclusive-create the staging file. `CreateNew` is what makes two copies racing on one
-    ///      staging name resolve to one winner in the kernel rather than in a check here.
-    ///   3. Copy. `std::io::copy` between two `File`s uses `copy_file_range(2)` on Linux, so on a
-    ///      copy-on-write filesystem this can be near-instant and the bytes never leave the kernel.
-    ///   4. Own it, THEN fsync it. `fchown` changes inode metadata and `fsync` is what makes inode
-    ///      metadata durable; the other order leaves a window where a power cut publishes the file
-    ///      under its real name with the wrong owner and no staging entry left to fix it.
-    ///   5. `publish` — `renameat2(RENAME_NOREPLACE)` plus the destination-directory fsync, in one
-    ///      call so step 5 of ADR-0008 cannot be skipped here either.
+    /// WHY IT IS A SLICE. The control socket, where this runs, is served strictly one connection at
+    /// a time. Whatever this call does, nothing else can ask the agent anything meanwhile. Copying a
+    /// whole file here would make a 50 GB copy a total control-plane outage, and the API's own
+    /// 60-second budget would make such a file impossible to copy at all — every attempt timing
+    /// out, each of the twenty retries leaving another full-size staging file behind. So the caller
+    /// asks for a slice and calls again, and the agent clamps the size itself because a caller that
+    /// asks for the whole file must not get it.
     ///
-    /// A FAILURE AFTER STEP 2 LEAVES A STAGING FILE. That is deliberate rather than unhandled: the
-    /// agent's own sweeper walks `.depsis/staging` in every share and unlinks by mtime
-    /// (`sweep.rs`), so an abandoned copy is reclaimed exactly like an abandoned upload. Removing
-    /// it here on the error path as well would be better; not doing so is not a leak.
+    /// The order on the LAST slice is the contract, and it is the same order `publish_transfer`
+    /// follows for the same reasons: own it, then fsync it — `fchown` changes inode metadata and
+    /// `fsync` is what makes inode metadata durable — then `publish`, which is
+    /// `renameat2(RENAME_NOREPLACE)` plus the destination-directory fsync in one call so ADR-0008's
+    /// step 5 cannot be skipped.
+    ///
+    /// A FAILURE MID-COPY LEAVES A STAGING FILE, deliberately. The caller can resume it by passing
+    /// the same staging name and the offset it was told, and if it never does, the agent's own
+    /// sweeper walks `.depsis/staging` in every share and unlinks by mtime (`sweep.rs`).
     fn copy_file(
         &self,
         share: &str,
         from: &[&str],
         to: &[&str],
         staging_name: &str,
+        offset: u64,
+        max_bytes: u64,
         owner_uid: u32,
         owner_gid: u32,
     ) -> Result<Response, SeamError> {
@@ -508,13 +518,12 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         };
 
         // An empty side names the share root, which is a directory and not a file either way.
-        let (Some(from_name), Some((to_name, to_dirs))) = (from.last(), to.split_last()) else {
+        let (Some(_), Some((to_name, to_dirs))) = (from.last(), to.split_last()) else {
             return Ok(Response::Refused {
                 reason: "a copy needs a source and a destination; the share root is not a file"
                     .to_string(),
             });
         };
-        let _ = from_name;
 
         // The same door `MoveEntry` and `RemoveEntry` close. A copy OUT of staging would publish a
         // half-finished upload under a name of the caller's choosing, with none of
@@ -532,7 +541,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         let mut source: Vec<&str> = vec![share];
         source.extend_from_slice(from);
 
-        let mut source_file = match paths.open(&source, OpenIntent::Read) {
+        let source_file = match paths.open(&source, OpenIntent::Read) {
             Ok(file) => file,
             Err(SeamError::NotFound(what)) => {
                 return Ok(Response::NotFound {
@@ -541,35 +550,83 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             }
             Err(other) => return Err(other),
         };
+        let total = source_file
+            .metadata()
+            .map_err(|e| SeamError::Io(format!("stat source: {e}")))?
+            .len();
 
         let staged = [share, STAGING_DIR[0], STAGING_DIR[1], staging_name];
-        let mut staging_file = match paths.open(&staged, OpenIntent::CreateNew) {
-            Ok(file) => file,
-            // Not a fault. A retried job that already staged this copy finds its own file, and
-            // saying so lets the caller pick a fresh name rather than treating it as a failure of
-            // the copy itself.
-            Err(SeamError::AlreadyExists(what)) => {
-                return Ok(Response::Conflict {
-                    reason: format!("{what}: a copy is already staged under this name"),
+        // `Append`, not `CreateNew`: this call may be the second or the twentieth on one staging
+        // file. O_APPEND also means the kernel resolves the write position at every write, so a
+        // caller's idea of the offset can never place bytes in the wrong part of the file.
+        let mut staging_file = paths.open(&staged, OpenIntent::Append)?;
+        let staged_len = staging_file
+            .metadata()
+            .map_err(|e| SeamError::Io(format!("stat staging file: {e}")))?
+            .len();
+
+        // The FILE is the authority, not the caller's number. A mismatch means the caller and the
+        // filesystem disagree about how much is there, and continuing would either duplicate a
+        // region or leave a hole — both of which produce a file that looks complete and is not.
+        if staged_len != offset {
+            return Ok(Response::Conflict {
+                reason: format!(
+                    "the staged copy is {staged_len} bytes, the caller expected {offset}"
+                ),
+            });
+        }
+
+        let slice = max_bytes.min(crate::op::MAX_COPY_SLICE);
+        // Seek, not read-and-discard. Reading past the staged prefix would make every slice cost
+        // the whole file so far, which on a 50 GB copy is quadratic and would defeat the entire
+        // point of slicing.
+        let mut reader = &source_file;
+        std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(offset))
+            .map_err(|e| SeamError::Io(format!("seek source to {offset}: {e}")))?;
+        let mut window = std::io::Read::take(reader, slice);
+
+        let copied = match std::io::copy(&mut window, &mut staging_file) {
+            Ok(n) => n,
+            Err(e) if matches!(crate::data::classify(&e), crate::data::FailureKind::OutOfSpace) => {
+                // Its own answer, not `Failed`. ADR-0008: a full dataset is permanent and the
+                // caller must not retry — and twenty retries would park twenty more part-files
+                // against the refquota that is already exhausted.
+                return Ok(Response::OutOfSpace {
+                    reason: format!("no space for the copy of {}: {e}", from.join("/")),
                 });
             }
-            Err(other) => return Err(other),
+            Err(e) => return Err(SeamError::Io(format!("copy slice into staging: {e}"))),
         };
 
-        let bytes = std::io::copy(&mut source_file, &mut staging_file)
-            .map_err(|e| SeamError::Io(format!("copy into staging: {e}")))?;
+        let now = offset.saturating_add(copied);
+        if now < total {
+            return Ok(Response::Copied {
+                offset: now,
+                done: false,
+            });
+        }
 
         paths.set_owner(&staging_file, owner_uid, owner_gid)?;
-        staging_file
-            .sync_all()
-            .map_err(|e| SeamError::Io(format!("fsync copy before publish: {e}")))?;
+        if let Err(e) = staging_file.sync_all() {
+            if matches!(crate::data::classify(&e), crate::data::FailureKind::OutOfSpace) {
+                // ZFS accounts quota at transaction-group commit, so this is where a full dataset
+                // most often shows up — `data.rs` says the same about uploads.
+                return Ok(Response::OutOfSpace {
+                    reason: format!("no space to flush the copy: {e}"),
+                });
+            }
+            return Err(SeamError::Io(format!("fsync copy before publish: {e}")));
+        }
 
         let mut dest_dir: Vec<&str> = vec![share];
         dest_dir.extend_from_slice(to_dirs);
         let staging_dir = [share, STAGING_DIR[0], STAGING_DIR[1]];
 
         match paths.publish(&staging_dir, staging_name, &dest_dir, to_name) {
-            Ok(()) => Ok(Response::Copied { bytes }),
+            Ok(()) => Ok(Response::Copied {
+                offset: now,
+                done: true,
+            }),
             // The destination parent is gone, or was never there. `RENAME_NOREPLACE` is
             // all-or-nothing, so the staging file is still where it was and the sweeper will take
             // it.
@@ -1139,6 +1196,8 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 from,
                 to,
                 staging_name,
+                offset,
+                max_bytes,
                 owner_uid,
                 owner_gid,
             } => {
@@ -1149,6 +1208,8 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     &from,
                     &to,
                     staging_name.as_str(),
+                    *offset,
+                    *max_bytes,
                     owner_uid.get(),
                     owner_gid.get(),
                 )
@@ -2251,9 +2312,12 @@ mod tests {
         std::fs::create_dir(h.share_path(&["alice", "docs"])).expect("mkdir docs");
         std::fs::write(h.share_path(&["alice", "docs", "a.txt"]), b"keep me").expect("write");
 
-        let raw = r#"{"op":"copy_file","share":"alice","from":["docs","a.txt"],"to":["b.txt"],"staging_name":"s1.part","owner_uid":300001,"owner_gid":300001}"#;
+        let raw = r#"{"op":"copy_file","share":"alice","from":["docs","a.txt"],"to":["b.txt"],"staging_name":"s1.part","offset":0,"max_bytes":4096,"owner_uid":300001,"owner_gid":300001}"#;
         match call(&h, raw) {
-            Response::Copied { bytes } => assert_eq!(bytes, 7),
+            Response::Copied { offset, done } => {
+                assert_eq!(offset, 7);
+                assert!(done, "one slice was enough for seven bytes");
+            }
             other => panic!("expected a copy, got {other:?}"),
         }
 
@@ -2275,8 +2339,8 @@ mod tests {
         let h = Harness::with_share("alice");
         std::fs::write(h.share_path(&["alice", "a.txt"]), b"x").expect("write");
 
-        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"s2.part","owner_uid":300001,"owner_gid":300001}"#;
-        assert!(matches!(call(&h, raw), Response::Copied { .. }));
+        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"s2.part","offset":0,"max_bytes":4096,"owner_uid":300001,"owner_gid":300001}"#;
+        assert!(matches!(call(&h, raw), Response::Copied { done: true, .. }));
         assert!(
             !h.share_path(&["alice", STAGING_DIR[0], STAGING_DIR[1], "s2.part"])
                 .exists(),
@@ -2292,7 +2356,7 @@ mod tests {
         std::fs::write(h.share_path(&["alice", "a.txt"]), b"the source").expect("write src");
         std::fs::write(h.share_path(&["alice", "b.txt"]), b"the resident").expect("write dst");
 
-        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"s3.part","owner_uid":300001,"owner_gid":300001}"#;
+        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"s3.part","offset":0,"max_bytes":4096,"owner_uid":300001,"owner_gid":300001}"#;
         match call(&h, raw) {
             Response::Conflict { reason } => assert!(reason.contains("b.txt"), "{reason}"),
             other => panic!("expected a conflict, got {other:?}"),
@@ -2308,7 +2372,7 @@ mod tests {
     #[test]
     fn copying_something_that_is_not_there_is_a_not_found() {
         let h = Harness::with_share("alice");
-        let raw = r#"{"op":"copy_file","share":"alice","from":["ghost.txt"],"to":["b.txt"],"staging_name":"s4.part","owner_uid":300001,"owner_gid":300001}"#;
+        let raw = r#"{"op":"copy_file","share":"alice","from":["ghost.txt"],"to":["b.txt"],"staging_name":"s4.part","offset":0,"max_bytes":4096,"owner_uid":300001,"owner_gid":300001}"#;
         assert!(matches!(call(&h, raw), Response::NotFound { .. }));
     }
 
@@ -2317,15 +2381,17 @@ mod tests {
         let h = Harness::with_share("alice");
         std::fs::write(h.share_path(&["alice", "a.txt"]), b"x").expect("write");
 
-        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["nope","a.txt"],"staging_name":"s5.part","owner_uid":300001,"owner_gid":300001}"#;
+        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["nope","a.txt"],"staging_name":"s5.part","offset":0,"max_bytes":4096,"owner_uid":300001,"owner_gid":300001}"#;
         assert!(matches!(call(&h, raw), Response::NotFound { .. }));
         assert!(!h.share_path(&["alice", "nope"]).exists());
     }
 
     #[test]
-    fn a_second_copy_under_one_staging_name_is_refused_rather_than_racing() {
-        // `OpenIntent::CreateNew` is what decides this, in the kernel, rather than a check here.
-        // Two jobs that picked the same staging name must not both write into one file.
+    fn a_staging_file_that_disagrees_with_the_offset_is_refused_rather_than_appended_to() {
+        // Slicing made the staging file resumable, so a name that is already taken is no longer
+        // decided by an exclusive create. What decides it now is the LENGTH: the file is the
+        // authority, and a caller whose number disagrees with it would either duplicate a region
+        // or leave a hole — both of which produce a file that looks complete and is not.
         let h = Harness::with_share("alice");
         std::fs::write(h.share_path(&["alice", "a.txt"]), b"x").expect("write");
         std::fs::write(
@@ -2334,14 +2400,86 @@ mod tests {
         )
         .expect("write staged");
 
-        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"taken.part","owner_uid":300001,"owner_gid":300001}"#;
+        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"taken.part","offset":0,"max_bytes":4096,"owner_uid":300001,"owner_gid":300001}"#;
         assert!(matches!(call(&h, raw), Response::Conflict { .. }));
         assert_eq!(
             std::fs::read(h.share_path(&["alice", STAGING_DIR[0], STAGING_DIR[1], "taken.part"]))
                 .expect("read staged"),
             b"somebody else",
-            "the other job's staging file was overwritten"
+            "the other job's staging file was written into"
         );
+    }
+
+    #[test]
+    fn a_file_larger_than_one_slice_takes_several_calls_and_arrives_whole() {
+        // The reason slicing exists, measured. The control socket is served one connection at a
+        // time, so an unbounded copy is a control-plane outage; what has to be true in exchange is
+        // that several bounded calls reassemble the file byte for byte.
+        let h = Harness::with_share("alice");
+        let body: Vec<u8> = (0..1000u32).map(|n| (n % 251) as u8).collect();
+        std::fs::write(h.share_path(&["alice", "big.bin"]), &body).expect("write");
+
+        let mut offset = 0u64;
+        let mut calls = 0;
+        loop {
+            let raw = format!(
+                r#"{{"op":"copy_file","share":"alice","from":["big.bin"],"to":["copy.bin"],"staging_name":"big.part","offset":{offset},"max_bytes":256,"owner_uid":300001,"owner_gid":300001}}"#
+            );
+            calls += 1;
+            match call(&h, &raw) {
+                Response::Copied { offset: next, done } => {
+                    assert!(next > offset, "a slice must make progress");
+                    offset = next;
+                    if done {
+                        break;
+                    }
+                }
+                other => panic!("expected a slice, got {other:?}"),
+            }
+            assert!(calls < 20, "the loop is not terminating");
+        }
+
+        assert_eq!(calls, 4, "1000 bytes in 256-byte slices");
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "copy.bin"])).expect("read copy"),
+            body,
+            "the reassembled copy must be byte-identical"
+        );
+    }
+
+    #[test]
+    fn nothing_is_published_until_the_last_slice() {
+        // A destination that appeared halfway through would be a file the user can open and read
+        // as truncated — and `RENAME_NOREPLACE` would then make the good copy's name permanently
+        // unusable.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "big.bin"]), vec![7u8; 600]).expect("write");
+
+        let raw = r#"{"op":"copy_file","share":"alice","from":["big.bin"],"to":["copy.bin"],"staging_name":"part.part","offset":0,"max_bytes":256,"owner_uid":300001,"owner_gid":300001}"#;
+        match call(&h, raw) {
+            Response::Copied { offset, done } => {
+                assert_eq!(offset, 256);
+                assert!(!done);
+            }
+            other => panic!("expected an unfinished slice, got {other:?}"),
+        }
+        assert!(
+            !h.share_path(&["alice", "copy.bin"]).exists(),
+            "the destination must not exist until the copy is whole"
+        );
+        assert_eq!(
+            std::fs::metadata(h.share_path(&["alice", STAGING_DIR[0], STAGING_DIR[1], "part.part"]))
+                .expect("stat staged")
+                .len(),
+            256
+        );
+    }
+
+    #[test]
+    fn the_agent_clamps_a_slice_the_caller_asked_to_make_huge() {
+        // A caller that asks for the whole file must not get it: the clamp is what makes "no single
+        // agent call can be made long" true rather than a convention the API is trusted to follow.
+        assert!(crate::op::MAX_COPY_SLICE <= 64 * 1024 * 1024);
     }
 
     #[test]
@@ -2354,8 +2492,8 @@ mod tests {
         std::fs::write(h.share_path(&["alice", "a.txt"]), b"x").expect("write");
 
         for raw in [
-            r#"{"op":"copy_file","share":"alice","from":[".depsis","staging","x.part"],"to":["stolen.txt"],"staging_name":"s6.part","owner_uid":300001,"owner_gid":300001}"#,
-            r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":[".depsis","staging","planted.part"],"staging_name":"s7.part","owner_uid":300001,"owner_gid":300001}"#,
+            r#"{"op":"copy_file","share":"alice","from":[".depsis","staging","x.part"],"to":["stolen.txt"],"staging_name":"s6.part","offset":0,"max_bytes":4096,"owner_uid":300001,"owner_gid":300001}"#,
+            r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":[".depsis","staging","planted.part"],"staging_name":"s7.part","offset":0,"max_bytes":4096,"owner_uid":300001,"owner_gid":300001}"#,
         ] {
             assert!(
                 matches!(call(&h, raw), Response::Refused { .. }),
@@ -2368,7 +2506,7 @@ mod tests {
     #[test]
     fn a_copy_is_refused_when_no_share_root_is_configured() {
         let h = Harness::bare();
-        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"s8.part","owner_uid":300001,"owner_gid":300001}"#;
+        let raw = r#"{"op":"copy_file","share":"alice","from":["a.txt"],"to":["b.txt"],"staging_name":"s8.part","offset":0,"max_bytes":4096,"owner_uid":300001,"owner_gid":300001}"#;
         assert!(matches!(call(&h, raw), Response::Refused { .. }));
     }
 

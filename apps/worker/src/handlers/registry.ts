@@ -36,7 +36,8 @@ export function registerHandlers(
   // handler needs the queue it was claimed from.
   worker.register(APPLY_ACL_KIND, applyAclHandler(services.acl, services.jobs));
   worker.register(IDENTITY_SYNC_KIND, identitySyncHandler(services.identity));
-  // `jobs` for the same reason as the ACL walk: a tree too large for one chunk queues its
-  // own continuation, so the handler needs the queue it was claimed from.
-  worker.register(COPY_KIND, copyHandler(services.copies, services.jobs));
+  // No `jobs` here, unlike the ACL walk: a copy runs the whole tree in ONE job and reports
+  // between nodes, so there is no successor to enqueue. The chained version made the id the user
+  // was handed report `succeeded` while most of the work had not happened.
+  worker.register(COPY_KIND, copyHandler(services.copies));
 }

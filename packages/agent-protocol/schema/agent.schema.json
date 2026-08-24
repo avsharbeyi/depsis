@@ -315,6 +315,18 @@
             "$ref": "#/$defs/SafeComponent"
           }
         },
+        "max_bytes": {
+          "description": "The most this call will copy before returning.\n\nTHE SLICE IS WHY THIS FIELD EXISTS. The control socket is served strictly one connection\nat a time (`unix.rs`), so whatever this call does, nothing else on the appliance can ask\nthe agent anything — no listing, no upload, no folder creation. Copying a whole file\nhere would make a 50 GB copy a total control-plane outage, and the API's own 60-second\ncall budget would make such a file impossible to copy at all: every attempt would time\nout, and each of the twenty retries would leave another full-size staging file behind.\n\nSo the caller asks for a slice and calls again. The agent bounds it too — see\n`MAX_COPY_SLICE` — because a caller that asks for the whole file must not get it.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "offset": {
+          "description": "How many bytes of the source are already staged.\n\nChecked against the staging file's actual length and refused on a mismatch, exactly as\n`OpenTransfer` does: a number kept beside the data can disagree with it, and the file is\nthe authority.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "op": {
           "type": "string",
           "const": "copy_file"
@@ -330,7 +342,7 @@
           "$ref": "#/$defs/SafeComponent"
         },
         "staging_name": {
-          "description": "The name to stage under, inside `.depsis/staging/`. Caller-chosen and exclusive-created,\nso two copies racing on one name cannot both win — the same guarantee `OpenTransfer`\nrelies on.",
+          "description": "The name to stage under, inside `.depsis/staging/`.",
           "$ref": "#/$defs/SafeComponent"
         },
         "to": {
@@ -348,6 +360,8 @@
         "from",
         "to",
         "staging_name",
+        "offset",
+        "max_bytes",
         "owner_uid",
         "owner_gid"
       ]
@@ -974,10 +988,13 @@
       ]
     },
     {
-      "description": "The copy is in place and the destination directory has been fsynced.\n\n`bytes` is what the agent actually wrote, read from the descriptor rather than from\nanything the caller believed. The API records it as the new entry's size, so a copy whose\nsource was being appended to while it ran produces a row that matches the file rather than\na row that matches the source's size at the moment the job was queued.",
+      "description": "One slice of a copy is staged, and possibly the whole thing is in place.\n\n`offset` is how many bytes of the source are now staged, read from the staging file's own\nlength rather than from anything the caller believed. The caller passes it back on the next\ncall.\n\n`done` means the source was exhausted, the staging file was chowned and fsynced, and the\nrename into place plus the destination-directory fsync have happened. Only then is there a\nfile at the destination; until then there is a `.part` in staging and nothing else.",
       "type": "object",
       "properties": {
-        "bytes": {
+        "done": {
+          "type": "boolean"
+        },
+        "offset": {
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -989,7 +1006,25 @@
       },
       "required": [
         "status",
-        "bytes"
+        "offset",
+        "done"
+      ]
+    },
+    {
+      "description": "The dataset is full, or the tenant is over quota.\n\nIts own variant rather than `Failed`, for the reason ADR-0008 gives about uploads: a full\ndataset is a PERMANENT condition the caller must not retry, and `Failed` is exactly what a\ncaller retries. Twenty attempts at a copy into a full pool would park twenty more\nfull-size staging files against the same refquota that is already exhausted.",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "out_of_space"
+        }
+      },
+      "required": [
+        "status",
+        "reason"
       ]
     },
     {

@@ -699,10 +699,26 @@ pub enum Request {
         /// Where the copy goes, relative to the same share root. The last element is the new name;
         /// every element before it must already exist and be a directory.
         to: Vec<SafeComponent>,
-        /// The name to stage under, inside `.depsis/staging/`. Caller-chosen and exclusive-created,
-        /// so two copies racing on one name cannot both win — the same guarantee `OpenTransfer`
-        /// relies on.
+        /// The name to stage under, inside `.depsis/staging/`.
         staging_name: SafeComponent,
+        /// How many bytes of the source are already staged.
+        ///
+        /// Checked against the staging file's actual length and refused on a mismatch, exactly as
+        /// `OpenTransfer` does: a number kept beside the data can disagree with it, and the file is
+        /// the authority.
+        offset: u64,
+        /// The most this call will copy before returning.
+        ///
+        /// THE SLICE IS WHY THIS FIELD EXISTS. The control socket is served strictly one connection
+        /// at a time (`unix.rs`), so whatever this call does, nothing else on the appliance can ask
+        /// the agent anything — no listing, no upload, no folder creation. Copying a whole file
+        /// here would make a 50 GB copy a total control-plane outage, and the API's own 60-second
+        /// call budget would make such a file impossible to copy at all: every attempt would time
+        /// out, and each of the twenty retries would leave another full-size staging file behind.
+        ///
+        /// So the caller asks for a slice and calls again. The agent bounds it too — see
+        /// `MAX_COPY_SLICE` — because a caller that asks for the whole file must not get it.
+        max_bytes: u64,
         /// Who owns the copy. NOT inherited from the source: a copy made by one person into their
         /// own folder that arrived owned by somebody else is a file the maker cannot delete.
         owner_uid: PosixId,
@@ -1039,14 +1055,28 @@ pub enum Response {
     Discarded {
         existed: bool,
     },
-    /// The copy is in place and the destination directory has been fsynced.
+    /// One slice of a copy is staged, and possibly the whole thing is in place.
     ///
-    /// `bytes` is what the agent actually wrote, read from the descriptor rather than from
-    /// anything the caller believed. The API records it as the new entry's size, so a copy whose
-    /// source was being appended to while it ran produces a row that matches the file rather than
-    /// a row that matches the source's size at the moment the job was queued.
+    /// `offset` is how many bytes of the source are now staged, read from the staging file's own
+    /// length rather than from anything the caller believed. The caller passes it back on the next
+    /// call.
+    ///
+    /// `done` means the source was exhausted, the staging file was chowned and fsynced, and the
+    /// rename into place plus the destination-directory fsync have happened. Only then is there a
+    /// file at the destination; until then there is a `.part` in staging and nothing else.
     Copied {
-        bytes: u64,
+        offset: u64,
+        done: bool,
+    },
+    /// The dataset is full, or the tenant is over quota.
+    ///
+    /// Its own variant rather than `Failed`, for the reason ADR-0008 gives about uploads: a full
+    /// dataset is a PERMANENT condition the caller must not retry, and `Failed` is exactly what a
+    /// caller retries. Twenty attempts at a copy into a full pool would park twenty more
+    /// full-size staging files against the same refquota that is already exhausted.
+    #[serde(rename = "out_of_space")]
+    OutOfSpace {
+        reason: String,
     },
     /// The entry is at its new name and the destination directory has been fsynced.
     ///
@@ -1230,7 +1260,16 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
+
+/// The most one `CopyFile` call will move, whatever the caller asks for.
+///
+/// 64 MiB. The control socket is serialised, so this is the length of time every other agent
+/// operation on the appliance can be blocked behind one copy — a few hundred milliseconds on a
+/// spinning disk, comfortably inside the API's 60-second call budget with room for a pool that is
+/// busy. The agent clamps rather than trusting the caller, because the whole point is that no
+/// single call can be made long.
+pub const MAX_COPY_SLICE: u64 = 64 * 1024 * 1024;
 
 /// The mode `SecureShareRoot` writes: `rwx` for the owner, `r-x` for the group, nothing for other.
 ///

@@ -52,10 +52,13 @@ export {
   COPY_KIND,
   COPY_MAX_ATTEMPTS,
   CopyService,
+  CopyDestinationOccupiedError,
   CopyNameExhaustedError,
+  CopyOutOfSpaceError,
   CopyTooLargeError,
   type CopyPayload,
   type CopyProgress,
+  type CopyReport,
 } from './files/copy.service.js';
 
 /**

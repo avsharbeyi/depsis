@@ -1038,6 +1038,16 @@ export class FilesService {
     actorId: string,
     correlationId: string,
     reason: string,
+    /**
+     * The folder this one is a copy of, when it is one.
+     *
+     * Folders need the link for the same reason files do, and an adversarial review found out what
+     * happens without it: `files.copy` identified a folder's copy by NAME, so a folder the user
+     * ALREADY had in the destination was indistinguishable from one this job had created. The copy
+     * silently merged into it — `docs (2)` was unreachable code — and the children landed in the
+     * user's own folder.
+     */
+    copiedFromEntryId: string | null = null,
   ): Promise<FileEntryRow> {
     assertValidName(name);
     let parentPath = '';
@@ -1077,10 +1087,10 @@ export class FilesService {
       const rows = await this.db.withTenant(organizationId, (db) =>
         db.query<FileEntryRow>(
           `INSERT INTO public.file_entries
-             (organization_id, share_id, parent_id, kind, name, path)
-           VALUES ($1, $2, $3, 'folder', $4, $5)
+             (organization_id, share_id, parent_id, kind, name, path, copied_from_entry_id)
+           VALUES ($1, $2, $3, 'folder', $4, $5, $6)
            RETURNING ${ENTRY_COLUMNS}`,
-          [organizationId, share.id, parentId, name, `${parentPath}/${name}`],
+          [organizationId, share.id, parentId, name, `${parentPath}/${name}`, copiedFromEntryId],
         ),
       );
       const row = rows[0];

@@ -149,6 +149,28 @@ export type AgentRequest =
        * The file to read, relative to the share root. The last element is its name.
        */
       from: SafeComponent[];
+      /**
+       * The most this call will copy before returning.
+       *
+       * THE SLICE IS WHY THIS FIELD EXISTS. The control socket is served strictly one connection
+       * at a time (`unix.rs`), so whatever this call does, nothing else on the appliance can ask
+       * the agent anything — no listing, no upload, no folder creation. Copying a whole file
+       * here would make a 50 GB copy a total control-plane outage, and the API's own 60-second
+       * call budget would make such a file impossible to copy at all: every attempt would time
+       * out, and each of the twenty retries would leave another full-size staging file behind.
+       *
+       * So the caller asks for a slice and calls again. The agent bounds it too — see
+       * `MAX_COPY_SLICE` — because a caller that asks for the whole file must not get it.
+       */
+      max_bytes: number;
+      /**
+       * How many bytes of the source are already staged.
+       *
+       * Checked against the staging file's actual length and refused on a mismatch, exactly as
+       * `OpenTransfer` does: a number kept beside the data can disagree with it, and the file is
+       * the authority.
+       */
+      offset: number;
       op: 'copy_file';
       owner_gid: PosixId;
       /**
@@ -520,8 +542,13 @@ export type AgentResponse =
       status: 'discarded';
     }
   | {
-      bytes: number;
+      done: boolean;
+      offset: number;
       status: 'copied';
+    }
+  | {
+      reason: string;
+      status: 'out_of_space';
     }
   | {
       status: 'moved';

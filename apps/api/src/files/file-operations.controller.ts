@@ -142,6 +142,18 @@ export class FileOperationsController {
     // walk is shared — a call per id would be the N+1 the contract names and refuses.
     await this.requirePermissions(caller, shareId, sourceIds, destinationId);
 
+    // Counted HERE, not in the worker. The limit is a refusal and a refusal is deterministic: a
+    // job that throws it retries on every attempt, burns its budget, and reports `dead` to
+    // somebody who was told the copy had started. One extra walk on the click buys a 422 the user
+    // can act on.
+    const entries = await this.copies.size(caller.organizationId, shareId, sourceIds);
+    if (entries > CopyService.MAX_ENTRIES) {
+      throw new ProblemException(
+        'validation-failed',
+        `Bu seçim ${entries} girdi içeriyor; en fazla ${CopyService.MAX_ENTRIES} kopyalanabilir.`,
+      );
+    }
+
     const payload: CopyPayload = {
       shareId,
       sourceIds,

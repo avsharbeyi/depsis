@@ -1,30 +1,30 @@
 import { Logger } from '@nestjs/common';
-import {
-  COPY_KIND,
-  COPY_MAX_ATTEMPTS,
-  type CopyPayload,
-  type CopyService,
-  type JobsService,
-} from '@depsis/api/worker-surface';
+import { COPY_KIND, type CopyPayload, type CopyService } from '@depsis/api/worker-surface';
 
 import type { JobHandler } from '../worker.service.js';
 
 export { COPY_KIND };
 
 /**
- * `POST /file-operations` — the copy, done a chunk at a time.
+ * `POST /file-operations` — the copy.
  *
  * The walk itself is `CopyService`, in the API package, and it is not duplicated here for the same
  * reason `applyAclHandler` does not duplicate `AclApplyService`: the tree lives in `file_entries`
  * and the rules for reading it must have one implementation, or the API's answer to "what is in
  * this folder" and the worker's will drift apart with neither looking wrong on its own.
  *
- * IDEMPOTENT, which the at-least-once queue requires (§17). A redelivered chunk re-attempts files
- * it already copied; the agent refuses to overwrite, and the service treats that refusal as "done"
- * after checking a row exists — which is also how it recovers a file that reached the filesystem
- * and not the database because a worker died between the two.
+ * ONE JOB FOR THE WHOLE OPERATION, and that is a correction. The first version queued a successor
+ * per chunk, which meant the job id the user was handed — the FIRST one — went `succeeded` as soon
+ * as its twenty-five entries were done, while the rest of the tree was still being copied by jobs
+ * nobody could see. A copy that died in its ninth chunk was invisible to the person who asked for
+ * it. The service loops instead and calls `report` between nodes, which is what extends the lease.
+ *
+ * IDEMPOTENT, which the at-least-once queue requires (§17): every row the copy writes carries
+ * `copied_from_entry_id`, so a redelivery asks "is there already a copy of this source here" and
+ * gets an exact answer. Asking by name cannot work — `keep_both` derives the name from what the
+ * destination holds, which the first attempt is exactly what changed.
  */
-export function copyHandler(copies: CopyService, jobs: JobsService): JobHandler {
+export function copyHandler(copies: CopyService): JobHandler {
   const logger = new Logger('CopyHandler');
 
   return async ({ job, report }) => {
@@ -37,37 +37,12 @@ export function copyHandler(copies: CopyService, jobs: JobsService): JobHandler 
     }
     const payload = parse(job.payload);
 
-    // Before the work. A lost lease means another worker already has this chunk, and two workers
-    // copying the same tree would race on `keep_both` names and produce duplicates.
-    if (!(await report(0.05))) return;
-
-    const result = await copies.copy(organizationId, payload, `files.copy job ${job.id}`);
-    const done = (payload.doneIds?.length ?? 0) + result.copied + result.skipped;
+    const result = await copies.copy(organizationId, payload, report, `files.copy job ${job.id}`);
 
     logger.log(
-      `copied ${result.copied} and skipped ${result.skipped} of ${result.total} for job ${job.id}`,
+      `copied ${result.copied}, skipped ${result.skipped}, refused ${result.refused} of ` +
+        `${result.total} for job ${job.id}`,
     );
-
-    if (result.next === null) {
-      await report(1);
-      return;
-    }
-
-    // The successor is queued BEFORE this job reports itself finished, exactly as
-    // `applyAclHandler` does: a crash between the two would otherwise leave a tree half-copied
-    // with nothing left to continue it. The cost of the other order is a duplicate chunk, which
-    // the service is built to absorb; the cost of this one is a copy that silently stops.
-    await jobs.enqueue(
-      organizationId,
-      COPY_KIND,
-      result.next as unknown as Record<string, unknown>,
-      {
-        maxAttempts: COPY_MAX_ATTEMPTS,
-      },
-    );
-    // Progress across the whole operation rather than within the chunk, because the whole
-    // operation is what the person is watching.
-    await report(Math.min(0.99, result.total === 0 ? 1 : done / result.total));
   };
 }
 
@@ -80,7 +55,6 @@ function parse(payload: unknown): CopyPayload {
   const sourceIds = raw['sourceIds'];
   const actorId = raw['actorId'];
   const destinationId = raw['destinationId'] ?? null;
-  const doneIds = raw['doneIds'];
 
   if (typeof shareId !== 'string' || typeof actorId !== 'string') {
     throw new Error('a files.copy payload needs a shareId and an actorId');
@@ -92,11 +66,5 @@ function parse(payload: unknown): CopyPayload {
     throw new Error('destinationId must be a uuid or null');
   }
 
-  return {
-    shareId,
-    sourceIds,
-    destinationId,
-    actorId,
-    ...(Array.isArray(doneIds) && doneIds.every((id) => typeof id === 'string') ? { doneIds } : {}),
-  };
+  return { shareId, sourceIds, destinationId, actorId };
 }

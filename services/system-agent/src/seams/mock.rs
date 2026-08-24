@@ -161,7 +161,10 @@ impl SafePath for MockSafePath {
         match intent {
             OpenIntent::Read => options.read(true),
             OpenIntent::CreateNew => options.write(true).create_new(true),
-            OpenIntent::Append => options.write(true).create(true),
+            // `.append(true)`, matching the real implementation's `O_APPEND`. Without it the mock
+            // writes from position 0, so a resumed upload or a sliced copy overwrote its own
+            // prefix in every portable test while working correctly against a kernel.
+            OpenIntent::Append => options.append(true).create(true),
         };
         // Classified, not blanket `Io`, for exactly the reason `open_dir` below already gives: the
         // dispatcher arms that turn a missing file into a 404 and a taken staging name into a
