@@ -97,8 +97,8 @@ maddesi tarandı ve her bulgu ayrıca çürütülmeye çalışıldı. Sonuç 85 
 ### En pahalı sınıftı: yazıldı, ulaşılamıyordu — kapandı
 
 Eksiklerin en ağırı yazılmamış özellikler değildi. **Yazılmış, test edilmiş ve hiçbir ekranın
-çağırmadığı** uçlardı; somut sonucu da şuydu: *ikinci bir kullanıcıya hiçbir şeye erişim
-veremiyordun.* Bu kümenin tamamı artık arayüzde:
+çağırmadığı** uçlardı; somut sonucu da şuydu: _ikinci bir kullanıcıya hiçbir şeye erişim
+veremiyordun._ Bu kümenin tamamı artık arayüzde:
 
 - **İzin paneli** — `Permissions.tsx`, hem `Files.tsx`'te seçili tek klasör için hem de
   `Shares.tsx`'te satır düğmesiyle. §6.2'nin istediği dry-run önizlemesi her değişiklikte
@@ -146,6 +146,7 @@ veremiyordun.* Bu kümenin tamamı artık arayüzde:
   Parametre yalnız DARALTABİLİR, o yüzden bu kümenin ACL'in izin verdiğinin üst kümesi olması
   güvenli yön. Kapalı hesap listede yok; gid'i olmayan ekip de yok. Ad `PosixName` tipiyle
   taşınıyor, yani satır sonu içeren bir "kullanıcı adı" dosyaya yeni bir direktif yazamıyor.
+
 - Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`
   yalnız DEPSIS'in kendi aldıklarını gösterir ve yanıtta `complete: false` ile bunu söyler.
 - §21'in belgeleri: yönetici kılavuzu, son kullanıcı kılavuzu, yedekleme ve felaket kurtarma.

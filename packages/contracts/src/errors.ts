@@ -29,6 +29,12 @@ export const ERROR_CODES = [
   // validation
   'validation-failed',
   'unsupported-media-type',
+  // A request the server will not act on and that is not a field-level validation failure —
+  // 400 rather than 422. The document declares seven of them; without a code the filter would
+  // have to answer one status with another status's name.
+  'bad-request',
+  // 416: a Range header the file cannot satisfy.
+  'range-not-satisfiable',
   // concurrency
   'conflict',
   'precondition-failed',
@@ -41,6 +47,9 @@ export const ERROR_CODES = [
   // operational
   'rate-limited',
   'dependency-unavailable',
+  // 410: the endpoint or the session is permanently over. Setup after a claim, a console session
+  // past its idle limit. Distinct from 404 on purpose — it says the thing existed.
+  'gone',
   'operation-in-progress',
   'internal-error',
 ] as const;
@@ -89,6 +98,8 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   'not-found': 404,
   'validation-failed': 422,
   'unsupported-media-type': 415,
+  'bad-request': 400,
+  'range-not-satisfiable': 416,
   conflict: 409,
   'precondition-failed': 412,
   'idempotency-key-reused': 409,
@@ -98,6 +109,7 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   'checksum-mismatch': 422,
   'rate-limited': 429,
   'dependency-unavailable': 503,
+  gone: 410,
   'operation-in-progress': 409,
   'internal-error': 500,
 };
@@ -112,6 +124,8 @@ const TITLE_BY_CODE: Record<ErrorCode, string> = {
   'not-found': 'Kaynak bulunamadı',
   'validation-failed': 'Girdi doğrulanamadı',
   'unsupported-media-type': 'Desteklenmeyen içerik türü',
+  'bad-request': 'İstek kabul edilmedi',
+  'range-not-satisfiable': 'İstenen aralık dosyada yok',
   conflict: 'Çakışma',
   'precondition-failed': 'Ön koşul sağlanmadı',
   'idempotency-key-reused': 'Idempotency anahtarı farklı bir istekle kullanılmış',
@@ -121,6 +135,7 @@ const TITLE_BY_CODE: Record<ErrorCode, string> = {
   'checksum-mismatch': 'Sağlama toplamı uyuşmuyor',
   'rate-limited': 'Çok fazla istek',
   'dependency-unavailable': 'Servis geçici olarak kullanılamıyor',
+  gone: 'Bu adres kalıcı olarak kapandı',
   'operation-in-progress': 'Bu kaynak üzerinde başka bir işlem sürüyor',
   'internal-error': 'Beklenmeyen bir hata oluştu',
 };
