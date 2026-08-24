@@ -908,6 +908,75 @@ paths:
           $ref: '#/components/responses/Problem'
         '503': { $ref: '#/components/responses/Problem' }
 
+  /system/trash-policy:
+    get:
+      tags: [system]
+      summary: Çöp kutusunun saklama politikası ve neye mal olacağı
+      description: |
+        Yalnız yöneticiler. 403 döner, 404 değil — bu ucun varlığı sır değil, kimin
+        çağırabileceği sır.
+
+        `days` verilirse, KAYDEDİLMEMİŞ bir değer fiyatlanır: ayar ekranı bir sayıyı yazan
+        kişiye, kaydetmeden önce ilk çalışmanın ne alacağını gösteriyor. Verilmezse kayıtlı
+        politika fiyatlanır — yani bir sonraki zamanlanmış çalışmanın ne alacağı.
+
+        ÖNİZLEME BİR KOLAYLIK DEĞİL, GÜVENLİK ARGÜMANININ PARÇASI. Bu politikayı açmak, kimse
+        bakmazken, bir zamanlamaya göre, kalıcı olarak kullanıcı verisi silmeye başlamak demek.
+        Sayı olmadan ayarlanan bir politika, körlemesine ayarlanmış bir politikadır.
+
+        `impact.bytes` KÖKLERİN değil, altlarındaki DOSYALARIN toplamı.
+        `file_entries_folder_has_no_size` bir klasörün `size_bytes` değerini 0'a sabitliyor, yani
+        kökleri toplamak 10 GB'lık bir klasörü "1 öğe, 0 bayt" diye gösterirdi — yıkımın
+        silahlandırıldığı ekranda, ölçülmeden raporlanmış bir geri kazanılabilir alan rakamı.
+      parameters:
+        - name: days
+          in: query
+          required: false
+          description: Kaydedilmemiş bir değeri fiyatla. Verilmezse kayıtlı politika fiyatlanır.
+          schema: { type: integer, minimum: 1, maximum: 3650 }
+      responses:
+        '200':
+          description: Politika ve etkisi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrashPolicy' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [system]
+      summary: Saklama politikasını değiştir
+      description: |
+        `retentionDays: null` politikayı KAPATIR ve varsayılan budur: bir göç, kimsenin
+        seçmediği bir anda kullanıcı verisi silmeye başlamamalı.
+
+        En az 1 gün. Sıfır, "çöpe atmak kalıcı silmektir" demek olurdu — çöp kutusu bu üründe
+        bir kullanıcı ile geri alınamaz veri kaybı arasındaki tek tıklama, ve yanlışlıkla 0
+        yazmanın sonucu geri alınamaz. Veritabanı da kabul etmiyor.
+
+        Kaydetmek bir temizlemeyi HEMEN kuyruğa alıyor. Ne alacağı kendisine gösterilmiş biri
+        olmasını bekler; bir saat hiçbir şey olmaması, kaydedilmemiş bir ayar gibi okunur.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [retentionDays]
+              properties:
+                retentionDays:
+                  type: integer
+                  nullable: true
+                  minimum: 1
+                  maximum: 3650
+      responses:
+        '200':
+          description: Kaydedildi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrashPolicy' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
   /system/telemetry:
     get:
       tags: [system]
@@ -1999,6 +2068,35 @@ components:
         offsetBytes: { type: integer, format: int64 }
         completed: { type: boolean }
 
+    TrashPolicy:
+      type: object
+      required: [retentionDays, updatedAt, impact]
+      properties:
+        retentionDays:
+          type: integer
+          nullable: true
+          description: '`null`: süresiz sakla. Varsayılan bu.'
+        updatedAt: { type: string, format: date-time, nullable: true }
+        impact:
+          type: object
+          required: [entries, files, bytes, oldestTrashedAt]
+          properties:
+            entries:
+              type: integer
+              description: |
+                Süresi dolmuş ÜST DÜZEY girdiler. Çöpe atılmış bir klasör, içinde ne olursa olsun
+                bir kez sayılır.
+            files:
+              type: integer
+              description: Onların altındaki dosyalar, özyinelemeli. Temizlemenin süresini bu belirler.
+            bytes:
+              type: integer
+              format: int64
+              description: |
+                Geri kazanılacak baytlar. KÖKLERİN değil, altlarındaki DOSYALARIN toplamı — bir
+                klasörün `size_bytes` değeri 0 olduğu için kökleri toplamak yalan söylerdi.
+            oldestTrashedAt: { type: string, format: date-time, nullable: true }
+
     PasswordResetTicket:
       type: object
       required: [token, expiresAt]
@@ -2308,6 +2406,22 @@ components:
         size: { type: integer, format: int64 }
         modifiedAt: { type: string, format: date-time }
         mimeType: { type: string }
+        trashedAt:
+          type: string
+          format: date-time
+          description: Yalnız çöp listesinde. Yoksa girdi çöpte değil.
+        expiresAt:
+          type: string
+          format: date-time
+          description: |
+            Bu girdinin kalıcı olarak silineceği an: `trashedAt` + saklama süresi.
+
+            Saklama politikası kapalıysa YOK, ve yokluğu "süresiz" demek. Bir tarih göstermek,
+            sonra o tarihte hiçbir şey olmaması, çöp kutusunun tutmadığı bir söz olurdu.
+
+            KENDİ ÜST DÜZEYİNDE olmayan bir girdi de yok: çöpe atılmış bir klasörün içindeki
+            dosya, kendi tarihinde değil, kökünün tarihinde gider. Kendi tarihini göstermek,
+            temizlemenin uymadığı bir geri sayım göstermek olurdu.
 
     FileEntryDetail:
       allOf:

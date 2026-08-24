@@ -30,6 +30,7 @@ import { z } from 'zod';
 import { AgentDataService } from '../agent/agent-data.service.js';
 import { AgentRefusedError, AgentUnavailableError } from '../agent/agent.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import { TrashRetentionService } from './trash-retention.service.js';
 import { ProblemException } from '../common/problem.filter.js';
 import { IdempotencyInterceptor } from '../common/idempotency.interceptor.js';
 import {
@@ -115,6 +116,7 @@ export class FilesController {
   constructor(
     private readonly files: FilesService,
     private readonly data: AgentDataService,
+    private readonly retention: TrashRetentionService,
   ) {}
 
   /**
@@ -156,10 +158,15 @@ export class FilesController {
     const order = cleanSort(sort);
 
     if (isTrue(trashed)) {
+      // The policy comes with the page: without it every row would show no expiry, which is what
+      // an interface says when nothing is scheduled — and that would be the same screen whether
+      // the bin empties on Tuesday or never.
+      const { retentionDays } = await this.retention.policy(caller.organizationId);
       return this.visible(
         caller,
         share.id,
         await this.files.listTrash(caller.organizationId, share.id, after, clampLimit(limit)),
+        retentionDays,
       );
     }
 
@@ -711,8 +718,13 @@ export class FilesController {
     caller: Caller,
     shareId: string,
     source: FileEntryPage,
+    retentionDays: number | null = null,
   ): Promise<Schemas['FileEntryPage']> {
-    return toPage(source, await this.files.effectiveForRows(caller, shareId, source.items));
+    return toPage(
+      source,
+      await this.files.effectiveForRows(caller, shareId, source.items),
+      retentionDays,
+    );
   }
 
   /**
@@ -856,18 +868,46 @@ function parseRange(
 export function toPage(
   source: FileEntryPage,
   permissions: ReadonlyMap<string, ReadonlySet<Permission>>,
+  /**
+   * The organisation's retention, when one is set and the page is the bin.
+   *
+   * Passed in rather than read here, because `toPage` is called for every ordinary listing too and
+   * a settings lookup per page would be a query nobody asked for.
+   */
+  retentionDays: number | null = null,
 ): Schemas['FileEntryPage'] {
   const items: Schemas['FileEntry'][] = [];
   for (const row of source.items) {
     const effective = permissions.get(row.id) ?? new Set<Permission>();
     if (!effective.has('list')) continue;
-    items.push(toEntry(row, effective));
+    items.push(toEntry(row, effective, expiryOf(row, retentionDays)));
   }
   return {
     items,
     ...(source.nextCursor === null ? {} : { nextCursor: source.nextCursor }),
     hasMore: source.hasMore,
   };
+}
+
+/**
+ * When a trashed row will actually be purged, or nothing.
+ *
+ * Nothing in three cases, and each is a promise this product would otherwise break:
+ *
+ *   * The row is not in the bin.
+ *   * No retention is set. Showing a date and then having nothing happen on it is worse than
+ *     showing none.
+ *   * The row's own PARENT is also trashed. Such a row dies on its root's date, not its own, so
+ *     its own would be a countdown the purge does not honour — `TrashRetentionService` takes roots
+ *     only and lets `purge` walk each subtree.
+ *
+ * The third case is decided from `parent_trashed`, which the trash query reports; an ordinary
+ * listing never sets it and never reaches here with a trashed row anyway.
+ */
+function expiryOf(row: FileEntryRow, retentionDays: number | null): Date | null {
+  if (row.trashed_at === null || retentionDays === null) return null;
+  if (row.parent_trashed === true) return null;
+  return new Date(row.trashed_at.getTime() + retentionDays * 86_400_000);
 }
 
 /**
@@ -932,6 +972,14 @@ function clampLimit(raw: string | undefined): number {
 export function toEntry(
   row: FileEntryRow,
   effective: ReadonlySet<Permission>,
+  /**
+   * When this row will be purged, for a trashed one under a policy.
+   *
+   * Absent means "not scheduled to go", and the two ways to be absent are the policy being off and
+   * the row not being a top-level trashed entry — a file inside a trashed folder dies on its
+   * ROOT's date, so showing its own would be a countdown the purge does not honour.
+   */
+  expiresAt: Date | null = null,
 ): Schemas['FileEntry'] {
   return {
     // Canonically ordered rather than in whatever order the grants happened to be visited in. Two
@@ -949,6 +997,8 @@ export function toEntry(
     size: Number(row.size_bytes),
     modifiedAt: row.updated_at.toISOString(),
     ...(row.content_type === null ? {} : { mimeType: row.content_type }),
+    ...(row.trashed_at === null ? {} : { trashedAt: row.trashed_at.toISOString() }),
+    ...(expiresAt === null ? {} : { expiresAt: expiresAt.toISOString() }),
   };
 }
 

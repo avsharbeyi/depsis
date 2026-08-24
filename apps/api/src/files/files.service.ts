@@ -25,6 +25,12 @@ import { PosixIdentityService } from '../identity/posix.service.js';
  * id, and no decision anywhere reads the path string.
  */
 export interface FileEntryRow {
+  /**
+   * Only the trash listing sets this. Undefined everywhere else, which reads as "not applicable"
+   * rather than as false — the distinction matters because a row from an ordinary listing is never
+   * trashed at all.
+   */
+  parent_trashed?: boolean;
   id: string;
   share_id: string;
   parent_id: string | null;
@@ -302,6 +308,17 @@ export interface FileEntryPage {
  */
 const ENTRY_COLUMNS = `id, share_id, parent_id, kind, name, path, size_bytes, content_type,
                        trashed_at, created_at, updated_at`;
+
+/**
+ * The same columns plus whether the row's PARENT is in the bin.
+ *
+ * Only the trash listing needs it, and only to decide whether to show an expiry date: a row whose
+ * parent is also trashed dies on its ROOT's date, so its own would be a countdown the purge does
+ * not honour.
+ */
+const TRASH_COLUMNS = `e.id, e.share_id, e.parent_id, e.kind, e.name, e.path, e.size_bytes,
+                       e.content_type, e.trashed_at, e.created_at, e.updated_at,
+                       (p.id IS NOT NULL AND p.trashed_at IS NOT NULL) AS parent_trashed`;
 
 /** The orders `GET /files` offers. The contract's enum, and nothing outside it. */
 export type SortOrder = 'name' | 'modified' | 'size';
@@ -1907,16 +1924,17 @@ export class FilesService {
   ): Promise<FileEntryPage> {
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<FileEntryRow>(
-        `SELECT ${ENTRY_COLUMNS}
-           FROM public.file_entries
-          WHERE organization_id = $1
-            AND share_id = $2
-            AND trashed_at IS NOT NULL
+        `SELECT ${TRASH_COLUMNS}
+           FROM public.file_entries e
+           LEFT JOIN public.file_entries p ON p.id = e.parent_id
+          WHERE e.organization_id = $1
+            AND e.share_id = $2
+            AND e.trashed_at IS NOT NULL
             AND ($3::uuid IS NULL
-                 OR (trashed_at, id) < (SELECT trashed_at, id
-                                          FROM public.file_entries
-                                         WHERE id = $3::uuid))
-          ORDER BY trashed_at DESC, id DESC
+                 OR (e.trashed_at, e.id) < (SELECT trashed_at, id
+                                              FROM public.file_entries
+                                             WHERE id = $3::uuid))
+          ORDER BY e.trashed_at DESC, e.id DESC
           LIMIT $4`,
         [organizationId, shareId, cursor, limit + 1],
       ),

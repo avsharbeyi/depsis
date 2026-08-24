@@ -146,11 +146,32 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   bir üzerine-yazma vermek demek olurdu, `version` var olmayan bir sürüm deposu istiyor, `skip`
   savunulabilir ve yazılmadı.
 
-- **Çöp kutusunun saklama süresi ve temizleme politikası yok.** Tasarımında iki tuzak ölçüldü:
-  `preview`'ün bayt toplamı yalan olurdu (`file_entries_folder_has_no_size`, klasörlerin
-  `size_bytes` değeri 0 — 10 GB'lık bir klasör "1 öğe, 0 bayt" görünür), ve `listTrash` paylaşım
-  başına çalışırken temizleme organizasyon geneli olurdu, yani operatör tek paylaşımın çöpüne
-  bakarken bütün paylaşımlar üzerinden sayılmış bir rakamı onaylardı.
+- **Çöp kutusunun saklama süresi ve temizleme politikası var** (0023, `/system/trash-policy`).
+
+  Varsayılan "süresiz sakla", ve bu güvenlik argümanının kendisi: bir göç, kimsenin seçmediği bir
+  anda kullanıcı verisi silmeye başlamamalı. En az 1 gün — sıfır, çöpe atmanın kalıcı silmeye eşit
+  olması demek olurdu ve çöp kutusu bu üründe kullanıcı ile geri alınamaz kayıp arasındaki tek
+  tıklama.
+
+  Kontrol, ayarlar panelinde değil ÇÖP KUTUSUNUN İÇİNDE: kalıcı silmeyi silahlandıran bir düğme,
+  sileceği verinin göründüğü ekranda durmalı. Bir süre seçmek onu kaydetmeden fiyatlıyor — kaç
+  öğe, kaç dosya, kaç bayt — çünkü o sayı, bir yöneticinin fikrini değiştirebilecek tek şey.
+
+  Tasarım incelemesinin bulduğu iki tuzak kapalı. Bayt toplamı köklerin değil altlarındaki
+  DOSYALARIN toplamı: `file_entries_folder_has_no_size` bir klasörün boyutunu 0'a sabitliyor, yani
+  kökleri toplamak 10 GB'lık bir klasörü "1 öğe, 0 bayt" diye gösterirdi. Ve zamanlama indeksi
+  yalnız `queued` üzerinde: `running`'i de kapsasaydı işleyicinin kendi ardılını kuyruğa alması
+  çakışır, zincir hiç ilerlemez ve her temizleme sonunda `dead` olurdu.
+
+  Zamanlayıcı kuyruğun kendisi. TypeScript tarafında `setInterval` yok — yalnız o süreç ayaktayken
+  çalışan ve yeniden başlatmada kaybolan bir zamanlayıcı, bir saklama politikasının sessizce
+  durması demek. `run_after` dayanıklı; her çalışma bir sonrakini kuyruğa alıyor ve API her
+  açılışta yeniden tohumluyor.
+
+  Çöp listesindeki her satır ne zaman gideceğini söylüyor. Politika kapalıysa tarih YOK — bir tarih
+  gösterip o tarihte hiçbir şey olmaması, çöp kutusunun tutmadığı bir söz olurdu. Çöpe atılmış bir
+  klasörün İÇİNDEKİ dosyada da yok: o, kendi tarihinde değil kökünün tarihinde gider.
+
 - Dosya sistemi olaylarından metadata'yı besleyen endeksleyici. Bu olmadan yalnız DEPSIS
   üzerinden yüklenen dosyalar listede görünür; SMB'den yazılanlar görünmez.
 - ZFS havuzu yaratma. Ajan dataset ve anlık görüntü yaratabiliyor, havuz yaratamıyor — mirror

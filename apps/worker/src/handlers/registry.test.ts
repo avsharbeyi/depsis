@@ -6,6 +6,7 @@ import type {
   CopyService,
   IdentitySyncService,
   JobsService,
+  TrashRetentionService,
 } from '@depsis/api/worker-surface';
 
 import { registerHandlers } from './registry.js';
@@ -29,9 +30,11 @@ describe('the worker consumes every kind the API enqueues', () => {
       jobs: {} as unknown as JobsService,
       identity: {} as unknown as IdentitySyncService,
       copies: {} as unknown as CopyService,
+      retention: {} as unknown as TrashRetentionService,
     });
     expect(worker.kinds.sort()).toEqual([
       'files.copy',
+      'files.trash.purge',
       'identity.sync',
       'permissions.apply',
       'storage.snapshot',

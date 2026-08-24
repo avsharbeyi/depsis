@@ -4,11 +4,13 @@ import type {
   CopyService,
   IdentitySyncService,
   JobsService,
+  TrashRetentionService,
 } from '@depsis/api/worker-surface';
 
 import type { WorkerService } from '../worker.service.js';
 import { applyAclHandler, APPLY_ACL_KIND } from './apply-acl.handler.js';
 import { copyHandler, COPY_KIND } from './copy.handler.js';
+import { trashPurgeHandler, TRASH_PURGE_KIND } from './trash-purge.handler.js';
 import { identitySyncHandler, IDENTITY_SYNC_KIND } from './identity-sync.handler.js';
 import { snapshotHandler, SNAPSHOT_KIND } from './snapshot.handler.js';
 
@@ -29,6 +31,7 @@ export function registerHandlers(
     jobs: JobsService;
     identity: IdentitySyncService;
     copies: CopyService;
+    retention: TrashRetentionService;
   },
 ): void {
   worker.register(SNAPSHOT_KIND, snapshotHandler(services.agent));
@@ -40,4 +43,7 @@ export function registerHandlers(
   // between nodes, so there is no successor to enqueue. The chained version made the id the user
   // was handed report `succeeded` while most of the work had not happened.
   worker.register(COPY_KIND, copyHandler(services.copies));
+  // Self-scheduling: each run queues the next through `run_after`, which is the only durable
+  // timer this product has. A `setInterval` would be gone after a restart.
+  worker.register(TRASH_PURGE_KIND, trashPurgeHandler(services.retention));
 }

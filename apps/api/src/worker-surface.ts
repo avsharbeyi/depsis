@@ -48,6 +48,19 @@ export { PosixIdentityService } from './identity/posix.service.js';
  * controllers and the auth flow into a process with no requests.
  */
 export { CopyModule } from './files/copy.module.js';
+
+/**
+ * §7's trash retention. The API stores the policy and re-seeds the schedule at boot; the worker
+ * runs it. The walk is exported rather than reimplemented for the same reason the copy's is.
+ */
+export { TrashRetentionModule } from './files/trash-retention.module.js';
+export {
+  TRASH_PURGE_KIND,
+  TrashRetentionService,
+  type PurgeResult,
+  type TrashImpact,
+  type TrashPolicy,
+} from './files/trash-retention.service.js';
 export {
   COPY_KIND,
   COPY_MAX_ATTEMPTS,

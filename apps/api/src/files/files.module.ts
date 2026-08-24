@@ -6,6 +6,8 @@ import { JobsModule } from '../jobs/jobs.module.js';
 import { CopyModule } from './copy.module.js';
 import { FileOperationsController } from './file-operations.controller.js';
 import { FilesController } from './files.controller.js';
+import { TrashPolicyController } from './trash-policy.controller.js';
+import { TrashRetentionModule } from './trash-retention.module.js';
 import { FilesService } from './files.service.js';
 import { SearchController } from './search.controller.js';
 import { TransfersController } from './transfers.controller.js';
@@ -25,10 +27,11 @@ import { UploadsController } from './uploads.controller.js';
  * supplies `SessionGuard`, which every route in all four controllers sits behind.
  */
 @Module({
-  imports: [AuthModule, JobsModule, IdempotencyModule, CopyModule],
+  imports: [AuthModule, JobsModule, IdempotencyModule, CopyModule, TrashRetentionModule],
   controllers: [
     FilesController,
     FileOperationsController,
+    TrashPolicyController,
     UploadsController,
     SearchController,
     TransfersController,

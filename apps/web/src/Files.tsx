@@ -6,12 +6,15 @@ import { formatBytes } from './Dashboard.js';
 import type { Tone } from './ui.js';
 import { Bar, ConfirmBox, Empty, FolderPicker, PromptBox, TONES, toneRgb, Win } from './ui.js';
 import { Permissions, type PermissionTarget } from './Permissions.js';
+import { TrashPolicyBar } from './TrashPolicy.js';
 
 type FileEntry = OpenApi.components['schemas']['FileEntry'];
 type FileEntryPage = OpenApi.components['schemas']['FileEntryPage'];
 
 interface Props {
   notify: (kind: 'ok' | 'error', text: string) => void;
+  /** Only an administrator may change the bin's retention policy, so only they are offered it. */
+  isAdmin: boolean;
   /** The optional note replaces the default sign-out sentence. A batch cut off by an expired
    *  session reports what it already did there, because this screen unmounts with the desk. */
   onUnauthenticated: (note?: string) => void;
@@ -196,7 +199,7 @@ function tint(tone: Tone, alpha = 0.22): React.CSSProperties {
 
 /* ─── the screen ────────────────────────────────────────────────────────────── */
 
-export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
+export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.Element {
   // Back and forward are a real stack rather than a "previous folder" variable, because with one
   // variable going back twice returns to where you already were.
   const [history, setHistory] = useState<Loc[]>([ROOT]);
@@ -1042,6 +1045,11 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
       {/* No `.ch` title row: the window this screen lives in already carries the glyph and the
           word "Dosyalar" in its own header, and repeating them two rows apart reads as a mistake.
           The one thing that row contributed — the item count — moved to the footer. */}
+      {/* Only in the bin, and only for an administrator. The control that arms permanent
+          deletion belongs on the screen showing the data it will delete — a settings pane would
+          put it where its effect is invisible. */}
+      {trashed && <TrashPolicyBar isAdmin={isAdmin} notify={notify} onChanged={reload} />}
+
       <div className="fbar" ref={bar}>
         <div className="search">
           <span style={{ color: 'var(--dim)', fontSize: 12 }} aria-hidden>
@@ -1495,6 +1503,15 @@ export function Files({ notify, onUnauthenticated }: Props): React.JSX.Element {
                 <span className="sz">
                   {entry.kind === 'folder' ? '—' : formatBytes(entry.size)}
                 </span>
+                {/* Only when the server sent one. Its absence means "not scheduled to go" — either
+                    no policy is set, or this row sits inside a trashed folder and dies on that
+                    folder's date rather than its own. Inventing a date here would be a countdown
+                    the purge does not honour. */}
+                {entry.expiresAt !== undefined && (
+                  <span className="sz" title="Kalıcı olarak silineceği tarih">
+                    ⏳ {new Date(entry.expiresAt).toLocaleDateString('tr')}
+                  </span>
+                )}
 
                 {/* The row itself is clickable while picking, so the actions have to swallow the
                     click or renaming a file would also select it. */}

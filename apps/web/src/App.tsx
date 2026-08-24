@@ -840,7 +840,7 @@ function PaneBody({
 }): React.JSX.Element {
   switch (pane) {
     case 'files':
-      return <Files notify={notify} onUnauthenticated={onUnauthenticated} />;
+      return <Files notify={notify} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />;
     case 'notes':
       return <Notes notify={notify} />;
     case 'tasks':
