@@ -23,6 +23,7 @@ import { Tasks } from './Tasks.js';
 import { Tiles } from './Tiles.js';
 import { Transfers } from './Transfers.js';
 import { toneRgb, Toasts, useToasts, Win, type Tone } from './ui.js';
+import { Teams } from './Teams.js';
 import { Users } from './Users.js';
 
 /**
@@ -55,6 +56,7 @@ export type PaneId =
   | 'notes'
   | 'tasks'
   | 'users'
+  | 'teams'
   | 'shares'
   | 'account'
   | 'transfers'
@@ -87,6 +89,18 @@ const PANES: Record<PaneId, PaneMeta> = {
     glyph: '🗂',
     tone: 'iris',
     wide: true,
+    adminOnly: false,
+  },
+  teams: {
+    // NOT admin-only. Granting a permission means naming a principal, and a member with `manage`
+    // on one folder has to be able to see which teams exist in order to name one — the same
+    // reasoning `GET /teams` uses to serve every signed-in caller. Only the mutations are gated,
+    // and they are gated inside the screen.
+    slug: 'ekipler',
+    label: 'Ekipler',
+    glyph: '👥',
+    tone: 'iris',
+    wide: false,
     adminOnly: false,
   },
   shares: {
@@ -190,6 +204,7 @@ const DOCK_ORDER: PaneId[] = [
   'remote',
   'console',
   'users',
+  'teams',
   'account',
   'background',
 ];
@@ -810,6 +825,8 @@ function PaneBody({
       return <Shares notify={notify} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />;
     case 'users':
       return <Users currentUserId={me.id} notify={notify} onUnauthenticated={onUnauthenticated} />;
+    case 'teams':
+      return <Teams notify={notify} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />;
     case 'account':
       return <Account me={me} notify={notify} />;
     case 'transfers':
