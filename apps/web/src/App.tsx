@@ -97,8 +97,11 @@ const PANES: Record<PaneId, PaneMeta> = {
     // Admin-only, matching the endpoint. `GET /jobs/{jobId}` is safe for anybody because holding
     // the id IS the authorisation; a LISTING has no such property — it would show a member every
     // piece of work happening in the tenant.
-    slug: 'isler',
-    label: 'İşler',
+    // NOT `isler`: the `tasks` pane below is already that, and it is a person's to-do list. These
+    // are the queue's jobs — `permissions.apply`, `identity.sync` — and two docks entries reading
+    // "İşler" would be two different things with one name.
+    slug: 'sistem-isleri',
+    label: 'Sistem işleri',
     glyph: '⚙',
     tone: 'warn',
     wide: false,

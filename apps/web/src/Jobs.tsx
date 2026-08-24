@@ -70,7 +70,7 @@ export function Jobs({ onUnauthenticated }: { onUnauthenticated: () => void }): 
   return (
     <>
       <div className="netrow">
-        <span className="lbl">İşler</span>
+        <span className="lbl">Sistem işleri</span>
         <select
           className="b"
           aria-label="Hangi durumdakiler"
@@ -98,7 +98,7 @@ export function Jobs({ onUnauthenticated }: { onUnauthenticated: () => void }): 
         </p>
       )}
 
-      {failed && <Empty glyph="⚠" text="İşler okunamadı." />}
+      {failed && <Empty glyph="⚠" text="Sistem işleri okunamadı." />}
       {!failed && jobs === null && <p className="note">Yükleniyor…</p>}
       {!failed && jobs !== null && jobs.length === 0 && (
         <Empty glyph="✓" text={status === 'dead' ? 'Vazgeçilen iş yok.' : 'Bu durumda iş yok.'} />
