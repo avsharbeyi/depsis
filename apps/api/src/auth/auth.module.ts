@@ -8,6 +8,7 @@ import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
 import { LoginThrottleService } from './login-throttle.service.js';
 import { MfaService } from './mfa.service.js';
+import { PasswordResetService } from './password-reset.service.js';
 import { PasswordService } from './password.service.js';
 import { PendingLoginService } from './pending-login.service.js';
 import { loadSecretBox, type SecretBox } from './secret-box.js';
@@ -38,6 +39,7 @@ function secretBoxFor(config: AppConfig): SecretBox | null {
       useFactory: (db: DbService, config: AppConfig) => new MfaService(db, secretBoxFor(config)),
     },
     PendingLoginService,
+    PasswordResetService,
     SessionGuard,
     AdminGuard,
   ],
@@ -48,6 +50,17 @@ function secretBoxFor(config: AppConfig): SecretBox | null {
   // module that needs to decide who may call it, or to hash a password, must use THESE instances.
   // A second `PasswordService` would be a second set of Argon2 parameters, and a locally-declared
   // guard is a guard nobody updates when the rule changes.
-  exports: [SessionService, SessionGuard, AdminGuard, MfaService, PasswordService],
+  // `PasswordResetService` is exported for the same reason: the two halves of a reset live in
+  // `UsersModule` — the administrator's half needs the session store and the hasher, the user's
+  // half needs to write a password — and putting them the other way round would make the two
+  // modules import each other.
+  exports: [
+    SessionService,
+    SessionGuard,
+    AdminGuard,
+    MfaService,
+    PasswordService,
+    PasswordResetService,
+  ],
 })
 export class AuthModule {}

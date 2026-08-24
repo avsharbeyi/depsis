@@ -5,6 +5,8 @@ import {
   Controller,
   ForbiddenException,
   Get,
+  HttpCode,
+  Logger,
   NotFoundException,
   Param,
   Patch,
@@ -17,6 +19,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
 import { requireSameOrigin } from '../auth/origin.js';
+import { PasswordResetService } from '../auth/password-reset.service.js';
 import { PasswordService } from '../auth/password.service.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { SessionService } from '../auth/session.service.js';
@@ -51,6 +54,9 @@ const createSchema = z.object({
   password: z.string().min(MIN_PASSWORD).max(MAX_PASSWORD),
 });
 
+/** The caller's own password, asked for before anything dangerous. */
+const confirmSchema = z.object({ password: z.string().min(1).max(MAX_PASSWORD) });
+
 const updateSchema = z
   .object({
     role: z.enum(['admin', 'member']).optional(),
@@ -68,10 +74,13 @@ const updateSchema = z
 @Controller('users')
 @UseGuards(SessionGuard, AdminGuard)
 export class UsersController {
+  private readonly logger = new Logger(UsersController.name);
+
   constructor(
     private readonly users: UsersService,
     private readonly passwords: PasswordService,
     private readonly sessions: SessionService,
+    private readonly resets: PasswordResetService,
   ) {}
 
   @Get()
@@ -110,6 +119,62 @@ export class UsersController {
     } catch (error) {
       throw translate(error);
     }
+  }
+
+  /**
+   * Open a password reset for somebody who cannot sign in.
+   *
+   * THE ADMINISTRATOR DOES NOT CHOOSE THE PASSWORD, and `PATCH /users/{id}` says why it must not:
+   * "a password the administrator sets is a password the administrator knows — it makes every
+   * account impersonable in a way indistinguishable in the audit." What comes back here is a
+   * one-time value to hand over; the user chooses the password themselves.
+   *
+   * THE ADMINISTRATOR'S OWN PASSWORD IS REQUIRED. A session is what somebody has when they borrow
+   * an unlocked laptop, and this endpoint is the single most useful thing to find on a borrowed
+   * one — it opens a door into any account on the box. `/me/password` and `DELETE /me/mfa` already
+   * ask for the same reason.
+   *
+   * The token is shown ONCE. It is stored as a SHA-256 digest, so this response is the only place
+   * the value exists; there is no second endpoint that can read it back.
+   */
+  @Post(':id/password-reset')
+  @HttpCode(201)
+  async openPasswordReset(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ): Promise<Schemas['PasswordResetTicket']> {
+    requireSameOrigin(request);
+    const session = requireSession(request);
+    const parsed = confirmSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('your own password is required');
+
+    const me = await this.users.findWithHash(session.organizationId, session.userId);
+    if (me === null || !(await this.passwords.verify(me.password_hash, parsed.data.password))) {
+      throw new UnauthorizedException('your password is wrong');
+    }
+
+    // Refused for oneself, and not as a safety rail: `/me/password` already does this properly,
+    // asking for the current password and LEAVING the current session alive. Redeeming a ticket
+    // revokes every session of the target, so an administrator resetting themselves this way would
+    // sign themselves out mid-way through the thing they were doing.
+    if (id === session.userId) {
+      throw new ConflictException('use /me/password to change your own password');
+    }
+
+    // Proves the account exists and belongs to this tenant before a row is written. Without it a
+    // reset could be opened against a uuid from another organisation and the foreign key would be
+    // the only thing that noticed — as a 500.
+    const target = await this.users.find(session.organizationId, id).catch((error: unknown) => {
+      throw translate(error);
+    });
+
+    const issued = await this.resets.open(session.organizationId, id, session.userId);
+    this.logger.warn(
+      `password reset opened for '${target.username}' by '${session.userId}'; ` +
+        `it expires at ${issued.expiresAt.toISOString()}`,
+    );
+    return { token: issued.token, expiresAt: issued.expiresAt.toISOString() };
   }
 
   @Patch(':id')

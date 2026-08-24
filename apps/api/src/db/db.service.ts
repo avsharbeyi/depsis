@@ -59,7 +59,12 @@ export type UntenantedJustification =
   // must be able to take a job from any organization, including the system jobs that belong to
   // none (ADR-0003). The widening lives in named SECURITY DEFINER functions with fixed shapes
   // rather than in a role that could be pointed at anything.
-  | 'job-queue-worker';
+  | 'job-queue-worker'
+  // A password reset token, redeemed by somebody who by definition cannot sign in — so there is no
+  // tenant context and the token is the only thing that names one. Identical in shape to
+  // `resolve-session` and `resolve-pending-login`, and argued in ADR-0015 §5e and migration 0021:
+  // an expired, spent, exhausted and never-existing token all return the same nothing.
+  | 'resolve-password-reset';
 
 const SET_TENANT_SQL = `SELECT set_config('depsis.organization_id', $1, true) AS applied,
                                public.current_organization_id()::text  AS observed`;

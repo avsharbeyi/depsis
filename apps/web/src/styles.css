@@ -2034,6 +2034,31 @@ label textarea,
   line-height: 1.6;
 }
 
+/* A button that reads as a link.
+   It has to BE a button: this one changes what the screen shows rather than going anywhere, and an
+   anchor with no href is invisible to a keyboard and to a screen reader. The rule strips the
+   button chrome and leaves the affordance. */
+.linky {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--cool);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.linky:hover {
+  color: var(--ink);
+}
+
+.linky:focus-visible {
+  outline: 2px solid var(--cool);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 /* apps — GET /apps, POST/PATCH/DELETE /apps/{slug}, GET /apps/{slug}/logs */
 .apps {
   display: grid;

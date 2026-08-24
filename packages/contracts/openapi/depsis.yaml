@@ -324,6 +324,107 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
 
+  /users/{id}/password-reset:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [users]
+      summary: Bir hesap için tek kullanımlık parola sıfırlama bileti aç
+      description: |
+        Yalnız yöneticiler. Parolasını unutan bir kullanıcının üründen kurtarılmasının yolu.
+
+        YÖNETİCİ PAROLAYI BELİRLEMİYOR ve `PATCH /users/{id}` bunun neden böyle olması
+        gerektiğini yazıyor: "yöneticinin belirlediği bir parola, yöneticinin bildiği bir
+        paroladır." Dönen şey elden verilecek tek kullanımlık bir jeton; parolayı kullanıcı
+        kendisi seçiyor.
+
+        Bu, taklidi imkânsız kılmıyor — bir NAS'ın yöneticisi zaten root eşdeğeri. Değiştirdiği
+        şey, taklidin SESSİZ olmaktan çıkması: jeton tek kullanımlık, yani yönetici kullanırsa
+        kullanıcının kendi denemesi başarısız olur ve kurban olayı öğrenir.
+
+        Yöneticinin KENDİ parolası isteniyor. Bir oturum, birinin açık bırakılmış dizüstünü ödünç
+        alan kişinin sahip olduğu şeydir ve bu uç, öyle bir dizüstünde bulunabilecek en kullanışlı
+        şey: cihazdaki her hesaba açılan bir kapı.
+
+        Jeton BİR KEZ gösteriliyor. Veritabanında yalnız SHA-256 özeti duruyor, yani bu yanıt
+        değerin var olduğu tek yer; geri okuyabilecek ikinci bir uç yok.
+
+        Kendine sıfırlama açmak 409: `POST /me/password` bunu zaten doğru yapıyor — mevcut parolayı
+        istiyor ve mevcut oturumu ayakta bırakıyor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password:
+                  type: string
+                  maxLength: 1024
+                  description: Çağıran YÖNETİCİNİN kendi parolası. Hedef kullanıcının değil.
+      responses:
+        '201':
+          description: Bilet açıldı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PasswordResetTicket' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /auth/password-reset:
+    post:
+      tags: [auth]
+      summary: Bileti kullan ve yeni parolayı belirle
+      description: |
+        KİMLİK DOĞRULAMASIZ, ve bütün mesele bu: bu ucu kullanan kişi giriş yapamıyor. Yetkiyi
+        veren şey, yöneticinin verdiği jeton.
+
+        İKİNCİ FAKTÖR YİNE İSTENİYOR. Hesap MFA'ya kayıtlıysa doğrulayıcı kodu ya da kurtarma kodu
+        gerekiyor; yoksa çalınmış bir kâğıt parçasıyla ikinci faktörün önünden dolaşılabilirdi —
+        ikinci faktörün var olma sebebi tam olarak bunu engellemek. `code` şemada isteğe bağlı
+        çünkü çağıran hesabın kayıtlı olup olmadığını bilemez, ve kodsuz isteği reddetmek bu soruyu
+        çalınmış bir bileti elinde tutan birine cevaplamak olurdu.
+
+        Kullanıcının BÜTÜN oturumları iptal ediliyor.
+
+        HER BAŞARISIZLIK AYNI CEVABI VERİYOR. Bilinmeyen jeton, süresi dolmuş jeton, kullanılmış
+        jeton, devre dışı hesaba ait jeton ve yanlış ikinci faktör — hepsi aynı 401. Ayırt
+        edilebilir olsalardı bu uç, hangi biletlerin var olduğunu söyleyen bir kâhin olurdu.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string, maxLength: 512 }
+                password: { type: string, minLength: 12, maxLength: 1024 }
+                code:
+                  type: string
+                  maxLength: 64
+                  description: Hesap ikinci faktöre kayıtlıysa zorunlu. Altı haneli kod ya da kurtarma kodu.
+      responses:
+        '200':
+          description: Parola değişti
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
   /me/password:
     post:
       tags: [me]
@@ -1767,6 +1868,16 @@ components:
           type: array
           items: { $ref: '#/components/schemas/ProblemFieldError' }
         retryAfter: { type: integer, minimum: 0 }
+
+    PasswordResetTicket:
+      type: object
+      required: [token, expiresAt]
+      properties:
+        token:
+          type: string
+          description: |
+            Tek kullanımlık. Bir daha gösterilmiyor — sunucuda yalnız SHA-256 özeti duruyor.
+        expiresAt: { type: string, format: date-time }
 
     ProblemFieldError:
       type: object

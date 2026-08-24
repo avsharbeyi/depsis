@@ -48,6 +48,7 @@ güncellenmesi gerekir.
 | `login-throttle`               | Deneme, kiracı **çözülmeden önce** sayılmalı — §5c    |
 | `resolve-pending-login`        | İkinci faktör adımı; kiracı yine belirteçten gelir    |
 | `setup-status`                 | Hiç kiracı yokken sorulan tek soru — §5d              |
+| `resolve-password-reset`       | Jetonu getiren, tanımı gereği giriş yapamıyor — §5e   |
 
 Dördüncüsü oturum katmanı, beşincisi kısıtlama, altıncısı ikinci faktör tasarlanırken eklendi —
 yani kural her seferinde işledi: listeyi genişletmek kod değişikliği değil, karar değişikliği oldu.
@@ -59,8 +60,14 @@ bekleyen giriş belirteci) kimliğe çeviriyor; sonuncusu ise kiracının **var 
 soruyor. Bu desene uymayan bir gerekçe, muhtemelen `withTenant` ile yazılabilecek bir iş demektir.
 
 Not: bu ADR'nin önceki hâli "liste altıda bitiyor" diyordu. Bitmedi — kurulum akışı tasarlanınca
-yedincisi geldi. Cümleyi düzeltmek, listeyi sessizce uzatmaktan iyi: bir ADR'nin yanlış çıkmış
-tahmini, düzeltilirse hâlâ bilgi taşır.
+yedincisi, parola kurtarma tasarlanınca sekizincisi geldi. Cümleyi düzeltmek, listeyi sessizce
+uzatmaktan iyi: bir ADR'nin yanlış çıkmış tahmini, düzeltilirse hâlâ bilgi taşır. Bu ADR artık
+listenin bittiğini iddia etmiyor; iddia ettiği şey, listeye girmenin bir KARAR olduğu — ve
+aşağıdaki §5e o kararın nasıl yazıldığının örneği.
+
+(Tabloda görünmeyen üç gerekçe daha var — `resolve-sole-organization`, `system-admin-check`,
+`mfa-key-inventory`, `job-queue-worker` — hepsi `apps/api/src/db/db.service.ts` içinde kendi
+gerekçesiyle yazılı. Tablo deseni gösteriyor, sayımı değil.)
 
 ### 5d. Kurulum: kiracılardan önce gelen soru
 
@@ -79,6 +86,29 @@ okumak konsol veya SSH erişimi gerektiriyor — ilk yöneticinin kim olacağın
 yetki tam olarak bu. §6.3 ihlali değil: §6.3 **parolanın** loga düşmesini yasaklıyor, bu ise parola
 değil; tek kullanımlık, her açılışta yenileniyor (eski bir journal'dan toplanan belirteç ölü) ve
 kurulum bitince hiçbir şey ifade etmiyor.
+
+### 5e. Parola sıfırlama: giriş yapamayan birinin çözümü
+
+Parolasını unutan bir kullanıcı, tanımı gereği bir oturum kuramaz. Elindeki tek şey yöneticinin
+verdiği tek kullanımlık jeton, ve kiracıyı adlandıran tek şey de o. §5b'nin oturum çerezi ile
+birebir aynı tavuk-yumurta: `password_resets` üzerindeki politika kiracıyı biliyor olmayı
+gerektiriyor, ve kiracı ancak jeton çözülünce biliniyor.
+
+`public.resolve_password_reset(bytea)` bu yüzden `resolve_session` ile aynı biçimde dar: jetonun
+**hash'ini** alıyor (ham değer veritabanına ve loglarına hiç ulaşmıyor), yalnız bağlamı kurmaya
+yetecek dört alanı döndürüyor, `SECURITY DEFINER` ve `search_path` sabitlenmiş, ve `PUBLIC`
+çalıştıramıyor.
+
+Süresi dolmuş, tüketilmiş, deneme hakkı bitmiş, devre dışı bir hesaba ait ve hiç var olmamış bir
+jeton AYNI cevabı veriyor: hiçbir satır. Çağıran bir jetonun bir zamanlar geçerli olduğunu
+öğrenemiyor.
+
+**Neden bu özellik bu ADR'yi ilgilendiriyor:** sözleşme `PATCH /users/{id}` üzerinde parola
+belirlemeyi açıkça reddediyor — "yöneticinin belirlediği bir parola, yöneticinin bildiği bir
+paroladır." Jeton tasarımı o itirazı ortadan kaldırmıyor ama sessiz taklidi gürültülü bir hırsızlığa
+çeviriyor: jeton tek kullanımlık, yani yönetici kullanırsa kullanıcının kendi denemesi başarısız
+olur ve kurban olayı öğrenir. Kiracısız çözümleyici, bu tasarımın çalışabilmesi için gereken tek
+genişletme — ve dar tutulmasının sebebi de bu.
 
 ### 5b. Oturum çözümü: aynı desen, bir adım içeride
 

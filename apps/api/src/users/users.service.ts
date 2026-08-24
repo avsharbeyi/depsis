@@ -93,6 +93,28 @@ export class UsersService {
   }
 
   /**
+   * One account, with the hash a confirmation check needs.
+   *
+   * Separate from `find` rather than a column added to it: `UserRow` is what `toUser` turns into an
+   * API response, and a password hash on that type is one careless spread away from being served.
+   * The two callers that need the hash ask for it by name.
+   */
+  async findWithHash(
+    organizationId: string,
+    id: string,
+  ): Promise<(UserRow & { password_hash: string | null }) | null> {
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<UserRow & { password_hash: string | null }>(
+        `SELECT id::text AS id, username, email, role, disabled_at, created_at, password_hash
+           FROM public.users
+          WHERE organization_id = $1 AND id = $2`,
+        [organizationId, id],
+      ),
+    );
+    return rows[0] ?? null;
+  }
+
+  /**
    * Create an account.
    *
    * `passwordHash`, never a password: hashing belongs to `PasswordService` and a plaintext

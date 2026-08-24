@@ -457,6 +457,10 @@ BAD=$(db -c "
      AND i.relname NOT IN ('organizations_slug_key',
                            'sessions_token_hash_key',
                            'pending_logins_token_hash_key',
+                           -- Migration 0021, and the same argument once more: the reset token is
+                           -- looked up before a tenant is known, because the person holding it
+                           -- cannot sign in by definition. Provoking a collision needs the value.
+                           'password_resets_token_hash_key',
                            -- A singleton key on a boolean, not an identifier. The only value it
                            -- can hold is true, so a violation says only that setup is already
                            -- complete, which the unauthenticated status endpoint answers anyway.
