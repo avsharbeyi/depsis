@@ -651,6 +651,34 @@ jobs:
             tail -80 "$log"
           done
 
+      - name: What the stack actually was
+        # THE STATE, not just the output — and emitted as ANNOTATIONS rather than as log lines.
+        #
+        # The step above already tails every log, and that was not enough the first time this
+        # suite ever ran in CI: reading a job's log needs an authenticated GitHub API call, while
+        # annotations are public on a public repository. So the facts that separate "the agent is
+        # not running" from "it is running against a share tree that is not there" from "it is
+        # running unprivileged and cannot chown to a DEPSIS uid" go somewhere they can be read
+        # from outside — including from a machine with no token.
+        #
+        # `::error::` and not `::notice::` because this step only runs when the job has already
+        # failed, and because notices are truncated harder.
+        if: failure()
+        run: |
+          note() {
+            # `%0A` for the newlines: the runner keeps only the first line of an annotation
+            # otherwise, and on a directory listing that is the least useful one.
+            local body=${2//$'\n'/%0A}
+            echo "::error title=$1::${body:0:3000}"
+          }
+          note "whoami" "$(id)"
+          note "run dir" "$(ls -la /tmp/depsis-e2e 2>&1 | head -30)"
+          note "share tree" "$(ls -laR /tmp/depsis-e2e/shares 2>&1 | head -40)"
+          note "agent process" "$(pgrep -a depsis-agent || echo 'the agent is not running')"
+          note "agent audit tail" "$(tail -25 /tmp/depsis-e2e/agent.log 2>&1)"
+          note "api errors" "$(grep -a -i error /tmp/depsis-e2e/main-api.log 2>/dev/null |
+            tail -20 | cut -c1-300)"
+
       - name: Traces and screenshots
         # `retain-on-failure` and `only-on-failure` in the config mean these directories hold
         # exactly the runs that went wrong. An e2e failure nobody can look at is a test nobody
