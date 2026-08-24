@@ -1,15 +1,24 @@
 import type { OpenApi } from '@depsis/contracts';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { api } from './api.js';
+import { useEventRefresh } from './events.js';
 import { formatBytes, formatWhen, percent } from './Dashboard.js';
 import { Empty } from './ui.js';
 
 type Transfer = OpenApi.components['schemas']['Transfer'];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
 
-/** Two seconds. Slower and a 40 MB/s upload appears to jump; faster buys nothing an eye can use. */
-const POLL_MS = 2000;
+/**
+ * The fallback interval, no longer the primary one.
+ *
+ * §14's event stream is what refreshes this list now: a chunk landing moves `updated_at`, the
+ * stream says so, and the panel re-reads. This timer stays as a much slower backstop for the case
+ * the stream itself is down — a proxy that closes SSE, a reconnect that has not completed — where
+ * a transfers panel frozen at its last value is worse than a slow one. Thirty seconds rather than
+ * two: it is insurance, not the mechanism.
+ */
+const POLL_MS = 30_000;
 
 /**
  * The three states, and what each one is allowed to look like.
@@ -29,6 +38,13 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
   /** Set only while the list has never been read. Once real rows have arrived, a dropped poll
    *  leaves the last known ones on screen rather than replacing them with a failure. */
   const [failed, setFailed] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const reload = useCallback(() => setReloadKey((key) => key + 1), []);
+
+  // The stream replaces the poll. `reload` is stable, so subscribing here does not tear the
+  // connection down on every render.
+  useEventRefresh('transfer', reload);
 
   useEffect(() => {
     let alive = true;
@@ -65,7 +81,7 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
       alive = false;
       window.clearInterval(timer);
     };
-  }, [notify]);
+  }, [notify, reloadKey]);
 
   return (
     <>

@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from './api.js';
+import { useEventRefresh } from './events.js';
 import { Empty } from './ui.js';
 
 type Job = OpenApi.components['schemas']['Job'];
@@ -42,6 +43,11 @@ export function Jobs({ onUnauthenticated }: { onUnauthenticated: () => void }): 
   const [reloadKey, setReloadKey] = useState(0);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
+
+  // §14. The board was a snapshot with a Yenile button: a job that died while somebody was looking
+  // at the screen stayed "çalışıyor" until they pressed it. Now the row moving is what refreshes
+  // the list, and a board with nothing happening makes no requests at all.
+  useEventRefresh('job', reload);
 
   useEffect(() => {
     let alive = true;

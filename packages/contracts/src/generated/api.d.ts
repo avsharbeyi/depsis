@@ -1647,6 +1647,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Olay akışı (Server-Sent Events)
+         * @description §14'ün istediği gerçek zamanlı akış. TEK uç nokta: bir tarayıcı köken başına az sayıda
+         *     bağlantı tutar ve ekran başına bir akış, dosya yöneticisi + işler + aktarımlar açıkken
+         *     üçünü boş sokete harcardı. Olaylar tipli geliyor, istemci `event.type` üzerinden
+         *     dağıtıyor — SSE'nin olay adının var olma sebebi bu.
+         *
+         *     WebSocket değil. ADR-0018 bu kararı konsol için zaten yazdı ve buradaki gerekçe daha
+         *     güçlü: bu akış doğası gereği tek yönlü, Nest'te `@Sse` çerçevede var, ve `EventSource`
+         *     kendi kendine yeniden bağlanıp `Last-Event-ID` gönderiyor — §14'ün istediği tam olarak bu.
+         *
+         *     ── Olay tipleri ────────────────────────────────────────────────────────
+         *
+         *     `job` — kuyruktaki bir işin durumu değişti. Gövde: `JobEvent`. YALNIZ YÖNETİCİYE,
+         *     çünkü `GET /jobs` de yalnız yöneticiye. Bir iş bittiğinde satır `job_queue`'dan
+         *     `job_history`'ye geçiyor; akış ikisini de okuyor, yoksa her iş ilerler ve hiçbiri
+         *     bitmezdi.
+         *
+         *     `transfer` — bir yüklemenin konumu ilerledi ya da tamamlandı. Gövde: `TransferEvent`.
+         *     YALNIZ YÜKLEMEYİ AÇAN KİŞİYE, çünkü `GET /transfers` de öyle. Kiracı geneli bir aktarım
+         *     akışı, her üyeye diğer her üyenin ne yüklediğini dosya adıyla söylerdi.
+         *
+         *     `ping` — 20 saniyede bir. Boştaki bir SSE bağlantısı yoldaki hiçbir şey için ölü bir
+         *     bağlantıdan ayırt edilemez; ters vekil kapatır ve tarayıcı okumaya çalışana kadar fark
+         *     etmez.
+         *
+         *     ── Yeniden bağlanma ────────────────────────────────────────────────────
+         *
+         *     Her olayın `id`'si, satırın `updated_at` değerinin epoch milisaniyesi. Tarayıcı yeniden
+         *     bağlanırken bunu `Last-Event-ID` başlığıyla gönderiyor ve sunucu oradan devam ediyor.
+         *
+         *     Teslimat EN AZ BİR KEZ: PostgreSQL mikrosaniye tutuyor, id milisaniye, ve devam noktası
+         *     bir milisaniye geri sarılıyor. Kopya zararsız — her olay satırın tamamını taşıyor ve
+         *     istemci id'ye göre değiştiriyor — ama bir eksik, ekranda sonsuza kadar "çalışıyor"
+         *     kalan bir iş demek.
+         *
+         *     Akış bir ANLIK GÖRÜNTÜ DEĞİL. Yeni açılan bir akış, o andan SONRA olanları taşıyor;
+         *     istemci mevcut durumu sıradan REST ucundan alıyor. Dünkü bitmiş işleri yeni açılan bir
+         *     ekrana tekrar oynatmak durum değil gürültü olurdu.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Olay akışı */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/event-stream": string;
+                    };
+                };
+                401: components["responses"]["Problem"];
+                /** @description Bu süreçte aynı anda tutulabilecek akış sayısına ulaşıldı. `Retry-After` taşır. */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["ProblemDetails"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/notes": {
         parameters: {
             query?: never;
@@ -3381,6 +3466,34 @@ export interface components {
             correlationId: string;
             errors?: components["schemas"]["ProblemFieldError"][];
             retryAfter?: number;
+        };
+        /**
+         * @description `event: job` olayının gövdesi. Medya tipi `text/event-stream` olduğu için şema oradan
+         *     referans verilemiyor — bu tanım, akışın taşıdığı JSON'ın sözleşmedeki karşılığı.
+         */
+        JobEvent: {
+            /** Format: uuid */
+            id: string;
+            kind: string;
+            /** @enum {string} */
+            status: "queued" | "running" | "succeeded" | "failed" | "dead";
+            progress: number;
+            /** Format: date-time */
+            createdAt: string;
+            error?: {
+                title: string;
+            };
+        };
+        /** @description `event: transfer` olayının gövdesi. */
+        TransferEvent: {
+            /** Format: uuid */
+            id: string;
+            filename: string;
+            /** Format: int64 */
+            lengthBytes: number;
+            /** Format: int64 */
+            offsetBytes: number;
+            completed: boolean;
         };
         PasswordResetTicket: {
             /** @description Tek kullanımlık. Bir daha gösterilmiyor — sunucuda yalnız SHA-256 özeti duruyor. */

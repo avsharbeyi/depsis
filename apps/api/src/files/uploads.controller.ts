@@ -341,7 +341,10 @@ export class UploadsController {
   private async setOffset(organizationId: string, id: string, offset: number): Promise<void> {
     await this.db.withTenant(organizationId, (db) =>
       db.query(
-        `UPDATE public.upload_sessions SET offset_bytes = $3
+        // `updated_at` moves with the offset. It is what the event stream's watermark compares
+        // against, so without it a chunk arriving would advance the upload and tell nobody — the
+        // transfers panel would sit at whatever it last polled.
+        `UPDATE public.upload_sessions SET offset_bytes = $3, updated_at = now()
           WHERE organization_id = $1 AND id = $2`,
         [organizationId, id, offset],
       ),

@@ -938,6 +938,62 @@ paths:
               schema: { $ref: '#/components/schemas/Job' }
         '404': { $ref: '#/components/responses/Problem' }
 
+  /events:
+    get:
+      tags: [events]
+      summary: Olay akışı (Server-Sent Events)
+      description: |
+        §14'ün istediği gerçek zamanlı akış. TEK uç nokta: bir tarayıcı köken başına az sayıda
+        bağlantı tutar ve ekran başına bir akış, dosya yöneticisi + işler + aktarımlar açıkken
+        üçünü boş sokete harcardı. Olaylar tipli geliyor, istemci `event.type` üzerinden
+        dağıtıyor — SSE'nin olay adının var olma sebebi bu.
+
+        WebSocket değil. ADR-0018 bu kararı konsol için zaten yazdı ve buradaki gerekçe daha
+        güçlü: bu akış doğası gereği tek yönlü, Nest'te `@Sse` çerçevede var, ve `EventSource`
+        kendi kendine yeniden bağlanıp `Last-Event-ID` gönderiyor — §14'ün istediği tam olarak bu.
+
+        ── Olay tipleri ────────────────────────────────────────────────────────
+
+        `job` — kuyruktaki bir işin durumu değişti. Gövde: `JobEvent`. YALNIZ YÖNETİCİYE,
+        çünkü `GET /jobs` de yalnız yöneticiye. Bir iş bittiğinde satır `job_queue`'dan
+        `job_history`'ye geçiyor; akış ikisini de okuyor, yoksa her iş ilerler ve hiçbiri
+        bitmezdi.
+
+        `transfer` — bir yüklemenin konumu ilerledi ya da tamamlandı. Gövde: `TransferEvent`.
+        YALNIZ YÜKLEMEYİ AÇAN KİŞİYE, çünkü `GET /transfers` de öyle. Kiracı geneli bir aktarım
+        akışı, her üyeye diğer her üyenin ne yüklediğini dosya adıyla söylerdi.
+
+        `ping` — 20 saniyede bir. Boştaki bir SSE bağlantısı yoldaki hiçbir şey için ölü bir
+        bağlantıdan ayırt edilemez; ters vekil kapatır ve tarayıcı okumaya çalışana kadar fark
+        etmez.
+
+        ── Yeniden bağlanma ────────────────────────────────────────────────────
+
+        Her olayın `id`'si, satırın `updated_at` değerinin epoch milisaniyesi. Tarayıcı yeniden
+        bağlanırken bunu `Last-Event-ID` başlığıyla gönderiyor ve sunucu oradan devam ediyor.
+
+        Teslimat EN AZ BİR KEZ: PostgreSQL mikrosaniye tutuyor, id milisaniye, ve devam noktası
+        bir milisaniye geri sarılıyor. Kopya zararsız — her olay satırın tamamını taşıyor ve
+        istemci id'ye göre değiştiriyor — ama bir eksik, ekranda sonsuza kadar "çalışıyor"
+        kalan bir iş demek.
+
+        Akış bir ANLIK GÖRÜNTÜ DEĞİL. Yeni açılan bir akış, o andan SONRA olanları taşıyor;
+        istemci mevcut durumu sıradan REST ucundan alıyor. Dünkü bitmiş işleri yeni açılan bir
+        ekrana tekrar oynatmak durum değil gürültü olurdu.
+      responses:
+        '200':
+          description: Olay akışı
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Problem' }
+        '429':
+          description: |
+            Bu süreçte aynı anda tutulabilecek akış sayısına ulaşıldı. `Retry-After` taşır.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
   /notes:
     get:
       tags: [desk]
@@ -1868,6 +1924,35 @@ components:
           type: array
           items: { $ref: '#/components/schemas/ProblemFieldError' }
         retryAfter: { type: integer, minimum: 0 }
+
+    JobEvent:
+      type: object
+      description: |
+        `event: job` olayının gövdesi. Medya tipi `text/event-stream` olduğu için şema oradan
+        referans verilemiyor — bu tanım, akışın taşıdığı JSON'ın sözleşmedeki karşılığı.
+      required: [id, kind, status, progress, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        status: { type: string, enum: [queued, running, succeeded, failed, dead] }
+        progress: { type: number, minimum: 0, maximum: 1 }
+        createdAt: { type: string, format: date-time }
+        error:
+          type: object
+          required: [title]
+          properties:
+            title: { type: string }
+
+    TransferEvent:
+      type: object
+      description: '`event: transfer` olayının gövdesi.'
+      required: [id, filename, lengthBytes, offsetBytes, completed]
+      properties:
+        id: { type: string, format: uuid }
+        filename: { type: string }
+        lengthBytes: { type: integer, format: int64 }
+        offsetBytes: { type: integer, format: int64 }
+        completed: { type: boolean }
 
     PasswordResetTicket:
       type: object

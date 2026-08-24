@@ -113,13 +113,34 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
 
 ### Diğerleri
 
-- **Sözleşmenin söz verip sunucunun yapmadıkları.** RFC 9457 `ProblemDetails` gövdesi hiç
-  üretilmiyor; `Idempotency-Key` dört uçta tanımlı ve hiçbir yerde okunmuyor; `If-Match`/412
-  tanımlı ve uygulanmamış; `GET /files`'ın `sort` parametresi yok sayılıyor; `Upload-Checksum`
-  doğrulanmıyor. §14'ün istediği SSE/WebSocket olay akışı da yok.
-- **Yönetici parola sıfırlama yok.** Parolasını unutan bir kullanıcı üründen kurtarılamıyor.
-- **Kopyalama yok** (`POST /file-operations`, ajanda karşılık gelen tipli işlem olmadığı için).
-- **Çöp kutusunun saklama süresi ve temizleme politikası yok.**
+- **Sözleşmenin söz verip sunucunun yapmadıkları — kapandı.** RFC 9457 `ProblemDetails` artık her
+  hatada üretiliyor ve `correlationId` her yanıtta; `Idempotency-Key` üç uçta gerçekten çalışıyor;
+  `If-Match`/412 uygulandı ve `GET /files/{id}` `ETag` veriyor; `sort` üç sıralamayı da yapıyor;
+  `Upload-Checksum` akarken doğrulanıyor. §14'ün olay akışı da var: tek bir SSE ucu
+  (`GET /events`), `job` ve `transfer` olayları, `Last-Event-ID` ile kaldığı yerden devam.
+  İşler panosu ve aktarımlar paneli artık iki saniyelik yoklama yerine bunu dinliyor.
+- **Yönetici parola sıfırlama var.** Yönetici parolayı BELİRLEMİYOR — tek kullanımlık bir bilet
+  açıyor, kullanıcı parolayı kendisi yazıyor, ve bilet tek kullanımlık olduğu için yönetici
+  kullanırsa kurban durumu öğreniyor. İkinci faktör atlanmıyor.
+
+- **Kopyalama yok** (`POST /file-operations`).
+
+  Sözleşme ilan ediyor, sunucu sunmuyor. Tasarımı çıkarıldı ve bir ölçüm onu değiştirdi:
+  ajanın veri soketi `MAX_DATA_CONNECTIONS = 16` iş parçacığını `sync_channel(0)` üzerinden
+  dağıtıyor, yani bağlantı ancak bir işçi boşta olduğunda kabul ediliyor. Bugünkü her işlem tek
+  bağlantı tutuyor; bir kopyalama İKİ tanesini aynı anda tutar. Önce `receive` bağlantısını alan
+  on altı eşzamanlı kopyalama, hiçbir işçinin kabul edemeyeceği bir `send` bekler — soketin
+  tamamı kilitlenir. Yani ilk sürümün cihaz genelinde en fazla 7 eşzamanlı kopyalamaya
+  sınırlanması ya da iki yarımın bir kuyrukla sıralanması gerekiyor, ve o sayı
+  `MAX_DATA_CONNECTIONS`'a karşı yazılmalı. Ayrıca `publish` ile `recordPublishedFile` arasında
+  ölen bir worker, diskte adı olan ve `file_entries`'te satırı olmayan bir dosya bırakır —
+  yüklemeyi bundan koruyan `upload_sessions` satırının kopyalamada karşılığı yok.
+
+- **Çöp kutusunun saklama süresi ve temizleme politikası yok.** Tasarımında iki tuzak ölçüldü:
+  `preview`'ün bayt toplamı yalan olurdu (`file_entries_folder_has_no_size`, klasörlerin
+  `size_bytes` değeri 0 — 10 GB'lık bir klasör "1 öğe, 0 bayt" görünür), ve `listTrash` paylaşım
+  başına çalışırken temizleme organizasyon geneli olurdu, yani operatör tek paylaşımın çöpüne
+  bakarken bütün paylaşımlar üzerinden sayılmış bir rakamı onaylardı.
 - Dosya sistemi olaylarından metadata'yı besleyen endeksleyici. Bu olmadan yalnız DEPSIS
   üzerinden yüklenen dosyalar listede görünür; SMB'den yazılanlar görünmez.
 - ZFS havuzu yaratma. Ajan dataset ve anlık görüntü yaratabiliyor, havuz yaratamıyor — mirror

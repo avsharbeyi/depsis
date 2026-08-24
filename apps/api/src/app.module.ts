@@ -11,6 +11,7 @@ import { correlationMiddleware } from './common/correlation.js';
 import { ProblemFilter } from './common/problem.filter.js';
 import { DbModule } from './db/db.module.js';
 import { DeskModule } from './desk/desk.module.js';
+import { EventsModule } from './events/events.module.js';
 import { FilesModule } from './files/files.module.js';
 import { HealthModule } from './health/health.module.js';
 import { PosixIdentityModule } from './identity/posix.module.js';
@@ -31,6 +32,7 @@ import { UsersModule } from './users/users.module.js';
     ConsoleModule,
     DbModule,
     DeskModule,
+    EventsModule,
     FilesModule,
     AgentModule,
     AppsModule,
