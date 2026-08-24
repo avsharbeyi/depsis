@@ -237,12 +237,56 @@ build_db() {
     pnpm --filter @depsis/db run migrate:up >/dev/null 2>&1 || return 1
 }
 
-# Build the agent if there is no binary yet, then hand it its two listening sockets.
+# Does the running agent speak the version this checkout was generated against?
+#
+# `AgentService.onModuleInit` asks exactly this and, when the answer is no, logs one line and
+# sets `available = false` FOR THE LIFETIME OF THE PROCESS — every endpoint that needs the
+# agent then answers 503 while the socket sits there working. That is right for a running
+# appliance and terrible to discover from a test report, because the report says "503, the
+# system agent is not reachable" about an agent that is reachable.
+#
+# So the harness asks first and says the true sentence instead: both numbers, and which side
+# to rebuild. Over the SOCKET rather than by inspecting the binary, because the socket is what
+# the API will use and a binary somewhere else on disk is not evidence about it.
+agent_speaks_our_schema() {
+  local expected spoken
+  expected="$(sed -n 's/^export const EXPECTED_SCHEMA_VERSION = \([0-9]*\);$/\1/p' \
+    "$REPO/packages/agent-protocol/src/index.ts")"
+  if [ -z "$expected" ]; then
+    echo '  ! could not read EXPECTED_SCHEMA_VERSION; skipping the agent handshake check'
+    return 0
+  fi
+
+  # AS THE API'S ACCOUNT. `Policy { api_uid }` compares SO_PEERCRED and refuses uid 0
+  # outright — that refusal is why the API may not run as root — so a ping sent by this
+  # script, which is root in WSL, comes back `refused` with no schema version in it. The
+  # check would then report "the agent did not answer" about an agent answering correctly.
+  spoken="$(${AS_API[@]+"${AS_API[@]}"} "$NODE" "$RUN/agent-ping.mjs" "$AGENT_SOCKET" 2>/dev/null)"
+  if [ -z "$spoken" ]; then
+    echo '  ! the agent did not answer a ping as the API would; storage operations answer 503'
+    tail -5 "$RUN/agent.log" 2>/dev/null
+    return 1
+  fi
+  if [ "$spoken" != "$expected" ]; then
+    echo "the agent speaks schema $spoken; this checkout was generated against $expected."
+    echo 'The API refuses every storage operation with a 503 in that state, so the suite would'
+    echo 'report the file tests as broken rather than as unrun. Rebuild the stale side:'
+    echo '  cargo build --locked --release --bin depsis-agent   # the agent is behind'
+    echo '  pnpm generate                                       # the contract is behind'
+    return 1
+  fi
+  return 0
+}
+
+# Build the agent, then hand it its two listening sockets.
 #
 # `--locked`, matching the `rust` job in CI: a harness that quietly resolved a different dependency
 # tree than the one the lockfile pins would be testing a binary nobody else has.
+#
+# EVERY TIME, not only when the binary is missing — see agent_speaks_our_schema above for the
+# failure this replaces. Cargo decides whether there is anything to do.
 launch_agent() {
-  if [ ! -x "$AGENT_BIN" ]; then
+  if command -v cargo >/dev/null 2>&1; then
     echo '  building depsis-agent'
     if ! (cd "$REPO" && cargo build --locked --release --bin depsis-agent) \
       >"$RUN/agent-build.log" 2>&1; then
@@ -298,6 +342,8 @@ launch_agent() {
   # where it is not the account that made the directory.
   chgrp -R "$API_GID" "$RUN/shares" 2>/dev/null || true
   chmod -R 0770 "$RUN/shares"
+
+  agent_speaks_our_schema || return 1
 }
 
 launch_api() {
@@ -462,6 +508,50 @@ BUNDLE_ID="$(
 # The static server, written once and started twice with different ports. Parameterised through
 # the environment rather than by interpolating the ports into the source, so that the file on disk
 # is the same file both stacks run and a reader can diff it against up.sh's copy.
+cat >"$RUN/agent-ping.mjs" <<'PING'
+// One `ping` over the agent's control socket; prints the schema version it answered with.
+//
+// Its own file rather than `node -e`, because the string would have to survive bash quoting inside
+// a script that is itself written by a heredoc, and a lost backslash there is a silent wrong answer
+// rather than a syntax error.
+//
+// The wire carries an ENVELOPE and not a bare request: `AgentService.enqueue` sends
+// `{correlation_id, reason, request}`, and the first two are what the agent's audit line is built
+// from. A bare `{"op":"ping"}` does not parse, and an unparsed line looks exactly like silence.
+import { connect } from 'node:net';
+import { randomUUID } from 'node:crypto';
+
+const socket = connect(process.argv[2]);
+let buffer = '';
+
+socket.on('connect', () =>
+  socket.write(
+    JSON.stringify({
+      correlation_id: randomUUID(),
+      reason: 'e2e harness: schema handshake',
+      request: { op: 'ping' },
+    }) + '\n',
+  ),
+);
+socket.on('data', (chunk) => {
+  buffer += chunk;
+  const end = buffer.indexOf('\n');
+  if (end < 0) return;
+  try {
+    const answer = JSON.parse(buffer.slice(0, end));
+    if (typeof answer.schema_version === 'number') process.stdout.write(String(answer.schema_version));
+    // Anything else — `refused`, `failed` — prints nothing, and the caller's message covers it.
+  } catch {
+    // Not a line we can read. Printing nothing is the caller's signal.
+  }
+  socket.destroy();
+});
+// Every failure prints nothing and exits 0: the caller distinguishes "no answer" from "wrong
+// answer" by the empty string, and an exception here would look like a broken harness.
+socket.on('error', () => process.exit(0));
+setTimeout(() => socket.destroy(), 5_000).unref();
+PING
+
 cat >"$RUN/static-server.mjs" <<'JS'
 import { createServer, request as httpRequest } from 'node:http';
 import { readFile } from 'node:fs/promises';
