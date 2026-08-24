@@ -240,5 +240,11 @@ describe('the API and its contract describe the same system', () => {
     // An explicit timeout, because this test boots the whole application. Measured on a cold module
     // cache it spent 18s in imports alone and blew the 5s default; the next run took 317ms. A drift
     // check that fails on a slow runner teaches people to ignore it.
-  }, 30_000);
+    //
+    // Raised from 30s after it started failing on exactly that: 16s when run alone, 32s in the full
+    // suite, where forty-six other files are importing Nest at the same time off a Windows
+    // filesystem reached over 9p. The failure said "timed out" and read as a contract violation.
+    // Two minutes is far above anything this test needs and still finite, so a genuinely wedged
+    // boot is still reported rather than hanging the run.
+  }, 120_000);
 });

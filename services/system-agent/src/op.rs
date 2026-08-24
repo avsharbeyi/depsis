@@ -559,6 +559,45 @@ pub enum Request {
     /// and the argv is a constant in this crate.
     ListDisks {},
 
+    /// Create a ZFS pool. THE ONE DESTRUCTIVE STORAGE OPERATION IN THE SET.
+    ///
+    /// ADR-0007 does not forbid this — it keeps destructive operations out of a GENERIC storage
+    /// interface and requires them to be written explicitly per backend, which is what this is —
+    /// and §8.1 prescribes the sequence around it: analysis, plan, the serial/WWN list of the
+    /// affected disks, written confirmation, re-authentication, job. `ListDisks` is the analysis;
+    /// the API owns the middle; this is the end.
+    ///
+    /// THREE REFUSALS LIVE HERE AND NOT IN A DIALOGUE, because a dialogue is a thing somebody
+    /// gets past:
+    ///
+    /// 1. A disk carrying `/`, `/boot` or `/boot/efi` is never a member. There is no confirmation
+    ///    that makes overwriting the appliance's own disk a thing the operator meant.
+    ///
+    /// 2. The WWN named for each disk must match what the box reports at the moment the pool is
+    ///    created. This closes the gap that risk R1 is really about: between the screen that
+    ///    listed the disks and the button that creates the pool, a disk can be pulled and another
+    ///    put in its place, and `/dev/disk/by-id` names identify a DEVICE rather than a slot — so
+    ///    the same name can be a different disk. Checking the name alone would confirm nothing.
+    ///
+    /// 3. `-f` is never passed. `zpool create` refuses a device that already holds a filesystem
+    ///    unless forced, and this operation does not force. Clearing a disk stays something an
+    ///    operator does themselves, deliberately, with a shell — the product does not offer a
+    ///    button for it, and an operation that could be talked into one would make the other two
+    ///    refusals decorative.
+    ///
+    /// The pool is created with ADR-0004's properties as POOL-LEVEL defaults, so every dataset
+    /// made in it inherits them. `CreateDataset` sets `acltype` per dataset; a pool whose default
+    /// is `off` makes every dataset that forgets to say so a dataset with no ACLs, which is the
+    /// failure ADR-0004 was rewritten about.
+    CreatePool {
+        /// The pool name. A `SafeComponent`, so it cannot contain `/` — a name with a slash in it
+        /// would be a DATASET path, and `zpool create tank/x` is a different and confusing error.
+        pool: SafeComponent,
+        topology: PoolTopology,
+        /// The members, each named twice.
+        disks: Vec<DiskRef>,
+    },
+
     /// Validate and atomically publish a Samba configuration.
     ///
     /// P0-B measured why `testparm` alone is not a sufficient gate: an invalid
@@ -1098,6 +1137,87 @@ pub struct DiskInfo {
     pub holds_system: bool,
 }
 
+/// How the members are arranged.
+///
+/// A multi-disk STRIPE is deliberately not expressible. It is the arrangement in which losing any
+/// one disk loses the whole pool, and on an appliance whose purpose is keeping files it is the one
+/// configuration nobody should be able to reach by picking the wrong item in a list. `Single` says
+/// what a one-disk pool actually is, and says it in its own word rather than as "a stripe of one".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolTopology {
+    /// Exactly one disk, and no redundancy. Honest rather than hidden: some appliances have one
+    /// disk, and refusing to serve them would push the operator to a shell where nothing is
+    /// checked at all.
+    Single,
+    /// Every disk holds every byte. Two or more.
+    Mirror,
+    /// One disk of parity. Three or more.
+    Raidz1,
+    /// Two disks of parity. Four or more.
+    Raidz2,
+}
+
+impl PoolTopology {
+    /// The `zpool create` keyword, or none for a single disk.
+    pub fn keyword(self) -> Option<&'static str> {
+        match self {
+            Self::Single => None,
+            Self::Mirror => Some("mirror"),
+            Self::Raidz1 => Some("raidz1"),
+            Self::Raidz2 => Some("raidz2"),
+        }
+    }
+
+    /// The fewest disks this arrangement means anything with.
+    ///
+    /// `raidz1` with two disks parses and creates a pool with the storage of one disk and the
+    /// redundancy of a mirror, described by a word that promises something else. Refusing is
+    /// clearer than serving a pool whose name misleads whoever reads it next year.
+    pub fn minimum_disks(self) -> usize {
+        match self {
+            Self::Single => 1,
+            Self::Mirror => 2,
+            Self::Raidz1 => 3,
+            Self::Raidz2 => 4,
+        }
+    }
+
+    /// `Single` means one disk and only one.
+    pub fn maximum_disks(self) -> Option<usize> {
+        match self {
+            Self::Single => Some(1),
+            _ => None,
+        }
+    }
+}
+
+/// A disk named twice: the stable link to use, and the WWN it must still be.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DiskRef {
+    /// The `/dev/disk/by-id` name. A `SafeComponent`, so a path or a flag cannot be smuggled in —
+    /// the same construction `ReadSmartSummary` uses, and for the same reason.
+    pub by_id: SafeComponent,
+    /// The WWN the caller believes this disk has, from a `ListDisks` answer.
+    ///
+    /// NOT decoration and not a second name for the same thing. `by_id` identifies a DEVICE, and a
+    /// device can be unplugged and a different one put in its place between the inventory and the
+    /// confirmation. The agent re-reads the inventory and refuses if this does not match, which is
+    /// the only check in the sequence that survives somebody swapping a disk mid-wizard.
+    ///
+    /// A `String` rather than a validated type because it is COMPARED, never passed to a command:
+    /// it never reaches an argv, so there is no flag to smuggle and nothing to escape.
+    pub wwn: String,
+}
+
+/// The most disks one pool creation will accept.
+///
+/// Not a ZFS limit — it has none worth naming here — but a bound on the blast radius of one
+/// request. An appliance building a vdev out of more disks than this is doing something the
+/// product should not be arranging in a single call.
+pub const MAX_POOL_DISKS: usize = 24;
+
 /// The most `ListDisks` will report.
 ///
 /// Bounded for the same reason `MAX_LISTING` is — one response is one line on the control socket —
@@ -1160,6 +1280,11 @@ pub enum Response {
         healthy: bool,
         temperature_celsius: Option<i32>,
         raw: String,
+    },
+    /// The pool exists.
+    PoolCreated {
+        /// What `zpool` printed, kept so an operator can see the real words on a bad day.
+        detail: String,
     },
     Disks {
         disks: Vec<DiskInfo>,
@@ -1421,7 +1546,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

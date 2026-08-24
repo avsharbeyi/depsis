@@ -14,10 +14,15 @@
 
 use serde::Deserialize;
 
-use crate::op::{DiskInfo, MAX_DISKS};
+use crate::op::{DiskInfo, DiskRef, PoolTopology, MAX_DISKS, MAX_POOL_DISKS};
 use crate::seams::SeamError;
 
 pub const LSBLK: &str = "/usr/bin/lsblk";
+
+/// Where a `/dev/disk/by-id` name becomes a path. A literal, joined to a validated single
+/// component — the same construction `read_smart_summary` uses, and the reason a caller cannot
+/// name `/dev/sda` (risk R1).
+pub const BY_ID_DIR: &str = "/dev/disk/by-id";
 
 /// The columns, as one constant.
 ///
@@ -192,6 +197,149 @@ fn clean(value: Option<&str>) -> Option<String> {
     }
 }
 
+/// Why a proposed pool was refused.
+///
+/// Each variant is a sentence an operator can act on. They are separate variants rather than one
+/// string because the API turns them into different HTTP answers — a disk that is not there is a
+/// 409 the operator fixes by looking at the box, and a mismatched WWN is a 409 that means STOP.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PoolPlanError {
+    #[error("a {topology} pool needs at least {minimum} disks; {given} were named")]
+    TooFewDisks {
+        topology: &'static str,
+        minimum: usize,
+        given: usize,
+    },
+    #[error("a {topology} pool takes exactly {maximum} disk(s); {given} were named")]
+    TooManyDisks {
+        topology: &'static str,
+        maximum: usize,
+        given: usize,
+    },
+    #[error("no more than {MAX_POOL_DISKS} disks in one pool; {given} were named")]
+    TooManyForOneCall { given: usize },
+    #[error("{by_id} was named twice")]
+    Duplicate { by_id: String },
+    #[error("{by_id} is not a disk this machine reports")]
+    Unknown { by_id: String },
+    #[error(
+        "{by_id} reports WWN {found:?}, not {expected:?}: the disk in that slot is not the one \
+         that was confirmed"
+    )]
+    WwnMismatch {
+        by_id: String,
+        expected: String,
+        found: Option<String>,
+    },
+    #[error("{by_id} holds this machine's own system; it can never be part of a pool")]
+    SystemDisk { by_id: String },
+}
+
+/// Check a proposed pool against what the box reports RIGHT NOW, and build the argv.
+///
+/// The inventory is a parameter rather than something this reads, so the caller decides when it
+/// was taken — and the dispatcher takes it immediately before creating the pool rather than
+/// reusing whatever the wizard was looking at. That ordering is the whole value of the WWN check:
+/// re-checking against a stale inventory would confirm only that the caller copied it correctly.
+pub fn plan<'a>(
+    pool: &'a str,
+    topology: PoolTopology,
+    disks: &'a [DiskRef],
+    inventory: &[DiskInfo],
+) -> Result<Vec<String>, PoolPlanError> {
+    let name = match topology {
+        PoolTopology::Single => "single",
+        PoolTopology::Mirror => "mirror",
+        PoolTopology::Raidz1 => "raidz1",
+        PoolTopology::Raidz2 => "raidz2",
+    };
+
+    if disks.len() > MAX_POOL_DISKS {
+        return Err(PoolPlanError::TooManyForOneCall { given: disks.len() });
+    }
+    if disks.len() < topology.minimum_disks() {
+        return Err(PoolPlanError::TooFewDisks {
+            topology: name,
+            minimum: topology.minimum_disks(),
+            given: disks.len(),
+        });
+    }
+    if let Some(maximum) = topology.maximum_disks() {
+        if disks.len() > maximum {
+            return Err(PoolPlanError::TooManyDisks {
+                topology: name,
+                maximum,
+                given: disks.len(),
+            });
+        }
+    }
+
+    let mut seen: Vec<&str> = Vec::new();
+    for disk in disks {
+        let by_id = disk.by_id.as_str();
+        // A disk named twice would be given to `zpool` twice, and a "mirror" of one device with
+        // itself is a single point of failure wearing the word mirror.
+        if seen.contains(&by_id) {
+            return Err(PoolPlanError::Duplicate {
+                by_id: by_id.to_string(),
+            });
+        }
+        seen.push(by_id);
+
+        let Some(found) = inventory.iter().find(|d| d.by_id.as_deref() == Some(by_id)) else {
+            return Err(PoolPlanError::Unknown {
+                by_id: by_id.to_string(),
+            });
+        };
+        if found.wwn.as_deref() != Some(disk.wwn.as_str()) {
+            return Err(PoolPlanError::WwnMismatch {
+                by_id: by_id.to_string(),
+                expected: disk.wwn.clone(),
+                found: found.wwn.clone(),
+            });
+        }
+        // Last, and not first, on purpose: an operator who named the system disk should hear that
+        // it is the system disk, not that it was named twice.
+        if found.holds_system {
+            return Err(PoolPlanError::SystemDisk {
+                by_id: by_id.to_string(),
+            });
+        }
+    }
+
+    let mut argv: Vec<String> = vec!["create".into()];
+    // ADR-0004's properties as POOL-level defaults, so every dataset made here inherits them.
+    // `CreateDataset` sets `acltype` per dataset; a pool whose default is `off` makes every
+    // dataset that forgets to say so a dataset with no ACLs at all.
+    argv.push("-O".into());
+    argv.push("acltype=posixacl".into());
+    argv.push("-O".into());
+    argv.push("xattr=sa".into());
+    // Relatime rather than atime=off: `atime=on` writes on every read, which on a NAS is every
+    // file anybody opens; `atime=off` breaks the small number of tools that read it.
+    argv.push("-O".into());
+    argv.push("relatime=on".into());
+    // 4 KiB sectors. Getting this wrong is UNFIXABLE — ashift is set per vdev at creation and
+    // cannot be changed — and a pool created with ashift=9 on a disk that lies about its sector
+    // size loses a large fraction of its write performance for the life of the pool.
+    argv.push("-o".into());
+    argv.push("ashift=12".into());
+    // NOT mounted at the pool name. `/tank` appearing at the root of the filesystem is a surprise,
+    // and DEPSIS mounts its own datasets where its configuration says.
+    argv.push("-m".into());
+    argv.push("none".into());
+    // NO `-f`. See `Request::CreatePool`: without it `zpool` refuses a disk that already holds a
+    // filesystem, and that refusal is a gate this product deliberately does not own.
+    argv.push(pool.to_string());
+    if let Some(keyword) = topology.keyword() {
+        argv.push(keyword.to_string());
+    }
+    for disk in disks {
+        argv.push(format!("{BY_ID_DIR}/{}", disk.by_id.as_str()));
+    }
+    Ok(argv)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -310,6 +458,214 @@ mod tests {
         let (disks, _) = parse(json).expect("parses");
         assert_eq!(disks[0].size_bytes, 0);
         assert_eq!(disks[0].model, None);
+    }
+
+    fn present(by_id: &str, wwn: &str, system: bool) -> DiskInfo {
+        DiskInfo {
+            by_id: Some(by_id.to_string()),
+            kname: "sdx".into(),
+            size_bytes: 1_000,
+            model: None,
+            serial: None,
+            wwn: Some(wwn.to_string()),
+            rotational: true,
+            removable: false,
+            transport: None,
+            holds: vec![],
+            mounted: false,
+            holds_system: system,
+        }
+    }
+
+    fn named(by_id: &str, wwn: &str) -> DiskRef {
+        DiskRef {
+            by_id: crate::op::SafeComponent::parse(by_id).expect("test id"),
+            wwn: wwn.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_mirror_becomes_a_zpool_create_with_the_adr_0004_properties() {
+        let inventory = [
+            present("ata-A", "0xA", false),
+            present("ata-B", "0xB", false),
+        ];
+        let argv = plan(
+            "tank",
+            PoolTopology::Mirror,
+            &[named("ata-A", "0xA"), named("ata-B", "0xB")],
+            &inventory,
+        )
+        .expect("a valid mirror");
+
+        assert_eq!(argv[0], "create");
+        // ADR-0004 chose POSIX ACLs and the `xattr=sa` that makes them cheap. As POOL defaults, so
+        // a dataset created without saying so inherits them rather than getting `off`.
+        assert!(argv.windows(2).any(|w| w == ["-O", "acltype=posixacl"]));
+        assert!(argv.windows(2).any(|w| w == ["-O", "xattr=sa"]));
+        assert!(argv.windows(2).any(|w| w == ["-o", "ashift=12"]));
+        assert!(argv.windows(2).any(|w| w == ["-m", "none"]));
+        // The name, the keyword, then the members, in that order — `zpool` is positional.
+        let tail: Vec<&str> = argv
+            .iter()
+            .rev()
+            .take(4)
+            .rev()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                "tank",
+                "mirror",
+                "/dev/disk/by-id/ata-A",
+                "/dev/disk/by-id/ata-B"
+            ]
+        );
+    }
+
+    #[test]
+    fn it_never_forces() {
+        // The gate this product does not own. Without `-f`, `zpool create` refuses a device that
+        // already holds a filesystem — so a disk with data on it cannot be taken by this operation
+        // however it was confirmed, and clearing one stays something an operator does themselves.
+        let inventory = [present("ata-A", "0xA", false)];
+        let argv = plan(
+            "tank",
+            PoolTopology::Single,
+            &[named("ata-A", "0xA")],
+            &inventory,
+        )
+        .expect("a valid single-disk pool");
+        assert!(!argv.iter().any(|a| a == "-f" || a == "--force"));
+    }
+
+    #[test]
+    fn a_single_disk_pool_gets_no_topology_keyword() {
+        let inventory = [present("ata-A", "0xA", false)];
+        let argv = plan(
+            "tank",
+            PoolTopology::Single,
+            &[named("ata-A", "0xA")],
+            &inventory,
+        )
+        .expect("valid");
+        assert!(!argv.iter().any(|a| a == "single"));
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("/dev/disk/by-id/ata-A")
+        );
+    }
+
+    #[test]
+    fn the_system_disk_is_refused_however_it_is_confirmed() {
+        // No confirmation makes this the thing the operator meant. Overwriting it destroys the
+        // appliance, so the refusal is here rather than in a dialogue.
+        let inventory = [
+            present("ata-A", "0xA", false),
+            present("ata-SYS", "0xS", true),
+        ];
+        let error = plan(
+            "tank",
+            PoolTopology::Mirror,
+            &[named("ata-A", "0xA"), named("ata-SYS", "0xS")],
+            &inventory,
+        )
+        .expect_err("must refuse");
+        assert!(matches!(error, PoolPlanError::SystemDisk { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_swapped_disk_is_refused_even_though_the_name_still_matches() {
+        // The check that makes the confirmation mean anything. `/dev/disk/by-id` names a DEVICE,
+        // and a device can be pulled and another put in the same slot between the inventory the
+        // operator read and the button they pressed — so the name alone confirms nothing.
+        let inventory = [present("ata-A", "0xSOMETHING-ELSE", false)];
+        let error = plan(
+            "tank",
+            PoolTopology::Single,
+            &[named("ata-A", "0xA")],
+            &inventory,
+        )
+        .expect_err("must refuse");
+        assert!(
+            matches!(error, PoolPlanError::WwnMismatch { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_disk_the_box_does_not_report_is_refused() {
+        let error = plan(
+            "tank",
+            PoolTopology::Single,
+            &[named("ata-GHOST", "0xG")],
+            &[],
+        )
+        .expect_err("must refuse");
+        assert!(matches!(error, PoolPlanError::Unknown { .. }), "{error}");
+    }
+
+    #[test]
+    fn one_disk_cannot_be_a_mirror_of_itself() {
+        // Named twice, `zpool` would happily build a "mirror" of one device with itself: a single
+        // point of failure wearing the word mirror.
+        let inventory = [present("ata-A", "0xA", false)];
+        let error = plan(
+            "tank",
+            PoolTopology::Mirror,
+            &[named("ata-A", "0xA"), named("ata-A", "0xA")],
+            &inventory,
+        )
+        .expect_err("must refuse");
+        assert!(matches!(error, PoolPlanError::Duplicate { .. }), "{error}");
+    }
+
+    #[test]
+    fn an_arrangement_needs_enough_disks_to_mean_what_it_says() {
+        // `raidz1` with two disks creates a pool with the storage of one disk and the redundancy
+        // of a mirror, described by a word that promises something else.
+        let inventory = [
+            present("ata-A", "0xA", false),
+            present("ata-B", "0xB", false),
+        ];
+        for (topology, count) in [
+            (PoolTopology::Mirror, 1),
+            (PoolTopology::Raidz1, 2),
+            (PoolTopology::Raidz2, 2),
+        ] {
+            let named: Vec<DiskRef> = [named("ata-A", "0xA"), named("ata-B", "0xB")]
+                .into_iter()
+                .take(count)
+                .collect();
+            let error = plan("tank", topology, &named, &inventory).expect_err("must refuse");
+            assert!(
+                matches!(error, PoolPlanError::TooFewDisks { .. }),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_disk_pool_takes_exactly_one() {
+        // Otherwise `Single` with two disks would be a STRIPE — the arrangement in which losing
+        // either disk loses everything, which is the one thing that must not be reachable by
+        // picking the wrong item in a list.
+        let inventory = [
+            present("ata-A", "0xA", false),
+            present("ata-B", "0xB", false),
+        ];
+        let error = plan(
+            "tank",
+            PoolTopology::Single,
+            &[named("ata-A", "0xA"), named("ata-B", "0xB")],
+            &inventory,
+        )
+        .expect_err("must refuse");
+        assert!(
+            matches!(error, PoolPlanError::TooManyDisks { .. }),
+            "{error}"
+        );
     }
 
     #[test]

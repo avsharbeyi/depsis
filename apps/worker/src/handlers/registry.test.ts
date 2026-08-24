@@ -41,6 +41,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       'files.trash.purge',
       'identity.sync',
       'permissions.apply',
+      'storage.pool.create',
       'storage.snapshot',
     ]);
   });

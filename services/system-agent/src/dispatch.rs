@@ -429,6 +429,52 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         path.first() == Some(&STAGING_DIR[0])
     }
 
+    /// Create a ZFS pool, after checking the disks against what the box reports RIGHT NOW.
+    ///
+    /// THE INVENTORY IS RE-READ HERE and not taken from the request. That ordering is the entire
+    /// value of the WWN check: a caller that supplied both the disk list and the disks to check it
+    /// against would be confirming only that it had copied its own screen correctly. Between the
+    /// wizard that listed the disks and the button that created the pool, a disk can be pulled and
+    /// another put in its place — and `/dev/disk/by-id` names a DEVICE, not a slot.
+    ///
+    /// A truncated inventory is refused rather than planned against. `plan` reports a disk that is
+    /// not in the list as unknown, so a cut list would turn "there are more disks than we can
+    /// report" into "that disk does not exist" — a confusing refusal for a correct request, and
+    /// worse, a possible ACCEPTANCE if the disk that fell off the end was the system disk.
+    fn create_pool(
+        &self,
+        pool: &str,
+        topology: crate::op::PoolTopology,
+        disks: &[crate::op::DiskRef],
+    ) -> Result<Response, SeamError> {
+        let listing = self.runner.run(bin::LSBLK, &crate::disks::argv())?;
+        let (inventory, truncated) = crate::disks::parse(&listing)?;
+        if truncated {
+            return Ok(Response::Refused {
+                reason: "this machine reports more block devices than one inventory can carry; \
+                         a pool cannot be checked against a partial list"
+                    .to_string(),
+            });
+        }
+
+        let argv = match crate::disks::plan(pool, topology, disks, &inventory) {
+            Ok(argv) => argv,
+            // A refusal, not a failure. Every one of these is a fact about the request that the
+            // operator can act on — a disk that is not there, a disk that is not the one they
+            // confirmed, an arrangement that needs more disks — and `handle` audits a refusal with
+            // its reason attached.
+            Err(error) => {
+                return Ok(Response::Refused {
+                    reason: error.to_string(),
+                })
+            }
+        };
+
+        let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let out = self.runner.run(bin::ZPOOL, &borrowed)?;
+        Ok(Response::PoolCreated { detail: out })
+    }
+
     /// Move one entry to another name inside a share, durably, without ever overwriting.
     fn move_entry(&self, share: &str, from: &[&str], to: &[&str]) -> Result<Response, SeamError> {
         let Some(paths) = self.paths else {
@@ -1232,6 +1278,12 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 Ok(Response::Disks { disks, truncated })
             }
 
+            Request::CreatePool {
+                pool,
+                topology,
+                disks,
+            } => self.create_pool(pool.as_str(), *topology, disks),
+
             Request::ReadSmartSummary { disk_by_id } => {
                 // Built from a validated single component, so the caller cannot reach outside
                 // /dev/disk/by-id or smuggle a flag (risk R1).
@@ -1710,6 +1762,132 @@ mod tests {
             .last()
             .expect("path arg")
             .starts_with("/dev/disk/by-id/"));
+    }
+
+    /// Two disks, one of them carrying the running system.
+    const TWO_DISKS: &str = r#"{"blockdevices":[
+      {"kname":"sda","type":"disk","size":100,"wwn":"0xA","id-link":"ata-A"},
+      {"kname":"sdb","type":"disk","size":100,"wwn":"0xB","id-link":"ata-B"},
+      {"kname":"sdc","type":"disk","size":100,"wwn":"0xS","id-link":"ata-SYS","pttype":"gpt",
+       "children":[{"kname":"sdc1","type":"part","size":100,"fstype":"ext4","mountpoint":"/"}]}
+    ]}"#;
+
+    #[test]
+    fn creating_a_pool_reads_the_box_first_and_then_runs_one_zpool_create() {
+        // The ORDER is the property. A caller that supplied both the disks and the inventory to
+        // check them against would be confirming that it had copied its own screen correctly.
+        let r = MockCommandRunner::with_responses([TWO_DISKS.into(), String::new()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"create_pool","pool":"tank","topology":"mirror","disks":[
+                 {"by_id":"ata-A","wwn":"0xA"},{"by_id":"ata-B","wwn":"0xB"}]}"#,
+            peer(API_UID),
+            "cp1",
+            "operator created a pool",
+        );
+        assert!(matches!(resp, Response::PoolCreated { .. }), "{resp:?}");
+
+        let inventory = r.call(0).expect("lsblk ran first");
+        assert_eq!(inventory[0], crate::disks::LSBLK);
+        let create = r.call(1).expect("zpool ran second");
+        assert_eq!(create[0], bin::ZPOOL);
+        assert_eq!(create[1], "create");
+        assert!(create.iter().any(|a| a == "mirror"));
+        assert!(create.iter().any(|a| a == "/dev/disk/by-id/ata-A"));
+        assert!(!create.iter().any(|a| a == "-f"));
+    }
+
+    #[test]
+    fn a_pool_naming_the_system_disk_never_reaches_zpool() {
+        // Refused, and — the part worth a test of its own — refused BEFORE the command runs. A
+        // check that produced the right answer after `zpool` had already been handed the disk
+        // would be no check at all.
+        let r = MockCommandRunner::with_responses([TWO_DISKS.into()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"create_pool","pool":"tank","topology":"mirror","disks":[
+                 {"by_id":"ata-A","wwn":"0xA"},{"by_id":"ata-SYS","wwn":"0xS"}]}"#,
+            peer(API_UID),
+            "cp2",
+            "operator created a pool",
+        );
+        match resp {
+            Response::Refused { reason } => assert!(reason.contains("system"), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(r.calls.borrow().len(), 1, "only lsblk ran");
+    }
+
+    #[test]
+    fn a_disk_swapped_since_the_wizard_read_it_never_reaches_zpool() {
+        // `/dev/disk/by-id` names a DEVICE and not a slot, so the same name can be a different
+        // disk. This is the only check in §8.1's sequence that survives somebody swapping a disk
+        // between the confirmation and the button.
+        let swapped = r#"{"blockdevices":[
+          {"kname":"sda","type":"disk","size":100,"wwn":"0xSOMEONE-ELSES","id-link":"ata-A"}]}"#;
+        let r = MockCommandRunner::with_responses([swapped.into()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"create_pool","pool":"tank","topology":"single","disks":[
+                 {"by_id":"ata-A","wwn":"0xA"}]}"#,
+            peer(API_UID),
+            "cp3",
+            "operator created a pool",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        assert_eq!(r.calls.borrow().len(), 1, "only lsblk ran");
+    }
+
+    #[test]
+    fn a_truncated_inventory_refuses_rather_than_planning_against_a_partial_list() {
+        // `plan` calls a disk it cannot see "unknown", so a cut list turns a correct request into
+        // a confusing refusal — and, far worse, could ACCEPT one whose system disk fell off the
+        // end of the list.
+        let many: String = format!(
+            r#"{{"blockdevices":[{}]}}"#,
+            (0..crate::op::MAX_DISKS + 1)
+                .map(|n| format!(
+                    r#"{{"kname":"sd{n}","type":"disk","size":1,"wwn":"0x{n}","id-link":"ata-{n}"}}"#
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let r = MockCommandRunner::with_responses([many]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"create_pool","pool":"tank","topology":"single","disks":[
+                 {"by_id":"ata-0","wwn":"0x0"}]}"#,
+            peer(API_UID),
+            "cp4",
+            "operator created a pool",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        assert_eq!(r.calls.borrow().len(), 1, "only lsblk ran");
+    }
+
+    #[test]
+    fn a_pool_name_cannot_be_a_path_or_a_flag() {
+        // `SafeComponent`, so both are refused by construction rather than by a check somebody
+        // could reorder. A name with a slash would be a DATASET, and one starting with `-` would
+        // be read by `zpool` as an option — P0-E's finding about every tool in this product.
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        for evil in [
+            r#"{"op":"create_pool","pool":"tank/x","topology":"single","disks":[{"by_id":"ata-A","wwn":"0xA"}]}"#,
+            r#"{"op":"create_pool","pool":"-f","topology":"single","disks":[{"by_id":"ata-A","wwn":"0xA"}]}"#,
+            r#"{"op":"create_pool","pool":"tank","topology":"single","disks":[{"by_id":"../../dev/sda","wwn":"0xA"}]}"#,
+            r#"{"op":"create_pool","pool":"tank","topology":"stripe","disks":[{"by_id":"ata-A","wwn":"0xA"}]}"#,
+        ] {
+            let resp = agent(&r, &s, &h).handle(evil, peer(API_UID), "cp5", "attack");
+            assert!(matches!(resp, Response::Refused { .. }), "{evil}");
+        }
+        // Not one command ran: these are refused while parsing the operands.
+        assert!(r.calls.borrow().is_empty());
     }
 
     #[test]

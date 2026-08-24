@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import type { OpenApi } from '@depsis/contracts';
 
 import { AgentService, AgentUnavailableError } from '../agent/agent.service.js';
@@ -194,6 +195,25 @@ export class SystemService {
       );
       return [];
     }
+  }
+
+  /**
+   * Does this machine already have a pool by that name?
+   *
+   * A REFUSAL IS `false`, not an error. `pool_status` on a name ZFS does not know comes back
+   * refused, which is exactly the answer this question wants — and treating it as a fault would
+   * make "no such pool" indistinguishable from "the agent is down" for a caller whose next step
+   * is to create it.
+   *
+   * A transport failure still throws. That one really is "we could not find out".
+   */
+  async poolExists(name: string): Promise<boolean> {
+    const response = await this.agent.call(
+      { op: 'pool_status', pool: name },
+      `does the pool '${name}' exist`,
+      randomUUID(),
+    );
+    return response.status === 'pool_status';
   }
 
   private async pools(correlationId: string): Promise<PoolStatus[]> {

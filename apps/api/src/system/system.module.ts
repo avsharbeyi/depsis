@@ -6,20 +6,24 @@ import { IdempotencyModule } from '../common/idempotency.module.js';
 import { APP_CONFIG } from '../config.module.js';
 import type { AppConfig } from '../config.js';
 import { DbService } from '../db/db.service.js';
+import { JobsModule } from '../jobs/jobs.module.js';
 import { BackupsController } from './backups.controller.js';
 import { BackupsService } from './backups.service.js';
+import { PoolsController } from './pools.controller.js';
 import { SystemController } from './system.controller.js';
 import { SystemService } from './system.service.js';
 
 @Module({
-  imports: [AuthModule, IdempotencyModule],
-  controllers: [SystemController, BackupsController],
+  imports: [AuthModule, IdempotencyModule, JobsModule],
+  controllers: [SystemController, BackupsController, PoolsController],
   providers: [
     {
       provide: SystemService,
       inject: [AgentService, DbService, APP_CONFIG],
-      // Which pools and which disks come from configuration, not from discovery: the agent's
-      // operation set is closed and has neither a "list pools" nor a "list disks" (ADR-0006).
+      // Which POOLS comes from configuration: the agent's closed operation set has no "list
+      // pools", so there is nothing to discover from. Which DISKS no longer has to —
+      // `ListDisks` closed that half — and `config.smartDisks` is now a narrowing rather than
+      // the only source; empty means ask the box (see `SystemService.smartTargets`).
       useFactory: (agent: AgentService, db: DbService, config: AppConfig) =>
         new SystemService(agent, db, config.zfsPools, config.smartDisks),
     },

@@ -57,6 +57,22 @@ export type AgentRequest =
       op: 'list_disks';
     }
   | {
+      /**
+       * The members, each named twice.
+       */
+      disks: DiskRef[];
+      op: 'create_pool';
+      /**
+       * A single path component under a share root — never a path, never absolute.
+       *
+       * ADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access
+       * to `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle
+       * `/` or `..` through, so this type refuses them rather than sanitising.
+       */
+      pool: string;
+      topology: PoolTopology;
+    }
+  | {
       op: 'publish_samba_config';
       shares: ShareSpec[];
     }
@@ -317,6 +333,15 @@ export type DatasetName = string;
  */
 export type SafeComponent = string;
 /**
+ * How the members are arranged.
+ *
+ * A multi-disk STRIPE is deliberately not expressible. It is the arrangement in which losing any
+ * one disk loses the whole pool, and on an appliance whose purpose is keeping files it is the one
+ * configuration nobody should be able to reach by picking the wrong item in a list. `Single` says
+ * what a one-disk pool actually is, and says it in its own word rather than as "a stripe of one".
+ */
+export type PoolTopology = 'single' | 'mirror' | 'raidz1' | 'raidz2';
+/**
  * A name that may appear in `valid users`.
  *
  * A TYPE rather than a `Vec<String>`, and the reason is the file this ends up in. `smb.conf` is
@@ -413,6 +438,31 @@ export type NtHash = string;
  */
 export type NetworkId = string;
 
+/**
+ * A disk named twice: the stable link to use, and the WWN it must still be.
+ */
+export interface DiskRef {
+  /**
+   * A single path component under a share root — never a path, never absolute.
+   *
+   * ADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access
+   * to `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle
+   * `/` or `..` through, so this type refuses them rather than sanitising.
+   */
+  by_id: string;
+  /**
+   * The WWN the caller believes this disk has, from a `ListDisks` answer.
+   *
+   * NOT decoration and not a second name for the same thing. `by_id` identifies a DEVICE, and a
+   * device can be unplugged and a different one put in its place between the inventory and the
+   * confirmation. The agent re-reads the inventory and refuses if this does not match, which is
+   * the only check in the sequence that survives somebody swapping a disk mid-wizard.
+   *
+   * A `String` rather than a validated type because it is COMPARED, never passed to a command:
+   * it never reaches an argv, so there is no flag to smuggle and nothing to escape.
+   */
+  wwn: string;
+}
 export interface ShareSpec {
   dataset: DatasetName;
   name: SafeComponent;
@@ -528,6 +578,13 @@ export type AgentResponse =
       raw: string;
       status: 'smart';
       temperature_celsius?: number | null;
+    }
+  | {
+      /**
+       * What `zpool` printed, kept so an operator can see the real words on a bad day.
+       */
+      detail: string;
+      status: 'pool_created';
     }
   | {
       disks: DiskInfo[];

@@ -349,7 +349,55 @@ istiyor. Bu ekran o analizdir — ve bilerek, onaylanacak bir şey olmadan önce
 duruyor: cihaz hâlâ güvendeyken okunabilen bir envanter, aynı listeyi geçilmeye çalışılan bir
 onay kutusunun içinde göstermekten daha değerli.
 
-### 3.9 Konsol
+### 3.9 Havuz oluşturma
+
+Diskler ekranının altında, boş disk varsa, bir havuz sihirbazı var. **Bu üründe disk silen tek
+ekran budur.**
+
+Sıra (§8.1): analiz → plan → etkilenen disklerin listesi → yazılı onay → yeniden kimlik doğrulama
+→ iş. Analiz yukarıdaki tablo; plan seçtiğiniz diskler; onay havuz adını yazmanız; kimlik
+doğrulama parolanız. Sonra bir iş kuyruğa giriyor ve ilerlemesi **Sistem işleri** panelinde.
+
+#### Neyi sunmuyor, ve neden
+
+**Üstünde bir şey olan bir disk sihirbazda seçilemiyor.** Ajan `zpool`'a hiçbir zaman `-f`
+geçmiyor, ve `zpool create` zorlanmadıkça üstünde dosya sistemi olan bir aygıtı reddediyor. Bu,
+ürünün geçersiz kılmadığı bir kapı: **bir diski temizlemek, operatörün kabuktan bilerek yaptığı
+bir iştir.** Sihirbaz o diskleri gizlemiyor, nedeniyle birlikte gösteriyor — göremediğiniz bir
+diski aramak, seçemediğinizi görmekten daha kötü.
+
+**Çok diskli stripe yok.** Herhangi bir diski kaybetmenin bütün havuzu kaybettirdiği düzen, dosya
+saklamak için var olan bir cihazda bir listeden yanlış maddeyi seçerek ulaşılabilecek bir şey
+olmamalı. Tek diskli havuz (`single`) var ve ne olduğunu söylüyor.
+
+**En az disk sayısı zorunlu:** `mirror` 2, `raidz1` 3, `raidz2` 4. İki diskli bir `raidz1` bir
+aynanın yedekliliğini başka bir şey vaat eden bir kelimeyle anlatır.
+
+#### Üç reddediş ajanın içinde
+
+Bunlar sihirbazda değil, **ajanda** — çünkü bir diyalog geçilen bir şeydir:
+
+1. `/`, `/boot` ya da `/boot/efi` taşıyan bir disk hiçbir onayla üye olamaz.
+2. Her diskin **WWN'i havuz kurulduğu anda** kutunun bildirdiğiyle karşılaştırılıyor. Ajan
+   envanteri kendisi, tam o anda okuyor. Sihirbazı açtığınızla düğmeye bastığınız an arasında bir
+   disk çıkarılıp yerine başkası takılmışsa işlem reddediliyor — `/dev/disk/by-id` bir YUVAYI
+   değil bir AYGITI adlandırdığı için ad tek başına bunu yakalamaz.
+3. `-f` yok.
+
+#### Havuz oluşturulduktan sonra
+
+Havuz ADR-0004'ün özellikleriyle kuruluyor (`acltype=posixacl`, `xattr=sa`), ve bunlar **havuz
+düzeyinde** — yani içinde açılan her veri kümesi devralıyor. `ashift=12` sabit ve **sonradan
+değiştirilemez**; yanlış olması havuzun ömrü boyunca yazma başarımını düşürür.
+
+Havuz `-m none` ile kuruluyor: dosya sisteminin kökünde `/tank` diye bir şey belirmiyor. Paylaşım
+veri kümelerini DEPSIS kendi yapılandırmasının söylediği yere bağlıyor.
+
+Son adım elle: yeni havuzu `/etc/depsis/api.env`'deki `DEPSIS_ZFS_POOLS`'a ekleyin ve API'yi
+yeniden başlatın, yoksa telemetride görünmez. (Ajanın kapalı işlem kümesinde "havuzları listele"
+yok — §2.4'teki not bunu anlatıyor.)
+
+### 3.10 Konsol
 
 Yalnız yönetici, ve her oturum parola onayı ister. Bir oturum, birinin açık bırakılmış dizüstünü
 ödünç alan kişinin sahip olduğu şeydir; kabuk erişimi için yetmez (ADR-0018).

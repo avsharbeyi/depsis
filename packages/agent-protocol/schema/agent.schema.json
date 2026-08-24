@@ -146,6 +146,37 @@
       ]
     },
     {
+      "description": "Create a ZFS pool. THE ONE DESTRUCTIVE STORAGE OPERATION IN THE SET.\n\nADR-0007 does not forbid this — it keeps destructive operations out of a GENERIC storage\ninterface and requires them to be written explicitly per backend, which is what this is —\nand §8.1 prescribes the sequence around it: analysis, plan, the serial/WWN list of the\naffected disks, written confirmation, re-authentication, job. `ListDisks` is the analysis;\nthe API owns the middle; this is the end.\n\nTHREE REFUSALS LIVE HERE AND NOT IN A DIALOGUE, because a dialogue is a thing somebody\ngets past:\n\n1. A disk carrying `/`, `/boot` or `/boot/efi` is never a member. There is no confirmation\n   that makes overwriting the appliance's own disk a thing the operator meant.\n\n2. The WWN named for each disk must match what the box reports at the moment the pool is\n   created. This closes the gap that risk R1 is really about: between the screen that\n   listed the disks and the button that creates the pool, a disk can be pulled and another\n   put in its place, and `/dev/disk/by-id` names identify a DEVICE rather than a slot — so\n   the same name can be a different disk. Checking the name alone would confirm nothing.\n\n3. `-f` is never passed. `zpool create` refuses a device that already holds a filesystem\n   unless forced, and this operation does not force. Clearing a disk stays something an\n   operator does themselves, deliberately, with a shell — the product does not offer a\n   button for it, and an operation that could be talked into one would make the other two\n   refusals decorative.\n\nThe pool is created with ADR-0004's properties as POOL-LEVEL defaults, so every dataset\nmade in it inherits them. `CreateDataset` sets `acltype` per dataset; a pool whose default\nis `off` makes every dataset that forgets to say so a dataset with no ACLs, which is the\nfailure ADR-0004 was rewritten about.",
+      "type": "object",
+      "properties": {
+        "disks": {
+          "description": "The members, each named twice.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiskRef"
+          }
+        },
+        "op": {
+          "type": "string",
+          "const": "create_pool"
+        },
+        "pool": {
+          "description": "The pool name. A `SafeComponent`, so it cannot contain `/` — a name with a slash in it\nwould be a DATASET path, and `zpool create tank/x` is a different and confusing error.",
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "topology": {
+          "$ref": "#/$defs/PoolTopology"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "pool",
+        "topology",
+        "disks"
+      ]
+    },
+    {
       "description": "Validate and atomically publish a Samba configuration.\n\nP0-B measured why `testparm` alone is not a sufficient gate: an invalid\n`full_audit:success` opname passes `testparm` cleanly and then makes smbd refuse every\nconnection. The implementation must follow validation with a live connection smoke test\nand roll back on failure (ADR-0011, §17).",
       "type": "object",
       "properties": {
@@ -656,6 +687,25 @@
       "description": "A ZFS dataset name, e.g. `tank/depsis/users/1001`.\n\nThe leading-dash check is not paranoia: P0-E's whole point is that `zfs`, `zpool`,\n`smbcacls` and `smartctl` parse their own argv, so an operand that begins with `-` becomes a\nflag even when it arrives as a separate argument. Inserting `--` helps but is not sufficient\nbecause these tools do not all honour it consistently, so the value is rejected outright.",
       "type": "string"
     },
+    "DiskRef": {
+      "description": "A disk named twice: the stable link to use, and the WWN it must still be.",
+      "type": "object",
+      "properties": {
+        "by_id": {
+          "description": "The `/dev/disk/by-id` name. A `SafeComponent`, so a path or a flag cannot be smuggled in —\nthe same construction `ReadSmartSummary` uses, and for the same reason.",
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "wwn": {
+          "description": "The WWN the caller believes this disk has, from a `ListDisks` answer.\n\nNOT decoration and not a second name for the same thing. `by_id` identifies a DEVICE, and a\ndevice can be unplugged and a different one put in its place between the inventory and the\nconfirmation. The agent re-reads the inventory and refuses if this does not match, which is\nthe only check in the sequence that survives somebody swapping a disk mid-wizard.\n\nA `String` rather than a validated type because it is COMPARED, never passed to a command:\nit never reaches an argv, so there is no flag to smuggle and nothing to escape.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "by_id",
+        "wwn"
+      ]
+    },
     "NetworkId": {
       "description": "A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.\n\nIts own type, next to `SafeComponent`, for the same reason and one more. The value is\nCONCATENATED INTO A REQUEST PATH (`/network/<id>`) and into an HTTP request line, so a\n`String` here would have to be remembered at every call site — and the site that forgot\nwould be the one that let `../` reach the local API's router, or a `\\r\\n` split one request\ninto two. A type is a validation nobody can skip.\n\nUppercase is REFUSED rather than folded to lowercase. ZeroTier prints ids in lowercase and\nthe same value is a key in `public.remote_networks`, so accepting two spellings for one\nnetwork means the audit trail and the table can end up holding both, and \"is this the\nnetwork we joined?\" stops being a string comparison.",
       "type": "string"
@@ -663,6 +713,31 @@
     "NtHash": {
       "description": "An NTLM password hash — `MD4(UTF-16LE(password))`, uppercase hex.\n\nA TYPE rather than a `String`, because the failure it prevents is silent. The smbpasswd import\nformat is fixed-width: a lowercase or short field produces a line `pdbedit` accepts and a user\nwho cannot log in, with no error anywhere. `tools/poc/p2-b-smb-password.sh` measured that shape\nof failure from the other direction with the `LCT` field.\n\nThe agent never computes this and never sees a password. The API computes it — see\n`apps/api/src/auth/nt-hash.ts`, which carries its own MD4 because OpenSSL 3 moved MD4 to the\nlegacy provider and Node cannot reach it. What crosses the boundary is password-EQUIVALENT for\none protocol, which is worse than nothing and much better than the user's actual password.",
       "type": "string"
+    },
+    "PoolTopology": {
+      "description": "How the members are arranged.\n\nA multi-disk STRIPE is deliberately not expressible. It is the arrangement in which losing any\none disk loses the whole pool, and on an appliance whose purpose is keeping files it is the one\nconfiguration nobody should be able to reach by picking the wrong item in a list. `Single` says\nwhat a one-disk pool actually is, and says it in its own word rather than as \"a stripe of one\".",
+      "oneOf": [
+        {
+          "description": "Exactly one disk, and no redundancy. Honest rather than hidden: some appliances have one\ndisk, and refusing to serve them would push the operator to a shell where nothing is\nchecked at all.",
+          "type": "string",
+          "const": "single"
+        },
+        {
+          "description": "Every disk holds every byte. Two or more.",
+          "type": "string",
+          "const": "mirror"
+        },
+        {
+          "description": "One disk of parity. Three or more.",
+          "type": "string",
+          "const": "raidz1"
+        },
+        {
+          "description": "Two disks of parity. Four or more.",
+          "type": "string",
+          "const": "raidz2"
+        }
+      ]
     },
     "PosixGroupSpec": {
       "description": "One group and the membership it must END UP with.",
@@ -920,6 +995,24 @@
         "status",
         "healthy",
         "raw"
+      ]
+    },
+    {
+      "description": "The pool exists.",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "What `zpool` printed, kept so an operator can see the real words on a bad day.",
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "pool_created"
+        }
+      },
+      "required": [
+        "status",
+        "detail"
       ]
     },
     {

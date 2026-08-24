@@ -1752,6 +1752,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/storage/pools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * ZFS havuzu oluştur
+         * @description **Bu uç disk siler.** §8.1'in sırası: analiz → plan → etkilenen disklerin seri/WWN
+         *     listesi → yazılı onay → yeniden kimlik doğrulama → iş. Analiz `GET /system/disks`;
+         *     gerisi burada.
+         *
+         *     Üç reddediş AJANIN İÇİNDE, bir diyaloğun içinde değil — çünkü diyalog geçilen bir şeydir:
+         *
+         *     1. `/`, `/boot` ya da `/boot/efi` taşıyan bir disk hiçbir onayla üye olamaz.
+         *     2. Her disk için verilen `wwn`, havuz oluşturulduğu ANDA kutunun bildirdiğiyle eşleşmek
+         *        zorunda. Sihirbazın diskleri listelediği ekranla düğmeye basıldığı an arasında bir disk
+         *        çıkarılıp yerine başkası takılabilir, ve `/dev/disk/by-id` bir YUVAYI değil bir AYGITI
+         *        adlandırır — yani ad tek başına hiçbir şeyi doğrulamaz.
+         *     3. `-f` hiç geçilmiyor. `zpool create`, üstünde dosya sistemi olan bir aygıtı
+         *        zorlanmadıkça reddeder; bu ürün o reddi geçersiz kılmıyor. **Üstünde bir şey olan bir
+         *        diski temizlemek, operatörün kabuktan kendi yaptığı bir iştir.**
+         *
+         *     `confirm` alanının işi niyeti kanıtlamak değil — onu parola yapıyor. İşi, tek tıkla
+         *     geçilmesini engellemek.
+         *
+         *     İş kuyruğa giriyor ve 202 dönüyor. Yeniden teslim güvenli: `zpool create` var olan bir
+         *     havuz adı için başarısız olur, ve işleyici zaten önce havuzun var olup olmadığına bakıyor.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreatePoolRequest"];
+                };
+            };
+            responses: {
+                /** @description İş kuyruğa alındı */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JobAccepted"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                401: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/jobs": {
         parameters: {
             query?: never;
@@ -4223,6 +4290,46 @@ export interface components {
             id: string;
             healthy: boolean;
             temperatureCelsius?: number;
+        };
+        CreatePoolRequest: {
+            /**
+             * @description Havuz adı. İçinde `/` OLAMAZ — o bir dataset yolu olurdu. Harfle başlamak zorunda:
+             *     `-` ile başlayan bir ad `zpool` tarafından seçenek olarak okunur (P0-E).
+             */
+            name: string;
+            /**
+             * @description Çok diskli **stripe bilerek ifade edilemez**: herhangi bir diski kaybetmenin bütün
+             *     havuzu kaybettirdiği düzen, dosya saklamak için var olan bir cihazda bir listeden
+             *     yanlış maddeyi seçerek ulaşılabilecek bir şey olmamalı.
+             *
+             *     En az disk sayısı: `single` 1 (ve yalnız 1), `mirror` 2, `raidz1` 3, `raidz2` 4. İki
+             *     diskli bir `raidz1`, bir aynanın yedekliliğini başka bir şey vaat eden bir kelimeyle
+             *     anlatır.
+             * @enum {string}
+             */
+            topology: "single" | "mirror" | "raidz1" | "raidz2";
+            disks: components["schemas"]["PoolDisk"][];
+            /**
+             * @description Havuz adının aynısı. İşi niyeti kanıtlamak DEĞİL — onu parola yapıyor — tek tıkla
+             *     geçilmesini engellemek.
+             */
+            confirm: string;
+            /** @description Mevcut parola. Oturum varken de isteniyor (§0.5). */
+            password: string;
+        };
+        PoolDisk: {
+            /** @description `GET /system/disks` yanıtındaki `byId`. Yol değil, tek bileşen. */
+            byId: string;
+            /**
+             * @description Aynı yanıttaki `wwn`. Süs değil: ajan havuzu kurmadan hemen önce envanteri YENİDEN
+             *     okuyup bunu karşılaştırıyor, ve bu, sihirbaz ile düğme arasında disk değiştirilmesine
+             *     dayanan tek kontrol. `wwn` bildirmeyen bir disk havuza katılamaz.
+             */
+            wwn: string;
+        };
+        JobAccepted: {
+            /** Format: uuid */
+            jobId: string;
         };
         DiskInventory: {
             disks: components["schemas"]["DiskInventoryEntry"][];

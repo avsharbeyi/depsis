@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from './api.js';
+import { CreatePool } from './CreatePool.js';
 import { formatBytes } from './Dashboard.js';
 import type { Snapshot as SystemSnapshot } from './snapshot.js';
 import { Empty } from './ui.js';
@@ -143,6 +144,11 @@ export function Disks({ notify, snapshot }: Props): React.JSX.Element {
         yeniden başlatmada başka bir diski gösterebilir. Bir diskin serisi boş görünebilir — bazı
         hipervizörler onu bozuk bildiriyor, o yüzden kimlik için WWN kullanılır.
       </p>
+
+      {/* The wizard renders inside the inventory rather than in a window of its own: §8.1 wants the
+          analysis in front of the operator while they confirm, and a dialogue that covers the table
+          it was opened from takes it away at exactly the wrong moment. */}
+      <CreatePool disks={disks} notify={notify} onCreated={reload} />
     </>
   );
 }

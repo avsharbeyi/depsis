@@ -60,6 +60,8 @@ export { TrashRetentionModule } from './files/trash-retention.module.js';
  * schedule and re-seeds it at boot; the worker runs the walk.
  */
 export { IndexerModule } from './files/indexer.module.js';
+export { CREATE_POOL_KIND } from './system/pools.controller.js';
+
 export {
   RECONCILE_KIND,
   INDEX_DRAIN_KIND,

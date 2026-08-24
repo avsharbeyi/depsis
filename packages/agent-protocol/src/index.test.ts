@@ -62,6 +62,13 @@ describe('the emitted agent schema', () => {
       // it turns a typo into a directory the user never asked for, and it breaks the one-row
       // one-directory correspondence that keeps the two stores in step.
       'create_directory',
+      // THE ONE DESTRUCTIVE STORAGE OPERATION. ADR-0007 does not forbid it — it keeps destructive
+      // work out of a GENERIC storage interface and requires it to be written explicitly per
+      // backend — and §8.1 prescribes the sequence around it. Three refusals live in the agent
+      // rather than in a dialogue: the system disk is never a member, the WWN named for each disk
+      // must match what the box reports at the moment of creation, and `-f` is never passed, so
+      // `zpool` itself still refuses a disk that already holds a filesystem.
+      'create_pool',
       'create_snapshot',
       'diff_snapshots',
       // The reclaim half, and the reason the set has one at all: `.depsis/staging` counts against
@@ -202,7 +209,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(11);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(12);
   });
 
   it('agrees with the number the agent actually reports', () => {

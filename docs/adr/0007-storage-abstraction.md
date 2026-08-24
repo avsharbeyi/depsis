@@ -74,6 +74,26 @@ Her yıkıcı operasyon şu sırayı izler (§8.1): analiz → plan → etkilene
 listesi** → yazılı onay → yeniden kimlik doğrulama → job. Bu sıra soyutlamanın **üstünde**, API
 katmanındadır ve backend'e devredilmez.
 
+#### Düzeltme (2026-08-24, `CreatePool` yazılırken)
+
+Yukarıdaki cümle "sıra API katmanındadır" diyor, ve olduğu gibi bırakılsa yanlış olurdu. Sıranın
+**adımları** API katmanında: yönetici kapısı, yazılı onay, yeniden kimlik doğrulama, iş kuyruğu.
+Ama üç **reddediş** bilerek ajanın içine kondu:
+
+1. Sistem diski hiçbir onayla üye olamaz.
+2. Her diskin WWN'i, havuz kurulduğu **anda** kutunun bildirdiğiyle karşılaştırılıyor.
+3. `-f` hiç geçilmiyor, yani `zpool`'un kendi reddi yerinde duruyor.
+
+Sebep, bu ADR'nin R1 hakkındaki kendi argümanının devamı. API'de yapılan bir kontrol, API'ye
+VERİLMİŞ bir listeye karşı yapılır — yani istemcinin kendi ekranını doğru kopyaladığını kanıtlar,
+diskin ne olduğunu değil. Ajan envanteri kendisi okuyor ve tam o anda okuyor; sihirbazın diskleri
+listelediği ekranla düğmeye basıldığı an arasında bir disk çıkarılıp yerine başkası takılabilir, ve
+`/dev/disk/by-id` bir yuvayı değil bir aygıtı adlandırdığı için ad tek başına bunu yakalamaz.
+
+Bu, "yıkıcı mantığı backend'e devretmek" DEĞİL: hangi diskin seçileceğine hâlâ API karar veriyor
+ve seçimi kullanıcıya hâlâ API onaylatıyor. Ajanın yaptığı, kararı uygulamadan önce **gerçekliğe
+karşı doğrulamak** — ve o doğrulamayı yapabilecek tek yer, komutu çalıştıracak olan süreç.
+
 ### Kapasite raporlama
 
 ADR-0008'de doğrulandı: `statvfs` ZFS'te `refquota`'yı sürümler arasında tutarsız yansıtır.
