@@ -230,8 +230,19 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
 
 - Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`
   yalnız DEPSIS'in kendi aldıklarını gösterir ve yanıtta `complete: false` ile bunu söyler.
-- §21'in belgeleri: yönetici kılavuzu, son kullanıcı kılavuzu, yedekleme ve felaket kurtarma.
-  Hiçbiri yok.
+- **§21'in dört operatör belgesi yazıldı** — [`docs/operations/`](docs/operations/): yönetici
+  kılavuzu, son kullanıcı kılavuzu, yedekleme, felaket kurtarma. Her komut ve her sayı depodaki
+  karşılığına bakılarak yazıldı, ve her belge ürünün o alanda YAPMADIKLARIYLA bitiyor — yedekleme
+  belgesinin PITR'ın olmadığını söylemesi, o belgenin en kullanışlı cümlesi olabilir.
+
+  Yedekleme belgesinin en pahalı uyarısı: `depsis_backup` rolüyle alınan bir döküm **geri
+  yüklenemez**. O rol bilerek eksik — TOTP sırlarını, kurtarma kodlarını ve NT hash'leri okuyamaz
+  — yani onunla alınan bir yedekten dönen sistemde kimsenin ikinci faktörü ve kimsenin SMB
+  erişimi olmaz. Geri yüklenebilir döküm `depsis_owner` ile alınır.
+
+- §21'in kalan teslimatları: mimari diyagramlar, ER diyagramı, Storybook, imzalı build prosedürü,
+  ve test raporlarının artefakt hâli (testler koşuyor; CI hesabı kilitli olduğu için yayımlanmış
+  rapor yok).
 
 ## CI şu an hiç koşmuyor — hesap kilitli
 
@@ -296,5 +307,7 @@ services/system-agent    ayrıcalıklı ajan (Rust, root)
 services/console         yönetici konsolu (Rust, ayrı birim — ajan DEĞİL)
 deploy/systemd  birim dosyaları
 docs/adr        mimari kararlar
+docs/operations §21'in operatör belgeleri: kurulum, kullanım, yedekleme, kurtarma
+docs/threat-model  güven sınırları
 tools/poc       ölçüm betikleri
 ```
