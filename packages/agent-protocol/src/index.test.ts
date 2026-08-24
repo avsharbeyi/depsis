@@ -182,7 +182,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(6);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(7);
   });
 
   it('agrees with the number the agent actually reports', () => {

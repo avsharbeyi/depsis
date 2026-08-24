@@ -35,7 +35,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::dispatch::bin::{TESTPARM, ZFS};
-use crate::op::ShareSpec;
+use crate::op::{ShareSpec, SmbPrincipal};
 use crate::seams::CommandRunner;
 
 /// The live half of the gate. `testparm` lives in `dispatch::bin` with the other binaries; this
@@ -146,6 +146,10 @@ pub struct Section {
     pub name: String,
     pub path: String,
     pub read_only: bool,
+    /// Already rendered — `ayse`, `@depsis-t-300010` — because `SmbPrincipal::render` is the one
+    /// place that knows Samba's sigil, and a second spelling of it here is a second thing to get
+    /// wrong.
+    pub valid_users: Vec<String>,
 }
 
 /// The things this module needs from the machine it runs on.
@@ -253,6 +257,11 @@ pub fn plan<H: SambaHost>(shares: &[ShareSpec], host: &H) -> Result<Vec<Section>
             name: name.to_string(),
             path,
             read_only: spec.read_only,
+            // No check here, on purpose. `SmbPrincipal` holds a `PosixName`, so a token that could
+            // break out of its line cannot have been deserialised in the first place. The share
+            // NAME is checked above because `SafeComponent` admits newlines; a principal is a
+            // different type with a different guarantee.
+            valid_users: spec.valid_users.iter().map(SmbPrincipal::render).collect(),
         });
     }
     Ok(sections)
@@ -358,13 +367,34 @@ pub fn render(sections: &[Section]) -> String {
         // guest account) would serve every DEPSIS share to anyone who can reach port 445, with
         // none of the access control §20 enforces on /files. One line per section closes that,
         // and it closes it in the file DEPSIS actually controls.
-        //
-        // What is still missing, and is stated here rather than left to be discovered: there is no
-        // `valid users`. Every principal the operator's globals authenticate can reach every share
-        // this file publishes. Narrowing that needs §6.2's folder-grant walk to map DEPSIS users
-        // onto SMB principals; until it exists, SMB access is coarser than API access and an
-        // operator has to know it.
         out.push_str("\tguest ok = no\n");
+        // §6.2's grant walk, arriving at the front door.
+        //
+        // WHAT THIS DOES AND DOES NOT DO. Who may read which folder is enforced by the POSIX ACL
+        // (ADR-0004) and stays there; `valid users` is a coarser gate in front of it. Samba's own
+        // semantics are why adding it is safe: the parameter can only NARROW. A principal named
+        // here is still refused by the ACL if the ACL refuses them, so this line cannot widen
+        // access even if the API computes it wrongly.
+        //
+        // The failure it CAN cause is the opposite one — a principal the ACL would admit, left off
+        // this line, is shut out of the whole share. That is why the API sends the union of every
+        // principal named in any grant anywhere in the share rather than only those at its root:
+        // it is exactly the set the ACL writer turns into entries, read from the same table, so
+        // the two cannot come to disagree about who exists.
+        //
+        // An unmatched name is harmless. `tools/poc/p2-a-smb-identity.sh` measured a `valid users`
+        // naming an account that does not exist: smbd serves the share and the name matches
+        // nobody. Unlike P0-B's `full_audit`, a stale entry here does not take the file down.
+        //
+        // Empty means no line at all rather than `valid users =`, which Samba reads as no
+        // restriction. Two spellings of one meaning, one of which looks like a closed door, is
+        // exactly the ambiguity this file exists to avoid.
+        if !section.valid_users.is_empty() {
+            out.push_str(&format!(
+                "\tvalid users = {}\n",
+                section.valid_users.join(" ")
+            ));
+        }
         // `.depsis/staging` holds half-finished uploads. A user who can see it can see other
         // people's in-flight files and can delete a transfer the API still believes in, so it is
         // vetoed rather than merely hidden — `hide files` would still let a client open it by
@@ -604,7 +634,7 @@ fn sync_parent(config: &Path) -> Result<(), SambaError> {
 )]
 mod tests {
     use super::*;
-    use crate::op::{DatasetName, SafeComponent};
+    use crate::op::{DatasetName, PosixName, SafeComponent};
     use std::cell::RefCell;
 
     fn spec(name: &str, dataset: &str, read_only: bool) -> ShareSpec {
@@ -612,6 +642,7 @@ mod tests {
             name: SafeComponent::parse(name).expect("test share name"),
             dataset: DatasetName::parse(dataset).expect("test dataset"),
             read_only,
+            valid_users: Vec::new(),
         }
     }
 
@@ -689,11 +720,13 @@ mod tests {
                 name: "belgeler".to_string(),
                 path: "/srv/depsis/belgeler".to_string(),
                 read_only: false,
+                valid_users: Vec::new(),
             },
             Section {
                 name: "arsiv".to_string(),
                 path: "/srv/depsis/arsiv".to_string(),
                 read_only: true,
+                valid_users: Vec::new(),
             },
         ];
         let text = render(&sections);
@@ -707,6 +740,87 @@ mod tests {
         assert!(text.contains("\tpath = /srv/depsis/arsiv\n"), "got: {text}");
     }
 
+    // ── valid users ──
+
+    #[test]
+    fn a_group_gets_the_sigil_and_a_user_does_not() {
+        // The whole reason the split is an enum: `@` decides whether Samba looks the name up in
+        // the user database or the group database, and getting it backwards silently matches
+        // nobody.
+        let text = render(&[Section {
+            name: "belgeler".to_string(),
+            path: "/srv/belgeler".to_string(),
+            read_only: false,
+            valid_users: vec![
+                SmbPrincipal::Group(PosixName::parse("depsis-t-300010").expect("group")).render(),
+                SmbPrincipal::User(PosixName::parse("ayse").expect("user")).render(),
+            ],
+        }]);
+        assert!(
+            text.contains("\tvalid users = @depsis-t-300010 ayse\n"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn no_principals_means_no_line_at_all() {
+        // NOT `valid users =`. Samba reads an empty value as no restriction, so the two spellings
+        // mean the same thing and one of them looks like a closed door to whoever reads the file.
+        let text = render(&[Section {
+            name: "belgeler".to_string(),
+            path: "/srv/belgeler".to_string(),
+            read_only: false,
+            valid_users: Vec::new(),
+        }]);
+        assert!(!text.contains("valid users"), "got: {text}");
+    }
+
+    #[test]
+    fn a_principal_cannot_carry_a_line_break_into_the_file() {
+        // The injection this type exists to prevent, attempted from the direction an attacker
+        // would: a "username" that ends the `valid users` line and starts a directive of its own.
+        // If `PosixName` ever admitted it, the share below would be served to guests.
+        for attempt in [
+            "ayse\n\tguest ok = yes",
+            "ayse ok",
+            "@everyone",
+            "ayse;guest ok = yes",
+        ] {
+            assert!(
+                PosixName::parse(attempt).is_err(),
+                "{attempt:?} was accepted as a principal name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_principal_list_survives_a_round_trip_through_json() {
+        // `plan` reads these off the wire, so the encoding is part of the contract rather than an
+        // implementation detail: a rename of the tag would make every group arrive as a user.
+        let encoded = serde_json::to_string(&SmbPrincipal::Group(
+            PosixName::parse("depsis-t-300010").expect("group"),
+        ))
+        .expect("encode");
+        assert_eq!(
+            encoded, r#"{"kind":"group","name":"depsis-t-300010"}"#,
+            "the wire shape changed"
+        );
+        let back: SmbPrincipal = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(back.render(), "@depsis-t-300010");
+    }
+
+    #[test]
+    fn planning_carries_the_principals_through_to_the_section() {
+        // The seam between the request and the file. `plan` is where a field is easiest to accept
+        // and then forget to pass on, which would produce a share with no restriction and no error.
+        let host = FakeHost::healthy("/srv/depsis/belgeler", &["belgeler"]);
+        let mut spec = spec("belgeler", "tank/belgeler", false);
+        spec.valid_users = vec![SmbPrincipal::User(PosixName::parse("ayse").expect("user"))];
+        let sections = plan(&[spec], &host).expect("plan");
+        let only = sections.first().expect("one section");
+        assert_eq!(only.valid_users, vec!["ayse".to_string()]);
+    }
+
     #[test]
     fn a_read_only_share_really_says_read_only() {
         // The inverse of the mistake worth catching: a share the user marked read-only being
@@ -715,6 +829,7 @@ mod tests {
             name: "arsiv".to_string(),
             path: "/srv/arsiv".to_string(),
             read_only: true,
+            valid_users: Vec::new(),
         }]);
         assert!(text.contains("\tread only = yes\n"), "got: {text}");
         assert!(!text.contains("read only = no"), "got: {text}");
@@ -723,6 +838,7 @@ mod tests {
             name: "belgeler".to_string(),
             path: "/srv/belgeler".to_string(),
             read_only: false,
+            valid_users: Vec::new(),
         }]);
         assert!(writable.contains("\tread only = no\n"), "got: {writable}");
     }
@@ -735,6 +851,7 @@ mod tests {
                 name: (*n).to_string(),
                 path: format!("/srv/{n}"),
                 read_only: false,
+                valid_users: Vec::new(),
             })
             .collect();
         let text = render(&sections);
@@ -759,6 +876,7 @@ mod tests {
                 name: (*n).to_string(),
                 path: format!("/srv/{n}"),
                 read_only: false,
+                valid_users: Vec::new(),
             })
             .collect();
         let text = render(&sections);
@@ -787,6 +905,7 @@ mod tests {
             name: hostile,
             dataset: DatasetName::parse("tank/docs").unwrap(),
             read_only: false,
+            valid_users: Vec::new(),
         };
 
         let host = FakeHost::healthy("/srv/docs", &["docs"]);
@@ -817,6 +936,7 @@ mod tests {
                 name: (*n).to_string(),
                 path: format!("/srv/{n}"),
                 read_only: false,
+                valid_users: Vec::new(),
             })
             .collect();
         let text = render(&sections);
@@ -1063,11 +1183,13 @@ mod tests {
                     name: "belgeler".to_string(),
                     path: "/srv/depsis/belgeler".to_string(),
                     read_only: false,
+                    valid_users: Vec::new(),
                 },
                 Section {
                     name: "arsiv".to_string(),
                     path: "/srv/depsis/arsiv".to_string(),
                     read_only: true,
+                    valid_users: Vec::new(),
                 },
             ]),
         )

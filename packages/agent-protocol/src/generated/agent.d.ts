@@ -240,27 +240,28 @@ export type DatasetName = string;
  */
 export type SafeComponent = string;
 /**
- * A numeric POSIX uid or gid, inside the range migration 0015 reserved for DEPSIS.
+ * A name that may appear in `valid users`.
  *
- * A type rather than a comparison, for the reason `AclType` is a type: the agent exists not to
- * trust the API, and a rule the API is asked to follow is not a rule the agent enforces. Before
- * this, the privileged side refused the value 0 and nothing else — so uid 33 (`www-data`), gid 27
- * (`sudo`), gid 42 (`shadow`) and the appliance's own service accounts were all accepted operands
- * of `PublishTransfer`, `CreateDirectory` and `AclEntry`. The 300000-399999 range that 0015
- * introduced *precisely* so that "sistem gruplarıyla çakışan bir gid, cihazdaki bir servis
- * hesabına kullanıcının dosyalarını açmaktır" was enforced in exactly two places, both
- * unprivileged: the `CHECK` constraints and `assertUsable` in `posix.service.ts`.
+ * A TYPE rather than a `Vec<String>`, and the reason is the file this ends up in. `smb.conf` is
+ * line-oriented and has no escaping: a principal containing a newline would not be a malformed
+ * name, it would be a new DIRECTIVE: a line break followed by `guest ok = yes`, appended by
+ * whatever the API believed was a username. `PosixName` already forbids every character that could do it, so reusing it
+ * here means the injection is unrepresentable rather than filtered.
  *
- * The agent's own stated reason for refusing 0 — an API that skipped the uid mapping must fail
- * loudly here — applies with the same force to an API that mapped it to the WRONG number, and
- * that was the case being waved through. Now a system id cannot be expressed in a request at all,
- * the same way `nfsv4` cannot be expressed at dataset creation.
- *
- * The bounds are duplicated from `0015_teams_and_grants.sql` rather than read from anywhere. That
- * is deliberate and it is the point: the agent must not depend on the database to know what it
- * will accept, because the database is on the unprivileged side of the boundary.
+ * The user/group split is an enum rather than a leading `@` in the string for the same reason.
+ * `@` is not a legal `PosixName` character, so a caller wanting a group cannot smuggle one
+ * through the user variant; the sigil is added by the renderer, which is the only place that
+ * knows Samba's syntax.
  */
-export type PosixId = number;
+export type SmbPrincipal =
+  | {
+      kind: 'user';
+      name: PosixName;
+    }
+  | {
+      kind: 'group';
+      name: PosixName;
+    };
 /**
  * A Unix login name the agent is willing to create.
  *
@@ -283,6 +284,28 @@ export type PosixId = number;
  * against `getent` before creating anything.
  */
 export type PosixName = string;
+/**
+ * A numeric POSIX uid or gid, inside the range migration 0015 reserved for DEPSIS.
+ *
+ * A type rather than a comparison, for the reason `AclType` is a type: the agent exists not to
+ * trust the API, and a rule the API is asked to follow is not a rule the agent enforces. Before
+ * this, the privileged side refused the value 0 and nothing else — so uid 33 (`www-data`), gid 27
+ * (`sudo`), gid 42 (`shadow`) and the appliance's own service accounts were all accepted operands
+ * of `PublishTransfer`, `CreateDirectory` and `AclEntry`. The 300000-399999 range that 0015
+ * introduced *precisely* so that "sistem gruplarıyla çakışan bir gid, cihazdaki bir servis
+ * hesabına kullanıcının dosyalarını açmaktır" was enforced in exactly two places, both
+ * unprivileged: the `CHECK` constraints and `assertUsable` in `posix.service.ts`.
+ *
+ * The agent's own stated reason for refusing 0 — an API that skipped the uid mapping must fail
+ * loudly here — applies with the same force to an API that mapped it to the WRONG number, and
+ * that was the case being waved through. Now a system id cannot be expressed in a request at all,
+ * the same way `nfsv4` cannot be expressed at dataset creation.
+ *
+ * The bounds are duplicated from `0015_teams_and_grants.sql` rather than read from anywhere. That
+ * is deliberate and it is the point: the agent must not depend on the database to know what it
+ * will accept, because the database is on the unprivileged side of the boundary.
+ */
+export type PosixId = number;
 /**
  * An NTLM password hash — `MD4(UTF-16LE(password))`, uppercase hex.
  *
@@ -317,6 +340,16 @@ export interface ShareSpec {
   dataset: DatasetName;
   name: SafeComponent;
   read_only: boolean;
+  /**
+   * Who smbd will let connect to this share at all.
+   *
+   * Empty means the line is not written and every principal the operator's `[global]`
+   * authenticates may connect — which is what this file did before the field existed, and is
+   * still the honest rendering of "the API named nobody". It is NOT rendered as an empty
+   * `valid users =`: Samba reads that as no restriction, so the two cases would produce
+   * different text with the same meaning and one of them would look like a closed door.
+   */
+  valid_users?: SmbPrincipal[];
 }
 /**
  * One group and the membership it must END UP with.

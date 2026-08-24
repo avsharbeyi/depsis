@@ -636,12 +636,59 @@
         },
         "read_only": {
           "type": "boolean"
+        },
+        "valid_users": {
+          "description": "Who smbd will let connect to this share at all.\n\nEmpty means the line is not written and every principal the operator's `[global]`\nauthenticates may connect — which is what this file did before the field existed, and is\nstill the honest rendering of \"the API named nobody\". It is NOT rendered as an empty\n`valid users =`: Samba reads that as no restriction, so the two cases would produce\ndifferent text with the same meaning and one of them would look like a closed door.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SmbPrincipal"
+          }
         }
       },
       "required": [
         "name",
         "dataset",
         "read_only"
+      ]
+    },
+    "SmbPrincipal": {
+      "description": "A name that may appear in `valid users`.\n\nA TYPE rather than a `Vec<String>`, and the reason is the file this ends up in. `smb.conf` is\nline-oriented and has no escaping: a principal containing a newline would not be a malformed\nname, it would be a new DIRECTIVE: a line break followed by `guest ok = yes`, appended by\nwhatever the API believed was a username. `PosixName` already forbids every character that could do it, so reusing it\nhere means the injection is unrepresentable rather than filtered.\n\nThe user/group split is an enum rather than a leading `@` in the string for the same reason.\n`@` is not a legal `PosixName` character, so a caller wanting a group cannot smuggle one\nthrough the user variant; the sigil is added by the renderer, which is the only place that\nknows Samba's syntax.",
+      "oneOf": [
+        {
+          "description": "A Unix login. Rendered bare.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "user"
+            },
+            "name": {
+              "$ref": "#/$defs/PosixName"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "A Unix group. Rendered with Samba's `@` sigil.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "group"
+            },
+            "name": {
+              "$ref": "#/$defs/PosixName"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ]
+        }
       ]
     }
   }

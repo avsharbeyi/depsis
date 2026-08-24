@@ -859,6 +859,46 @@ pub struct ShareSpec {
     pub name: SafeComponent,
     pub dataset: DatasetName,
     pub read_only: bool,
+    /// Who smbd will let connect to this share at all.
+    ///
+    /// Empty means the line is not written and every principal the operator's `[global]`
+    /// authenticates may connect — which is what this file did before the field existed, and is
+    /// still the honest rendering of "the API named nobody". It is NOT rendered as an empty
+    /// `valid users =`: Samba reads that as no restriction, so the two cases would produce
+    /// different text with the same meaning and one of them would look like a closed door.
+    #[serde(default)]
+    pub valid_users: Vec<SmbPrincipal>,
+}
+
+/// A name that may appear in `valid users`.
+///
+/// A TYPE rather than a `Vec<String>`, and the reason is the file this ends up in. `smb.conf` is
+/// line-oriented and has no escaping: a principal containing a newline would not be a malformed
+/// name, it would be a new DIRECTIVE: a line break followed by `guest ok = yes`, appended by
+/// whatever the API believed was a username. `PosixName` already forbids every character that could do it, so reusing it
+/// here means the injection is unrepresentable rather than filtered.
+///
+/// The user/group split is an enum rather than a leading `@` in the string for the same reason.
+/// `@` is not a legal `PosixName` character, so a caller wanting a group cannot smuggle one
+/// through the user variant; the sigil is added by the renderer, which is the only place that
+/// knows Samba's syntax.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", content = "name", rename_all = "snake_case")]
+pub enum SmbPrincipal {
+    /// A Unix login. Rendered bare.
+    User(PosixName),
+    /// A Unix group. Rendered with Samba's `@` sigil.
+    Group(PosixName),
+}
+
+impl SmbPrincipal {
+    /// The token as `smb.conf` spells it.
+    pub fn render(&self) -> String {
+        match self {
+            Self::User(name) => name.as_str().to_owned(),
+            Self::Group(name) => format!("@{}", name.as_str()),
+        }
+    }
 }
 
 /// One POSIX ACL entry: a GROUP and the three permission bits.
@@ -1134,7 +1174,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// The mode `SecureShareRoot` writes: `rwx` for the owner, `r-x` for the group, nothing for other.
 ///

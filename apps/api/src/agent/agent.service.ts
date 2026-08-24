@@ -11,6 +11,14 @@ import { randomUUID } from 'node:crypto';
 
 export type AgentRequest = Agent.AgentRequest;
 export type AgentResponse = Agent.AgentResponse;
+/**
+ * A name in a share's `valid users`.
+ *
+ * Re-exported beside the request rather than reached for through `Agent.` at the call site, for
+ * the same reason `AgentRequest` is: the generated namespace is the agent's, and a service that
+ * imports one type from it should not have to know that.
+ */
+export type SmbPrincipal = Agent.SmbPrincipal;
 
 /** The agent could not be reached, or did not answer in time. Nothing was necessarily done. */
 export class AgentUnavailableError extends Error {

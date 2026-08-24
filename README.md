@@ -94,29 +94,25 @@ Bu liste elle tutuluyordu ve dört yerde bayat çıktı, o yüzden koda karşı 
 maddesi tarandı ve her bulgu ayrıca çürütülmeye çalışıldı. Sonuç 85 madde; tamamı
 [Eksikler Panosu](https://claude.ai/code/artifact/7949358c-b855-4128-9e99-082e15249ea2)'nda.
 
-### En pahalı sınıf: yazıldı, ulaşılamıyor
+### En pahalı sınıftı: yazıldı, ulaşılamıyordu — kapandı
 
-Eksiklerin en ağırı yazılmamış özellikler değil. **Yazılmış, test edilmiş ve hiçbir ekranın
-çağırmadığı** uçlar — dokuz kalem:
+Eksiklerin en ağırı yazılmamış özellikler değildi. **Yazılmış, test edilmiş ve hiçbir ekranın
+çağırmadığı** uçlardı; somut sonucu da şuydu: *ikinci bir kullanıcıya hiçbir şeye erişim
+veremiyordun.* Bu kümenin tamamı artık arayüzde:
 
-- **İzin paneli yok.** `GET/PUT /files/{id}/permissions` ve `GET/PUT /shares/{id}/permissions`
-  sunuluyor, 968 satırlık bir servis ve iki entegrasyon paketi arkasında duruyor, ve
-  `apps/web/src` içinde tek bir çağrısı yok. `Shares.tsx` kullanıcıyı hiç var olmayan bir
-  "izinler paneline" yönlendiriyor.
-- **Ekiplerin hiç arayüzü yok.** Dört yol üzerinde sekiz işlem sunuluyor; web'de sıfır çağrı.
-- **MFA kaydının arayüzü yok** (yukarıya bakınız).
-- **İşler ekranı yok.** `GET /jobs` yönetici için var; onu okuyan hiçbir yer yok.
-
-**Bunun somut sonucu: ikinci bir kullanıcıya hiçbir şeye erişim veremiyorsun.** Üstelik
-`everyone_team()` yalnız o an var olan kullanıcıları ekibe aldığı için, ilk `GET /files`'tan
-SONRA açılan bir üye boş bir dosya yöneticisi görüyor — ve bunu düzeltecek iki yolun (ekip
-üyeliği, kök izni) ikisinin de ekranı yok.
+- **İzin paneli** — `Permissions.tsx`, hem `Files.tsx`'te seçili tek klasör için hem de
+  `Shares.tsx`'te satır düğmesiyle. §6.2'nin istediği dry-run önizlemesi her değişiklikte
+  çalışıyor ve `applyingJobId: null` geldiğinde "dosya sistemine yazılamadı" diye söylüyor.
+- **Ekipler** — `Teams.tsx`: ekip aç, adını değiştir, üye ekle/çıkar, silmeden önce fiyatını gör.
+  `posix_gid` boş olan ekip "dosya sistemine yansımadı" etiketiyle görünüyor.
+- **MFA kaydı** — `Mfa.tsx`, `Account.tsx`'in altında. Kurtarma kodları bir kez gösteriliyor.
+- **İşler** — `Jobs.tsx`, yalnız yöneticiye. Liste `dead` ile açılıyor: ölü bir `permissions.apply`,
+  veritabanında uygulanmış ama dosya sistemine hiç yazılmamış bir izin demek.
+- **Çoklu paylaşım** — `/files` ve `/search` artık `shareId` alıyor, dosya yöneticisinde paylaşım
+  değiştirici var, ve klasör/dosya uçları paylaşımı girdinin kendisinden çözüyor.
 
 ### Diğerleri
 
-- **Web dosya yöneticisi yalnız TEK paylaşımı görebiliyor.** `FilesService.shareOf` her zaman
-  `ORDER BY created_at LIMIT 1` ile ilk paylaşımı seçiyor ve `/files`'ın bir `share` parametresi
-  yok — yani `POST /shares` ile açılan bir paylaşım Samba'ya yayımlanıyor ama web'de görünmüyor.
 - **Sözleşmenin söz verip sunucunun yapmadıkları.** RFC 9457 `ProblemDetails` gövdesi hiç
   üretilmiyor; `Idempotency-Key` dört uçta tanımlı ve hiçbir yerde okunmuyor; `If-Match`/412
   tanımlı ve uygulanmamış; `GET /files`'ın `sort` parametresi yok sayılıyor; `Upload-Checksum`
@@ -131,7 +127,7 @@ SONRA açılan bir üye boş bir dosya yöneticisi görüyor — ve bunu düzelt
 - Paylaşımı SİLMEK. Grant'ları paylaşımı tutuyor (`ON DELETE RESTRICT`) ve son grant'ı silmek de
   reddediliyor. Bilinçli: paylaşımı silmek dataset'i silmek demek, ve ADR-0007 yıkıcı havuz
   işlemlerini üründen dışarıda tutuyor. Kapatmanın yolu, kimseyi adlandırmayan bir kök izni.
-- **SMB kimlik zinciri artık uçtan uca çalışıyor ve ölçüldü** — eksik kalan tek şey `valid users`.
+- **SMB kimlik zinciri uçtan uca çalışıyor ve ölçüldü.**
 
   `tools/poc/p2-c-identity-end-to-end.sh` (14/14) derlenmiş ajana gerçek bir soket üzerinden
   gerçek bir `sync_posix_identity` gönderiyor ve sonra makineye ve smbd'ye soruyor:
@@ -144,14 +140,12 @@ SONRA açılan bir üye boş bir dosya yöneticisi görüyor — ve bunu düzelt
   - ali ekipten çıkarılınca paylaşım ona gerçekten kapanıyor;
   - `nt_hash` göndermeyen bir senkron mevcut parolayı bozmuyor.
 
-  Kalan: `smb.conf` bölümlerinde `valid users` yok. Yani bir paylaşımı SMB'den açabilmek şu an
-  yalnız POSIX ACL'e bakıyor — ki p2-a bunun gerçekten kapıladığını ölçtü — ama operatörün
-  globals'ının doğruladığı her principal en azından bölümü GÖREBİLİYOR. `valid users`'ın güvenle
-  üretilebileceği de ölçüldü (p2-a: daraltıyor, genişletemiyor, karşılığı olmayan bir ad dosyayı
-  düşürmüyor); yazılması kaldı.
-
-- **Ölen işleri gösteren bir EKRAN yok.** `GET /jobs?status=dead` var ve yönetici görebiliyor, ama
-  arayüzde onu okuyan bir yer yok — yani bakmayı bilen birinin API'yi çağırması gerekiyor.
+  `valid users` de artık üretiliyor. Bölüm başına yazılan ad kümesi, o paylaşımın ağacındaki
+  HERHANGİ bir grant'ta adı geçen her principal'in birleşimi — `AclApplyService`'in ACL girdisine
+  çevirdiği kümenin aynısı, aynı tablodan okunuyor, ki ikisi kimin var olduğu konusunda ayrışmasın.
+  Parametre yalnız DARALTABİLİR, o yüzden bu kümenin ACL'in izin verdiğinin üst kümesi olması
+  güvenli yön. Kapalı hesap listede yok; gid'i olmayan ekip de yok. Ad `PosixName` tipiyle
+  taşınıyor, yani satır sonu içeren bir "kullanıcı adı" dosyaya yeni bir direktif yazamıyor.
 - Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`
   yalnız DEPSIS'in kendi aldıklarını gösterir ve yanıtta `complete: false` ile bunu söyler.
 - §21'in belgeleri: yönetici kılavuzu, son kullanıcı kılavuzu, yedekleme ve felaket kurtarma.

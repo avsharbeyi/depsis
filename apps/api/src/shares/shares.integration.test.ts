@@ -167,6 +167,12 @@ describeDb('shares, against a real PostgreSQL', () => {
       // grant on it cannot be deleted. Both creation paths write one now.
       await q.query(`DELETE FROM folder_grants WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
       await q.query(`DELETE FROM shares WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+      // The `valid users` tests seed their own users and teams. Cleared here rather than in each
+      // test so a failure part-way through one does not leave a duplicate username behind for the
+      // next.
+      await q.query(`DELETE FROM team_members WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+      await q.query(`DELETE FROM teams WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+      await q.query(`DELETE FROM users WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
       await q.query(
         `INSERT INTO shares (organization_id, name, dataset, read_only)
          VALUES ($1, 'belgeler', 'tank/depsis/a-belgeler', false),
@@ -189,6 +195,7 @@ describeDb('shares, against a real PostgreSQL', () => {
         // opened implicitly.
         await q.query(`DELETE FROM team_members WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM teams WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        await q.query(`DELETE FROM users WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM organizations WHERE id = ANY($1)`, [[orgA, orgB]]);
       });
       await owner.onModuleDestroy();
@@ -279,8 +286,135 @@ describeDb('shares, against a real PostgreSQL', () => {
     const request = calls[0]?.request;
     const specs = request !== undefined && 'shares' in request ? request.shares : [];
     expect(specs).toEqual([
-      { name: 'arsiv', dataset: 'tank/depsis/a-arsiv', read_only: true },
-      { name: 'belgeler', dataset: 'tank/depsis/a-belgeler', read_only: false },
+      { name: 'arsiv', dataset: 'tank/depsis/a-arsiv', read_only: true, valid_users: [] },
+      { name: 'belgeler', dataset: 'tank/depsis/a-belgeler', read_only: false, valid_users: [] },
+    ]);
+  });
+
+  /* ── valid users ──
+     §6.2 asks SMB access to follow the same grants the API enforces. Until `valid_users` existed
+     the generated file had none, so every principal the operator's `[global]` authenticated could
+     connect to every DEPSIS share; the ACL still decided what they could read once inside, but the
+     share list itself was open to all of them. These tests are about the list the API computes,
+     not about smbd — whether Samba honours it is measured in `tools/poc/p2-a-smb-identity.sh`
+     against a real server. */
+
+  /** A grant on the share root, written directly: this suite has no folder tree to hang one on. */
+  async function grantRoot(
+    organizationId: string,
+    shareName: string,
+    who: { userId?: string; teamId?: string },
+  ): Promise<void> {
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO folder_grants (organization_id, share_id, entry_id, user_id, team_id, permissions)
+         SELECT $1, id, NULL, $3::uuid, $4::uuid, ARRAY['list','read']::public.folder_permission[]
+           FROM shares WHERE organization_id = $1 AND name = $2`,
+        [organizationId, shareName, who.userId ?? null, who.teamId ?? null],
+      ),
+    );
+  }
+
+  async function makeUser(
+    organizationId: string,
+    username: string,
+    disabled = false,
+  ): Promise<string> {
+    const rows = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ id: string }>(
+        `INSERT INTO users (organization_id, username, password_hash, disabled_at)
+         VALUES ($1, $2, 'x', CASE WHEN $3 THEN now() ELSE NULL END)
+         RETURNING id::text AS id`,
+        [organizationId, username, disabled],
+      ),
+    );
+    return rows[0]?.id ?? '';
+  }
+
+  async function makeTeam(
+    organizationId: string,
+    name: string,
+    gid: number | null,
+  ): Promise<string> {
+    const rows = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ id: string }>(
+        `INSERT INTO teams (organization_id, name, posix_gid) VALUES ($1, $2, $3)
+         RETURNING id::text AS id`,
+        [organizationId, name, gid],
+      ),
+    );
+    return rows[0]?.id ?? '';
+  }
+
+  it('names the users and teams a share is granted to, and only that share', async () => {
+    const ayse = await makeUser(orgA, 'ayse');
+    const muhasebe = await makeTeam(orgA, 'muhasebe', 300010);
+    await grantRoot(orgA, 'belgeler', { userId: ayse });
+    await grantRoot(orgA, 'belgeler', { teamId: muhasebe });
+
+    const { shares, calls } = service();
+    await shares.publish(orgA, 'corr-valid-1');
+
+    const request = calls[0]?.request;
+    const specs = request !== undefined && 'shares' in request ? request.shares : [];
+    expect(specs.find((spec) => spec.name === 'belgeler')?.valid_users).toEqual([
+      { kind: 'user', name: 'ayse' },
+      { kind: 'group', name: 'depsis-t-300010' },
+    ]);
+    // `arsiv` has no grant of its own. It must not inherit `belgeler`'s — a per-share line that
+    // leaked across shares would be the one direction `valid users` CAN do damage in, because
+    // every other mistake here only narrows.
+    expect(specs.find((spec) => spec.name === 'arsiv')?.valid_users).toEqual([]);
+  });
+
+  it('leaves a disabled account off the line', async () => {
+    // The account is disabled in DEPSIS and its NT hash is still in tdbsam — Samba is not told
+    // about a disabled user by anything else — so this line is what stands between them and their
+    // files over SMB.
+    const kapali = await makeUser(orgA, 'kapali', true);
+    await grantRoot(orgA, 'belgeler', { userId: kapali });
+
+    const { shares, calls } = service();
+    await shares.publish(orgA, 'corr-valid-2');
+
+    const request = calls[0]?.request;
+    const specs = request !== undefined && 'shares' in request ? request.shares : [];
+    expect(specs.find((spec) => spec.name === 'belgeler')?.valid_users).toEqual([]);
+  });
+
+  it('leaves out a team that has no group on the filesystem yet', async () => {
+    // A team with no gid has no group name to write, and `AclApplyService.gidFor` skips it for the
+    // same reason — so including it would put a name in the file that matches nothing while the
+    // ACL has no entry either. `Teams.tsx` shows the state rather than hiding it.
+    const gidsiz = await makeTeam(orgA, 'gidsiz', null);
+    await grantRoot(orgA, 'belgeler', { teamId: gidsiz });
+
+    const { shares, calls } = service();
+    await shares.publish(orgA, 'corr-valid-3');
+
+    const request = calls[0]?.request;
+    const specs = request !== undefined && 'shares' in request ? request.shares : [];
+    expect(specs.find((spec) => spec.name === 'belgeler')?.valid_users).toEqual([]);
+  });
+
+  it('names a user whose POSIX account has not been allocated yet', async () => {
+    // Identity sync allocates a uid on first need, so a freshly granted user may have none when a
+    // publish happens. An unmatched name in `valid users` matches nobody and takes nothing down;
+    // omitting it would instead build an ordering trap where publishing before syncing silently
+    // locks out a real user until somebody republishes.
+    const yeni = await makeUser(orgA, 'yeni');
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE users SET posix_uid = NULL WHERE id = $1`, [yeni]),
+    );
+    await grantRoot(orgA, 'belgeler', { userId: yeni });
+
+    const { shares, calls } = service();
+    await shares.publish(orgA, 'corr-valid-4');
+
+    const request = calls[0]?.request;
+    const specs = request !== undefined && 'shares' in request ? request.shares : [];
+    expect(specs.find((spec) => spec.name === 'belgeler')?.valid_users).toEqual([
+      { kind: 'user', name: 'yeni' },
     ]);
   });
 

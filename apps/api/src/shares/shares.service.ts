@@ -7,6 +7,7 @@ import {
   AgentUnavailableError,
   expectStatus,
   type AgentRequest,
+  type SmbPrincipal,
 } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
@@ -466,12 +467,14 @@ export class SharesService {
       }
     }
 
+    const principals = await this.validUsers(organizationId);
     const request: AgentRequest = {
       op: 'publish_samba_config',
       shares: rows.map((row) => ({
         name: row.name,
         dataset: row.dataset,
         read_only: row.read_only,
+        valid_users: principals.get(row.id) ?? [],
       })),
     };
 
@@ -539,6 +542,71 @@ export class SharesService {
     this.publishedShareIds = response.verified ? new Set(rows.map((row) => row.id)) : new Set();
 
     return { shares: response.shares, verified: response.verified };
+  }
+
+  /**
+   * Who may connect to each share at all, as `smb.conf` spells it.
+   *
+   * §6.2 asks for SMB access to follow the same grants as the API, and until now it did not: the
+   * generated file had no `valid users`, so every principal the operator's `[global]`
+   * authenticated could connect to every DEPSIS share. The POSIX ACL still decided what they could
+   * read once inside, but the share list itself, and every folder whose ACL had not been applied
+   * yet, was open.
+   *
+   * WHY THE UNION AND NOT THE ROOT. A grant can sit on any folder in the tree, and somebody granted
+   * three levels down has no grant at the root — narrowing to root grants would shut them out of a
+   * share the ACL admits them to. The set below is every principal named in any grant anywhere in
+   * the share, which is precisely the set `AclApplyService` turns into ACL entries: same table,
+   * same filter, so the two cannot come to disagree about who exists. `valid users` can only
+   * narrow, never widen, so being a superset of what the ACL permits is the safe direction and
+   * this is exactly that superset.
+   *
+   * Two deliberate exclusions:
+   *
+   *   * A DISABLED account. `IdentitySyncService` already leaves them out of the POSIX user list,
+   *     and their NT hash stays in tdbsam until Samba is told otherwise — so leaving the name off
+   *     this line is the only thing standing between a disabled account and its files. It narrows,
+   *     which is the safe direction.
+   *   * A team with no `posix_gid`. There is no group name to write. `AclApplyService.gidFor`
+   *     skips the same rows for the same reason, and `Teams.tsx` shows the team as not reaching
+   *     the filesystem, so the state is visible rather than silent.
+   *
+   * A user with no `posix_uid` IS included. The Unix account may not exist yet — identity sync
+   * allocates on first need — and an unmatched name in `valid users` matches nobody and takes
+   * nothing down (measured in `tools/poc/p2-a-smb-identity.sh`). Omitting them would instead
+   * create an ordering trap where a publish before a sync silently locks out a real user.
+   */
+  private async validUsers(organizationId: string): Promise<Map<string, SmbPrincipal[]>> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ share_id: string; username: string | null; posix_gid: number | null }>(
+        `SELECT DISTINCT g.share_id::text AS share_id, u.username, t.posix_gid
+           FROM public.folder_grants g
+           LEFT JOIN public.users u
+             ON u.id = g.user_id AND u.disabled_at IS NULL
+           LEFT JOIN public.teams t
+             ON t.id = g.team_id AND t.posix_gid IS NOT NULL
+          WHERE g.organization_id = $1
+          ORDER BY g.share_id::text, u.username NULLS LAST, t.posix_gid`,
+        [organizationId],
+      ),
+    );
+
+    const byShare = new Map<string, SmbPrincipal[]>();
+    for (const row of rows) {
+      const principal: SmbPrincipal | null =
+        row.username !== null
+          ? { kind: 'user', name: row.username }
+          : row.posix_gid !== null
+            ? { kind: 'group', name: `depsis-t-${row.posix_gid}` }
+            : null;
+      // Null on both sides is a grant to a disabled user or a gidless team — the LEFT JOINs above
+      // turn each of those into a row with nothing to write, which is the filter, not a bug.
+      if (principal === null) continue;
+      const list = byShare.get(row.share_id);
+      if (list === undefined) byShare.set(row.share_id, [principal]);
+      else list.push(principal);
+    }
+    return byShare;
   }
 
   private async rows(organizationId: string): Promise<ShareRow[]> {
