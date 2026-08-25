@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState, type ReactElement, type ReactNode } f
 
 import { api, problemMessage } from './api.js';
 import { when } from './Notifications.js';
+import type { Tag } from './TagBar.js';
 
 type Comment = OpenApi.components['schemas']['TaskComment'];
 type ChecklistItem = OpenApi.components['schemas']['ChecklistItem'];
@@ -26,6 +27,9 @@ export function TaskThread({
   canHaveSubtasks,
   onSubtask,
   onCounts,
+  tags,
+  taskTags,
+  onTags,
   onError,
 }: {
   taskId: string;
@@ -51,6 +55,12 @@ export function TaskThread({
    * Bütün panoyu yeniden çekmek bir madde tiki için fazla; sayıyı bilen taraf zaten burası.
    */
   onCounts: (done: number, total: number) => void;
+  /** Kiracının bütün etiketleri — seçim kutusu buradan doluyor. */
+  tags: Tag[];
+  /** Bu işin üstündekiler. */
+  taskTags: Tag[];
+  /** Etiketler değişti; pano yeniden okusun. */
+  onTags: () => void;
   onError: (text: string) => void;
 }): ReactElement {
   const [comments, setComments] = useState<Comment[] | null>(null);
@@ -59,6 +69,7 @@ export function TaskThread({
   const [items, setItems] = useState<ChecklistItem[]>([]);
   const [itemDraft, setItemDraft] = useState('');
   const [subDraft, setSubDraft] = useState('');
+  const [tagDraft, setTagDraft] = useState('');
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   /** Okunamadı ile "henüz yorum yok" ayrı şeyler; ikisini aynı ekrana çevirmek bir yalan. */
@@ -191,6 +202,44 @@ export function TaskThread({
     [onCounts, onError, taskId],
   );
 
+  const setTag = useCallback(
+    async (tagId: string, on: boolean): Promise<void> => {
+      const { response, error } = on
+        ? await api.PUT('/tasks/{id}/tags/{tagId}', { params: { path: { id: taskId, tagId } } })
+        : await api.DELETE('/tasks/{id}/tags/{tagId}', {
+            params: { path: { id: taskId, tagId } },
+          });
+      if (!response.ok) {
+        onError(problemMessage(error, 'Etiket değiştirilemedi.'));
+        return;
+      }
+      // Panoyu tazeliyor: çip hem burada hem satırda duruyor, ve yalnız birini güncellemek ikisini
+      // ayrıştırırdı.
+      onTags();
+    },
+    [onError, onTags, taskId],
+  );
+
+  /**
+   * Yeni etiket oluştur VE hemen tak.
+   *
+   * Tek adım, çünkü kullanıcının niyeti tek: bu işe bu etiketi koymak. Sunucu aynı adda bir etiket
+   * varsa var olanı döndürüyor (`POST /tags` sessizce birleştiriyor), yani aynı kutu hem seçmeye
+   * hem oluşturmaya yarıyor ve "bu zaten var" diye bir hata yolu hiç doğmuyor.
+   */
+  const makeTag = useCallback(async (): Promise<void> => {
+    const name = tagDraft.trim();
+    if (name === '') return;
+    setTagDraft('');
+    const { data, error } = await api.POST('/tags', { body: { name } });
+    if (data === undefined) {
+      onError(problemMessage(error, 'Etiket oluşturulamadı.'));
+      setTagDraft((current) => (current === '' ? name : current));
+      return;
+    }
+    await setTag(data.id, true);
+  }, [onError, setTag, tagDraft]);
+
   const remove = useCallback(
     async (id: string): Promise<void> => {
       const { error, response } = await api.DELETE('/tasks/{id}/comments/{commentId}', {
@@ -238,6 +287,51 @@ export function TaskThread({
             {watchers.length} izleyici
           </span>
         )}
+      </div>
+
+      {/* ─── etiketler ───────────────────────────────────────────────────── */}
+
+      <div className="pmh">Etiketler</div>
+      <div className="tagpick">
+        {taskTags.map((tag) => (
+          <button
+            key={tag.id}
+            type="button"
+            className={`tg c-${tag.color} on`}
+            aria-label={`"${tag.name}" etiketini kaldır`}
+            onClick={() => void setTag(tag.id, false)}
+          >
+            {tag.name} ✕
+          </button>
+        ))}
+        {/* Takılı OLMAYANLAR soluk duruyor ve tıklanınca takılıyor. Ayrı bir "ekle" kutusu ve
+            liste, aynı sözlüğü iki kez çizmek olurdu. */}
+        {tags
+          .filter((tag) => !taskTags.some((it) => it.id === tag.id))
+          .map((tag) => (
+            <button
+              key={tag.id}
+              type="button"
+              className={`tg c-${tag.color} off`}
+              aria-label={`"${tag.name}" etiketini tak`}
+              onClick={() => void setTag(tag.id, true)}
+            >
+              {tag.name}
+            </button>
+          ))}
+        <input
+          value={tagDraft}
+          maxLength={40}
+          aria-label="Yeni etiket"
+          placeholder="Yeni etiket — Enter"
+          onChange={(event) => setTagDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              void makeTag();
+            }
+          }}
+        />
       </div>
 
       {/* ─── kontrol listesi ─────────────────────────────────────────────── */}

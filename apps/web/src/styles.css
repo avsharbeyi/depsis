@@ -1650,6 +1650,143 @@ canvas.spark {
   outline: none;
 }
 
+/* ─── etiketler ─────────────────────────────────────────────────────────────── */
+
+.tagbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 0 10px;
+}
+/* Etiketin kendisi: hap, ve rengi PALETTEN. Serbest bir hex alanı, karanlık zemine karşı
+   görünmeyen etiketler üretiyor — ve görünmeyen bir etiket, olmayan bir etiket. */
+.tg {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink2);
+}
+.tg.sm {
+  font-size: 9.5px;
+  padding: 2px 7px;
+  cursor: default;
+}
+.tg b {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 9px;
+  font-weight: 700;
+  opacity: 0.7;
+}
+/* Takılı OLMAYAN etiket soluk: seçim kutusunda hangilerinin zaten takılı olduğu, renkten önce
+   doygunluktan okunuyor. */
+.tg.off {
+  opacity: 0.45;
+}
+.tg.off:hover {
+  opacity: 1;
+}
+
+.c-iris {
+  background: rgba(143, 166, 255, 0.16);
+  border-color: rgba(143, 166, 255, 0.35);
+  color: #cdd7ff;
+}
+.c-mint {
+  background: rgba(79, 227, 168, 0.15);
+  border-color: rgba(79, 227, 168, 0.35);
+  color: #b6f2da;
+}
+.c-cyan {
+  background: rgba(91, 200, 245, 0.15);
+  border-color: rgba(91, 200, 245, 0.35);
+  color: #bce6fb;
+}
+.c-amber {
+  background: rgba(245, 185, 68, 0.15);
+  border-color: rgba(245, 185, 68, 0.35);
+  color: #f7dfa8;
+}
+.c-rose {
+  background: rgba(255, 126, 138, 0.15);
+  border-color: rgba(255, 126, 138, 0.35);
+  color: #ffc6cc;
+}
+.c-slate {
+  background: rgba(120, 140, 160, 0.16);
+  border-color: rgba(120, 140, 160, 0.35);
+  color: #c3ced9;
+}
+
+/* Seçili süzgeç: kenarı belirginleşiyor. Rengi DEĞİŞMİYOR — etiketin rengi onun kimliği, ve
+   seçiliyken başka bir renge dönmesi hangi etiket olduğunu okunmaz yapardı. */
+.tg.on {
+  box-shadow: 0 0 0 1px currentColor inset;
+}
+
+.tg.edit {
+  gap: 4px;
+  padding: 2px 4px 2px 7px;
+  cursor: default;
+}
+.tg.edit input {
+  width: 92px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+}
+.tg.edit input:focus-visible {
+  outline: 1px solid currentColor;
+  border-radius: 4px;
+}
+.tg.edit select {
+  border: none;
+  background: rgba(0, 0, 0, 0.25);
+  color: inherit;
+  font-family: var(--sans);
+  font-size: 9.5px;
+  border-radius: 5px;
+  padding: 1px 2px;
+}
+.tg.edit .del {
+  color: inherit;
+  opacity: 0.7;
+}
+
+.tagpick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.tagpick input {
+  flex: 1;
+  min-width: 120px;
+  font-family: var(--sans);
+  font-size: 11.5px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--edge);
+  background: rgba(8, 14, 22, 0.55);
+  color: var(--ink);
+}
+.tagpick input:focus-visible {
+  border-color: var(--edge2);
+  outline: none;
+}
+
 /* ─── overlays ─────────────────────────────────────────────────────────────── */
 
 .ovl {

@@ -2604,6 +2604,231 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Kiracının etiket sözlüğü
+         * @description Kullanım sayılarıyla, ada göre. Sayı, hangi etiketlerin gerçekten kullanıldığını ve
+         *     hangilerinin bir kez yazılıp unutulduğunu söylüyor — bir sözlüğün bakımı için gereken tek
+         *     bilgi.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Etiketler */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TagPage"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Etiket oluştur
+         * @description HERKESE AÇIK. Oluşturmayı yöneticiye kilitlemek, etiketlemeyi bir talep sürecine çevirir ve
+         *     kimse kullanmaz.
+         *
+         *     AYNI AD VARSA VAR OLANI DÖNDÜRÜYOR, hata vermiyor: buradaki niyet "bu adda bir etiket
+         *     olsun", ve zaten varsa istenen şey olmuş demektir. Bu, arayüzde hem seçmeye hem oluşturmaya
+         *     izin veren tek bir kutu olmasını sağlıyor.
+         *
+         *     Benzersizlik KATLANMIŞ ad üzerinden — kullanıcı adlarındaki `fold_identity`, yani
+         *     büyük/küçük harf ve Türkçe i ailesi katlanıyor, aksanlar katlanmıyor.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateTagRequest"];
+                };
+            };
+            responses: {
+                /** @description Oluşturuldu ya da zaten vardı */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Tag"];
+                    };
+                };
+                422: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tags/{tagId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Etiketi sil
+         * @description YALNIZ YÖNETİCİ, ve KİRACI ÇAPINDA: etiket her işten kalkıyor. Cevap kaç işten kalktığını
+         *     söylüyor, ve arayüz onu silmeden ÖNCE soruyor — sessiz bir kaskat veri kaybının en sık
+         *     biçimi, ve burada kaybedilen şey otuz işin sınıflandırması.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    tagId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Silindi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Etiketin kalktığı iş sayısı. */
+                            removedFrom: number;
+                        };
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Etiketi yeniden adlandır ya da rengini değiştir
+         * @description YALNIZ YÖNETİCİ. Bir adı değiştirmek, onu kullanan HER İŞİN anlamını değiştiriyor — bir
+         *     üyenin yanlışlıkla yaptığı bir şeyin otuz işi etkilemesi, geri alınması en zor hata sınıfı.
+         *
+         *     `POST /tags`'in tersine sessizce birleştirmiyor: ad başka bir etikete aitse 409. "Bunu şu ad
+         *     yap" diyen biri, iki etiketin tek etikete dönüşeceğini bilmeli.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    tagId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateTagRequest"];
+                };
+            };
+            responses: {
+                /** @description Değişti */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Tag"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        trace?: never;
+    };
+    "/tasks/{id}/tags/{tagId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * İşe etiket tak
+         * @description Zaten takılıysa hiçbir şey olmuyor; cevap yine 204.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    tagId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Takıldı */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        post?: never;
+        /** Etiketi işten kaldır */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    tagId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Kaldırıldı */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tasks/{id}/checklist": {
         parameters: {
             query?: never;
@@ -4964,6 +5189,8 @@ export interface components {
             subtaskTotal?: number;
             checklistDone?: number;
             checklistTotal?: number;
+            /** @description Bu işin etiketleri, ada göre. `uses` burada YOK — satırda görünen şey ad ve renk. */
+            tags?: components["schemas"]["Tag"][];
             /**
              * @description Bu görevin ÇAĞIRANIN GÖREBİLDİĞİ kaç dosyaya bağlı olduğu. Toplam sayı değil, ve fark
              *     §7'nin kuralı: görev erişimi gizli dosya erişimi vermemeli. Göremediği bir dosyanın
@@ -5027,7 +5254,7 @@ export interface components {
              *     ilk 200 karakteri, `newValue` null.
              * @enum {string}
              */
-            field: "status" | "priority" | "due_at" | "assignee_id" | "body" | "file_link" | "comment" | "parent_id" | "checklist";
+            field: "status" | "priority" | "due_at" | "assignee_id" | "body" | "file_link" | "comment" | "parent_id" | "checklist" | "tag";
             oldValue?: string | null;
             newValue?: string | null;
             /** Format: date-time */
@@ -5058,6 +5285,32 @@ export interface components {
             /** Format: date-time */
             dueAt?: string | null;
             position?: number;
+        };
+        Tag: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /**
+             * @description SABİT BİR PALET, serbest bir hex alanı değil. Karanlık zemine karşı görünmeyen bir
+             *     etiket, olmayan bir etiket — ve serbest renk, arayüzü birkaç hafta içinde okunmaz kılar.
+             * @enum {string}
+             */
+            color: "iris" | "mint" | "cyan" | "amber" | "rose" | "slate";
+            /** @description Kaç işte kullanıldığı. Yalnız `GET /tags` dolduruyor; bir işin çipinde yok. */
+            uses?: number;
+        };
+        TagPage: {
+            items: components["schemas"]["Tag"][];
+        };
+        CreateTagRequest: {
+            name: string;
+            /** @enum {string} */
+            color?: "iris" | "mint" | "cyan" | "amber" | "rose" | "slate";
+        };
+        UpdateTagRequest: {
+            name?: string;
+            /** @enum {string} */
+            color?: "iris" | "mint" | "cyan" | "amber" | "rose" | "slate";
         };
         ChecklistItem: {
             /** Format: uuid */

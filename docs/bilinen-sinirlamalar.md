@@ -108,8 +108,13 @@ ama sınırın doğru sayı olduğu ölçülmedi.
 
 ### Faz 2
 
-1. **Görev modülünün kalanı: yalnız ETİKET.** Durum, öncelik, son tarih, aktivite, dosya bağı,
-   yorum, mention, izleyici, alt görev ve kontrol listesi yazıldı.
+1. **Görev modülü §7'ye göre TAMAM.** Durum, öncelik, son tarih, aktivite, dosya bağı, yorum,
+   mention, izleyici, alt görev, kontrol listesi ve etiket yazıldı. Kalanlar birer sınırlama, eksik
+   madde değil:
+
+   **Etiket süzmesi İSTEMCİDE ve VE'li.** Pano zaten bütün işleri tek çağrıda getiriyor, o yüzden
+   süzgeç bir sorgu parametresi değil; iki etiket seçmek daraltıyor ("acil VE depolama"), ve
+   "acil ya da depolama" sorulamıyor. Pano büyüdüğünde ikisi de sunucuya taşınmalı.
 
    Alt görev **tek seviye** ve bu bilinçli: keyfi derinlikte bir ağaç, bir yapılacaklar panosunu
    bir dosya yöneticisine çevirir. Parçalar panoda kendi satırları olarak, atananının sütununda

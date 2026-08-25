@@ -1472,6 +1472,120 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/NotificationsRead' }
 
+  /tags:
+    get:
+      tags: [tasks]
+      summary: Kiracının etiket sözlüğü
+      description: |
+        Kullanım sayılarıyla, ada göre. Sayı, hangi etiketlerin gerçekten kullanıldığını ve
+        hangilerinin bir kez yazılıp unutulduğunu söylüyor — bir sözlüğün bakımı için gereken tek
+        bilgi.
+      responses:
+        '200':
+          description: Etiketler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TagPage' }
+    post:
+      tags: [tasks]
+      summary: Etiket oluştur
+      description: |
+        HERKESE AÇIK. Oluşturmayı yöneticiye kilitlemek, etiketlemeyi bir talep sürecine çevirir ve
+        kimse kullanmaz.
+
+        AYNI AD VARSA VAR OLANI DÖNDÜRÜYOR, hata vermiyor: buradaki niyet "bu adda bir etiket
+        olsun", ve zaten varsa istenen şey olmuş demektir. Bu, arayüzde hem seçmeye hem oluşturmaya
+        izin veren tek bir kutu olmasını sağlıyor.
+
+        Benzersizlik KATLANMIŞ ad üzerinden — kullanıcı adlarındaki `fold_identity`, yani
+        büyük/küçük harf ve Türkçe i ailesi katlanıyor, aksanlar katlanmıyor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTagRequest' }
+      responses:
+        '201':
+          description: Oluşturuldu ya da zaten vardı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tag' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /tags/{tagId}:
+    patch:
+      tags: [tasks]
+      summary: Etiketi yeniden adlandır ya da rengini değiştir
+      description: |
+        YALNIZ YÖNETİCİ. Bir adı değiştirmek, onu kullanan HER İŞİN anlamını değiştiriyor — bir
+        üyenin yanlışlıkla yaptığı bir şeyin otuz işi etkilemesi, geri alınması en zor hata sınıfı.
+
+        `POST /tags`'in tersine sessizce birleştirmiyor: ad başka bir etikete aitse 409. "Bunu şu ad
+        yap" diyen biri, iki etiketin tek etikete dönüşeceğini bilmeli.
+      parameters:
+        - { name: tagId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateTagRequest' }
+      responses:
+        '200':
+          description: Değişti
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tag' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [tasks]
+      summary: Etiketi sil
+      description: |
+        YALNIZ YÖNETİCİ, ve KİRACI ÇAPINDA: etiket her işten kalkıyor. Cevap kaç işten kalktığını
+        söylüyor, ve arayüz onu silmeden ÖNCE soruyor — sessiz bir kaskat veri kaybının en sık
+        biçimi, ve burada kaybedilen şey otuz işin sınıflandırması.
+      parameters:
+        - { name: tagId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Silindi
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [removedFrom]
+                properties:
+                  removedFrom:
+                    type: integer
+                    description: Etiketin kalktığı iş sayısı.
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /tasks/{id}/tags/{tagId}:
+    put:
+      tags: [tasks]
+      summary: İşe etiket tak
+      description: Zaten takılıysa hiçbir şey olmuyor; cevap yine 204.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: tagId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204':
+          description: Takıldı
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [tasks]
+      summary: Etiketi işten kaldır
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: tagId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204':
+          description: Kaldırıldı
+        '404': { $ref: '#/components/responses/Problem' }
+
   /tasks/{id}/checklist:
     get:
       tags: [tasks]
@@ -3125,6 +3239,10 @@ components:
         subtaskTotal: { type: integer }
         checklistDone: { type: integer }
         checklistTotal: { type: integer }
+        tags:
+          type: array
+          description: Bu işin etiketleri, ada göre. `uses` burada YOK — satırda görünen şey ad ve renk.
+          items: { $ref: '#/components/schemas/Tag' }
         linkedFileCount:
           type: integer
           description: |
@@ -3196,7 +3314,18 @@ components:
         field:
           type: string
           enum:
-            [status, priority, due_at, assignee_id, body, file_link, comment, parent_id, checklist]
+            [
+              status,
+              priority,
+              due_at,
+              assignee_id,
+              body,
+              file_link,
+              comment,
+              parent_id,
+              checklist,
+              tag,
+            ]
           description: |
             `comment` yalnız bir yorumun SİLİNMESİ için düşüyor, eklenmesi için değil: yorum
             listesinin kendisi eklendiğinin kaydı, ve iki yere yazmak iki farklı doğruluk kaynağı
@@ -3242,6 +3371,44 @@ components:
         priority: { type: string, enum: [low, normal, high, urgent] }
         dueAt: { type: [string, 'null'], format: date-time }
         position: { type: number }
+
+    Tag:
+      type: object
+      required: [id, name, color]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 40 }
+        color:
+          type: string
+          enum: [iris, mint, cyan, amber, rose, slate]
+          description: |
+            SABİT BİR PALET, serbest bir hex alanı değil. Karanlık zemine karşı görünmeyen bir
+            etiket, olmayan bir etiket — ve serbest renk, arayüzü birkaç hafta içinde okunmaz kılar.
+        uses:
+          type: integer
+          description: Kaç işte kullanıldığı. Yalnız `GET /tags` dolduruyor; bir işin çipinde yok.
+
+    TagPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Tag' }
+
+    CreateTagRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 40 }
+        color: { type: string, enum: [iris, mint, cyan, amber, rose, slate] }
+
+    UpdateTagRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 40 }
+        color: { type: string, enum: [iris, mint, cyan, amber, rose, slate] }
 
     ChecklistItem:
       type: object

@@ -6,6 +6,8 @@ import { NotificationsController } from './notifications.controller.js';
 import { NotificationsModule } from './notifications.module.js';
 import { TaskChecklistService } from './task-checklist.service.js';
 import { TaskCommentsService } from './task-comments.service.js';
+import { TaskTagsService } from './task-tags.service.js';
+import { TagsController } from './tags.controller.js';
 import { TaskFilesService } from './task-files.service.js';
 import { TaskWatchersService } from './task-watchers.service.js';
 import { NotesController } from './notes.controller.js';
@@ -31,7 +33,7 @@ import { TasksService } from './tasks.service.js';
  */
 @Module({
   imports: [AuthModule, FilesModule, NotificationsModule],
-  controllers: [NotesController, TasksController, NotificationsController],
+  controllers: [NotesController, TasksController, NotificationsController, TagsController],
   providers: [
     NotesService,
     TasksService,
@@ -39,6 +41,7 @@ import { TasksService } from './tasks.service.js';
     TaskCommentsService,
     TaskWatchersService,
     TaskChecklistService,
+    TaskTagsService,
   ],
 })
 export class DeskModule {}

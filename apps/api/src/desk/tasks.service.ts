@@ -85,7 +85,8 @@ export interface TaskChange {
     | 'file_link'
     | 'comment'
     | 'parent_id'
-    | 'checklist';
+    | 'checklist'
+    | 'tag';
   old: string | null;
   new: string | null;
 }

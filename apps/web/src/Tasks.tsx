@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
+import { TagBar, type Tag } from './TagBar.js';
 import { TaskThread } from './TaskThread.js';
 import type { Tone } from './ui.js';
 import { Empty, Glyph } from './ui.js';
@@ -187,6 +188,9 @@ export function Tasks({
   // Aynı anda TEK tartışma açık. İkisi birden açıkken pano bir listeden çok bir yığına dönüşüyor,
   // ve zaten okunan şey her seferinde tek bir işin konuşması.
   const [open, setOpen] = useState<string | null>(null);
+  const [tags, setTags] = useState<Tag[]>([]);
+  /** Seçili etiketler. Boşsa süzme yok — panonun varsayılanı her şeyi göstermek. */
+  const [filter, setFilter] = useState<string[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -235,6 +239,20 @@ export function Tasks({
       current === null ? current : current.map((item) => (item.id === saved.id ? saved : item)),
     );
   }
+
+  // Etiket sözlüğü, panoyla birlikte. Ayrı bir efekt çünkü ayrı bir uç — ve `reloadKey`'e bağlı,
+  // yani bir etiket yeniden adlandırıldığında ikisi de tazeleniyor.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const { data } = await api.GET('/tags', {});
+      if (!alive || data === undefined) return;
+      setTags(data.items);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [reloadKey]);
 
   async function add(person: Person): Promise<void> {
     const key = person.id ?? NOBODY;
@@ -354,13 +372,23 @@ export function Tasks({
   }
 
   const persons = people(tasks, me, users);
+  // SÜZME İSTEMCİDE. Pano zaten bütün işleri tek çağrıda getiriyor ve etiketler her satırda
+  // geliyor; sunucuya bir sorgu parametresi eklemek, elde olan bir cevabı ikinci kez sormak olurdu.
+  // Bir iş SEÇİLİ ETİKETLERİN HEPSİNİ taşımak zorunda: iki etiket seçmek daraltıyor, genişletmiyor
+  // — "acil VE depolama" sorulabilir bir soru, "acil ya da depolama" ise seçimin kendisi.
+  const shown =
+    filter.length === 0
+      ? tasks
+      : tasks.filter((task) =>
+          filter.every((id) => (task.tags ?? []).some((tag) => tag.id === id)),
+        );
   const groups: Group[] = [
     ...persons,
     // Always last, and always present: "birinin yapması lazım" is a state the board has to be
     // able to express, and the endpoint accepts a null assignee for exactly that.
     { id: null, name: 'Atanmamış', canAdd: true },
   ].map((person) => {
-    const items = order(tasks.filter((task) => task.assigneeId === person.id));
+    const items = order(shown.filter((task) => task.assigneeId === person.id));
     return {
       ...person,
       key: person.id ?? NOBODY,
@@ -384,6 +412,21 @@ export function Tasks({
         Bu pano herkese açıktır: bir iş birine atanır ve göremediği bir iş atanmış sayılmaz.
         Tamamlananlar listenin sonunda durur.
       </div>
+
+      <TagBar
+        tags={tags}
+        selected={filter}
+        isAdmin={me.role === 'admin'}
+        onToggle={(id) =>
+          setFilter((current) =>
+            current.includes(id) ? current.filter((it) => it !== id) : [...current, id],
+          )
+        }
+        // Sözlük değişti: hem şeridi hem PANOYU yeniden okuyor. Bir etiketin adı değiştiğinde
+        // satırlardaki çipler de değişiyor, ve yalnız şeridi tazelemek onları eski adla bırakırdı.
+        onChanged={() => setReloadKey((key) => key + 1)}
+        onError={(text) => notify('error', text)}
+      />
 
       <div className="jobs">
         {groups.map((group) => (
@@ -584,6 +627,12 @@ export function Tasks({
                       </span>
                     )}
 
+                    {(task.tags ?? []).map((tag) => (
+                      <span className={`tg c-${tag.color} sm`} key={tag.id}>
+                        {tag.name}
+                      </span>
+                    ))}
+
                     {task.linkedFileCount !== undefined && task.linkedFileCount > 0 && (
                       // Sayı ÇAĞIRANIN GÖREBİLDİKLERİ. Toplamı göstermek, göremediği dosyaların
                       // varlığını söylerdi — §7'nin yasakladığı şeyin sayı hâli.
@@ -623,6 +672,9 @@ export function Tasks({
                       canHaveSubtasks={task.parentId === null || task.parentId === undefined}
                       onSubtask={(body) => void addSubtask(task.id, body)}
                       onCounts={(done, total) => setChecklistCount(task.id, done, total)}
+                      tags={tags}
+                      taskTags={task.tags ?? []}
+                      onTags={() => setReloadKey((key) => key + 1)}
                       taskId={task.id}
                       me={me.username}
                       isAdmin={me.role === 'admin'}

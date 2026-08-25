@@ -26,6 +26,7 @@ import {
   TaskFileLinkExistsError,
   TaskFilesService,
 } from './task-files.service.js';
+import { TagNotFoundError, TaskTagsService } from './task-tags.service.js';
 import {
   ChecklistItemNotFoundError,
   ChecklistRejectedError,
@@ -115,6 +116,7 @@ export class TasksController {
     private readonly thread: TaskCommentsService,
     private readonly watching: TaskWatchersService,
     private readonly checks: TaskChecklistService,
+    private readonly tagging: TaskTagsService,
   ) {}
 
   @Get()
@@ -128,17 +130,24 @@ export class TasksController {
     //
     // Paralel, çünkü aralarında bağ yok: üçü de aynı `ids` listesini okuyor ve hiçbiri ötekinin
     // cevabını beklemiyor.
-    const [files, subtasks, checklist] = await Promise.all([
+    const [files, subtasks, checklist, tags] = await Promise.all([
       // Dosya sayısı çağıranın GÖREBİLDİKLERİ — toplamı göstermek, göremediği dosyaların
       // varlığını söylerdi.
       this.links.visibleCounts(caller, ids),
       this.tasks.subtaskProgress(caller.organizationId, ids),
       this.checks.progress(caller.organizationId, ids),
+      this.tagging.forTasks(caller.organizationId, ids),
     ]);
 
     return {
       items: rows.map((row) =>
-        toTask(row, files.get(row.id) ?? 0, subtasks.get(row.id), checklist.get(row.id)),
+        toTask(
+          row,
+          files.get(row.id) ?? 0,
+          subtasks.get(row.id),
+          checklist.get(row.id),
+          tags.get(row.id),
+        ),
       ),
     };
   }
@@ -297,6 +306,45 @@ export class TasksController {
           at: row.created_at.toISOString(),
         })),
       };
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  /* ─── etiket bağları ──────────────────────────────────────────────────────── */
+  //
+  // Sözlüğün kendisi `/tags`'te ve kendi denetleyicisinde: bir etiket KİRACIYA ait. Burada olan
+  // şey bağ, yani değişen şey İŞİN kendisi — ve o yüzden denetim satırı da buradan düşüyor.
+
+  @Put(':id/tags/:tagId')
+  @HttpCode(204)
+  async attachTag(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('tagId') tagId: string,
+  ): Promise<void> {
+    const session = requireSession(request);
+    requireUuid(id);
+    requireUuid(tagId);
+    try {
+      await this.tagging.attach(session.organizationId, id, tagId, session.userId);
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Delete(':id/tags/:tagId')
+  @HttpCode(204)
+  async detachTag(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('tagId') tagId: string,
+  ): Promise<void> {
+    const session = requireSession(request);
+    requireUuid(id);
+    requireUuid(tagId);
+    try {
+      await this.tagging.detach(session.organizationId, id, tagId, session.userId);
     } catch (error) {
       throw translate(error);
     }
@@ -550,6 +598,7 @@ function toTask(
   linkedFileCount = 0,
   subtasks?: { done: number; total: number },
   checklist?: { done: number; total: number },
+  tags?: readonly { id: string; name: string; color: string }[],
 ): Schemas['Task'] {
   return {
     id: row.id,
@@ -562,6 +611,13 @@ function toTask(
     subtaskTotal: subtasks?.total ?? 0,
     checklistDone: checklist?.done ?? 0,
     checklistTotal: checklist?.total ?? 0,
+    // Etiketsiz bir iş için BOŞ DİZİ, eksik alan değil: alanı hiç göndermemek istemciye "etiketi
+    // yok" ile "sunucu söylemedi"yi ayırt ettirirdi — panonun sahip olmadığı bir durum.
+    tags: (tags ?? []).map((tag) => ({
+      id: tag.id,
+      name: tag.name,
+      color: tag.color as Schemas['Tag']['color'],
+    })),
     status: row.status,
     priority: row.priority,
     // `dueAt` sözleşmede isteğe bağlı ve `exactOptionalPropertyTypes` "yok" ile "var ama
@@ -638,6 +694,7 @@ function translate(error: unknown): Error {
   if (error instanceof CommentNotYoursError) return new ForbiddenException(error.message);
   if (error instanceof CommentRejectedError) return new UnprocessableEntityException(error.message);
   if (error instanceof ChecklistItemNotFoundError) return new NotFoundException();
+  if (error instanceof TagNotFoundError) return new NotFoundException();
   if (error instanceof ChecklistRejectedError) {
     return new UnprocessableEntityException(error.message);
   }

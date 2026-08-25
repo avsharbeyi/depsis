@@ -186,6 +186,8 @@ erDiagram
     file_entries ||--o{ task_file_links : ""
     tasks ||--o{ tasks : "parça (TEK seviye)"
     tasks ||--o{ task_checklist_items : ""
+    tasks ||--o{ task_tag_links : ""
+    task_tags ||--o{ task_tag_links : ""
     tasks ||--o{ task_comments : ""
     tasks ||--o{ task_watchers : ""
     users ||--o{ task_watchers : "abone"
@@ -207,6 +209,12 @@ erDiagram
         timestamptz done_at "NULL = yapılmadı"
         uuid done_by FK "silinen hesapta NULL"
         float position "sürüklemek tek UPDATE"
+    }
+    task_tags {
+        uuid id PK
+        text name
+        text name_folded "GENERATED; benzersizlik bunun üstünden"
+        text color "sabit palet"
     }
     task_activity {
         uuid id PK
@@ -240,6 +248,20 @@ erDiagram
         timestamptz read_at "NULL = okunmamış"
     }
 ```
+
+**Etiket KİRACININ SÖZLÜĞÜ, işin bir alanı değil.** `tasks` üzerinde bir metin dizisi daha az
+tablo olurdu ve bir sözlüğün çözdüğü şeyi çözmezdi: "acil", "Acil" ve "acıl" üç ayrı etiket olur ve
+kimse hangisini yazdığını hatırlamaz. Benzersizlik `name_folded` üzerinden — `fold_identity`, yani
+kullanıcı adlarındaki aynı fonksiyon: büyük/küçük harf ve Türkçe i ailesi katlanıyor, **aksanlar
+katlanmıyor** ("Çağrı" ile "Cagri" ayrı, çünkü arama için doğru olan kimlik için yanlış).
+
+**Renk sabit bir paletten**, serbest bir hex alanı değil: karanlık zemine karşı görünmeyen bir
+etiket, olmayan bir etiket.
+
+**Herkes etiket oluşturup takabiliyor, yalnız yönetici yeniden adlandırıp silebiliyor.** İkisi de
+kiracı çapında — bir adı değiştirmek onu kullanan her işin anlamını değiştiriyor, silmek her işten
+kaldırıyor. Oluşturmayı da yöneticiye kilitlemek ise etiketlemeyi bir talep sürecine çevirir ve
+kimse kullanmaz.
 
 **Alt görev bir SÜTUN, yeni bir tablo değil.** Bir alt görev tam olarak bir görev: atanabiliyor,
 kendi durumu, önceliği, son tarihi, yorumu ve izleyicisi oluyor. Ayrı bir tablo bunların hepsinin
