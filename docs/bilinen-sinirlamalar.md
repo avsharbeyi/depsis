@@ -173,9 +173,18 @@ ama sınırın doğru sayı olduğu ölçülmedi.
    ölçülen şey argv'nin şekli, parmak izi eşleştirmesi ve reddedişler; baytların gerçekten karşıya
    varması değil.
 
-   **Zamanlama yok:** çoğaltma elle başlatılıyor, gece kendiliğinden koşmuyor. `job_queue.run_after`
-   zaten dayanıklı bir zamanlayıcı ve dört zincir onu kullanıyor, yani eksik olan şey mekanizma
-   değil bir politika ekranı.
+   **Zamanlama YAPILDI.** `storage.backup-tick` altıncı kendi kendini zamanlayan zincir: beş
+   dakikada bir vakti gelmiş zamanlamaları buluyor, görüntüyü alıyor, çoğaltmayı kuyruğa alıyor ve
+   fazlalıkları buduyor. Saatlik, günlük ya da haftalık; cron ifadesi değil, çünkü cron bir ev
+   NAS'ının sahibinin yanlış yazabileceği ve yanlış yazdığında sessizce hiç çalışmayan bir dil.
+
+   **Budama yalnız KENDİ aldıklarına dokunuyor** — her zamanlamanın görüntüleri kendi ritminin ön
+   ekini taşıyor. Elle alınmış bir görüntüyü ya da başka bir aracın aldığını silen bir budama, veri
+   kaybının fark edilmeyen biçimi olurdu.
+
+   **Zamanlanmış çoğaltma her turda TAM gönderiyor.** Artımlı taban, karşı tarafın neyi tuttuğunu
+   bilmeyi gerektiriyor, ve bu henüz yapılmadı — yani her gece bütün veri kümesi taşınıyor. Küçük
+   bir paylaşımda fark edilmez, bir terabaytta gecenin tamamı.
 
    **İlerleme göstergesi yok, ve bu bilinçli.** `zfs send` ilerlemeyi yalnız `-v` ile kendi
    stderr'ine yazıyor; ajan onu ayrıştırmıyor. Bir zamanlayıcıyla ilerleyen çubuk, hiçbir şeyin

@@ -1,6 +1,7 @@
 import type {
   AclApplyService,
   AgentService,
+  BackupSchedulesService,
   CopyService,
   IdentitySyncService,
   IndexerService,
@@ -11,6 +12,7 @@ import type {
 
 import type { WorkerService } from '../worker.service.js';
 import { applyAclHandler, APPLY_ACL_KIND } from './apply-acl.handler.js';
+import { backupTickHandler, BACKUP_TICK_KIND } from './backup-tick.handler.js';
 import { copyHandler, COPY_KIND } from './copy.handler.js';
 import { createPoolHandler, CREATE_POOL_KIND } from './create-pool.handler.js';
 import { indexDrainHandler, INDEX_DRAIN_KIND } from './index-drain.handler.js';
@@ -43,6 +45,7 @@ export function registerHandlers(
     retention: TrashRetentionService;
     indexer: IndexerService;
     notifications: NotificationsService;
+    schedules: BackupSchedulesService;
   },
 ): void {
   worker.register(SNAPSHOT_KIND, snapshotHandler(services.agent));
@@ -83,4 +86,7 @@ export function registerHandlers(
   // `run_after` is the only timer that survives a restart. Its failure is also the quietest one
   // in this list — what goes missing is a notification nobody was told to expect.
   worker.register(OVERDUE_SWEEP_KIND, overdueSweepHandler(services.notifications));
+  // Zamanlanmış yedekler. Kendi kendini zamanlayan altıncı zincir, ve sessiz kalması en pahalı
+  // olan: eksik olan şey bir yedeğin yokluğu, ve o ancak ihtiyaç duyulduğu gün aranıyor.
+  worker.register(BACKUP_TICK_KIND, backupTickHandler(services.schedules));
 }

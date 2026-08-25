@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
 import { Offsite } from './Offsite.js';
+import { Schedules } from './Schedules.js';
 import { Replicate } from './Replicate.js';
 import { formatBytes, formatWhen, percent } from './Dashboard.js';
 import type { Snapshot as SystemSnapshot } from './snapshot.js';
@@ -211,6 +212,10 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
           bağlı her veri kümesine ulaşmasını atlatmıyor — ki insanlar "yedek" derken çoğunlukla
           bunu kastediyor. */}
       {page !== null && !forbidden && <Offsite backups={items} notify={notify} onQueued={reload} />}
+
+      {/* ELLE BAŞLATILAN BİR YEDEK, ALINMAYAN BİR YEDEKTİR. Yukarıdaki iki form bir düğmeye
+          basıldığında çalışıyor; bu, basılmadığında. */}
+      {page !== null && !forbidden && <Schedules notify={notify} />}
 
       {pools.length > 0 && (
         <div>

@@ -70,6 +70,10 @@ describe('the emitted agent schema', () => {
       // `zpool` itself still refuses a disk that already holds a filesystem.
       'create_pool',
       'create_snapshot',
+      // Exactly ONE snapshot, never a dataset and never recursively: the agent joins a
+      // `DatasetName` (whose character set has no `@`) to a `SafeComponent` with `@`, so the
+      // argument `zfs destroy` receives always names a snapshot. No `-r`, no `-R`, no `-d`.
+      'destroy_snapshot',
       'diff_snapshots',
       // The reclaim half, and the reason the set has one at all: `.depsis/staging` counts against
       // the user's refquota, Samba vetoes `/.depsis/` and this API filters the prefix server-side,
@@ -238,7 +242,11 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 18 since the five
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 19 since
+    // `destroy_snapshot` — the operation scheduled backups prune with. A stale agent that did
+    // not know it would leave every schedule taking snapshots and removing none, which fills the
+    // pool; and a full pool stops writes, which is worse than having no backup at all. 18 since
+    // the five
     // off-site operations — a stale agent that did not know `replicate_offsite` would answer a
     // backup to another machine with a parse failure rather than half-performing one, and a
     // stale agent that did not know `offsite_trust_host` would leave the appliance believing it
@@ -257,7 +265,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(18);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(19);
   });
 
   it('agrees with the number the agent actually reports', () => {

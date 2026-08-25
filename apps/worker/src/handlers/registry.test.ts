@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   AclApplyService,
   AgentService,
+  BackupSchedulesService,
   CopyService,
   IdentitySyncService,
   IndexerService,
@@ -35,6 +36,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       retention: {} as unknown as TrashRetentionService,
       indexer: {} as unknown as IndexerService,
       notifications: {} as unknown as NotificationsService,
+      schedules: {} as unknown as BackupSchedulesService,
     });
     expect(worker.kinds.sort()).toEqual([
       'files.copy',
@@ -44,6 +46,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       'files.trash.purge',
       'identity.sync',
       'permissions.apply',
+      'storage.backup-tick',
       'storage.pool.create',
       'storage.replicate',
       'storage.replicate-offsite',

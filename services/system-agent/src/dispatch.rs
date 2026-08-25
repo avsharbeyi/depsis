@@ -1725,6 +1725,26 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 }
             }
 
+            Request::DestroySnapshot { dataset, snapshot } => {
+                // `@` REFUSED IN THE SNAPSHOT NAME, and not because `zfs` would accept it —
+                // `tank/x@a@b` is an invalid name and `zfs destroy` says so. It is refused here so
+                // that the argument this agent constructs is provably one dataset and one snapshot
+                // by reading these six lines, rather than by reasoning about another program's
+                // parser. `DatasetName` already has no `@` in its character set.
+                if snapshot.as_str().contains('@') {
+                    return Ok(Response::Refused {
+                        reason: "a snapshot name may not contain '@'".to_string(),
+                    });
+                }
+                let full = format!("{}@{}", dataset.as_str(), snapshot.as_str());
+
+                // No flags at all. `-r` walks children, `-R` walks clones and dependents, `-d`
+                // defers and hides the outcome; each hands the blast radius to the caller, which
+                // is the one thing §2.2 says a single accepted call must never do.
+                self.runner.run(bin::ZFS, &["destroy", &full])?;
+                Ok(Response::SnapshotDestroyed { full_name: full })
+            }
+
             Request::ListSnapshots { dataset } => {
                 let argv = crate::snapshots::list_snapshots_argv(dataset.as_str());
                 match self.runner.run(bin::ZFS, &argv) {

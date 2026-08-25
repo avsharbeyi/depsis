@@ -3488,6 +3488,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/storage/backup-schedules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Zamanlanmış yedekler
+         * @description Elle başlatılan bir yedek, alınmayan bir yedektir. Bir NAS'ın verisini kaybetme yolu bozuk
+         *     bir yedekleme değil, ALINMAMIŞ bir yedek — ve sebebi neredeyse her zaman birinin bir
+         *     düğmeye basmayı unutması.
+         *
+         *     Kurucu yönetici.
+         */
+        get: operations["listBackupSchedules"];
+        put?: never;
+        /** Zamanlama ekle */
+        post: operations["createBackupSchedule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/backup-schedules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Zamanlamayı değiştir */
+        put: operations["updateBackupSchedule"];
+        post?: never;
+        /**
+         * Zamanlamayı kaldır
+         * @description ALDIĞI GÖRÜNTÜLERİ SİLMEZ. Bir zamanlamayı kaldırmak "artık yenisini alma" demek,
+         *     "elimdekileri at" demek değil — ve iki anlamı birbirine karıştıran bir silme düğmesi, bir
+         *     kullanıcının bütün yedek geçmişini bir tıkla götürürdü.
+         */
+        delete: operations["deleteBackupSchedule"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/storage/offsite": {
         parameters: {
             query?: never;
@@ -6304,6 +6352,65 @@ export interface components {
              */
             name: string;
         };
+        BackupSchedule: {
+            /** Format: uuid */
+            id: string;
+            dataset: string;
+            label: string;
+            /** @enum {string} */
+            cadence: "hourly" | "daily" | "weekly";
+            /** @description Günlük ve haftalık için saat; saatlik için null (her saat). */
+            atHour: number | null;
+            atMinute: number;
+            /** @description Haftalık için gün; 0 = Pazar. */
+            weekday: number | null;
+            /**
+             * @description BU ZAMANLAMANIN kaç görüntüsü saklanacak. Budama yalnız kendi ön ekiyle
+             *     (`depsis-<ritim>-`) başlayan görüntülere dokunuyor: elle alınmış bir görüntüyü ya da
+             *     başka bir aracın aldığını silen bir budama, veri kaybının fark edilmeyen biçimi olurdu.
+             */
+            keep: number;
+            /** @description Yerel çoğaltma hedefi. null ise bu zamanlama yalnız görüntü alıyor. */
+            replicateTarget: string | null;
+            offsite: {
+                host: string;
+                port: number;
+                user: string;
+            } | null;
+            enabled: boolean;
+            /** Format: date-time */
+            nextRunAt: string;
+            /** Format: date-time */
+            lastRunAt: string | null;
+            /**
+             * @description Son turun ne yaptığı: `ok`, ya da başarısızlığın kendi cümlesi. İş satırı kuyruktan
+             *     silindikten sonra da duran tek kayıt.
+             */
+            lastResult: string | null;
+        };
+        BackupSchedulePage: {
+            items: components["schemas"]["BackupSchedule"][];
+        };
+        BackupScheduleRequest: {
+            dataset: string;
+            label: string;
+            /** @enum {string} */
+            cadence: "hourly" | "daily" | "weekly";
+            atHour?: number | null;
+            /** @default 0 */
+            atMinute: number;
+            weekday?: number | null;
+            keep: number;
+            replicateTarget?: string | null;
+            offsite?: {
+                host: string;
+                /** @default 22 */
+                port: number;
+                user: string;
+            } | null;
+            /** @default true */
+            enabled: boolean;
+        };
         OffsiteStatus: {
             /** @description Anahtar üretildi mi. Geri kalan her şey bu false iken anlamsız. */
             hasIdentity: boolean;
@@ -6720,6 +6827,116 @@ export interface operations {
             403: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+        };
+    };
+    listBackupSchedules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Zamanlamalar */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupSchedulePage"];
+                };
+            };
+            403: components["responses"]["Problem"];
+        };
+    };
+    createBackupSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupScheduleRequest"];
+            };
+        };
+        responses: {
+            /** @description Eklendi */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupSchedule"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            /**
+             * @description Bu veri kümesi için bu ritimde bir zamanlama zaten var. İkincisi, aynı anda çalışan ve
+             *     birbirinin görüntüsünü budayan iki politika demek olurdu.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    updateBackupSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupScheduleRequest"];
+            };
+        };
+        responses: {
+            /** @description Değiştirildi */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupSchedule"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+        };
+    };
+    deleteBackupSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Kaldırıldı */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
         };
     };
     getOffsiteStatus: {

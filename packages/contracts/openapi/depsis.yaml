@@ -1999,6 +1999,91 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
 
+  /storage/backup-schedules:
+    get:
+      operationId: listBackupSchedules
+      tags: [system]
+      summary: Zamanlanmış yedekler
+      description: |
+        Elle başlatılan bir yedek, alınmayan bir yedektir. Bir NAS'ın verisini kaybetme yolu bozuk
+        bir yedekleme değil, ALINMAMIŞ bir yedek — ve sebebi neredeyse her zaman birinin bir
+        düğmeye basmayı unutması.
+
+        Kurucu yönetici.
+      responses:
+        '200':
+          description: Zamanlamalar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupSchedulePage' }
+        '403': { $ref: '#/components/responses/Problem' }
+    post:
+      operationId: createBackupSchedule
+      tags: [system]
+      summary: Zamanlama ekle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BackupScheduleRequest' }
+      responses:
+        '201':
+          description: Eklendi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupSchedule' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409':
+          description: |
+            Bu veri kümesi için bu ritimde bir zamanlama zaten var. İkincisi, aynı anda çalışan ve
+            birbirinin görüntüsünü budayan iki politika demek olurdu.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  /storage/backup-schedules/{id}:
+    put:
+      operationId: updateBackupSchedule
+      tags: [system]
+      summary: Zamanlamayı değiştir
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BackupScheduleRequest' }
+      responses:
+        '200':
+          description: Değiştirildi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupSchedule' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      operationId: deleteBackupSchedule
+      tags: [system]
+      summary: Zamanlamayı kaldır
+      description: |
+        ALDIĞI GÖRÜNTÜLERİ SİLMEZ. Bir zamanlamayı kaldırmak "artık yenisini alma" demek,
+        "elimdekileri at" demek değil — ve iki anlamı birbirine karıştıran bir silme düğmesi, bir
+        kullanıcının bütün yedek geçmişini bir tıkla götürürdü.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Kaldırıldı }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
   /storage/offsite:
     get:
       operationId: getOffsiteStatus
@@ -4542,6 +4627,91 @@ components:
             Dosyanın ineceği ad. Aslıyla aynı olmayabilir: hedefte o ad doluysa sunucu boş bir ad
             seçiyor, ve seçtiğini burada söylüyor — sessizce başka bir ada indirmek, kullanıcının
             aradığı dosyayı bulamaması demek olurdu.
+
+    BackupSchedule:
+      type: object
+      required:
+        [
+          id,
+          dataset,
+          label,
+          cadence,
+          atHour,
+          atMinute,
+          weekday,
+          keep,
+          replicateTarget,
+          offsite,
+          enabled,
+          nextRunAt,
+          lastRunAt,
+          lastResult,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        dataset: { type: string }
+        label: { type: string }
+        cadence: { type: string, enum: [hourly, daily, weekly] }
+        atHour:
+          type: [integer, 'null']
+          description: Günlük ve haftalık için saat; saatlik için null (her saat).
+        atMinute: { type: integer, minimum: 0, maximum: 59 }
+        weekday:
+          type: [integer, 'null']
+          description: Haftalık için gün; 0 = Pazar.
+        keep:
+          type: integer
+          description: |
+            BU ZAMANLAMANIN kaç görüntüsü saklanacak. Budama yalnız kendi ön ekiyle
+            (`depsis-<ritim>-`) başlayan görüntülere dokunuyor: elle alınmış bir görüntüyü ya da
+            başka bir aracın aldığını silen bir budama, veri kaybının fark edilmeyen biçimi olurdu.
+        replicateTarget:
+          type: [string, 'null']
+          description: Yerel çoğaltma hedefi. null ise bu zamanlama yalnız görüntü alıyor.
+        offsite:
+          type: [object, 'null']
+          required: [host, port, user]
+          properties:
+            host: { type: string }
+            port: { type: integer }
+            user: { type: string }
+        enabled: { type: boolean }
+        nextRunAt: { type: string, format: date-time }
+        lastRunAt: { type: [string, 'null'], format: date-time }
+        lastResult:
+          type: [string, 'null']
+          description: |
+            Son turun ne yaptığı: `ok`, ya da başarısızlığın kendi cümlesi. İş satırı kuyruktan
+            silindikten sonra da duran tek kayıt.
+
+    BackupSchedulePage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/BackupSchedule' }
+
+    BackupScheduleRequest:
+      type: object
+      required: [dataset, label, cadence, keep]
+      properties:
+        dataset: { type: string }
+        label: { type: string, maxLength: 80 }
+        cadence: { type: string, enum: [hourly, daily, weekly] }
+        atHour: { type: [integer, 'null'], minimum: 0, maximum: 23 }
+        atMinute: { type: integer, minimum: 0, maximum: 59, default: 0 }
+        weekday: { type: [integer, 'null'], minimum: 0, maximum: 6 }
+        keep: { type: integer, minimum: 1, maximum: 10000 }
+        replicateTarget: { type: [string, 'null'] }
+        offsite:
+          type: [object, 'null']
+          required: [host, user]
+          properties:
+            host: { type: string }
+            port: { type: integer, default: 22 }
+            user: { type: string }
+        enabled: { type: boolean, default: true }
 
     OffsiteStatus:
       type: object

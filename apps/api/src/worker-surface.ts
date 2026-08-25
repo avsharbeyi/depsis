@@ -88,6 +88,12 @@ export {
   type TrashPolicy,
 } from './files/trash-retention.service.js';
 export {
+  BACKUP_TICK_KIND,
+  BackupSchedulesService,
+  TICK_INTERVAL_MS,
+} from './system/backup-schedules.service.js';
+export { BackupSchedulesModule } from './system/backup-schedules.module.js';
+export {
   COPY_KIND,
   COPY_MAX_ATTEMPTS,
   RESTORE_KIND,

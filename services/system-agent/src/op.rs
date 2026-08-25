@@ -1182,6 +1182,28 @@ pub enum Request {
         target: DatasetName,
     },
 
+    /// Destroy exactly ONE snapshot. Never a dataset, never recursively.
+    ///
+    /// The operation scheduled backups need and nothing else does. A schedule that takes an hourly
+    /// snapshot and never removes one is a schedule that fills the pool — and a full pool is worse
+    /// than an unbacked-up one, because writes stop too.
+    ///
+    /// WHY THIS SHAPE IS SAFE. The two operands are a `DatasetName` and a `SafeComponent`, and the
+    /// agent joins them with `@`. `DatasetName`'s character set has no `@`, so the left half cannot
+    /// smuggle one; the dispatcher refuses a right half that contains one. The argument `zfs
+    /// destroy` receives therefore ALWAYS names a snapshot and never a dataset — which is the
+    /// difference between removing one hour of history and removing everything.
+    ///
+    /// NO `-r`, NO `-R`, NO `-d`. Recursive destroy walks children; deferred destroy hides the
+    /// outcome. §2.2's rule is that no single call the agent accepts may have a blast radius the
+    /// caller chooses, and every one of those flags hands the radius to the caller.
+    #[serde(rename = "destroy_snapshot")]
+    DestroySnapshot {
+        dataset: DatasetName,
+        /// The snapshot's own name — the part after `@`.
+        snapshot: SafeComponent,
+    },
+
     /// Delete exactly ONE entry inside a share. Never a tree.
     ///
     /// `directory` is a required operand rather than something the agent works out by stat-ing the
@@ -1705,6 +1727,12 @@ pub enum Response {
     Diff {
         lines: Vec<String>,
     },
+    /// The snapshot is gone. Carries the full name so the audit trail says what was destroyed.
+    #[serde(rename = "snapshot_destroyed")]
+    SnapshotDestroyed {
+        full_name: String,
+    },
+
     /// The off-site identity and the destinations this appliance trusts.
     #[serde(rename = "offsite")]
     Offsite {
@@ -2039,7 +2067,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 18;
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///
