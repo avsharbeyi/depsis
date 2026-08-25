@@ -2,6 +2,7 @@ import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import { PasswordService } from '../auth/password.service.js';
+import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import { DbService } from '../db/db.service.js';
 
 export interface ClaimRequest {
@@ -51,6 +52,7 @@ export class SetupService implements OnModuleInit {
   constructor(
     private readonly db: DbService,
     private readonly passwords: PasswordService,
+    private readonly identity: IdentitySyncService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -108,6 +110,37 @@ export class SetupService implements OnModuleInit {
 
       const row = rows[0];
       if (row === undefined) return { outcome: 'already-complete' };
+
+      // SMB KİMLİĞİ DE BURADA, ve olmaması bir hataydı.
+      //
+      // NT hash'i parola AYARLANIRKEN türetiliyor — düz metin yalnız o an elde. `users.service`
+      // hesap oluştururken ve parola sıfırlarken bunu yapıyordu; kurucu yönetici, yani her
+      // cihazın İLK hesabı, atlanmıştı. Sonucu sessizdi: hesap her yerde çalışıyor, yalnız
+      // Windows hiçbir zaman kabul etmeyeceği bir kimlik penceresi gösteriyor, ve sebebi hiçbir
+      // ekranda yazmıyordu.
+      //
+      // `CurrentUser.smbReady` bunu ortaya çıkardı: kurulum sihirbazının açtığı hesapta false
+      // dönüyordu.
+      //
+      // Kendi işleminde ve YUTULARAK: SMB kimliği yazılamaması, cihazın sahiplenilmemesine yol
+      // açmamalı — kurulum bir kez çalışıyor ve yarıda kalması onu geri alınamaz biçimde bozardı.
+      // Kaybedilen şey SMB erişimi, ve onu geri getirmenin yolu parolayı bir kez değiştirmek.
+      try {
+        await this.db.withTenant(row.organization_id, (q) =>
+          this.identity.rememberPassword(
+            q,
+            row.organization_id,
+            row.user_id,
+            request.adminPassword,
+          ),
+        );
+      } catch (error) {
+        this.logger.warn(
+          `the founding administrator has no SMB credential yet: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
 
       // Burned even though the database already refuses a second claim. Two locks on a door that
       // can only be opened once costs nothing, and the in-memory one closes the window between the

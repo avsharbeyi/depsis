@@ -1668,6 +1668,41 @@ canvas.spark {
   outline: none;
 }
 
+/* ─── bu bilgisayara bağla ──────────────────────────────────────────────────── */
+
+.conn {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-basis: 100%;
+  padding: 10px 0 2px;
+}
+.crow {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cmd {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+/* Komut MONOSPACE ve seçilebilir: pano izni verilmemiş bir tarayıcıda kopyalama düğmesi
+   çalışmıyor, ve o durumda ekranda okunup elle seçilebilecek bir şeyin durması gerekiyor. */
+.cmd code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--edge);
+  color: var(--ink);
+  overflow-x: auto;
+  white-space: pre;
+}
+
 /* ─── çoğaltma formu ────────────────────────────────────────────────────────── */
 
 .repl {

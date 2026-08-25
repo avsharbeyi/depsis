@@ -866,7 +866,17 @@ function PaneBody({
     case 'tasks':
       return <Tasks notify={notify} me={me} users={snapshot?.users ?? null} />;
     case 'shares':
-      return <Shares notify={notify} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />;
+      return (
+        <Shares
+          notify={notify}
+          isAdmin={isAdmin}
+          username={me.username}
+          // `?? false`: alan sözleşmede zorunlu ama üretilen tip onu isteğe bağlı görüyor, ve
+          // bilinmeyeni "hazır" saymak, çalışmayacak komutları uyarısız göstermek olurdu.
+          smbReady={me.smbReady ?? false}
+          onUnauthenticated={onUnauthenticated}
+        />
+      );
     case 'users':
       return <Users currentUserId={me.id} notify={notify} onUnauthenticated={onUnauthenticated} />;
     case 'teams':

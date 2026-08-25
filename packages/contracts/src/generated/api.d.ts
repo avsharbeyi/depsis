@@ -5018,6 +5018,17 @@ export interface components {
             id: string;
             username: string;
             /**
+             * @description Bu hesap SMB'ye ULAŞABİLİR Mİ.
+             *
+             *     SMB parolası, DEPSIS parolası AYARLANIRKEN türetiliyor. Bu özellik var olmadan önce
+             *     parolasını en son değiştirmiş bir hesabın passdb girdisi yok, ve Windows öyle birine
+             *     hiçbir zaman kabul etmeyeceği bir kimlik penceresi gösteriyor — sebebini söylemeden.
+             *
+             *     Alan bunun için var: "DEPSIS parolanı kullan" demeden önce, kullanabileceğini bilmek
+             *     gerekiyor. Değeri false ise yapılacak şey belli ve tek: parolayı bir kez değiştirmek.
+             */
+            smbReady?: boolean;
+            /**
              * @description İSTEĞE BAĞLI ve kimlik doğrulamada KULLANILMIYOR. Yerel ağdaki bir NAS posta
              *     göndermiyor ve hiçbir adresi doğrulamıyor; giriş kullanıcı adıyla yapılıyor.
              */

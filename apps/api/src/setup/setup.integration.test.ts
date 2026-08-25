@@ -10,6 +10,7 @@ import { PendingLoginService } from '../auth/pending-login.service.js';
 import { SessionService } from '../auth/session.service.js';
 import { DbService } from '../db/db.service.js';
 import { OrganizationsService } from '../organizations/organizations.service.js';
+import type { IdentitySyncService } from '../identity/identity-sync.service.js';
 import { SetupService } from './setup.service.js';
 
 /**
@@ -30,6 +31,19 @@ const describeDb =
   SETUP_URL !== undefined && SETUP_URL !== '' && SETUP_OWNER_URL !== undefined
     ? describe
     : describe.skip;
+
+/**
+ * Bir kimlik servisi yerine hiçbir şey yapmayan biri.
+ *
+ * Bu süit sahiplenmeyi ölçüyor, SMB kimliğini değil — ve gerçek servis bir `SecretBox` ile bir
+ * ajan istiyor, ikisi de bu testin sorusuyla ilgisiz. `claim` çağrısı hatayı zaten yutuyor, ama
+ * yutulan bir hata log'a düşen bir hata: sessiz bir sahte, gürültüsüz bir süit demek.
+ */
+function noIdentity(): IdentitySyncService {
+  return {
+    rememberPassword: () => Promise.resolve(),
+  } as unknown as IdentitySyncService;
+}
 
 describeDb('system setup, against a real PostgreSQL', () => {
   let db: DbService;
@@ -60,7 +74,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
       if (found?.[1] !== undefined) lastToken = found[1];
     });
     try {
-      const service = new SetupService(db, new PasswordService());
+      const service = new SetupService(db, new PasswordService(), noIdentity());
       await service.onModuleInit();
       expect(lastToken, 'the boot log must carry a setup token').not.toBe('');
       return service;
@@ -188,7 +202,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
     const service = await freshSetup();
     expect((await service.claim(claimBody(tokenOf(service)))).outcome).toBe('ok');
 
-    const restarted = new SetupService(db, new PasswordService());
+    const restarted = new SetupService(db, new PasswordService(), noIdentity());
     await restarted.onModuleInit();
     expect(await restarted.isComplete()).toBe(true);
     expect((await restarted.claim(claimBody(tokenOf(restarted), 'thirdorg'))).outcome).toBe(

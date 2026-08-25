@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
+import { Connect } from './Connect.js';
 import { Empty, Win } from './ui.js';
 import { Permissions, type PermissionTarget } from './Permissions.js';
 
@@ -34,6 +35,10 @@ const UNPUBLISHED: React.CSSProperties = {
 interface Props {
   notify: Notify;
   isAdmin: boolean;
+  /** Bağlanma komutlarındaki kullanıcı adı — Windows'un tahmin ettiği ad değil. */
+  username: string;
+  /** SMB parolası var mı; yoksa komutlar açılıyor ama hiçbir parola kabul edilmiyor. */
+  smbReady: boolean;
   onUnauthenticated: () => void;
 }
 
@@ -49,7 +54,13 @@ interface Props {
  * reader to Explorer with an address that will time out — which they will read as a broken
  * appliance rather than as configuration that has not been applied yet.
  */
-export function Shares({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.Element {
+export function Shares({
+  notify,
+  isAdmin,
+  username,
+  smbReady,
+  onUnauthenticated,
+}: Props): React.JSX.Element {
   const [page, setPage] = useState<SharePage | null>(null);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -320,6 +331,17 @@ export function Shares({ notify, isAdmin, onUnauthenticated }: Props): React.JSX
                 <span className="st2" style={UNPUBLISHED}>
                   yayımlanmadı
                 </span>
+              )}
+              {/* YALNIZ YAYIMLANMIŞ paylaşımda. Yayımlanmamış bir paylaşımın adresi Gezgin'de
+                  açılmıyor, ve onun için bir `net use` satırı vermek çalışmayacak bir komut
+                  vermektir — ekranın hemen üstünde "Samba bu adresi sunmuyor" yazarken. */}
+              {share.published && (
+                <Connect
+                  shareName={share.name}
+                  username={username}
+                  smbReady={smbReady}
+                  notify={notify}
+                />
               )}
             </div>
           ))}

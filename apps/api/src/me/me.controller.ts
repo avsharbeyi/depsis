@@ -45,6 +45,7 @@ interface UserRow {
   email: string | null;
   password_hash: string | null;
   slug: string;
+  smb_ready: boolean;
 }
 
 /**
@@ -143,6 +144,14 @@ export class MeController {
       // the row loaded here, which is a second read and therefore a second moment.
       role: request.depsis?.role ?? 'member',
       organizationSlug: user.slug,
+      // Can this account reach SMB AT ALL.
+      //
+      // The NT hash is derived when a password is SET, so an account that has not changed its
+      // password since that feature existed has no passdb entry — and Windows answers such a
+      // person with a bare credential prompt that never accepts anything. Telling them to use
+      // their DEPSIS password would be telling them to do something that cannot work, and the
+      // share screen is exactly where they would be told it.
+      smbReady: user.smb_ready,
       mfaEnrolled: await this.mfa.isEnrolled(session.organizationId, session.userId),
       recoveryCodesRemaining: await this.mfa.remainingRecoveryCodes(
         session.organizationId,
@@ -249,7 +258,11 @@ export class MeController {
   private async load(organizationId: string, userId: string): Promise<UserRow> {
     const rows = await this.db.withTenant(organizationId, (q) =>
       q.query<UserRow>(
-        `SELECT u.id::text AS id, u.username, u.email, u.password_hash, o.slug
+        `SELECT u.id::text AS id, u.username, u.email, u.password_hash, o.slug,
+                -- Not the hash itself — only WHETHER there is one. The value is a sealed NT hash
+                -- and has no business leaving the identity path; the boolean is the only part a
+                -- screen needs.
+                (u.nt_hash IS NOT NULL) AS smb_ready
            FROM users u
            JOIN organizations o ON o.id = u.organization_id
           WHERE u.id = $1`,

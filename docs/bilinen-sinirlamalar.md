@@ -194,7 +194,23 @@ ama sınırın doğru sayı olduğu ölçülmedi.
    bir dizin, bir yapılandırma ve bir temizleme işi demek; yeniden üretmek 128 kB'lık bir okuma.
    Fotoğraf kütüphanesi büyüdükçe ölçülüp değiştirilecek bir sayı.
 
-7. **Masaüstü istemci ve Windows sürücü eşleme.**
+7. **Masaüstü istemci — Windows sürücü eşleme yapıldı, AYRI UYGULAMA yapılmadı.**
+
+   Paylaşımlar ekranındaki "Bu bilgisayara bağla", her paylaşım için Windows (Gezgin adresi ve
+   kalıcı `net use`), macOS (`smb://`) ve Linux (`mount -t cifs`) komutlarını kullanıcı adıyla
+   birlikte veriyor. Adres TARAYICININ bağlandığı addan alınıyor, sunucunun yapılandırılmış
+   adından değil: sunucunun birkaç adresi olabiliyor ve hangisinin bu istemciye ulaştığını
+   bilmiyor, ama tarayıcının bağlandığı ad tanım gereği az önce çalışmış olan.
+
+   Ayrı bir masaüstü uygulaması YAPILMADI: paketleme, imzalama, otomatik güncelleme ve platform
+   başına bir yükleyici demek, ve §21'in teslimat listesinde "imzalı derleme ve güncelleme
+   prosedürü" olarak zaten ayrı bir madde. Bir uygulamanın çözeceği asıl sürtünme — adresi,
+   kullanıcı adını ve `net use`'un söz dizimini bilmek — bu ekranla çözülüyor; kalanı senkronizasyon
+   ve tepsi simgesi.
+
+   **Otomatik eşleme yok:** komut kopyalanıp çalıştırılıyor. Tarayıcıdan bir `.cmd` indirtmek
+   mümkündü ve yapılmadı — indirilen bir betiği çalıştırmak, kullanıcıya öğretilmemesi gereken bir
+   alışkanlık.
 
 ### Faz 3
 
