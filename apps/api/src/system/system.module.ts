@@ -10,12 +10,13 @@ import { JobsModule } from '../jobs/jobs.module.js';
 import { BackupsController } from './backups.controller.js';
 import { BackupsService } from './backups.service.js';
 import { PoolsController } from './pools.controller.js';
+import { ReplicationController } from './replication.controller.js';
 import { SystemController } from './system.controller.js';
 import { SystemService } from './system.service.js';
 
 @Module({
   imports: [AuthModule, IdempotencyModule, JobsModule],
-  controllers: [SystemController, BackupsController, PoolsController],
+  controllers: [SystemController, BackupsController, PoolsController, ReplicationController],
   providers: [
     {
       provide: SystemService,

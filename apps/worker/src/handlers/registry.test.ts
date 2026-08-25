@@ -44,6 +44,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       'identity.sync',
       'permissions.apply',
       'storage.pool.create',
+      'storage.replicate',
       'storage.snapshot',
       'tasks.overdue-sweep',
     ]);

@@ -88,6 +88,45 @@
       ]
     },
     {
+      "description": "Copy one dataset's snapshot onto another dataset, on THIS appliance.\n\n`zfs send | zfs recv`, and the most destructive operation in the set after `CreatePool`:\n`recv -F` destroys whatever is at the target and any snapshot newer than the base. Pointed\nat the share dataset it erases every tenant's files.\n\nFour refusals sit in front of it in `replicate::check` — same dataset, nested either way,\nthe share root, inside the share tree — and §8.1's written confirmation and\nre-authentication sit in front of THOSE in the API. Neither is redundant: the API's\nsequence protects against a person in a hurry, and these refuse a request that reached the\nagent by any other route at all.\n\nNOT REPLICATION TO ANOTHER MACHINE. That needs a transport, a credential store and\nhost-key verification, and none of it can be exercised here. This is the target a two-pool\nNAS has: a second set of disks.",
+      "type": "object",
+      "properties": {
+        "base": {
+          "description": "A snapshot both sides already have, for an incremental send.\n\nAbsent means a FULL send. The caller decides rather than the agent guessing: a full\nsend of a terabyte is not something to start on the agent's own initiative, and the\ncaller is the only side that knows what the target already holds.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeComponent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "op": {
+          "type": "string",
+          "const": "replicate_dataset"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "source": {
+          "description": "The snapshot to send, as a name on `source`.",
+          "$ref": "#/$defs/DatasetName"
+        },
+        "target": {
+          "description": "Where it lands. `recv -F` DESTROYS what is here.",
+          "$ref": "#/$defs/DatasetName"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "source",
+        "snapshot",
+        "target"
+      ]
+    },
+    {
       "description": "What snapshots this dataset ACTUALLY has.\n\nThe read that was missing beside `CreateSnapshot`. DEPSIS could take a snapshot and record\nit, but never ask — so its backups list was a table, not an inventory, and the screen said\nso in a warning box. The failure direction is the one that costs data: a snapshot destroyed\nfrom a shell keeps its row, and the screen goes on offering a restore point that is gone.\n\nONE OPERAND, and it is a validated `DatasetName`. `zfs list -t snapshot` with no operand\nwalks every dataset on the box; on an appliance holding several tenants' shares that is one\ntenant being told what another has. The depth limit in the argv (`-d 1`) is the other half\nof the same fence.",
       "type": "object",
       "properties": {
@@ -1032,6 +1071,30 @@
       "required": [
         "status",
         "lines"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "base": {
+          "description": "The send was incremental from this snapshot, or absent for a full send.\n\nEchoed back because the caller's request is not proof of what happened: an incremental\nthat the target refused is retried as a full send, and a job history that recorded the\nREQUEST would say \"incremental\" about a transfer that moved the whole dataset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "description": "What `zfs recv` printed, kept so an operator can read the real words on a bad day.",
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "replicated"
+        }
+      },
+      "required": [
+        "status",
+        "detail"
       ]
     },
     {

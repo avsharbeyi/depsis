@@ -37,6 +37,7 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::CreateDataset { .. } => "create_dataset",
         Request::CreateSnapshot { .. } => "create_snapshot",
         Request::ListSnapshots { .. } => "list_snapshots",
+        Request::ReplicateDataset { .. } => "replicate_dataset",
         Request::DiffSnapshots { .. } => "diff_snapshots",
         Request::ReadSmartSummary { .. } => "read_smart_summary",
         Request::ListDisks {} => "list_disks",

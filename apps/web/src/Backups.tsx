@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
+import { Replicate } from './Replicate.js';
 import { formatBytes, formatWhen, percent } from './Dashboard.js';
 import type { Snapshot as SystemSnapshot } from './snapshot.js';
 import { Empty } from './ui.js';
@@ -196,6 +197,12 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
             ))}
           </tbody>
         </table>
+      )}
+
+      {/* Yıkıcı form, ve varsayılan olarak kapalı: bir yedek listesine bakan kişinin çoğu
+          zaman yapacağı şey bakmak. */}
+      {page !== null && !forbidden && (
+        <Replicate backups={items} notify={notify} onQueued={reload} />
       )}
 
       {pools.length > 0 && (

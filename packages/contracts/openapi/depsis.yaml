@@ -1849,6 +1849,46 @@ paths:
           description: İzlenmiyor
         '404': { $ref: '#/components/responses/Problem' }
 
+  /storage/replication:
+    post:
+      tags: [system]
+      summary: Bir anlık görüntüyü ikinci bir veri kümesine çoğalt
+      description: |
+        Bu API'nin veri yok eden **ikinci** yolu. `zfs recv -F` hedefteki her şeyi ve ortak
+        tabandan yeni her anlık görüntüyü YOK EDİYOR — havuz oluşturmayla aynı sınıfta, ve önünde
+        §8.1'in aynı dizisi duruyor: analiz, plan, yazılı onay, yeniden kimlik doğrulama, iş.
+
+        **`confirm` HEDEFİN adı**, kaynağın değil: yok edilen şey hedef, ve bir onay kutusuna
+        yazılacak şey kaybedilecek olanın adı olmalı.
+
+        **Bu makinedeki ikinci bir veri kümesine.** Başka bir MAKİNEYE değil: o bir taşıma katmanı
+        (SSH), bir kimlik deposu ve host anahtarı doğrulaması istiyor — kendi güven yüzeyi, ve tek
+        havuzlu bir kutuda hiçbiri denenemez. Bu, iki havuzlu bir NAS'ın gerçekten sahip olduğu
+        hedef: ikinci bir disk kümesi, yani birincisini kaybetmek veriyi kaybetmek olmasın.
+
+        Ajan dört şeyi reddediyor ve bu rota onları TEKRARLAMIYOR: aynı veri kümesi, iç içe olanlar,
+        paylaşım kökü, ve paylaşım ağacının içi. Ajanın kontrolü kendi okuduğu listeye karşı;
+        buradaki bir kopya yalnızca istemcinin kendi ekranını doğru kopyaladığını kanıtlardı.
+
+        `base` verilmezse TAM gönderim. Hedefin neyi tuttuğunu bilen taraf istemci, ve bir terabaytı
+        taşımak sunucunun kendi inisiyatifiyle başlatacağı bir şey değil.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReplicateRequest' }
+      responses:
+        '202':
+          description: İş kuyruğa alındı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobAccepted' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+
   /me/preferences:
     get:
       tags: [me]
@@ -3671,6 +3711,31 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/Transfer' }
+
+    ReplicateRequest:
+      type: object
+      required: [source, snapshot, target, confirm, password]
+      properties:
+        source: { type: string, maxLength: 255 }
+        snapshot: { type: string, maxLength: 63 }
+        target:
+          type: string
+          maxLength: 255
+          description: Hedefteki veri YOK EDİLİYOR. Paylaşım kökü ve altı ajan tarafından reddedilir.
+        base:
+          type: [string, 'null']
+          maxLength: 63
+          description: |
+            Artımlı gönderim için iki tarafın da sahip olduğu anlık görüntü. Verilmezse TAM
+            gönderim. Hedef bu tabanı tutmuyorsa ajan reddediyor ve tam gönderim gerektiğini
+            söylüyor — kendiliğinden tam gönderime düşmüyor, çünkü bir terabaytı taşımak bir karar.
+        confirm:
+          type: string
+          description: HEDEFİN adı, birebir. Yok edilen şeyin adı yazılıyor.
+        password:
+          type: string
+          maxLength: 1024
+          description: §0.5 yeniden kimlik doğrulama. Girişle aynı kısıtlamaya tabi ve aynı yere kaydediliyor.
 
     Snapshot:
       type: object

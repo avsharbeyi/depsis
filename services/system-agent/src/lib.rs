@@ -44,6 +44,7 @@ pub mod dispatch;
 pub mod identity;
 pub mod op;
 pub mod pools;
+pub mod replicate;
 pub mod samba;
 pub mod seams;
 pub mod smart;

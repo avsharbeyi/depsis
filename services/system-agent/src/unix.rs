@@ -10,7 +10,7 @@ use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use depsis_agent::audit::Sink;
@@ -614,13 +614,59 @@ pub fn peer_of(stream: &std::os::unix::net::UnixStream) -> Result<PeerIdentity, 
 /// argv-only execution. No shell exists anywhere in this path.
 pub struct ExecRunner;
 
-impl CommandRunner for ExecRunner {
-    fn run(&self, program: &str, args: &[&str]) -> Result<String, SeamError> {
-        debug_assert!(program.starts_with('/'), "program path must be absolute");
+impl ExecRunner {
+    /// How long a finished pipeline is given to be reaped before the writer is killed.
+    ///
+    /// Not a transfer timeout: by the time this runs the reader has already exited, so the only
+    /// thing being waited for is the writer noticing. Two seconds is far longer than a process
+    /// needs to see EOF and far shorter than anyone would call a hang.
+    const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+    /// The writer's output if it finishes within the grace, `None` if it is still running.
+    fn reap(
+        child: &mut std::process::Child,
+        program: &str,
+    ) -> Result<Option<std::process::Output>, SeamError> {
+        let until = std::time::Instant::now() + Self::REAP_GRACE;
+        loop {
+            match child.try_wait() {
+                Err(e) => return Err(SeamError::Io(format!("wait {program}: {e}"))),
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() >= until => return Ok(None),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        // `wait_with_output` after the child has exited collects the pipes it already filled; the
+        // status it reports is the one `try_wait` observed.
+        child
+            .stdout
+            .take()
+            .map_or(Ok(()), |_| Ok::<(), SeamError>(()))?;
+        let mut stderr = Vec::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            use std::io::Read;
+            pipe.read_to_end(&mut stderr)
+                .map_err(|e| SeamError::Io(format!("read {program} stderr: {e}")))?;
+        }
+        let status = child
+            .wait()
+            .map_err(|e| SeamError::Io(format!("wait {program}: {e}")))?;
+        Ok(Some(std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr,
+        }))
+    }
+
+    /// A `Command` with the environment already stripped.
+    ///
+    /// Shared by `run` and `run_piped` so the hardening cannot drift between them: a pipeline that
+    /// inherited the caller's `LD_PRELOAD` while the single-command path did not would be a hole
+    /// nobody reading either function alone could see.
+    fn hardened(program: &str, args: &[&str]) -> Command {
+        debug_assert!(program.starts_with('/'), "program path must be absolute");
         let mut cmd = Command::new(program);
         cmd.args(args);
-
         // Inherit nothing. A privileged process that inherits its caller's environment inherits
         // whatever the caller decided LD_PRELOAD, PATH or IFS should be.
         cmd.env_clear();
@@ -629,8 +675,13 @@ impl CommandRunner for ExecRunner {
         // parser wrong in a way that only shows up on someone else's machine.
         cmd.env("LC_ALL", "C");
         cmd.env("TZ", "UTC");
+        cmd
+    }
+}
 
-        let out = cmd
+impl CommandRunner for ExecRunner {
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, SeamError> {
+        let out = Self::hardened(program, args)
             .output()
             .map_err(|e| SeamError::Io(format!("spawn {program}: {e}")))?;
 
@@ -643,6 +694,101 @@ impl CommandRunner for ExecRunner {
                 stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
             })
         }
+    }
+
+    fn run_piped(
+        &self,
+        writer: &str,
+        writer_args: &[&str],
+        reader: &str,
+        reader_args: &[&str],
+    ) -> Result<String, SeamError> {
+        debug_assert!(writer.starts_with('/'), "program path must be absolute");
+        debug_assert!(reader.starts_with('/'), "program path must be absolute");
+
+        let mut left = Self::hardened(writer, writer_args);
+        left.stdout(Stdio::piped());
+        // The writer's stderr is kept: when a send fails, its message is the only description of
+        // why, and the reader's own stderr will only say the stream ended early.
+        left.stderr(Stdio::piped());
+        let mut sending = left
+            .spawn()
+            .map_err(|e| SeamError::Io(format!("spawn {writer}: {e}")))?;
+
+        // Taken, not borrowed: the child's stdout has to MOVE into the reader's stdin, and leaving
+        // a copy in `sending` would hold the pipe open after the writer exits — the reader would
+        // then wait forever for an EOF that never comes.
+        let pipe = sending
+            .stdout
+            .take()
+            .ok_or_else(|| SeamError::Io(format!("{writer} produced no stdout")))?;
+
+        let mut right = Self::hardened(reader, reader_args);
+        right.stdin(Stdio::from(pipe));
+        right.stdout(Stdio::piped());
+        right.stderr(Stdio::piped());
+        let receiving = right
+            .spawn()
+            .map_err(|e| SeamError::Io(format!("spawn {reader}: {e}")))?;
+
+        // THE READER FIRST. Waiting on the writer first deadlocks whenever the stream is larger
+        // than the pipe buffer: the writer blocks writing, we block waiting for it, and nothing
+        // drains the pipe. Collecting the reader's output drains it.
+        let read_out = receiving
+            .wait_with_output()
+            .map_err(|e| SeamError::Io(format!("wait {reader}: {e}")))?;
+
+        // AND THEN THE WRITER, BUT NOT FOREVER.
+        //
+        // Measured, and it wedged the agent: with `/usr/bin/yes` writing into a `head` that had
+        // already exited, this call never returned. Rust sets SIGPIPE to SIG_IGN at startup and
+        // children INHERIT that disposition, so a writer whose reader is gone is not killed by the
+        // kernel — it sees EPIPE and, depending on the program, spins.
+        //
+        // The cost is not one stuck process. The agent's control socket is SERIALISED — one
+        // connection at a time — so a wedged pipeline stops the privileged process answering
+        // anything at all. A failed `zfs recv` would take the whole appliance's storage control
+        // with it.
+        //
+        // Killing is correct rather than merely expedient: the reader has exited, so nothing will
+        // ever read another byte, and a writer still alive is by definition unable to finish. The
+        // short grace exists only for the ordinary case where the writer has already finished and
+        // simply has not been reaped yet.
+        let write_out = match Self::reap(&mut sending, writer)? {
+            Some(out) => out,
+            None => {
+                let _ = sending.kill();
+                let _ = sending.wait();
+                return Err(SeamError::Command {
+                    program: writer.to_string(),
+                    status: -1,
+                    stderr: "the writer did not finish after its reader exited; it was killed"
+                        .to_string(),
+                });
+            }
+        };
+
+        // THE WRITER IS CHECKED FIRST, and this order is the point of the whole method. A shell
+        // pipeline reports the last command's status, so a `zfs send` that died half way through
+        // would leave a `zfs recv` that succeeded on a truncated stream — a target dataset that
+        // exists, looks like a backup, and is missing an arbitrary tail.
+        if !write_out.status.success() {
+            return Err(SeamError::Command {
+                program: writer.to_string(),
+                status: write_out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&write_out.stderr)
+                    .trim()
+                    .to_string(),
+            });
+        }
+        if !read_out.status.success() {
+            return Err(SeamError::Command {
+                program: reader.to_string(),
+                status: read_out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&read_out.stderr).trim().to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&read_out.stdout).into_owned())
     }
 }
 
@@ -1220,6 +1366,132 @@ pub fn write_private(path: &Path, body: &str) -> std::io::Result<()> {
     reason = "test code: a failed assertion should panic loudly"
 )]
 mod tests {
+
+    /// The pipeline mechanism, exercised with programs every box has.
+    ///
+    /// ZFS IS NOT NEEDED TO MEASURE THIS, and that is the point of putting the mechanism in the
+    /// seam. What `zfs send | zfs recv` needs from this method is exactly what `/bin/echo | /bin/cat`
+    /// needs: both children spawned, the pipe moved rather than copied, the reader drained before
+    /// the writer is waited on, and BOTH exit statuses checked. Those are the parts that can be
+    /// wrong; the ZFS semantics on top of them can only be measured on a box with a pool.
+    mod piped {
+        use super::*;
+
+        fn runner() -> ExecRunner {
+            ExecRunner
+        }
+
+        #[test]
+        fn moves_the_writer_output_into_the_reader() {
+            let out = runner()
+                .run_piped("/bin/echo", &["depsis"], "/bin/cat", &[])
+                .expect("a pipeline of echo into cat must succeed");
+            assert_eq!(out.trim(), "depsis");
+        }
+
+        #[test]
+        fn returns_the_reader_stdout_and_not_the_writer_s() {
+            // `zfs send` writes the STREAM to stdout and `zfs recv` writes a short summary. Getting
+            // this backwards would return a whole dataset's bytes to a caller expecting one line.
+            let out = runner()
+                .run_piped("/bin/echo", &["ham"], "/usr/bin/wc", &["-c"])
+                .expect("wc must read what echo wrote");
+            assert_eq!(out.trim(), "4", "wc should count 'ham' plus its newline");
+        }
+
+        #[test]
+        fn fails_when_the_writer_fails_even_though_the_reader_succeeded() {
+            // THE CASE A SHELL PIPELINE GETS WRONG. `sh -c 'a | b'` reports b's status, so a send
+            // that died half way through would look like a successful replication onto a
+            // TRUNCATED target — a dataset that exists, looks like a backup, and is missing a tail.
+            let error = runner()
+                .run_piped("/bin/false", &[], "/bin/cat", &[])
+                .expect_err("a failed writer must fail the pipeline");
+            match error {
+                SeamError::Command { program, .. } => {
+                    assert_eq!(program, "/bin/false", "the WRITER must be blamed");
+                }
+                other => panic!("expected a command failure, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn fails_when_the_reader_fails() {
+            let error = runner()
+                .run_piped("/bin/echo", &["x"], "/bin/false", &[])
+                .expect_err("a failed reader must fail the pipeline");
+            match error {
+                SeamError::Command { program, .. } => assert_eq!(program, "/bin/false"),
+                other => panic!("expected a command failure, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn does_not_deadlock_on_a_stream_larger_than_the_pipe_buffer() {
+            // A pipe buffer is 64 kB on Linux. Waiting on the writer BEFORE draining the reader
+            // deadlocks the moment the stream exceeds it: the writer blocks on write, the parent
+            // blocks on wait, and nothing reads. A real `zfs send` is gigabytes, so this is not a
+            // corner — it is the ordinary case, and the smallest test that would notice.
+            let out = runner()
+                .run_piped(
+                    "/usr/bin/head",
+                    &["-c", "1000000", "/dev/zero"],
+                    "/usr/bin/wc",
+                    &["-c"],
+                )
+                .expect("a megabyte through the pipe must not hang");
+            assert_eq!(out.trim(), "1000000");
+        }
+
+        #[test]
+        fn kills_a_writer_whose_reader_exited_instead_of_waiting_for_ever() {
+            // THE ONE THAT WEDGED THE AGENT. Rust sets SIGPIPE to SIG_IGN and children inherit it,
+            // so `yes` writing into an exited `head` is never killed by the kernel — it sees EPIPE
+            // and spins, and the parent's `wait` never returns. The control socket is serialised,
+            // so that stops the privileged process answering anything at all.
+            //
+            // Bounded on the test side too: if the fix regresses, this hangs, and a hanging test
+            // is a louder failure than a wrong assertion.
+            let started = std::time::Instant::now();
+            let error = runner()
+                .run_piped("/usr/bin/yes", &["depsis"], "/usr/bin/head", &["-c", "8"])
+                .expect_err("a writer that cannot finish must be reported, not waited on");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(30),
+                "the pipeline must give up rather than hang"
+            );
+            match error {
+                SeamError::Command { program, .. } => assert_eq!(program, "/usr/bin/yes"),
+                other => panic!("expected the writer to be blamed, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn the_reader_inherits_no_environment_from_this_process() {
+            // `env_clear` on both halves. A privileged pipeline that inherited the caller's
+            // LD_PRELOAD would be a hole neither half's code shows on its own.
+            std::env::set_var("DEPSIS_PIPED_LEAK", "1");
+            let out = runner()
+                .run_piped("/usr/bin/env", &[], "/bin/cat", &[])
+                .expect("env must run");
+            std::env::remove_var("DEPSIS_PIPED_LEAK");
+            assert!(
+                !out.contains("DEPSIS_PIPED_LEAK"),
+                "the writer half must start from a cleared environment"
+            );
+            // And the allowlist is actually applied rather than the environment merely being empty.
+            assert!(out.contains("LC_ALL=C"), "the fixed locale must be set");
+        }
+
+        #[test]
+        fn a_program_that_does_not_exist_is_an_io_error_not_a_panic() {
+            let error = runner()
+                .run_piped("/nonexistent/depsis-writer", &[], "/bin/cat", &[])
+                .expect_err("a missing program must be reported");
+            assert!(matches!(error, SeamError::Io(_)), "got {error:?}");
+        }
+    }
+
     use super::*;
     use depsis_agent::audit::MemorySink;
     use depsis_agent::authz::Policy;

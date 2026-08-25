@@ -527,6 +527,35 @@ pub enum Request {
         name: SafeComponent,
     },
 
+    /// Copy one dataset's snapshot onto another dataset, on THIS appliance.
+    ///
+    /// `zfs send | zfs recv`, and the most destructive operation in the set after `CreatePool`:
+    /// `recv -F` destroys whatever is at the target and any snapshot newer than the base. Pointed
+    /// at the share dataset it erases every tenant's files.
+    ///
+    /// Four refusals sit in front of it in `replicate::check` — same dataset, nested either way,
+    /// the share root, inside the share tree — and §8.1's written confirmation and
+    /// re-authentication sit in front of THOSE in the API. Neither is redundant: the API's
+    /// sequence protects against a person in a hurry, and these refuse a request that reached the
+    /// agent by any other route at all.
+    ///
+    /// NOT REPLICATION TO ANOTHER MACHINE. That needs a transport, a credential store and
+    /// host-key verification, and none of it can be exercised here. This is the target a two-pool
+    /// NAS has: a second set of disks.
+    ReplicateDataset {
+        /// The snapshot to send, as a name on `source`.
+        source: DatasetName,
+        snapshot: SafeComponent,
+        /// Where it lands. `recv -F` DESTROYS what is here.
+        target: DatasetName,
+        /// A snapshot both sides already have, for an incremental send.
+        ///
+        /// Absent means a FULL send. The caller decides rather than the agent guessing: a full
+        /// send of a terabyte is not something to start on the agent's own initiative, and the
+        /// caller is the only side that knows what the target already holds.
+        base: Option<SafeComponent>,
+    },
+
     /// What snapshots this dataset ACTUALLY has.
     ///
     /// The read that was missing beside `CreateSnapshot`. DEPSIS could take a snapshot and record
@@ -1339,6 +1368,16 @@ pub enum Response {
     Diff {
         lines: Vec<String>,
     },
+    Replicated {
+        /// What `zfs recv` printed, kept so an operator can read the real words on a bad day.
+        detail: String,
+        /// The send was incremental from this snapshot, or absent for a full send.
+        ///
+        /// Echoed back because the caller's request is not proof of what happened: an incremental
+        /// that the target refused is retried as a full send, and a job history that recorded the
+        /// REQUEST would say "incremental" about a transfer that moved the whole dataset.
+        base: Option<String>,
+    },
     Snapshots {
         snapshots: Vec<SnapshotEntry>,
         /// The dataset is not there at all.
@@ -1640,7 +1679,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

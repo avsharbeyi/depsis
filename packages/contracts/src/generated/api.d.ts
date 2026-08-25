@@ -3338,6 +3338,71 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/storage/replication": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bir anlık görüntüyü ikinci bir veri kümesine çoğalt
+         * @description Bu API'nin veri yok eden **ikinci** yolu. `zfs recv -F` hedefteki her şeyi ve ortak
+         *     tabandan yeni her anlık görüntüyü YOK EDİYOR — havuz oluşturmayla aynı sınıfta, ve önünde
+         *     §8.1'in aynı dizisi duruyor: analiz, plan, yazılı onay, yeniden kimlik doğrulama, iş.
+         *
+         *     **`confirm` HEDEFİN adı**, kaynağın değil: yok edilen şey hedef, ve bir onay kutusuna
+         *     yazılacak şey kaybedilecek olanın adı olmalı.
+         *
+         *     **Bu makinedeki ikinci bir veri kümesine.** Başka bir MAKİNEYE değil: o bir taşıma katmanı
+         *     (SSH), bir kimlik deposu ve host anahtarı doğrulaması istiyor — kendi güven yüzeyi, ve tek
+         *     havuzlu bir kutuda hiçbiri denenemez. Bu, iki havuzlu bir NAS'ın gerçekten sahip olduğu
+         *     hedef: ikinci bir disk kümesi, yani birincisini kaybetmek veriyi kaybetmek olmasın.
+         *
+         *     Ajan dört şeyi reddediyor ve bu rota onları TEKRARLAMIYOR: aynı veri kümesi, iç içe olanlar,
+         *     paylaşım kökü, ve paylaşım ağacının içi. Ajanın kontrolü kendi okuduğu listeye karşı;
+         *     buradaki bir kopya yalnızca istemcinin kendi ekranını doğru kopyaladığını kanıtlardı.
+         *
+         *     `base` verilmezse TAM gönderim. Hedefin neyi tuttuğunu bilen taraf istemci, ve bir terabaytı
+         *     taşımak sunucunun kendi inisiyatifiyle başlatacağı bir şey değil.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ReplicateRequest"];
+                };
+            };
+            responses: {
+                /** @description İş kuyruğa alındı */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JobAccepted"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                401: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                429: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/me/preferences": {
         parameters: {
             query?: never;
@@ -5541,6 +5606,22 @@ export interface components {
         };
         TransferPage: {
             items: components["schemas"]["Transfer"][];
+        };
+        ReplicateRequest: {
+            source: string;
+            snapshot: string;
+            /** @description Hedefteki veri YOK EDİLİYOR. Paylaşım kökü ve altı ajan tarafından reddedilir. */
+            target: string;
+            /**
+             * @description Artımlı gönderim için iki tarafın da sahip olduğu anlık görüntü. Verilmezse TAM
+             *     gönderim. Hedef bu tabanı tutmuyorsa ajan reddediyor ve tam gönderim gerektiğini
+             *     söylüyor — kendiliğinden tam gönderime düşmüyor, çünkü bir terabaytı taşımak bir karar.
+             */
+            base?: string | null;
+            /** @description HEDEFİN adı, birebir. Yok edilen şeyin adı yazılıyor. */
+            confirm: string;
+            /** @description §0.5 yeniden kimlik doğrulama. Girişle aynı kısıtlamaya tabi ve aynı yere kaydediliyor. */
+            password: string;
         };
         Snapshot: {
             /**

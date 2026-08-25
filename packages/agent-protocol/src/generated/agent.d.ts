@@ -37,6 +37,36 @@ export type AgentRequest =
       op: 'create_snapshot';
     }
   | {
+      /**
+       * A snapshot both sides already have, for an incremental send.
+       *
+       * Absent means a FULL send. The caller decides rather than the agent guessing: a full
+       * send of a terabyte is not something to start on the agent's own initiative, and the
+       * caller is the only side that knows what the target already holds.
+       */
+      base?: SafeComponent | null;
+      op: 'replicate_dataset';
+      snapshot: SafeComponent;
+      /**
+       * A ZFS dataset name, e.g. `tank/depsis/users/1001`.
+       *
+       * The leading-dash check is not paranoia: P0-E's whole point is that `zfs`, `zpool`,
+       * `smbcacls` and `smartctl` parse their own argv, so an operand that begins with `-` becomes a
+       * flag even when it arrives as a separate argument. Inserting `--` helps but is not sufficient
+       * because these tools do not all honour it consistently, so the value is rejected outright.
+       */
+      source: string;
+      /**
+       * A ZFS dataset name, e.g. `tank/depsis/users/1001`.
+       *
+       * The leading-dash check is not paranoia: P0-E's whole point is that `zfs`, `zpool`,
+       * `smbcacls` and `smartctl` parse their own argv, so an operand that begins with `-` becomes a
+       * flag even when it arrives as a separate argument. Inserting `--` helps but is not sufficient
+       * because these tools do not all honour it consistently, so the value is rejected outright.
+       */
+      target: string;
+    }
+  | {
       dataset: DatasetName;
       op: 'list_snapshots';
     }
@@ -586,6 +616,21 @@ export type AgentResponse =
   | {
       lines: string[];
       status: 'diff';
+    }
+  | {
+      /**
+       * The send was incremental from this snapshot, or absent for a full send.
+       *
+       * Echoed back because the caller's request is not proof of what happened: an incremental
+       * that the target refused is retried as a full send, and a job history that recorded the
+       * REQUEST would say "incremental" about a transfer that moved the whole dataset.
+       */
+      base?: string | null;
+      /**
+       * What `zfs recv` printed, kept so an operator can read the real words on a bad day.
+       */
+      detail: string;
+      status: 'replicated';
     }
   | {
       /**

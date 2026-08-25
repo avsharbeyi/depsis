@@ -446,6 +446,26 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// to a "ready" boolean, because the three states the API has to tell apart — no root
     /// configured, a root with nothing on it, a root that already has a dataset — need different
     /// sentences on screen and a boolean would collapse two of them.
+    /// Which dataset DEPSIS serves shares from, for `ReplicateDataset`'s refusals.
+    ///
+    /// `Ok(None)` means the agent serves NO shares — `DEPSIS_SHARES_ROOT` is unset — so there is
+    /// nothing for a target to collide with. That is a real state on a box before setup.
+    ///
+    /// `Err` means the question could not be ANSWERED, and the caller must refuse rather than
+    /// carry on. Treating "I could not ask" as "there is nothing to protect" would remove the two
+    /// refusals that matter most (`recv -F` onto the share root erases every tenant's files)
+    /// exactly when the agent is least sure of itself. A destructive operation fails closed.
+    fn share_dataset(&self) -> Result<Option<String>, SeamError> {
+        let Ok(root) = crate::acl::shares_root_from_env() else {
+            return Ok(None);
+        };
+        let listing = self
+            .runner
+            .run(bin::ZFS, &crate::pools::list_filesystems_argv())?;
+        let filesystems = crate::pools::parse_filesystems(&listing);
+        Ok(crate::pools::mounted_at(&filesystems, &root.to_string_lossy()).map(str::to_string))
+    }
+
     fn share_root_status(&self) -> Result<Response, SeamError> {
         let Ok(root) = crate::acl::shares_root_from_env() else {
             return Ok(Response::ShareRoot {
@@ -1396,6 +1416,46 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 let full = format!("{}@{}", dataset.as_str(), name.as_str());
                 self.runner.run(bin::ZFS, &["snapshot", &full])?;
                 Ok(Response::Snapshot { full_name: full })
+            }
+
+            Request::ReplicateDataset {
+                source,
+                snapshot,
+                target,
+                base,
+            } => {
+                // BEFORE ANYTHING IS SPAWNED. `recv -F` is not undoable, so the refusals cannot be
+                // something the operation discovers half way through.
+                let shares = self.share_dataset()?;
+                if let Err(refusal) =
+                    crate::replicate::check(source.as_str(), target.as_str(), shares.as_deref())
+                {
+                    return Ok(Response::Refused {
+                        reason: refusal.reason().to_string(),
+                    });
+                }
+
+                let full = format!("{}@{}", source.as_str(), snapshot.as_str());
+                let from = base
+                    .as_ref()
+                    .map(|b| format!("{}@{}", source.as_str(), b.as_str()));
+                let send = crate::replicate::send_argv(&full, from.as_deref());
+                let recv = crate::replicate::recv_argv(target.as_str());
+
+                match self.runner.run_piped(bin::ZFS, &send, bin::ZFS, &recv) {
+                    Ok(detail) => Ok(Response::Replicated { detail, base: from }),
+                    // The target has drifted, so the incremental cannot apply. Reported rather
+                    // than retried as a full send on the agent's own initiative: moving a terabyte
+                    // is a decision, and the caller is the side that gets to make it.
+                    Err(error) if crate::replicate::incremental_rejected(&error) => {
+                        Ok(Response::Refused {
+                            reason: "the target does not hold the base snapshot; a full send is \
+                                     needed"
+                                .to_string(),
+                        })
+                    }
+                    Err(error) => Err(error),
+                }
             }
 
             Request::ListSnapshots { dataset } => {
@@ -2375,6 +2435,188 @@ mod tests {
                 "program {:?} must be absolute — execvp falls back to /bin:/usr/bin",
                 argv[0]
             );
+        }
+    }
+
+    /// Replication, at the dispatch layer.
+    ///
+    /// `replicate.rs` tests the rules in isolation; these test that dispatch APPLIES them, and
+    /// applies them BEFORE spawning anything. The distinction is the whole point: a refusal that
+    /// arrives after `zfs recv -F` has started is not a refusal, and `recv -F` has no undo.
+    ///
+    /// EVERY ONE OF THESE SETS A SHARE ROOT, and the first attempt did not — which made the two
+    /// most important tests pass for the wrong reason. With `DEPSIS_SHARES_ROOT` unset the agent
+    /// serves no shares, so "the target is the share dataset" cannot be true and the refusal never
+    /// fires. The tests went green while measuring nothing. A refusal test on a box with nothing
+    /// to protect is not a refusal test.
+    ///
+    /// The mock runner records a pipeline as one call with a literal `|` in the middle, so an
+    /// assertion can read the whole decision — which snapshot, which base, which target — in one
+    /// string.
+    ///
+    /// Call 0 is always the `zfs list -H -o name,mountpoint` that finds the share dataset; the
+    /// pipeline, when it runs at all, is call 1.
+    fn replicating(
+        mounted_at: &str,
+        responses: Vec<String>,
+        request: &str,
+        check: impl FnOnce(Response, &MockCommandRunner, &MemorySink),
+    ) {
+        let root = tempfile::tempdir().expect("tempdir");
+        let listing = format!("tank/depsis\t{}\n", root.path().display());
+        let mut all = vec![listing];
+        all.extend(responses);
+        let r = MockCommandRunner::with_responses(all);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        assert_eq!(
+            mounted_at, "tank/depsis",
+            "the fixture pins one share dataset"
+        );
+        with_shares_root(root.path(), || {
+            let resp = agent(&r, &s, &h).handle(request, peer(API_UID), "c-rep", "replication");
+            check(resp, &r, &s);
+        });
+    }
+
+    #[test]
+    fn a_replication_runs_send_piped_into_recv() {
+        replicating(
+            "tank/depsis",
+            vec!["received 1.2M stream".into()],
+            r#"{"op":"replicate_dataset","source":"tank/other","snapshot":"nightly","target":"backup/depsis","base":null}"#,
+            |resp, r, _| {
+                match resp {
+                    Response::Replicated { ref base, .. } => assert!(base.is_none(), "a full send"),
+                    other => panic!("expected a replication, got {other:?}"),
+                }
+                assert_eq!(
+                    r.call(1).expect("the pipeline ran"),
+                    vec![
+                        "/usr/sbin/zfs",
+                        "send",
+                        "-p",
+                        "tank/other@nightly",
+                        "|",
+                        "/usr/sbin/zfs",
+                        "recv",
+                        "-F",
+                        "-u",
+                        "backup/depsis",
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn an_incremental_replication_names_the_base_and_reports_it_back() {
+        replicating(
+            "tank/depsis",
+            vec!["received 4K stream".into()],
+            r#"{"op":"replicate_dataset","source":"tank/other","snapshot":"tuesday","target":"backup/depsis","base":"monday"}"#,
+            |resp, r, _| {
+                match resp {
+                    // Echoed back rather than taken from the request: an incremental the target
+                    // refuses is reported as a refusal, and a history that recorded the REQUEST
+                    // would claim a transfer that did not happen.
+                    Response::Replicated { base, .. } => {
+                        assert_eq!(base.as_deref(), Some("tank/other@monday"));
+                    }
+                    other => panic!("expected a replication, got {other:?}"),
+                }
+                let pipeline = r.call(1).expect("the pipeline ran");
+                assert!(pipeline.contains(&"-i".to_string()));
+                assert!(pipeline.contains(&"tank/other@monday".to_string()));
+            },
+        );
+    }
+
+    #[test]
+    fn refuses_to_receive_onto_the_share_dataset_and_spawns_nothing() {
+        // THE ONE THAT WOULD ERASE EVERY TENANT'S FILES.
+        replicating(
+            "tank/depsis",
+            vec![],
+            r#"{"op":"replicate_dataset","source":"backup/old","snapshot":"s","target":"tank/depsis","base":null}"#,
+            |resp, r, _| {
+                match resp {
+                    Response::Refused { ref reason } => assert!(reason.contains("every share")),
+                    other => panic!("expected a refusal, got {other:?}"),
+                }
+                // ONLY the lookup ran. A second call would mean `zfs recv -F` had already started,
+                // and it has no undo.
+                assert_eq!(
+                    r.calls.borrow().len(),
+                    1,
+                    "nothing may be spawned after a refusal"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn refuses_a_target_inside_the_share_tree() {
+        replicating(
+            "tank/depsis",
+            vec![],
+            r#"{"op":"replicate_dataset","source":"backup/old","snapshot":"s","target":"tank/depsis/acme","base":null}"#,
+            |resp, r, _| {
+                assert!(matches!(resp, Response::Refused { .. }));
+                assert_eq!(r.calls.borrow().len(), 1);
+            },
+        );
+    }
+
+    #[test]
+    fn a_refused_replication_is_audited_as_refused() {
+        // A refusal the audit records as `allowed` is a refusal nobody can find afterwards.
+        replicating(
+            "tank/depsis",
+            vec![],
+            r#"{"op":"replicate_dataset","source":"backup/old","snapshot":"s","target":"tank/depsis","base":null}"#,
+            |_, _, s| {
+                let entries = s.entries();
+                assert!(
+                    entries.iter().any(|e| e.operation == "replicate_dataset"
+                        && matches!(e.outcome, Outcome::Refused(_))),
+                    "the refusal must be in the audit trail: {entries:?}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn refuses_when_the_share_dataset_cannot_be_determined() {
+        // FAIL CLOSED. If the lookup itself fails the agent cannot tell whether the target is the
+        // share root, and carrying on would run `recv -F` on exactly the guess it could not make.
+        let root = tempfile::tempdir().expect("tempdir");
+        let r = FailingRunner;
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        with_shares_root(root.path(), || {
+            let resp = agent(&r, &s, &h).handle(
+                r#"{"op":"replicate_dataset","source":"tank/a","snapshot":"s","target":"backup/b","base":null}"#,
+                peer(API_UID),
+                "c-blind",
+                "replication with a broken lookup",
+            );
+            assert!(
+                matches!(resp, Response::Failed { .. }),
+                "a lookup that cannot answer must not become a replication: {resp:?}"
+            );
+        });
+    }
+
+    /// A runner whose every call fails, for the fail-closed test above.
+    struct FailingRunner;
+    impl CommandRunner for FailingRunner {
+        fn run(&self, program: &str, _args: &[&str]) -> Result<String, SeamError> {
+            Err(SeamError::Command {
+                program: program.to_string(),
+                status: 1,
+                stderr: "the pool is not imported".to_string(),
+            })
         }
     }
 

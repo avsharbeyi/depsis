@@ -19,6 +19,7 @@ import { trashPurgeHandler, TRASH_PURGE_KIND } from './trash-purge.handler.js';
 import { identitySyncHandler, IDENTITY_SYNC_KIND } from './identity-sync.handler.js';
 import { snapshotHandler, SNAPSHOT_KIND } from './snapshot.handler.js';
 import { overdueSweepHandler, OVERDUE_SWEEP_KIND } from './overdue-sweep.handler.js';
+import { replicateHandler, REPLICATE_KIND } from './replicate.handler.js';
 
 /**
  * Every job kind this worker consumes, in one place a test can read.
@@ -60,6 +61,10 @@ export function registerHandlers(
   // every other handler here is safe to run twice, and this one runs `zpool create` against
   // real disks.
   worker.register(CREATE_POOL_KIND, createPoolHandler(services.agent));
+  // The OTHER destructive kind, and enqueued with `maxAttempts: 1` for the same reason:
+  // `zfs recv -F` destroys the target, and a retry after an ambiguous failure destroys it
+  // again without knowing what state it reached.
+  worker.register(REPLICATE_KIND, replicateHandler(services.agent));
   worker.register(RECONCILE_KIND, reconcileHandler(services.indexer));
   // ADR-0011 Layer 1's consumer: what Samba said, acted on within seconds. The walk above
   // stays — it is what this degrades to when an event is missed.

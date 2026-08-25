@@ -336,6 +336,42 @@ pub trait TokenSource {
 ///   - clear the environment and re-add only a fixed allowlist.
 pub trait CommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, SeamError>;
+
+    /// Run two programs with the first's stdout wired to the second's stdin.
+    ///
+    /// NO SHELL, and that is the entire reason this is a seam method rather than one `run` call
+    /// with a `sh -c` in it. ADR-0006 forbids a shell in the privileged process, and a pipeline is
+    /// exactly the shape that tempts one: `zfs send a@s | zfs recv -F b` is one line of shell and
+    /// two `Command`s with `Stdio::piped()` in Rust. The shell version would also re-introduce
+    /// word-splitting on every operand, which is what the validated `DatasetName` type exists to
+    /// make impossible.
+    ///
+    /// BOTH EXIT STATUSES MATTER, and the reader half's matters more. A pipeline reports the LAST
+    /// command's status by default, so a `zfs send` that dies half way through — a disk error, a
+    /// destroyed snapshot — leaves `zfs recv` succeeding on a TRUNCATED stream. On a replication
+    /// that is the worst possible outcome: the target dataset exists, looks like a backup, and is
+    /// missing an arbitrary tail. Implementations must wait for both and fail if EITHER failed.
+    ///
+    /// The output of the writer is discarded and the reader's stdout is returned: `zfs send`
+    /// writes the stream itself to stdout, which must never be buffered into memory, and `zfs recv`
+    /// writes only a short summary.
+    ///
+    /// THE DEFAULT REFUSES rather than doing nothing. Most implementations of this trait are test
+    /// doubles for code paths that never replicate, and requiring each to write out a pipeline it
+    /// will not use is noise. But the default cannot be a silent success: a runner that returned
+    /// `Ok("")` here would make a replication report success while nothing was sent, which is the
+    /// one outcome a backup feature must never produce.
+    fn run_piped(
+        &self,
+        writer: &str,
+        _writer_args: &[&str],
+        reader: &str,
+        _reader_args: &[&str],
+    ) -> Result<String, SeamError> {
+        Err(SeamError::Io(format!(
+            "this runner cannot pipe {writer} into {reader}"
+        )))
+    }
 }
 
 /// Where requests arrive from. Real: a Unix socket. Mock: an in-memory pipe.

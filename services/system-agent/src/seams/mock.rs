@@ -471,4 +471,26 @@ impl CommandRunner for MockCommandRunner {
         self.calls.borrow_mut().push(argv);
         Ok(self.responses.borrow_mut().pop_front().unwrap_or_default())
     }
+
+    /// Recorded as ONE call with a literal `|` between the two argvs.
+    ///
+    /// One entry rather than two because a pipeline is one decision: a test asserting on the
+    /// replication argv wants to see which snapshot was sent and where it went in a single string,
+    /// and two separate entries would let a future change send to the wrong target while both
+    /// halves still looked right on their own.
+    fn run_piped(
+        &self,
+        writer: &str,
+        writer_args: &[&str],
+        reader: &str,
+        reader_args: &[&str],
+    ) -> Result<String, SeamError> {
+        let mut argv = vec![writer.to_string()];
+        argv.extend(writer_args.iter().map(|a| (*a).to_string()));
+        argv.push("|".to_string());
+        argv.push(reader.to_string());
+        argv.extend(reader_args.iter().map(|a| (*a).to_string()));
+        self.calls.borrow_mut().push(argv);
+        Ok(self.responses.borrow_mut().pop_front().unwrap_or_default())
+    }
 }

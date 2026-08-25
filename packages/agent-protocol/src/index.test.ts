@@ -128,6 +128,7 @@ describe('the emitted agent schema', () => {
       // behind a typed name, in the one process that can reach every tenant's data. The API walks
       // the tree from the leaves up, because the API is the side that stores it (§2.2, ADR-0006).
       'remove_entry',
+      'replicate_dataset',
       // The one operation that touches a share root's MODE, and the reason it is separate from
       // `create_dataset`. `zfs create` leaves a mountpoint at 0755 root:root and `apply_folder_acl`
       // refuses to touch the user::/group::/other:: triple, so every share root was `other::r-x`
@@ -222,7 +223,10 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 14 since `ListSnapshots`,
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 15 since
+    // `ReplicateDataset`, the second most destructive operation in the set: a stale agent
+    // that did not know it would answer with a parse failure rather than running a
+    // `zfs recv -F` it did not understand. 14 since `ListSnapshots`,
     // which is what turned the backups list from DEPSIS's own record into the pool's inventory —
     // an API that believed it could ask a stale agent would show every recorded snapshot as
     // unverified forever. 6 since
@@ -230,7 +234,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(14);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(15);
   });
 
   it('agrees with the number the agent actually reports', () => {
