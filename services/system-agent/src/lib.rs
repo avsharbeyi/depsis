@@ -47,6 +47,7 @@ pub mod op;
 pub mod pools;
 pub mod replicate;
 pub mod samba;
+pub mod scrub;
 pub mod seams;
 pub mod smart;
 pub mod snapshots;

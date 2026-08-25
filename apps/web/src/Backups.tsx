@@ -3,9 +3,10 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
 import { Offsite } from './Offsite.js';
+import { Pool } from './Scrub.js';
 import { Schedules } from './Schedules.js';
 import { Replicate } from './Replicate.js';
-import { formatBytes, formatWhen, percent } from './Dashboard.js';
+import { formatBytes, formatWhen } from './Dashboard.js';
 import type { Snapshot as SystemSnapshot } from './snapshot.js';
 import { Empty } from './ui.js';
 
@@ -223,13 +224,7 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
             Havuzlar
           </div>
           {pools.map((pool) => (
-            <div className="netrow" key={pool.name}>
-              <span className="lbl">{pool.name}</span>
-              <span className="val">
-                {formatBytes(pool.used)} / {formatBytes(pool.used + pool.available)} ·{' '}
-                {percent(pool.used, pool.used + pool.available)}
-              </span>
-            </div>
+            <Pool key={pool.name} pool={pool} notify={notify} />
           ))}
         </div>
       )}

@@ -46,6 +46,8 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::OffsiteTrustHost { .. } => "offsite_trust_host",
         Request::ReplicateOffsite { .. } => "replicate_offsite",
         Request::DestroySnapshot { .. } => "destroy_snapshot",
+        Request::StartScrub { .. } => "start_scrub",
+        Request::ScrubStatus { .. } => "scrub_status",
         Request::RestoreFromSnapshot { .. } => "restore_from_snapshot",
         Request::DiffSnapshots { .. } => "diff_snapshots",
         Request::ReadSmartSummary { .. } => "read_smart_summary",

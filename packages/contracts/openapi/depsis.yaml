@@ -1999,6 +1999,67 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
 
+  /storage/pools/{pool}/scrub:
+    get:
+      operationId: getScrubStatus
+      tags: [system]
+      summary: Bu havuzun tarama durumu
+      description: |
+        ZFS her bloğun sağlama toplamını tutuyor ve bozulmuş bir bloğu OKUNDUĞUNDA fark ediyor.
+        Sessiz bit çürümesinin problemi tam da bu: bir yedek arşivi yıllarca okunmuyor, yani
+        bozulma yıllarca fark edilmiyor, ve fark edildiği gün — dosyanın gerçekten gerektiği gün —
+        kopyası da bozulmuş olabiliyor.
+
+        Debian'ın `zfsutils-linux` paketi zaten aylık bir tarama koyuyor, yani sıradan bir cihazda
+        taramalar KOŞUYOR. Eksik olan şey zamanlama değil GÖRÜNÜRLÜK: bir taramanın koşup
+        koşmadığını, ne bulduğunu ve devam edip etmediğini DEPSIS'in hiçbir ekranı söylemiyordu.
+        Bulduğu hataları kimsenin görmediği bir tarama, hiç koşmamış bir taramadan yalnızca daha
+        pahalı.
+
+        Satırlar `zpool status`'ün kendi sözleri, AYRIŞTIRILMIYOR: `scan:` satırındaki tarih yerel
+        biçimde, ve onu bir zaman damgasına çevirmeye çalışmak, yanlış çevirdiğinde "en son ne
+        zaman tarandı" sorusuna kendinden emin ve yanlış bir cevap vermek olurdu.
+      parameters:
+        - name: pool
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Tarama durumu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScrubStatus' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+    post:
+      operationId: startScrub
+      tags: [system]
+      summary: Şimdi tara
+      description: |
+        Her bloğu okuyup sağlamasını doğruluyor; ayna ya da RAIDZ varsa bozuk olanı sağlam kopyadan
+        onarıyor.
+
+        YIKICI DEĞİL, o yüzden önünde §8.1'in dizisi yok: tarama okuyor ve onarabildiğini onarıyor.
+        Maliyeti saatlerce disk bant genişliği — bu yüzden birinin bastığı bir düğme, DEPSIS'in
+        kendi inisiyatifiyle başlattığı bir şey değil.
+
+        Cevap, başlatıldıktan SONRA okunan durum: `zpool scrub` hemen dönüyor ve hiçbir şey
+        söylemiyor, yani "başlatıldı" demek isteğin yankısı olurdu.
+      parameters:
+        - name: pool
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: Tarama başlatıldı; okunmuş durum
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScrubStatus' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
   /storage/backup-schedules:
     get:
       operationId: listBackupSchedules
@@ -4627,6 +4688,28 @@ components:
             Dosyanın ineceği ad. Aslıyla aynı olmayabilir: hedefte o ad doluysa sunucu boş bir ad
             seçiyor, ve seçtiğini burada söylüyor — sessizce başka bir ada indirmek, kullanıcının
             aradığı dosyayı bulamaması demek olurdu.
+
+    ScrubStatus:
+      type: object
+      required: [scan, errors, inProgress, hasErrors]
+      properties:
+        scan:
+          type: string
+          description: |
+            `zpool status`'ün `scan:` satırı, devam satırlarıyla birlikte ve OLDUĞU GİBİ. Süren bir
+            taramada yüzde ve kalan süre bu satırda. Boş ise `zpool status` bir şey söylememiş —
+            "sorun yok" DEĞİL.
+        errors:
+          type: string
+          description: '`errors:` satırı, olduğu gibi.'
+        inProgress: { type: boolean }
+        hasErrors:
+          type: boolean
+          description: |
+            TEK ÇIKARIM. `zpool status` bilinen hata yokken tam olarak "No known data errors"
+            yazıyor; başka her şey bir insanın bakması gereken hâl. Bu yönde kurulması bilinçli —
+            tersi ("şu kalıplar hatadır") yeni bir ZFS sürümünün yeni bir cümlesini sessizce
+            "sorun yok" sayardı.
 
     BackupSchedule:
       type: object

@@ -3488,6 +3488,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/storage/pools/{pool}/scrub": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bu havuzun tarama durumu
+         * @description ZFS her bloğun sağlama toplamını tutuyor ve bozulmuş bir bloğu OKUNDUĞUNDA fark ediyor.
+         *     Sessiz bit çürümesinin problemi tam da bu: bir yedek arşivi yıllarca okunmuyor, yani
+         *     bozulma yıllarca fark edilmiyor, ve fark edildiği gün — dosyanın gerçekten gerektiği gün —
+         *     kopyası da bozulmuş olabiliyor.
+         *
+         *     Debian'ın `zfsutils-linux` paketi zaten aylık bir tarama koyuyor, yani sıradan bir cihazda
+         *     taramalar KOŞUYOR. Eksik olan şey zamanlama değil GÖRÜNÜRLÜK: bir taramanın koşup
+         *     koşmadığını, ne bulduğunu ve devam edip etmediğini DEPSIS'in hiçbir ekranı söylemiyordu.
+         *     Bulduğu hataları kimsenin görmediği bir tarama, hiç koşmamış bir taramadan yalnızca daha
+         *     pahalı.
+         *
+         *     Satırlar `zpool status`'ün kendi sözleri, AYRIŞTIRILMIYOR: `scan:` satırındaki tarih yerel
+         *     biçimde, ve onu bir zaman damgasına çevirmeye çalışmak, yanlış çevirdiğinde "en son ne
+         *     zaman tarandı" sorusuna kendinden emin ve yanlış bir cevap vermek olurdu.
+         */
+        get: operations["getScrubStatus"];
+        put?: never;
+        /**
+         * Şimdi tara
+         * @description Her bloğu okuyup sağlamasını doğruluyor; ayna ya da RAIDZ varsa bozuk olanı sağlam kopyadan
+         *     onarıyor.
+         *
+         *     YIKICI DEĞİL, o yüzden önünde §8.1'in dizisi yok: tarama okuyor ve onarabildiğini onarıyor.
+         *     Maliyeti saatlerce disk bant genişliği — bu yüzden birinin bastığı bir düğme, DEPSIS'in
+         *     kendi inisiyatifiyle başlattığı bir şey değil.
+         *
+         *     Cevap, başlatıldıktan SONRA okunan durum: `zpool scrub` hemen dönüyor ve hiçbir şey
+         *     söylemiyor, yani "başlatıldı" demek isteğin yankısı olurdu.
+         */
+        post: operations["startScrub"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/storage/backup-schedules": {
         parameters: {
             query?: never;
@@ -6352,6 +6397,24 @@ export interface components {
              */
             name: string;
         };
+        ScrubStatus: {
+            /**
+             * @description `zpool status`'ün `scan:` satırı, devam satırlarıyla birlikte ve OLDUĞU GİBİ. Süren bir
+             *     taramada yüzde ve kalan süre bu satırda. Boş ise `zpool status` bir şey söylememiş —
+             *     "sorun yok" DEĞİL.
+             */
+            scan: string;
+            /** @description `errors:` satırı, olduğu gibi. */
+            errors: string;
+            inProgress: boolean;
+            /**
+             * @description TEK ÇIKARIM. `zpool status` bilinen hata yokken tam olarak "No known data errors"
+             *     yazıyor; başka her şey bir insanın bakması gereken hâl. Bu yönde kurulması bilinçli —
+             *     tersi ("şu kalıplar hatadır") yeni bir ZFS sürümünün yeni bir cümlesini sessizce
+             *     "sorun yok" sayardı.
+             */
+            hasErrors: boolean;
+        };
         BackupSchedule: {
             /** Format: uuid */
             id: string;
@@ -6850,6 +6913,54 @@ export interface operations {
             403: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+        };
+    };
+    getScrubStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tarama durumu */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScrubStatus"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    startScrub: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tarama başlatıldı; okunmuş durum */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScrubStatus"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
         };
     };
     listBackupSchedules: {

@@ -1,18 +1,24 @@
+import { randomUUID } from 'node:crypto';
 import {
   BadRequestException,
   Body,
   ConflictException,
   Controller,
   ForbiddenException,
+  Get,
   HttpCode,
+  Param,
   Post,
   Req,
+  ServiceUnavailableException,
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
+import { AgentService } from '../agent/agent.service.js';
+import { requireSameOrigin } from '../auth/origin.js';
 import { ReauthService } from '../auth/reauth.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { JobsService } from '../jobs/jobs.service.js';
@@ -69,6 +75,7 @@ export class PoolsController {
     private readonly system: SystemService,
     private readonly jobs: JobsService,
     private readonly reauth: ReauthService,
+    private readonly agent: AgentService,
   ) {}
 
   @Post()
@@ -137,6 +144,76 @@ export class PoolsController {
   }
 
   /**
+   * Bu havuz taranıyor mu, en son ne bulmuş.
+   *
+   * ZFS her bloğun sağlama toplamını tutuyor ve bozulmuş bir bloğu OKUNDUĞUNDA fark ediyor. Sessiz
+   * bit çürümesinin problemi tam da bu: bir yedek arşivi yıllarca okunmuyor, yani bozulma yıllarca
+   * fark edilmiyor, ve fark edildiği gün — dosyanın gerçekten gerektiği gün — kopyası da bozulmuş
+   * olabiliyor.
+   *
+   * DEPSIS TARAMA ZAMANLAMIYOR, ve gerekçesi yazılmalı: Debian'ın `zfsutils-linux` paketi zaten
+   * aylık bir tarama koyuyor, yani sıradan bir cihazda taramalar KOŞUYOR. Eksik olan şey zamanlama
+   * değil GÖRÜNÜRLÜK — koşup koşmadığını, ne bulduğunu ve devam edip etmediğini hiçbir ekran
+   * söylemiyordu. Bulduğu hataları kimsenin görmediği bir tarama, hiç koşmamış bir taramadan
+   * yalnızca daha pahalı.
+   */
+  @Get(':pool/scrub')
+  async scrubStatus(
+    @Req() request: AuthenticatedRequest,
+    @Param('pool') pool: string,
+  ): Promise<Schemas['ScrubStatus']> {
+    await this.requireSystemAdmin(request);
+    const name = this.requirePoolName(pool);
+    const response = await this.agent.call(
+      { op: 'scrub_status', pool: name },
+      `reading the scrub status of ${name}`,
+      randomUUID(),
+    );
+    return toScrub(response, name);
+  }
+
+  /**
+   * Şimdi tara.
+   *
+   * YIKICI DEĞİL, o yüzden önünde §8.1'in dizisi yok: tarama okuyor ve onarabildiğini onarıyor.
+   * Maliyeti saatlerce disk bant genişliği — bu yüzden birinin bastığı bir düğme, DEPSIS'in kendi
+   * inisiyatifiyle başlattığı bir şey değil.
+   *
+   * 202, ve durum başlatıldıktan SONRA okunuyor: `zpool scrub` hemen dönüyor ve hiçbir şey
+   * söylemiyor, yani "başlatıldı" demek isteğin yankısı olurdu.
+   */
+  @Post(':pool/scrub')
+  @HttpCode(202)
+  async startScrub(
+    @Req() request: AuthenticatedRequest,
+    @Param('pool') pool: string,
+  ): Promise<Schemas['ScrubStatus']> {
+    requireSameOrigin(request);
+    await this.requireSystemAdmin(request);
+    const name = this.requirePoolName(pool);
+    const response = await this.agent.call(
+      { op: 'start_scrub', pool: name },
+      `starting a scrub of ${name}`,
+      randomUUID(),
+    );
+    return toScrub(response, name);
+  }
+
+  /** Havuz adı bir argv elemanı oluyor; havuz yaratmadaki kuralın aynısı. */
+  private requirePoolName(raw: string): string {
+    if (!/^[A-Za-z][A-Za-z0-9_.:-]{0,62}$/u.test(raw)) {
+      throw new BadRequestException('a pool name must start with a letter');
+    }
+    return raw;
+  }
+
+  private async requireSystemAdmin(request: AuthenticatedRequest): Promise<void> {
+    const session = request.depsis;
+    if (session === undefined) throw new UnauthorizedException();
+    if (!(await this.system.isSystemAdministrator(session.userId))) throw new ForbiddenException();
+  }
+
+  /**
    * Does this box already have a pool by that name?
    *
    * A refusal from the agent counts as "no such pool" — that is what `pool_status` answers for a
@@ -150,4 +227,30 @@ export class PoolsController {
       return false;
     }
   }
+}
+
+/**
+ * Ajanın cevabını sözleşmenin şekline çevir.
+ *
+ * Bir modül fonksiyonu, metot değil: hiçbir alanına dokunmuyor, ve sınıfın içinde olsaydı
+ * dokunabileceğini düşündürürdü.
+ */
+function toScrub(
+  response: Awaited<ReturnType<AgentService['call']>>,
+  pool: string,
+): Schemas['ScrubStatus'] {
+  if (response.status === 'refused' || response.status === 'failed') {
+    throw new ServiceUnavailableException(`${pool}: ${response.reason}`);
+  }
+  if (response.status !== 'scrub') {
+    throw new ServiceUnavailableException(
+      `ajan bir tarama durumu yerine '${response.status}' cevabı verdi`,
+    );
+  }
+  return {
+    scan: response.scan,
+    errors: response.errors,
+    inProgress: response.in_progress,
+    hasErrors: response.has_errors,
+  };
 }

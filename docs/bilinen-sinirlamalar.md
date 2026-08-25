@@ -190,7 +190,10 @@ ama sınırın doğru sayı olduğu ölçülmedi.
    duruyor.
 
    **Baytların sağlam olduğunu göstermiyor**, ve bu da yazılı: onu ZFS'in sağlama toplamları ve
-   `zpool scrub` yapıyor, ve DEPSIS scrub'ı henüz ne zamanlıyor ne raporluyor. Veri kümesi bir
+   `zpool scrub` yapıyor. Taramanın SONUCU artık Yedekleme panelinde her havuz satırının altında
+   (`zpool status`'ün kendi sözleriyle, ayrıştırılmadan) ve bir "Şimdi tara" düğmesi yanında.
+   DEPSIS tarama ZAMANLAMIYOR — Debian'ın `zfsutils-linux` paketi zaten aylık bir tarama koyuyor,
+   yani eksik olan şey zamanlama değil görünürlüktü. Veri kümesi bir
    paylaşımın kümesi değilse görüntünün içine bakılamıyor; cümle onu da söylüyor, çünkü
    "doğrulandı" deyip yalnız satır sayan bir alan kapalı görünüp hiçbir şey tutmayan bir kapı
    olurdu.

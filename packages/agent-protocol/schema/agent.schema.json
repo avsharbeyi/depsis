@@ -811,6 +811,42 @@
       ]
     },
     {
+      "description": "Start a scrub: read every block and verify its checksum.\n\nZFS notices a rotted block WHEN IT IS READ, which for a backup archive can be years after\nthe rot — and by then the other copy may have gone too. A scrub is the read that happens on\npurpose, and on a mirror or RAIDZ it repairs what it finds from the good copy.\n\nNOT DESTRUCTIVE, so no §8.1 sequence in front of it: a scrub reads and, where it can,\nrepairs. What it does cost is disk bandwidth for hours, which is why it is a button\nsomebody presses rather than something DEPSIS starts on its own initiative.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "start_scrub"
+        },
+        "pool": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "pool"
+      ]
+    },
+    {
+      "description": "What `zpool status` says about scrubbing this pool.\n\nThe visibility half, and the half that was missing. Debian's `zfsutils-linux` already puts\na monthly scrub in `/etc/cron.d`, so on an ordinary appliance scrubs ARE happening — and\nnothing in DEPSIS said whether they had run, what they found, or whether one is running\nnow. A scrub whose findings nobody sees is only more expensive than no scrub at all.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "scrub_status"
+        },
+        "pool": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "pool"
+      ]
+    },
+    {
       "description": "Delete exactly ONE entry inside a share. Never a tree.\n\n`directory` is a required operand rather than something the agent works out by stat-ing the\npath, and that is deliberate twice over. `unlinkat` needs `AT_REMOVEDIR` or not, so the\ndistinction has to be made somewhere; making the CALLER state it means a caller that\nbelieves it is deleting a file and finds a directory gets a refusal instead of a surprise.\nDeciding it from a stat would also be check-then-use on the one operation that cannot be\nundone.\n\nThere is no recursive variant and there will not be one. A non-empty directory comes back\nas an error (`ENOTEMPTY`) and the API walks the tree itself. The reason is §2.2 and\nADR-0006: the closed operation set exists so that no single call the agent accepts has a\nblast radius the caller chooses. \"Delete this subtree\" is `rm -rf` behind a typed name — one\nbug in the unprivileged side, or one confused-deputy request, and it is the whole share.\nThe API knows the tree because the API stores the tree; the agent only needs to be able to\nremove a leaf.",
       "type": "object",
       "properties": {
@@ -1353,6 +1389,38 @@
       "required": [
         "status",
         "lines"
+      ]
+    },
+    {
+      "description": "What `zpool status` said about scrubbing, carried rather than interpreted.",
+      "type": "object",
+      "properties": {
+        "errors": {
+          "description": "The `errors:` line, verbatim.",
+          "type": "string"
+        },
+        "has_errors": {
+          "description": "The ONE inference: `zpool status` writes exactly \"No known data errors\" when there are\nnone, and anything else is a person's problem. Built this way round on purpose — the\nopposite (\"these patterns mean trouble\") would silently pass a wording it had not seen.",
+          "type": "boolean"
+        },
+        "in_progress": {
+          "type": "boolean"
+        },
+        "scan": {
+          "description": "The `scan:` line, verbatim, continuation lines included. Empty when there is none.\n\nNOT PARSED INTO A DATE. `zpool status` is written for a person and the timestamp is in\nthe local format; turning it into an instant would mean answering \"when was it last\nscrubbed\" confidently and wrongly whenever the parse missed. The reader sees what\n`zpool status` said.",
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "scrub"
+        }
+      },
+      "required": [
+        "status",
+        "scan",
+        "errors",
+        "in_progress",
+        "has_errors"
       ]
     },
     {

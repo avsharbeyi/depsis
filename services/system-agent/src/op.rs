@@ -1204,6 +1204,27 @@ pub enum Request {
         snapshot: SafeComponent,
     },
 
+    /// Start a scrub: read every block and verify its checksum.
+    ///
+    /// ZFS notices a rotted block WHEN IT IS READ, which for a backup archive can be years after
+    /// the rot — and by then the other copy may have gone too. A scrub is the read that happens on
+    /// purpose, and on a mirror or RAIDZ it repairs what it finds from the good copy.
+    ///
+    /// NOT DESTRUCTIVE, so no §8.1 sequence in front of it: a scrub reads and, where it can,
+    /// repairs. What it does cost is disk bandwidth for hours, which is why it is a button
+    /// somebody presses rather than something DEPSIS starts on its own initiative.
+    #[serde(rename = "start_scrub")]
+    StartScrub { pool: SafeComponent },
+
+    /// What `zpool status` says about scrubbing this pool.
+    ///
+    /// The visibility half, and the half that was missing. Debian's `zfsutils-linux` already puts
+    /// a monthly scrub in `/etc/cron.d`, so on an ordinary appliance scrubs ARE happening — and
+    /// nothing in DEPSIS said whether they had run, what they found, or whether one is running
+    /// now. A scrub whose findings nobody sees is only more expensive than no scrub at all.
+    #[serde(rename = "scrub_status")]
+    ScrubStatus { pool: SafeComponent },
+
     /// Delete exactly ONE entry inside a share. Never a tree.
     ///
     /// `directory` is a required operand rather than something the agent works out by stat-ing the
@@ -1727,6 +1748,25 @@ pub enum Response {
     Diff {
         lines: Vec<String>,
     },
+    /// What `zpool status` said about scrubbing, carried rather than interpreted.
+    #[serde(rename = "scrub")]
+    Scrub {
+        /// The `scan:` line, verbatim, continuation lines included. Empty when there is none.
+        ///
+        /// NOT PARSED INTO A DATE. `zpool status` is written for a person and the timestamp is in
+        /// the local format; turning it into an instant would mean answering "when was it last
+        /// scrubbed" confidently and wrongly whenever the parse missed. The reader sees what
+        /// `zpool status` said.
+        scan: String,
+        /// The `errors:` line, verbatim.
+        errors: String,
+        in_progress: bool,
+        /// The ONE inference: `zpool status` writes exactly "No known data errors" when there are
+        /// none, and anything else is a person's problem. Built this way round on purpose — the
+        /// opposite ("these patterns mean trouble") would silently pass a wording it had not seen.
+        has_errors: bool,
+    },
+
     /// The snapshot is gone. Carries the full name so the audit trail says what was destroyed.
     #[serde(rename = "snapshot_destroyed")]
     SnapshotDestroyed {
@@ -2067,7 +2107,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 19;
+pub const SCHEMA_VERSION: u32 = 20;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

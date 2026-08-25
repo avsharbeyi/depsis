@@ -408,6 +408,14 @@ export type AgentRequest =
       snapshot: string;
     }
   | {
+      op: 'start_scrub';
+      pool: SafeComponent;
+    }
+  | {
+      op: 'scrub_status';
+      pool: SafeComponent;
+    }
+  | {
       /**
        * Is the entry a directory? The caller knows and has to say.
        */
@@ -770,6 +778,29 @@ export type AgentResponse =
   | {
       lines: string[];
       status: 'diff';
+    }
+  | {
+      /**
+       * The `errors:` line, verbatim.
+       */
+      errors: string;
+      /**
+       * The ONE inference: `zpool status` writes exactly "No known data errors" when there are
+       * none, and anything else is a person's problem. Built this way round on purpose — the
+       * opposite ("these patterns mean trouble") would silently pass a wording it had not seen.
+       */
+      has_errors: boolean;
+      in_progress: boolean;
+      /**
+       * The `scan:` line, verbatim, continuation lines included. Empty when there is none.
+       *
+       * NOT PARSED INTO A DATE. `zpool status` is written for a person and the timestamp is in
+       * the local format; turning it into an instant would mean answering "when was it last
+       * scrubbed" confidently and wrongly whenever the parse missed. The reader sees what
+       * `zpool status` said.
+       */
+      scan: string;
+      status: 'scrub';
     }
   | {
       full_name: string;

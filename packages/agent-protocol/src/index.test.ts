@@ -150,6 +150,10 @@ describe('the emitted agent schema', () => {
       // `folder_grants` said. An operand on creation would only ever have fixed the next share;
       // this can be aimed at one that already exists, and the API runs it before every root ACL
       // write. It takes no mode: the value is the agent's, so a caller cannot ask for 0777.
+      // The read that makes ZFS's checksums worth anything: rot is noticed when a block is READ,
+      // and a backup archive is read on the day it is needed. `start_scrub` is the read that
+      // happens on purpose; `scrub_status` is the part nobody had — what it found.
+      'scrub_status',
       'secure_share_root',
       // The last link between the permission model and SMB, and the most privileged thing in the
       // set: it creates system accounts. The operands are narrowed until the dangerous shapes
@@ -172,6 +176,7 @@ describe('the emitted agent schema', () => {
       // it. Neither writes into one — a ZFS snapshot is immutable, so a write variant could
       // only ever fail, and its presence would suggest otherwise.
       'snapshot_entries',
+      'start_scrub',
       'sync_posix_identity',
       // ADR-0020's four, and the shape of them is the point. A general `ZeroTierRequest { path }`
       // proxy would have been the network form of the free-form command §2.2 forbids: one variant
@@ -242,7 +247,10 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 19 since
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 20 since `start_scrub`
+    // and `scrub_status` — the read that makes ZFS's checksums useful, and the screen that says
+    // what it found. A stale agent that did not know them would leave the appliance unable to
+    // report whether its own bit rot check had ever run. 19 since
     // `destroy_snapshot` — the operation scheduled backups prune with. A stale agent that did
     // not know it would leave every schedule taking snapshots and removing none, which fills the
     // pool; and a full pool stops writes, which is worse than having no backup at all. 18 since
@@ -265,7 +273,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(19);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(20);
   });
 
   it('agrees with the number the agent actually reports', () => {

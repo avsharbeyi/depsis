@@ -947,6 +947,20 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         Ok(out?.trim().to_string())
     }
 
+    /// `zpool status`, read for the two lines a person acts on.
+    fn scrub_status(&self, pool: &str) -> Result<Response, SeamError> {
+        let out = self
+            .runner
+            .run(bin::ZPOOL, &crate::scrub::status_argv(pool))?;
+        let info = crate::scrub::parse_status(&out);
+        Ok(Response::Scrub {
+            scan: info.scan,
+            errors: info.errors,
+            in_progress: info.in_progress,
+            has_errors: info.has_errors,
+        })
+    }
+
     /// One directory's contents, so the API can compare disk against `file_entries`.
     ///
     /// Names and metadata only — see `op::Request::ListDirectory` for why that is the whole point.
@@ -1744,6 +1758,17 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 self.runner.run(bin::ZFS, &["destroy", &full])?;
                 Ok(Response::SnapshotDestroyed { full_name: full })
             }
+
+            Request::StartScrub { pool } => {
+                self.runner
+                    .run(bin::ZPOOL, &crate::scrub::scrub_argv(pool.as_str()))?;
+                // The status is read back rather than assumed. `zpool scrub` returns immediately
+                // and says nothing; reporting "started" without looking would be an echo of the
+                // request, and the one thing the caller wants to know is whether it IS running.
+                self.scrub_status(pool.as_str())
+            }
+
+            Request::ScrubStatus { pool } => self.scrub_status(pool.as_str()),
 
             Request::ListSnapshots { dataset } => {
                 let argv = crate::snapshots::list_snapshots_argv(dataset.as_str());

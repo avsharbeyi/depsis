@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 
+import type { AgentService } from '../agent/agent.service.js';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
 import type { ReauthService } from '../auth/reauth.service.js';
 import type { JobsService } from '../jobs/jobs.service.js';
@@ -67,7 +68,13 @@ function controller(options: {
         : Promise.reject(new UnauthorizedException('the password is wrong')),
   } as unknown as ReauthService;
 
-  return { controller: new PoolsController(system, jobs, reauth), enqueue };
+  // The agent is only reached by the scrub routes, which this file does not exercise: what it
+  // measures is §8.1's sequence in front of pool creation. A stub that throws would make an
+  // accidental call loud rather than silent.
+  const agent = {
+    call: () => Promise.reject(new Error('this suite does not drive the agent')),
+  } as unknown as AgentService;
+  return { controller: new PoolsController(system, jobs, reauth, agent), enqueue };
 }
 
 describe('POST /storage/pools', () => {
