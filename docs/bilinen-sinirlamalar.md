@@ -140,8 +140,22 @@ ama sınırın doğru sayı olduğu ölçülmedi.
 
    **Kalan iki şey ve neden kaldıkları:**
 
-   _Ayrı hedefe `zfs send`._ Bir hedef (SSH ya da ikinci bir havuz), bir zamanlama ve bir ilerleme
-   göstergesi gerekiyor. Bu makinede hiçbiri denenemiyor.
+   _Ayrı hedefe `zfs send` — İKİNCİ BİR VERİ KÜMESİNE yapılabiliyor, başka bir MAKİNEYE değil._
+   `POST /storage/replication` §8.1'in dizisiyle çalışıyor (analiz, plan, yazılı onay, yeniden
+   kimlik doğrulama, iş) ve ajan dört şeyi reddediyor: aynı veri kümesi, iç içe olanlar, paylaşım
+   kökü, paylaşım ağacının içi. İki havuzlu bir NAS'ın gerçekten sahip olduğu hedef budur.
+
+   Başka bir makineye göndermek bir taşıma katmanı (SSH), bir kimlik deposu, host anahtarı
+   doğrulaması ve kopan bir bağlantı için bir hata modeli istiyor — kendi güven yüzeyi, ve tek
+   havuzlu bir kutuda hiçbiri denenemez.
+
+   **Zamanlama yok:** çoğaltma elle başlatılıyor, gece kendiliğinden koşmuyor. `job_queue.run_after`
+   zaten dayanıklı bir zamanlayıcı ve dört zincir onu kullanıyor, yani eksik olan şey mekanizma
+   değil bir politika ekranı.
+
+   **İlerleme göstergesi yok, ve bu bilinçli.** `zfs send` ilerlemeyi yalnız `-v` ile kendi
+   stderr'ine yazıyor; ajan onu ayrıştırmıyor. Bir zamanlayıcıyla ilerleyen çubuk, hiçbir şeyin
+   resmi olurdu. İş "çalışıyor" diyor, bitince `zfs recv`'in kendi sözlerini gösteriyor.
 
    _Dosya bazında geri yükleme._ Bu bir eksiklik değil bir TASARIM ENGELİ, ve yazılı kalması gerek:
    ZFS'te bir anlık görüntü `.zfs/snapshot/<ad>/` altında AYRI BİR MOUNT olarak beliriyor, ve
