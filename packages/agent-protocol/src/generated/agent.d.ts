@@ -417,6 +417,24 @@ export type AgentRequest =
     }
   | {
       /**
+       * How many dumps to keep. Pruning only ever touches files ending in `.dump`.
+       */
+      keep: number;
+      /**
+       * A single path component under a share root — never a path, never absolute.
+       *
+       * ADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access
+       * to `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle
+       * `/` or `..` through, so this type refuses them rather than sanitising.
+       */
+      name: string;
+      op: 'dump_database';
+    }
+  | {
+      op: 'list_database_dumps';
+    }
+  | {
+      /**
        * Is the entry a directory? The caller knows and has to say.
        */
       directory: boolean;
@@ -781,6 +799,14 @@ export type AgentResponse =
     }
   | {
       /**
+       * Where they are, so an operator reading the screen knows what to copy off the box.
+       */
+      directory: string;
+      dumps: DatabaseDump[];
+      status: 'database_dumps';
+    }
+  | {
+      /**
        * The `errors:` line, verbatim.
        */
       errors: string;
@@ -1036,6 +1062,14 @@ export type ZeroTierNetworkStatus =
  * Partitions are not reported as disks. They appear only through `holds`, `mounted` and
  * `holds_system` — which is what a caller about to overwrite the device needs to know, and a
  * per-partition inventory is not.
+ * One database dump on disk.
+ */
+export interface DatabaseDump {
+  created_unix: number;
+  name: string;
+  size_bytes: number;
+}
+/**
  * One host key a destination offered, and the fingerprint a person compares.
  */
 export interface OffsiteHostKey {

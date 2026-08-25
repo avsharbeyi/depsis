@@ -137,6 +137,29 @@ SystemCallFilter=~@module
 #
 # Requires: openssh-client (ssh, ssh-keygen, ssh-keyscan), at the absolute paths in dispatch.rs.
 
+# ─── the appliance's own database ─────────────────────────────────────────────
+#
+# ZFS snapshots protect the user's FILES. What they do not protect is who those files belong to:
+# accounts, share definitions, folder grants, the task board and the file index all live in
+# PostgreSQL, and PostgreSQL lives on the system disk. Lose that disk and every byte on the pool
+# survives with nothing left to say who may read it.
+#
+# DEPSIS_BACKUP_DATABASE_URL — what `pg_dump` connects to. UNSET BY DEFAULT and the operation then
+# refuses with a sentence saying so, rather than defaulting to `postgres://localhost/depsis`:
+# dumping the wrong database and reporting "you have a backup" is worse than having none. Use the
+# `depsis_backup` role, which migration 0001 grants SELECT and nothing else.
+#
+# DEPSIS_DB_BACKUP_DIR — where the dumps go; /var/lib/depsis/db-backups by default. NOT a share,
+# and that is a security decision rather than a choice of location: the dump carries password
+# hashes, sealed TOTP secrets and SMB NT hashes, so a share would hand all of them to anybody with
+# `download` on it. Files are written 0600 with the mode set BEFORE any bytes.
+#
+# Getting them OFF the box is the administrator's own step: create a backup schedule for the
+# dataset that directory lives on, or copy the files. A dump that never leaves the appliance does
+# not survive the appliance.
+#
+# Requires: postgresql-client (pg_dump), at the absolute path in dispatch.rs.
+
 # ─── hardening deliberately NOT enabled, with reasons ─────────────────────────
 #
 # ProtectSystem=, ProtectHome=, PrivateTmp=, ReadWritePaths=, ProtectProc=, PrivateDevices=,

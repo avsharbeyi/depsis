@@ -2060,6 +2060,51 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /storage/database-backups:
+    get:
+      operationId: listDatabaseBackups
+      tags: [system]
+      summary: Cihazın kendi veritabanının dökümleri
+      description: |
+        ZFS anlık görüntüleri kullanıcının DOSYALARINI koruyor. Korumadığı şey o dosyaların kime
+        ait olduğu: hesaplar, paylaşım tanımları, klasör izinleri, iş panosu ve dosya dizini
+        PostgreSQL'de, ve PostgreSQL sistem diskinde. Sistem diski ölürse havuzdaki her bayt
+        duruyor ve onlara kimin erişebileceğini söyleyen hiçbir şey kalmıyor.
+
+        Günde bir alınıyor, on dört tanesi saklanıyor. "En son ne zaman" sorusunun cevabı dizindeki
+        en yeni dosyanın tarihi — bir kolonda tutulsaydı, kabuktan silinmiş bir dökümden sonra o
+        kolon yalan söylerdi.
+
+        DÖKÜM PAYLAŞIMA YAZILMIYOR: parola hash'lerini, mühürlenmiş TOTP sırlarını ve SMB NT
+        hash'lerini taşıyor, ve bir paylaşım onları o paylaşımda `download` yetkisi olan herkese
+        verirdi. Ajanın kendi dizininde, 0600 ile duruyor. `directory` alanı nerede olduğunu
+        söylüyor — o dizinin veri kümesine bir zamanlama kurmak yöneticinin işi.
+      responses:
+        '200':
+          description: Dökümler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DatabaseBackupPage' }
+        '403': { $ref: '#/components/responses/Problem' }
+    post:
+      operationId: dumpDatabase
+      tags: [system]
+      summary: Şimdi döküm al
+      responses:
+        '201':
+          description: Alındı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DatabaseBackupPage' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503':
+          description: |
+            Ajan döküm alamıyor — neredeyse her zaman bağlantı dizesinin yapılandırılmamış olması.
+            Sebep cevapta.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
   /storage/backup-schedules:
     get:
       operationId: listBackupSchedules
@@ -4710,6 +4755,26 @@ components:
             yazıyor; başka her şey bir insanın bakması gereken hâl. Bu yönde kurulması bilinçli —
             tersi ("şu kalıplar hatadır") yeni bir ZFS sürümünün yeni bir cümlesini sessizce
             "sorun yok" sayardı.
+
+    DatabaseBackupPage:
+      type: object
+      required: [items, directory]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [name, sizeBytes, createdAt]
+            properties:
+              name: { type: string }
+              sizeBytes: { type: integer, format: int64 }
+              createdAt: { type: string, format: date-time }
+        directory:
+          type: string
+          description: |
+            Dökümlerin durduğu dizin. Ekranda gösteriliyor çünkü onları cihazdan ÇIKARMAK
+            yöneticinin işi: o dizinin veri kümesine bir yedekleme zamanlaması kurulur, ya da
+            dosyalar elle kopyalanır. Nerede olduğunu söylemeyen bir yedek, bulunamayan bir yedek.
 
     BackupSchedule:
       type: object

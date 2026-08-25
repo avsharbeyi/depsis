@@ -26,6 +26,16 @@ export const TICK_INTERVAL_MS = 5 * 60_000;
  */
 export const VERIFY_INTERVAL_MS = 24 * 60 * 60_000;
 
+/**
+ * Veritabanı dökümleri arası aralık, ve kaç tane saklanacağı.
+ *
+ * Günde bir, ve on dört tane: iki hafta geriye gitmek, bir yapılandırma hatasının fark edilmesi
+ * için gereken süreden uzun. Döküm sıkıştırılmış ve bir ev NAS'ının veritabanı megabaytlar
+ * mertebesinde, yani on dört tanesi disk sorunu değil.
+ */
+export const DUMP_INTERVAL_MS = 24 * 60 * 60_000;
+export const DUMP_KEEP = 14;
+
 export type Cadence = 'hourly' | 'daily' | 'weekly';
 
 export interface ScheduleRow {
@@ -517,6 +527,56 @@ export class BackupSchedulesService {
       return `${newest.name} açıldı ama BOŞ — bu veri kümesinde yedeklenecek bir şey var mı?`;
     }
     return `${newest.name} açıldı, ${entries.entries.length} öğe okundu`;
+  }
+
+  /**
+   * Cihazın KENDİ verisini yedekle: hesaplar, paylaşımlar, izinler, dosya dizini.
+   *
+   * ZFS anlık görüntüleri kullanıcının DOSYALARINI koruyor. Korumadığı şey, o dosyaların kime ait
+   * olduğu — hepsi PostgreSQL'de, ve PostgreSQL sistem diskinde. Sistem diski ölürse havuzdaki her
+   * bayt duruyor ve onlara kimin erişebileceğini söyleyen hiçbir şey kalmıyor.
+   *
+   * `docs/operations/03-yedekleme.md` bunun için elle bir `pg_dump` tarif ediyordu, ve elle
+   * başlatılan bir yedek alınmayan bir yedektir.
+   *
+   * DURUM DOSYA SİSTEMİNDE, veritabanında değil. "En son ne zaman döküm alındı" sorusunun cevabı
+   * dizindeki en yeni dosyanın tarihi; bir kolonda tutulsaydı, kabuktan silinmiş bir dökümden
+   * sonra o kolon yalan söylerdi. Aynı gerekçe yedek listesinin havuzdan okunmasında da geçerli.
+   *
+   * `null` dönüyor: vakti gelmediyse, ya da ajan bu kutuda döküm alamıyorsa (bağlantı dizesi
+   * yapılandırılmamış). İkincisi sessiz DEĞİL — `GET /storage/database-backups` onu söylüyor, ve
+   * ekran hiç döküm yokken bunu yüksek sesle gösteriyor.
+   */
+  async dumpDatabaseIfDue(now: Date): Promise<string | null> {
+    const correlationId = randomUUID();
+    const listed = await this.agent.call(
+      { op: 'list_database_dumps' },
+      'checking when the database was last dumped',
+      correlationId,
+    );
+    if (listed.status !== 'database_dumps') return null;
+
+    const newest = listed.dumps[0];
+    if (newest !== undefined && now.getTime() - newest.created_unix * 1000 < DUMP_INTERVAL_MS) {
+      return null;
+    }
+
+    // `SafeComponent`: iki nokta üst üste yok, bölü yok. Anlık görüntü adlarıyla aynı biçim.
+    const name = `depsis-${now
+      .toISOString()
+      .replace(/[-:]/gu, '')
+      .replace(/\.\d+Z$/u, 'Z')}`;
+    const dumped = await this.agent.call(
+      { op: 'dump_database', name, keep: DUMP_KEEP },
+      'the daily dump of the appliance database',
+      correlationId,
+    );
+    if (dumped.status !== 'database_dumps') {
+      // Reddedildiyse sebebi taşınıyor: neredeyse her zaman "bağlantı dizesi yapılandırılmamış",
+      // ve o cümle yöneticinin yapacağı şeyi söylüyor.
+      return `veritabanı dökümü alınamadı: ${'reason' in dumped ? dumped.reason : dumped.status}`;
+    }
+    return `veritabanı dökümü alındı: ${name} (${String(dumped.dumps.length)} döküm saklanıyor)`;
   }
 
   private async runOne(organizationId: string, schedule: ScheduleRow, now: Date): Promise<void> {

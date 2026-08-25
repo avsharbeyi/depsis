@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
+import { DatabaseBackups } from './DatabaseBackups.js';
 import { Offsite } from './Offsite.js';
 import { Pool } from './Scrub.js';
 import { Schedules } from './Schedules.js';
@@ -217,6 +218,10 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
       {/* ELLE BAŞLATILAN BİR YEDEK, ALINMAYAN BİR YEDEKTİR. Yukarıdaki iki form bir düğmeye
           basıldığında çalışıyor; bu, basılmadığında. */}
       {page !== null && !forbidden && <Schedules notify={notify} />}
+
+      {/* EN ÇOK GÖZDEN KAÇAN SATIR. Yukarıdaki her şey kullanıcının DOSYALARINI koruyor; bu,
+          o dosyaların kime ait olduğunu. */}
+      {page !== null && !forbidden && <DatabaseBackups notify={notify} />}
 
       {pools.length > 0 && (
         <div>

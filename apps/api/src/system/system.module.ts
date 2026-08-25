@@ -11,6 +11,7 @@ import { BackupsController } from './backups.controller.js';
 import { BackupsService } from './backups.service.js';
 import { BackupSchedulesController } from './backup-schedules.controller.js';
 import { BackupSchedulesModule } from './backup-schedules.module.js';
+import { DatabaseBackupsController } from './database-backups.controller.js';
 import { OffsiteController } from './offsite.controller.js';
 import { PoolsController } from './pools.controller.js';
 import { ReplicationController } from './replication.controller.js';
@@ -26,6 +27,7 @@ import { SystemService } from './system.service.js';
     ReplicationController,
     OffsiteController,
     BackupSchedulesController,
+    DatabaseBackupsController,
   ],
   providers: [
     {

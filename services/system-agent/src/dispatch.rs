@@ -12,8 +12,8 @@ use crate::acl::{self, AclError};
 use crate::audit::{self, Outcome, Sink};
 use crate::authz::{Decision, Policy};
 use crate::op::{
-    AclEntry, AclType, DirEntry, OffsiteHostKey, PosixId, Request, Response, SafeComponent,
-    SnapshotEntry, SCHEMA_VERSION, SHARE_ROOT_MODE,
+    AclEntry, AclType, DatabaseDump, DirEntry, OffsiteHostKey, PosixId, Request, Response,
+    SafeComponent, SnapshotEntry, SCHEMA_VERSION, SHARE_ROOT_MODE,
 };
 use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource};
 use crate::transfer::{
@@ -39,6 +39,8 @@ pub mod bin {
     pub const SSH: &str = "/usr/bin/ssh";
     pub const SSH_KEYGEN: &str = "/usr/bin/ssh-keygen";
     pub const SSH_KEYSCAN: &str = "/usr/bin/ssh-keyscan";
+    /// The appliance's own backup. Absolute, for the reason every path here is.
+    pub const PG_DUMP: &str = "/usr/bin/pg_dump";
 }
 
 /// Where staging files live inside a share.
@@ -947,6 +949,22 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         Ok(out?.trim().to_string())
     }
 
+    /// The dumps on disk, newest first.
+    fn database_dumps(&self) -> Result<Response, SeamError> {
+        let dir = crate::dbdump::dump_dir();
+        Ok(Response::DatabaseDumps {
+            dumps: crate::dbdump::read_dumps(&dir)?
+                .into_iter()
+                .map(|dump| DatabaseDump {
+                    name: dump.name,
+                    size_bytes: dump.size_bytes,
+                    created_unix: dump.created_unix,
+                })
+                .collect(),
+            directory: dir.display().to_string(),
+        })
+    }
+
     /// `zpool status`, read for the two lines a person acts on.
     fn scrub_status(&self, pool: &str) -> Result<Response, SeamError> {
         let out = self
@@ -1758,6 +1776,64 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 self.runner.run(bin::ZFS, &["destroy", &full])?;
                 Ok(Response::SnapshotDestroyed { full_name: full })
             }
+
+            Request::DumpDatabase { name, keep } => {
+                let Some(url) = std::env::var_os(crate::dbdump::DATABASE_URL_ENV) else {
+                    // REFUSED rather than defaulted. Inventing `postgres://localhost/depsis` would
+                    // mean dumping the wrong database and reporting "you have a backup", which is
+                    // worse than having none.
+                    return Ok(Response::Refused {
+                        reason: format!(
+                            "{} is not set, so there is no database to dump",
+                            crate::dbdump::DATABASE_URL_ENV
+                        ),
+                    });
+                };
+                let Some(url) = url.to_str().map(str::to_string) else {
+                    return Ok(Response::Refused {
+                        reason: format!("{} is not valid UTF-8", crate::dbdump::DATABASE_URL_ENV),
+                    });
+                };
+
+                let dir = crate::dbdump::dump_dir();
+                std::fs::create_dir_all(&dir)
+                    .map_err(|e| SeamError::Io(format!("{}: {e}", dir.display())))?;
+
+                let out = dir.join(format!("{}{}", name.as_str(), crate::dbdump::DUMP_SUFFIX));
+                let out_display = out.display().to_string();
+
+                // 0600 BEFORE `pg_dump` writes into it. `pg_dump` creates the file itself with the
+                // process umask, so creating it here first — empty and already private — is what
+                // keeps the window between "file exists" and "file is not world-readable" from
+                // existing at all. The same ordering `identity::write_private` explains.
+                (self.private_writer)(&out, "")
+                    .map_err(|e| SeamError::Io(format!("{out_display}: {e}")))?;
+
+                let argv = crate::dbdump::dump_argv(&url, &out_display);
+                if let Err(error) = self.runner.run(bin::PG_DUMP, &argv) {
+                    // A failed dump leaves the empty 0600 file behind, and an empty `.dump` in the
+                    // directory is worse than no file: the next listing would show it as a backup.
+                    let _ = std::fs::remove_file(&out);
+                    return Err(error);
+                }
+
+                // Budama dökümden SONRA: yeni döküm sayıya dahil, ve önce budasaydık `keep` her
+                // turda bir fazla tutardı. Anlık görüntü budamasındaki aynı sıra.
+                let existing = crate::dbdump::read_dumps(&dir)?;
+                for doomed in crate::dbdump::prunable(&existing, (*keep).max(1) as usize) {
+                    let path = dir.join(&doomed);
+                    if let Err(error) = std::fs::remove_file(&path) {
+                        // Not fatal, and not silent either: the dump itself succeeded, and a
+                        // directory that grows is a disk-space problem rather than a lost backup —
+                        // but a pruning that quietly stops working is how the disk fills.
+                        eprintln!("depsis-agent: could not prune {}: {error}", path.display());
+                    }
+                }
+
+                self.database_dumps()
+            }
+
+            Request::ListDatabaseDumps {} => self.database_dumps(),
 
             Request::StartScrub { pool } => {
                 self.runner

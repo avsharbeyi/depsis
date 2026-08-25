@@ -81,6 +81,10 @@ describe('the emitted agent schema', () => {
       // — the API cannot write inside a share — and undeletable by the agent. Without this the
       // upload path leaked quota nobody could free.
       'discard_transfer',
+      // The appliance's own database. NOT written into a share: the dump carries password
+      // hashes, sealed TOTP secrets and NT hashes, and a share would hand all of them to
+      // anybody holding `download` on it.
+      'dump_database',
       // Rename and relocate, one `renameat2(RENAME_NOREPLACE)` on two descriptors the agent
       // resolved itself. Named for the entry rather than for the syscall because the API asks for
       // an outcome, and because `rename` in this product already means the metadata-only kind.
@@ -88,6 +92,7 @@ describe('the emitted agent schema', () => {
       // a directory read under RESOLVE_BENEATH plus an fstatat per entry. Without it a file
       // written over SMB — which is what a NAS is for — was invisible to the web interface, to
       // search and to the permission walk.
+      'list_database_dumps',
       'list_directory',
       // What disks the box has. NO OPERANDS, which is the whole of its security argument: nothing
       // in the request reaches the command line, so there is no `-d` and no second device to
@@ -247,7 +252,10 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 20 since `start_scrub`
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 21 since `dump_database`
+    // and `list_database_dumps` — the appliance's OWN data. ZFS snapshots protect the user's
+    // files; nothing protected the accounts, shares and grants that say whose they are. 20 since
+    // `start_scrub`
     // and `scrub_status` — the read that makes ZFS's checksums useful, and the screen that says
     // what it found. A stale agent that did not know them would leave the appliance unable to
     // report whether its own bit rot check had ever run. 19 since
@@ -273,7 +281,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(20);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(21);
   });
 
   it('agrees with the number the agent actually reports', () => {

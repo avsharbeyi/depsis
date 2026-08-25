@@ -350,6 +350,7 @@ packages:
   - acl                 # getfacl/setfacl - ADR-0004 depends on these
   - attr                # getfattr, to inspect security.NTACL
   - openssh-client      # ssh / ssh-keygen / ssh-keyscan, for off-site replication
+  - postgresql-client   # pg_dump, for the appliance's own database backup
   - jq
   - git
   - curl

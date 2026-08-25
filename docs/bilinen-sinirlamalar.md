@@ -344,7 +344,30 @@ ama sınırın doğru sayı olduğu ölçülmedi.
 
 ### Faz 4
 
-11. Off-site backup, PITR, otomatik restore testi.
+11. **Off-site backup YAPILDI** (madde 5), **otomatik restore testi YAPILDI** (madde 5'teki yedek
+    doğrulaması), **cihazın kendi veritabanının yedeği YAPILDI.**
+
+    Sonuncusu bu listedeki en sessiz açıktı. ZFS anlık görüntüleri kullanıcının DOSYALARINI
+    koruyor; korumadığı şey o dosyaların kime ait olduğu — hesaplar, paylaşım tanımları, klasör
+    izinleri, iş panosu ve dosya dizini PostgreSQL'de, ve PostgreSQL sistem diskinde. Sistem diski
+    ölünce havuzdaki her bayt duruyor ve onlara kimin erişebileceğini söyleyen hiçbir şey
+    kalmıyordu. `docs/operations/03-yedekleme.md` bunun için elle bir `pg_dump` tarif ediyordu, ve
+    elle başlatılan bir yedek alınmayan bir yedektir.
+
+    Günde bir alınıyor, on dört tanesi saklanıyor, ve "en son ne zaman" sorusunun cevabı DİZİNDEKİ
+    EN YENİ DOSYANIN tarihi — bir kolonda tutulsaydı, kabuktan silinmiş bir dökümden sonra o kolon
+    yalan söylerdi. Hiç döküm yokken Yedekleme paneli bunu yüksek sesle söylüyor.
+
+    Döküm bir paylaşıma YAZILMIYOR: parola hash'lerini, mühürlenmiş TOTP sırlarını ve SMB NT
+    hash'lerini taşıyor, ve bir paylaşım onları o paylaşımda `download` yetkisi olan herkese
+    verirdi. Ajanın kendi dizininde, 0600 ile.
+
+    **Cihazdan ÇIKARMAK yöneticinin adımı**, ve ekran dizini bu yüzden gösteriyor: o dizinin veri
+    kümesine bir yedekleme zamanlaması kurulur. Cihazı terk etmeyen bir döküm, cihazı atlatmaz.
+
+    **PITR yok.** Günlük tutarlı bir döküm var; WAL arşivleme ve "14:37'ye dön" yok. Bir ev NAS'ında
+    aradaki farkın maliyeti, WAL arşivinin kendi disk ve izleme yükünden küçük.
+
 12. Güncelleme ve geri alma, HA controller, relay.
 13. Performans, chaos ve penetrasyon testleri. **Erişilebilirlik testleri yazıldı**
     (`e2e/a11y.spec.ts`): giriş ekranı, masaüstü, beş panel ve iki açılır panel, WCAG 2 A/AA

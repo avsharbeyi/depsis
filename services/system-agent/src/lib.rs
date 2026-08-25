@@ -39,6 +39,7 @@ pub mod acl;
 pub mod audit;
 pub mod authz;
 pub mod data;
+pub mod dbdump;
 pub mod disks;
 pub mod dispatch;
 pub mod identity;

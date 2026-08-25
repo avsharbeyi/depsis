@@ -47,6 +47,8 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::ReplicateOffsite { .. } => "replicate_offsite",
         Request::DestroySnapshot { .. } => "destroy_snapshot",
         Request::StartScrub { .. } => "start_scrub",
+        Request::DumpDatabase { .. } => "dump_database",
+        Request::ListDatabaseDumps {} => "list_database_dumps",
         Request::ScrubStatus { .. } => "scrub_status",
         Request::RestoreFromSnapshot { .. } => "restore_from_snapshot",
         Request::DiffSnapshots { .. } => "diff_snapshots",

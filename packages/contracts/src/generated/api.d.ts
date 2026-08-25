@@ -3533,6 +3533,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/storage/database-backups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Cihazın kendi veritabanının dökümleri
+         * @description ZFS anlık görüntüleri kullanıcının DOSYALARINI koruyor. Korumadığı şey o dosyaların kime
+         *     ait olduğu: hesaplar, paylaşım tanımları, klasör izinleri, iş panosu ve dosya dizini
+         *     PostgreSQL'de, ve PostgreSQL sistem diskinde. Sistem diski ölürse havuzdaki her bayt
+         *     duruyor ve onlara kimin erişebileceğini söyleyen hiçbir şey kalmıyor.
+         *
+         *     Günde bir alınıyor, on dört tanesi saklanıyor. "En son ne zaman" sorusunun cevabı dizindeki
+         *     en yeni dosyanın tarihi — bir kolonda tutulsaydı, kabuktan silinmiş bir dökümden sonra o
+         *     kolon yalan söylerdi.
+         *
+         *     DÖKÜM PAYLAŞIMA YAZILMIYOR: parola hash'lerini, mühürlenmiş TOTP sırlarını ve SMB NT
+         *     hash'lerini taşıyor, ve bir paylaşım onları o paylaşımda `download` yetkisi olan herkese
+         *     verirdi. Ajanın kendi dizininde, 0600 ile duruyor. `directory` alanı nerede olduğunu
+         *     söylüyor — o dizinin veri kümesine bir zamanlama kurmak yöneticinin işi.
+         */
+        get: operations["listDatabaseBackups"];
+        put?: never;
+        /** Şimdi döküm al */
+        post: operations["dumpDatabase"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/storage/backup-schedules": {
         parameters: {
             query?: never;
@@ -6415,6 +6448,21 @@ export interface components {
              */
             hasErrors: boolean;
         };
+        DatabaseBackupPage: {
+            items: {
+                name: string;
+                /** Format: int64 */
+                sizeBytes: number;
+                /** Format: date-time */
+                createdAt: string;
+            }[];
+            /**
+             * @description Dökümlerin durduğu dizin. Ekranda gösteriliyor çünkü onları cihazdan ÇIKARMAK
+             *     yöneticinin işi: o dizinin veri kümesine bir yedekleme zamanlaması kurulur, ya da
+             *     dosyalar elle kopyalanır. Nerede olduğunu söylemeyen bir yedek, bulunamayan bir yedek.
+             */
+            directory: string;
+        };
         BackupSchedule: {
             /** Format: uuid */
             id: string;
@@ -6961,6 +7009,60 @@ export interface operations {
             };
             403: components["responses"]["Problem"];
             503: components["responses"]["Problem"];
+        };
+    };
+    listDatabaseBackups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dökümler */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatabaseBackupPage"];
+                };
+            };
+            403: components["responses"]["Problem"];
+        };
+    };
+    dumpDatabase: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Alındı */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatabaseBackupPage"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            /**
+             * @description Ajan döküm alamıyor — neredeyse her zaman bağlantı dizesinin yapılandırılmamış olması.
+             *     Sebep cevapta.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
         };
     };
     listBackupSchedules: {

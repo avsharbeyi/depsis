@@ -1225,6 +1225,33 @@ pub enum Request {
     #[serde(rename = "scrub_status")]
     ScrubStatus { pool: SafeComponent },
 
+    /// Dump the appliance's own database, and keep the newest few.
+    ///
+    /// ZFS snapshots protect the user's FILES. What they do not protect is who those files belong
+    /// to: accounts, share definitions, folder grants, the task board and the file index all live
+    /// in PostgreSQL, and PostgreSQL lives on the system disk. Lose that disk and every byte on
+    /// the pool survives with nothing left to say who may read it.
+    ///
+    /// NOT WRITTEN INTO A SHARE, and that is a security decision rather than a choice of
+    /// location: the dump carries password hashes, sealed TOTP secrets and SMB NT hashes, so a
+    /// share would hand all of them to anybody with `download` on it. It goes to the agent's own
+    /// directory at 0600. Backing THAT up is a schedule an administrator creates deliberately.
+    ///
+    /// The connection string comes from the agent's environment and never from this request —
+    /// `samba::CONFIG_PATH_ENV`'s rule: which database the privileged daemon connects to is not a
+    /// question an unprivileged caller may answer.
+    #[serde(rename = "dump_database")]
+    DumpDatabase {
+        /// The file's own name, without a directory and without the `.dump` suffix.
+        name: SafeComponent,
+        /// How many dumps to keep. Pruning only ever touches files ending in `.dump`.
+        keep: u32,
+    },
+
+    /// What dumps are on disk, newest first. No operands.
+    #[serde(rename = "list_database_dumps")]
+    ListDatabaseDumps {},
+
     /// Delete exactly ONE entry inside a share. Never a tree.
     ///
     /// `directory` is a required operand rather than something the agent works out by stat-ing the
@@ -1493,6 +1520,15 @@ pub const MAX_LISTING: usize = 5_000;
 /// Partitions are not reported as disks. They appear only through `holds`, `mounted` and
 /// `holds_system` — which is what a caller about to overwrite the device needs to know, and a
 /// per-partition inventory is not.
+/// One database dump on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseDump {
+    pub name: String,
+    pub size_bytes: u64,
+    pub created_unix: i64,
+}
+
 /// One host key a destination offered, and the fingerprint a person compares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1748,6 +1784,14 @@ pub enum Response {
     Diff {
         lines: Vec<String>,
     },
+    /// The dumps on disk, newest first.
+    #[serde(rename = "database_dumps")]
+    DatabaseDumps {
+        dumps: Vec<DatabaseDump>,
+        /// Where they are, so an operator reading the screen knows what to copy off the box.
+        directory: String,
+    },
+
     /// What `zpool status` said about scrubbing, carried rather than interpreted.
     #[serde(rename = "scrub")]
     Scrub {
@@ -2107,7 +2151,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 20;
+pub const SCHEMA_VERSION: u32 = 21;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

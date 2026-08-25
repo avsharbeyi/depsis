@@ -847,6 +847,46 @@
       ]
     },
     {
+      "description": "Dump the appliance's own database, and keep the newest few.\n\nZFS snapshots protect the user's FILES. What they do not protect is who those files belong\nto: accounts, share definitions, folder grants, the task board and the file index all live\nin PostgreSQL, and PostgreSQL lives on the system disk. Lose that disk and every byte on\nthe pool survives with nothing left to say who may read it.\n\nNOT WRITTEN INTO A SHARE, and that is a security decision rather than a choice of\nlocation: the dump carries password hashes, sealed TOTP secrets and SMB NT hashes, so a\nshare would hand all of them to anybody with `download` on it. It goes to the agent's own\ndirectory at 0600. Backing THAT up is a schedule an administrator creates deliberately.\n\nThe connection string comes from the agent's environment and never from this request —\n`samba::CONFIG_PATH_ENV`'s rule: which database the privileged daemon connects to is not a\nquestion an unprivileged caller may answer.",
+      "type": "object",
+      "properties": {
+        "keep": {
+          "description": "How many dumps to keep. Pruning only ever touches files ending in `.dump`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "description": "The file's own name, without a directory and without the `.dump` suffix.",
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "op": {
+          "type": "string",
+          "const": "dump_database"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "name",
+        "keep"
+      ]
+    },
+    {
+      "description": "What dumps are on disk, newest first. No operands.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "list_database_dumps"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
       "description": "Delete exactly ONE entry inside a share. Never a tree.\n\n`directory` is a required operand rather than something the agent works out by stat-ing the\npath, and that is deliberate twice over. `unlinkat` needs `AT_REMOVEDIR` or not, so the\ndistinction has to be made somewhere; making the CALLER state it means a caller that\nbelieves it is deleting a file and finds a directory gets a refusal instead of a surprise.\nDeciding it from a stat would also be check-then-use on the one operation that cannot be\nundone.\n\nThere is no recursive variant and there will not be one. A non-empty directory comes back\nas an error (`ENOTEMPTY`) and the API walks the tree itself. The reason is §2.2 and\nADR-0006: the closed operation set exists so that no single call the agent accepts has a\nblast radius the caller chooses. \"Delete this subtree\" is `rm -rf` behind a typed name — one\nbug in the unprivileged side, or one confused-deputy request, and it is the whole share.\nThe API knows the tree because the API stores the tree; the agent only needs to be able to\nremove a leaf.",
       "type": "object",
       "properties": {
@@ -1389,6 +1429,31 @@
       "required": [
         "status",
         "lines"
+      ]
+    },
+    {
+      "description": "The dumps on disk, newest first.",
+      "type": "object",
+      "properties": {
+        "directory": {
+          "description": "Where they are, so an operator reading the screen knows what to copy off the box.",
+          "type": "string"
+        },
+        "dumps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DatabaseDump"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "database_dumps"
+        }
+      },
+      "required": [
+        "status",
+        "dumps",
+        "directory"
       ]
     },
     {
@@ -2175,6 +2240,30 @@
     }
   ],
   "$defs": {
+    "DatabaseDump": {
+      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.\nOne database dump on disk.",
+      "type": "object",
+      "properties": {
+        "created_unix": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "name": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "size_bytes",
+        "created_unix"
+      ]
+    },
     "DirEntry": {
       "description": "One thing in a directory, as the agent found it.\n\n`size` is 0 for a directory, matching `file_entries_folder_has_no_size`. The database\nconstraint and the filesystem answer have to agree, or every reconciliation would report a\ndifference that is not one.",
       "type": "object",
@@ -2287,7 +2376,7 @@
       ]
     },
     "OffsiteHostKey": {
-      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.\nOne host key a destination offered, and the fingerprint a person compares.",
+      "description": "One host key a destination offered, and the fingerprint a person compares.",
       "type": "object",
       "properties": {
         "fingerprint": {

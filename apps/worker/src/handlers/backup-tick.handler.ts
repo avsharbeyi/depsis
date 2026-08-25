@@ -42,6 +42,11 @@ export function backupTickHandler(schedules: BackupSchedulesService): JobHandler
     // hata vermediğini biliyor; bu, en yeni görüntünün havuzda durduğunu ve açılabildiğini
     // kontrol ediyor. Tur başına bir zamanlama, en eski doğrulanmış olandan başlayarak.
     const verified = await schedules.verifyOne(organizationId, new Date());
+
+    // CİHAZIN KENDİ VERİSİ. ZFS anlık görüntüleri kullanıcının dosyalarını koruyor; hesapları,
+    // paylaşımları ve izinleri koruyan hiçbir şey yoktu — hepsi sistem diskindeki PostgreSQL'de.
+    // Günde bir, ve "en son ne zaman" sorusunun cevabı dizindeki en yeni dosyanın tarihi.
+    const dumped = await schedules.dumpDatabaseIfDue(new Date());
     // Sessiz bir tur normal ve çoğunluk: vakti gelmiş bir zamanlama yoksa yazacak bir şey yok. Her
     // beş dakikada bir "0 koştu" satırı, günlüğü okunmaz yapan şeyin ta kendisi.
     if (ran > 0 || failed > 0) {
@@ -49,6 +54,9 @@ export function backupTickHandler(schedules: BackupSchedulesService): JobHandler
     }
     if (verified !== null) {
       logger.log(`backup verification: ${verified}`);
+    }
+    if (dumped !== null) {
+      logger.log(dumped);
     }
 
     await report(1);
