@@ -1581,6 +1581,9 @@ canvas.spark {
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
+  /* Metin kutunun `<label>`'ı: dokunmatik ekranda asıl basılan yer burası, ve imlecin onu
+     söylemesi gerekiyor. */
+  cursor: pointer;
 }
 /* Tiklenmiş madde ÜSTÜ ÇİZİLİ ve soluk. Listeden kaldırmak "kaç maddesi vardı" sorusunu
    cevaplanamaz yapardı, ve bir kontrol listesinin yarısı bitmiş hâli de bir bilgi. */

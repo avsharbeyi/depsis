@@ -337,14 +337,23 @@ export function TaskThread({
       {/* ─── kontrol listesi ─────────────────────────────────────────────── */}
 
       <div className="pmh">Kontrol listesi</div>
+      {/* Kutu bir <label> İÇİNDE DEĞİL, htmlFor ile ona bağlı.
+          Sarmalayan bir etiket dokunmatik ekranda İKİ KEZ etkinleşiyordu: tarayıcı hem kutunun
+          kendi tıklamasını hem etiketin ürettiğini gönderiyor, kutu açılıp hemen kapanıyor, ve
+          ekranda hiçbir şey olmamış gibi görünüyor. Mobil uçtan uca testi bunu yakaladı, ve
+          masaüstünde hiç görünmüyordu — dokunmatik öykünmesi olmadan ikinci tıklama doğmuyor.
+          htmlFor metni tıklanabilir tutuyor, ki dokunmatik ekranda asıl gereken o. */}
       {items.map((item) => (
-        <label className={item.doneAt === null ? 'citem' : 'citem on'} key={item.id}>
+        <div className={item.doneAt === null ? 'citem' : 'citem on'} key={item.id}>
           <input
+            id={`ck-${item.id}`}
             type="checkbox"
             checked={item.doneAt !== null}
             onChange={(event) => void tick(item.id, event.target.checked)}
           />
-          <span className="tx">{item.body}</span>
+          <label className="tx" htmlFor={`ck-${item.id}`}>
+            {item.body}
+          </label>
           {/* Kim tikledi. Yalnız tiklenmiş maddede, ve yalnız adı biliniyorsa. */}
           {item.doneByUsername !== null && <span className="s">{item.doneByUsername}</span>}
           <button
@@ -355,7 +364,7 @@ export function TaskThread({
           >
             ✕
           </button>
-        </label>
+        </div>
       ))}
       <div className="cadd">
         <input
