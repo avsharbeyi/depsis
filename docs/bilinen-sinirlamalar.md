@@ -135,7 +135,31 @@ ama sınırın doğru sayı olduğu ölçülmedi.
    bir dakika gecikiyor. Ölçülüp değiştirilecek bir sayı, çalışmayan bir şey değil.
 5. **Replikasyon ve restore arayüzü.** Anlık görüntü var; ayrı hedefe `zfs send` ve geri yükleme
    ekranı yok. (Bugün `restore` yalnız çöp kutusundan geri alma.)
-6. **Önizleme ve küçük resim.**
+6. **Önizleme ve küçük resim — yarısı var, ve eksik olan yarı bilinçli.**
+
+   Satırdaki kare, JPEG'in EXIF'ine GÖMÜLÜ küçük resmi gösteriyor: telefon ve fotoğraf makinesi
+   fotoğraflarının neredeyse hepsi onu taşıyor, ve çıkarmak bayt dilimlemek — sunucu hiçbir
+   görüntünün kodunu ÇÖZMÜYOR.
+
+   **Kapsamayan:** ekran görüntüleri, PNG, WebP, EXIF'siz JPEG ve videolar. Onlar için kare tür
+   simgesinde kalıyor.
+
+   Eksik olanın yolu belli ve bilerek seçilmedi: sunucuda bir görüntü kütüphanesi (`sharp`/libvips)
+   çalıştırıp yeniden boyutlandırmak. Maliyeti, güvenilmeyen kullanıcı baytlarını çözen onlarca
+   megabaytlık yerel bir ikiliyi — tarihsel olarak en verimli RCE yüzeylerinden birini — oturumları
+   ve veritabanı bağlantısını tutan sürecin içine koymak. Bir NAS'ın en çok yüklenen şeyi fotoğraf,
+   yani o kod her gün güvenilmeyen veri görürdü. Yapılacaksa ayrı, ayrıcalıksız ve zaman sınırlı
+   bir süreçte yapılmalı; API'nin içinde değil.
+
+   İkinci ara adım, istemcinin dosyayı indirip kendi canvas'ında küçültmesi: tarayıcının çözücüsü
+   sandbox'lı ve bu iş için sertleştirilmiş. Bedeli bant genişliği — 27 piksellik bir kare için tam
+   çözünürlüklü bir dosya — ve ZeroTier üzerinden uzaktan bakan biri için kabul edilemez. Bir boyut
+   eşiğiyle yapılabilir, ama ölçülmeden değil.
+
+   **Önbellek BELLEKTE ve süreçle birlikte gidiyor** (32 MB, en eski atılır). Diskte bir önbellek
+   bir dizin, bir yapılandırma ve bir temizleme işi demek; yeniden üretmek 128 kB'lık bir okuma.
+   Fotoğraf kütüphanesi büyüdükçe ölçülüp değiştirilecek bir sayı.
+
 7. **Masaüstü istemci ve Windows sürücü eşleme.**
 
 ### Faz 3

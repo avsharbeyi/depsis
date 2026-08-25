@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -260,5 +260,135 @@ describe('the bulk data client', () => {
     await expect(
       service.send('tok', 0, 1, Readable.from([Buffer.from('x')])),
     ).rejects.toBeInstanceOf(AgentUnavailableError);
+  });
+});
+
+/**
+ * İndirme yönü, ve asıl olarak BAŞLIKLA YÜKÜN AYNI PAKETE SIĞDIĞI durum.
+ *
+ * Ölçülen hata buradaydı: `LineReader`, `takeLeftover` çağrılana kadar satır ayrıştırmayı
+ * bırakmıyordu, ve o çağrı `await next()` çözüldükten SONRA — bir mikro görev sonra — geliyordu.
+ * Ajan `sending` başlığını ve dosyanın ilk baytlarını aynı `write` ile gönderdiğinde `onData`
+ * ikisini birden alıyor, başlığı teslim ediyor, ve SENKRON olarak devam edip yükün içinde 0x0A
+ * arıyordu.
+ *
+ * İkili bir dosyada 0x0A sıradan bir bayt. Bulunan "satır" boşluğa indirgeniyorsa sessizce
+ * atılıyordu — yani dosya EKSİK iniyordu — değilse `JSON.parse` patlayıp aktarımı düşürüyordu.
+ *
+ * Büyük dosyalarda görünmüyordu: yükün geri kalanı sonraki paketlerde geliyor, o zamana kadar
+ * `takeLeftover` çalışmış oluyor. Yalnız küçük dosyalar bu yola giriyor.
+ */
+function servingAgent(
+  payload: Buffer,
+  options: { split?: boolean } = {},
+): {
+  path: string;
+  close: () => Promise<void>;
+} {
+  const path = socketPath();
+  const live = new Set<Socket>();
+  const server = createServer({ allowHalfOpen: true }, (socket) => {
+    live.add(socket);
+    socket.on('close', () => live.delete(socket));
+    socket.on('error', () => undefined);
+    let buffered = Buffer.alloc(0);
+    socket.on('data', (chunk: Buffer) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      const at = buffered.indexOf(0x0a);
+      if (at < 0) return;
+      const asked = JSON.parse(buffered.subarray(0, at).toString('utf8')) as {
+        offset: number;
+        length: number;
+      };
+      buffered = Buffer.alloc(0);
+      const slice = payload.subarray(asked.offset, asked.offset + asked.length);
+      const header = Buffer.from(
+        `${JSON.stringify({ status: 'sending', bytes: slice.length })}\n`,
+        'utf8',
+      );
+      if (options.split === true) {
+        // Ayrı yazmalar: büyük bir dosyanın davranışı, ve hatanın GÖRÜNMEDİĞİ hâl.
+        socket.write(header);
+        setTimeout(() => socket.end(slice), 5);
+      } else {
+        // TEK yazma — ajanın küçük bir dosya için gerçekte yaptığı şey.
+        socket.end(Buffer.concat([header, slice]));
+      }
+    });
+  });
+  server.listen(path);
+  return {
+    path,
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const socket of live) socket.destroy();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+async function collect(service: AgentDataService, token: string, length: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  const sink = new Writable({
+    write(chunk: Buffer, _encoding, done) {
+      chunks.push(chunk);
+      done();
+    },
+  });
+  await service.receive(token, 0, length, sink);
+  return Buffer.concat(chunks);
+}
+
+describe('the bulk data client, reading', () => {
+  const closers: (() => Promise<void>)[] = [];
+  afterEach(async () => {
+    for (const close of closers.splice(0)) await close();
+  });
+
+  /**
+   * 0x0A TAŞIYAN bir yük, ve başlıkla aynı pakette.
+   *
+   * Bayt dizisi kasıtlı: iki tane 0x0A var ve aralarındaki bayt bir boşluk (0x20), yani eski kod
+   * o parçayı `line.trim() === ''` dalına düşürüp SESSİZCE atıyordu. Sonuç, doğru uzunlukta
+   * olduğunu sanan ama içinden bayt eksilmiş bir dosya.
+   */
+  it('keeps every byte when the header and the payload arrive together', async () => {
+    const payload = Buffer.from([0xff, 0xd8, 0x0a, 0x20, 0x0a, 0x00, 0x7b, 0x22, 0x0a, 0xff, 0xd9]);
+    const agent = servingAgent(payload);
+    closers.push(agent.close);
+    const service = new AgentDataService(agent.path);
+
+    expect(await collect(service, 'tok', payload.length)).toEqual(payload);
+  });
+
+  it('reads the same payload when the agent writes it in two packets', async () => {
+    // Aynı yük, ayrı yazmalarla: hatanın hiç görünmediği yol. İkisi de aynı sonucu vermeli, yoksa
+    // düzeltme yalnız bir zamanlamada doğru olurdu.
+    const payload = Buffer.from([0xff, 0xd8, 0x0a, 0x20, 0x0a, 0x00, 0xff, 0xd9]);
+    const agent = servingAgent(payload, { split: true });
+    closers.push(agent.close);
+    const service = new AgentDataService(agent.path);
+
+    expect(await collect(service, 'tok', payload.length)).toEqual(payload);
+  });
+
+  it('carries a payload that is entirely newlines', async () => {
+    // Uç durum, ve eski kodda tam bir kayıp: her bayt bir satır sınırı, her "satır" boş.
+    const payload = Buffer.alloc(64, 0x0a);
+    const agent = servingAgent(payload);
+    closers.push(agent.close);
+    const service = new AgentDataService(agent.path);
+
+    expect(await collect(service, 'tok', payload.length)).toEqual(payload);
+  });
+
+  it('reads a payload that looks like a JSON line', async () => {
+    // Eski kod bunu ayrıştırıp bir cevap sanardı — ya da ayrıştıramayıp aktarımı düşürürdü.
+    const payload = Buffer.from(`{"status":"stored","bytes":9}\nsonra\n`, 'utf8');
+    const agent = servingAgent(payload);
+    closers.push(agent.close);
+    const service = new AgentDataService(agent.path);
+
+    expect(await collect(service, 'tok', payload.length)).toEqual(payload);
   });
 });

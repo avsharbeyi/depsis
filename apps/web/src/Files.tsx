@@ -1494,9 +1494,7 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
                 >
                   ✓
                 </button>
-                <span className="g" style={tint(type.tone)} aria-hidden>
-                  {type.glyph}
-                </span>
+                <Thumb entry={entry} tone={type.tone} glyph={type.glyph} />
                 <span className="n" title={entry.name}>
                   {entry.name}
                 </span>
@@ -1723,6 +1721,113 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
   );
 }
 
+/* ─── satır küçük resmi ─────────────────────────────────────────────────────── */
+
+/**
+ * Yalnız JPEG soruluyor.
+ *
+ * Uç, JPEG'in EXIF'ine GÖMÜLÜ küçük resmi çıkarıyor; PNG, WebP ve GIF öyle bir şey taşımıyor, yani
+ * onlar için istek her zaman 204 dönerdi. Uzantıya bakıp hiç sormamak, bir klasör açılışında
+ * yüzlerce boş gidiş dönüşü ortadan kaldırıyor.
+ *
+ * Uzantı, `mimeType` DEĞİL: sözleşmede o alan isteğe bağlı ve ajan her zaman doldurmuyor, yani ona
+ * bakan bir kontrol aynı dosyayı bazen soruyor bazen sormuyor olurdu. `typeOf` da aynı sebeple
+ * uzantıya bakıyor.
+ */
+const THUMBNAILED = new Set(['jpg', 'jpeg']);
+
+/**
+ * EXIF yönlendirmesinin (1–8) CSS karşılığı.
+ *
+ * Gömülü küçük resim ana görüntüyle aynı yönde saklanıyor, ve sunucu pikselleri çevirmiyor —
+ * çevirmek, o ucun var olma sebebi olan "hiçbir şeyin kodunu çözme" kuralını bozardı. Döndürme
+ * burada, bir dönüşüm olarak: bedava, ve kare zaten `object-fit: cover`.
+ *
+ * Aynalanan hâller (2, 4, 5, 7) fotoğraf makinelerinde neredeyse hiç görülmüyor ama tanımlı, ve
+ * atlanmış bir değer sessizce yan yatmış bir fotoğraf demek.
+ */
+const ORIENTATION: Record<string, string> = {
+  '2': 'scaleX(-1)',
+  '3': 'rotate(180deg)',
+  '4': 'scaleY(-1)',
+  '5': 'rotate(90deg) scaleX(-1)',
+  '6': 'rotate(90deg)',
+  '7': 'rotate(270deg) scaleX(-1)',
+  '8': 'rotate(270deg)',
+};
+
+/**
+ * Satırın solundaki kare: küçük resim varsa o, yoksa tür simgesi.
+ *
+ * `fetch`, `<img src>` DEĞİL. Bir `<img>`'i doğrudan uca yöneltmek daha az kod olurdu ama 204'ü
+ * "çözülemedi" diye ele alır ve tarayıcı konsoluna bir satır yazardı — küçük resmi olmayan seksen
+ * fotoğraflık bir klasör, seksen satır. `fetch` ile 204 sessiz ve olağan bir cevap.
+ *
+ * `AbortController` kaçınılmaz: bir klasörden çıkmak, henüz cevaplanmamış onlarca isteği anlamsız
+ * yapıyor, ve iptal edilmeyen her biri hem bir bağlantı hem de sökülmüş bir bileşene yazan bir
+ * `setState` demek.
+ */
+function Thumb({
+  entry,
+  tone,
+  glyph,
+}: {
+  entry: FileEntry;
+  tone: Tone;
+  glyph: string;
+}): React.JSX.Element {
+  const [source, setSource] = useState<{ url: string; spin: string | undefined } | null>(null);
+  const wanted = entry.kind === 'file' && THUMBNAILED.has(suffix(entry.name));
+
+  useEffect(() => {
+    if (!wanted) return undefined;
+    const stop = new AbortController();
+    let url: string | null = null;
+
+    void (async () => {
+      try {
+        const answer = await fetch(`${API_BASE_URL}/files/${entry.id}/thumbnail`, {
+          credentials: 'same-origin',
+          signal: stop.signal,
+        });
+        // 204 = gömülü küçük resmi yok. Bir hata değil, olağan cevap; kare simgede kalıyor.
+        if (answer.status !== 200) return;
+        const blob = await answer.blob();
+        if (stop.signal.aborted) return;
+        url = URL.createObjectURL(blob);
+        setSource({ url, spin: ORIENTATION[answer.headers.get('x-depsis-orientation') ?? '1'] });
+      } catch {
+        // Ağ hatası ya da iptal. Bir küçük resmin gelmemesi, dosya yöneticisinin bir sorunu değil.
+      }
+    })();
+
+    return () => {
+      stop.abort();
+      // Nesne URL'i AÇIKÇA bırakılıyor: tarayıcı onu belge ömrü boyunca tutuyor, ve iki yüz
+      // fotoğraflık bir klasörde gezinmek onları sızdırmanın en kolay yolu.
+      if (url !== null) URL.revokeObjectURL(url);
+      setSource(null);
+    };
+  }, [entry.id, wanted]);
+
+  if (source === null) {
+    return (
+      <span className="g" style={tint(tone)} aria-hidden>
+        {glyph}
+      </span>
+    );
+  }
+  return (
+    <span className="g thumb" aria-hidden>
+      <img
+        src={source.url}
+        alt=""
+        style={source.spin === undefined ? undefined : { transform: source.spin }}
+      />
+    </span>
+  );
+}
+
 /* ─── preview ───────────────────────────────────────────────────────────────── */
 
 /**
@@ -1737,9 +1842,11 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
  * same-origin cookie the browser sends by itself, and a blob would pull a 40 MP photograph or a
  * whole video through this tab's heap before showing anything.
  *
- * Deliberately NOT also used as a row thumbnail. The reference sets `background-size: cover` on
- * `.frow .g` for that, but there is no thumbnail service behind this API — a folder of two hundred
- * photographs would fetch two hundred full-resolution originals to fill two hundred 27px squares.
+ * SATIR KARESİ İÇİN KULLANILMIYOR, ve bu yorum bir zamanlar "çünkü bu API'nin arkasında bir küçük
+ * resim servisi yok" diyordu. Artık var (`GET /files/{id}/thumbnail`), ama o uç TAM ÇÖZÜNÜRLÜKLÜ
+ * dosyayı değil, JPEG'in içine gömülü ~160×120'lik küçük resmi döndürüyor — dosya başına 128 kB
+ * okuyarak, ve hiçbir şeyin kodunu çözmeden. Satırdaki kare onu kullanıyor (`Thumb`); bu pencere
+ * gerçek dosyayı kullanmaya devam ediyor, çünkü burada bakılan şey fotoğrafın kendisi.
  */
 function Preview({ entry, onClose }: { entry: FileEntry; onClose: () => void }): React.JSX.Element {
   const source = `${API_BASE_URL}/files/${entry.id}/content`;

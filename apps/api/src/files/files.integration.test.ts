@@ -15,6 +15,7 @@ import type { AuthenticatedRequest } from '../auth/session.guard.js';
 import { DbService } from '../db/db.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
+import { ThumbnailsService } from './thumbnails.service.js';
 import { FilesController } from './files.controller.js';
 import { TrashRetentionService } from './trash-retention.service.js';
 import {
@@ -1537,7 +1538,12 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     // A real retention service over the same pool: the trash listing reads the policy to work out
     // each row's expiry, and stubbing it would make that read untested in the one suite that lists
     // the bin.
-    controller = new FilesController(pfiles, stubData, new TrashRetentionService(pdb, pfiles));
+    controller = new FilesController(
+      pfiles,
+      stubData,
+      new TrashRetentionService(pdb, pfiles),
+      new ThumbnailsService(pfiles, stubData),
+    );
     search = new SearchController(pfiles);
     uploads = new UploadsController(
       pdb,

@@ -138,6 +138,9 @@ export class AgentDataService {
         socket.destroy(new AgentUnavailableError('the agent went quiet mid-transfer'));
       });
 
+      // İSTEKTEN ÖNCE. Ajan başlığı ve dosyanın ilk baytlarını aynı pakete yazıyor; bayrak
+      // sonradan kurulsaydı okuyucu o paketin ikili kuyruğunu satır diye tarardı.
+      reader.expectPayload();
       socket.write(`${JSON.stringify({ token, offset, length })}\n`);
       const announced = await reader.next();
       if (announced.status !== 'sending') throw toError(announced);
@@ -310,6 +313,26 @@ class LineReader {
   private waiting: ((reply: DataReply) => void) | null = null;
   /** Set by `takeLeftover`: no further line parsing, the rest of the socket is payload. */
   private stopped = false;
+  /**
+   * Set by `expectPayload`, BEFORE the request goes out: the next line is the last one, and
+   * everything after its newline is file content.
+   *
+   * ÖLÇÜLEN HATA. `stopped` yalnız `takeLeftover`'da kuruluyordu, ve o çağrı `await next()`
+   * çözüldükten SONRA — yani bir mikro görev sonra. Ajan `sending` başlığını ve dosyanın ilk
+   * baytlarını aynı pakete yazıyor (bu sınıfın kendi yorumu da öyle diyor), o yüzden `onData`
+   * ikisini birden alıyor ve döngüsü başlığı teslim ettikten sonra SENKRON olarak devam edip
+   * YÜKÜN İÇİNDE 0x0A arıyordu.
+   *
+   * İkili bir dosyada 0x0A sıradan bir bayt. Bulunan her "satır" ya `line.trim() === ''` dalına
+   * düşüp SESSİZCE ATILIYOR, ya da `JSON.parse`'ı patlatıp bütün aktarımı düşürüyordu. Birincisi
+   * veri bozulması: dosya eksik iniyor.
+   *
+   * Neden bugüne kadar görünmedi: büyük bir dosyanın yükü sonraki paketlerde geliyor, o zamana
+   * kadar `takeLeftover` çalışmış ve `stopped` kurulmuş oluyor. Yalnız KÜÇÜK dosyalar — başlıkla
+   * yükün aynı segmente sığdığı durumlar — bu yola giriyor, ve 230 baytlık bir JPEG'in küçük
+   * resmini okumaya çalışmak onu ilk kez tetikledi.
+   */
+  private payloadAfterNextLine = false;
   private failure: Error | null = null;
   private failWaiting: ((error: Error) => void) | null = null;
 
@@ -341,6 +364,12 @@ class LineReader {
       this.failWaiting = null;
       if (waiter) waiter(parsed);
       else this.queued.push(parsed);
+      // Bu satır sonuncuysa döngü BURADA duruyor — `takeLeftover`'ın çalışmasını beklemeden.
+      // Beklemek, kalan baytları yük olarak değil satır olarak taramak demek.
+      if (this.payloadAfterNextLine) {
+        this.stopped = true;
+        break;
+      }
     }
   };
 
@@ -384,6 +413,16 @@ class LineReader {
    * every fast download — and the file would still be the right LENGTH, because the copy loop
    * simply reads further, so nothing downstream would notice.
    */
+  /**
+   * Bundan sonraki İLK satırdan sonrası yük.
+   *
+   * İstek yazılmadan ÖNCE çağrılıyor: ajanın cevabı ilk `data` olayında gelebilir, ve bayrak o
+   * andan önce kurulmamışsa okuyucu yükün içine girer.
+   */
+  expectPayload(): void {
+    this.payloadAfterNextLine = true;
+  }
+
   takeLeftover(): Buffer {
     this.stopped = true;
     const rest = this.buffered;

@@ -889,6 +889,21 @@ body {
   background-size: cover;
   background-position: center;
 }
+/* Satır karesi bir küçük resim taşıdığında: tint yok, dolgu yok, kırpılmış görüntü.
+   `overflow: hidden` ve `object-fit: cover` birlikte, çünkü gömülü küçük resim 4:3 ve kare
+   değil — sığdırmak yerine kırpmak, bir satırda tanınabilir olan tek seçenek. */
+.frow .g.thumb {
+  padding: 0;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.35);
+}
+.frow .g.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
 .frow .n {
   flex: 1;
   color: var(--ink2);

@@ -1047,6 +1047,90 @@ export interface paths {
         };
         trace?: never;
     };
+    "/files/{id}/thumbnail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Gömülü küçük resim
+         * @description SUNUCU HİÇBİR GÖRÜNTÜNÜN KODUNU ÇÖZMÜYOR. Telefon ve fotoğraf makinesi JPEG'leri küçük
+         *     resmi zaten içinde taşıyor — EXIF'in IFD1 bölümünde, tam bir JPEG olarak — ve bu uç onu
+         *     bayt dilimleyerek çıkarıyor. Kodlanmış piksel verisine hiç dokunulmuyor.
+         *
+         *     Alternatifi, sunucuya bir görüntü kütüphanesi koyup güvenilmeyen kullanıcı baytlarını
+         *     oturumları tutan sürecin içinde çözmek olurdu. Bir NAS'ın en çok yüklenen şeyi fotoğraf,
+         *     yani o kod her gün güvenilmeyen veri görürdü.
+         *
+         *     **`download` izni istiyor, `read` değil:** bir küçük resim içeriğin küçültülmüş bir
+         *     kopyası, ve adını görebilen ama baytlarını alamayan birine onu göstermek izni atlatmak
+         *     olurdu.
+         *
+         *     **Küçük resmi olmayan dosya için 204, 404 değil.** Girdinin kendisi var — çağıran onu
+         *     görüyor ve indirebiliyor — olmayan tek şey gömülü bir küçük resim, ki ekran görüntülerinin
+         *     ve EXIF'siz resimlerin çoğunda olmaması normal. Ayrıca 4xx tarayıcı konsoluna bir hata
+         *     satırı yazıyor: yüz fotoğrafın seksen tanesinde küçük resim yoksa bir klasörü açmak seksen
+         *     kırmızı satır demek, ve gerçek hataların görülmemesinin yolu bu. 404 yalnız gerçek yokluk
+         *     için: girdi yok, ya da çağıran onu göremiyor.
+         *
+         *     Cevap her zaman `image/jpeg`, ve `X-Depsis-Orientation` (1–8) EXIF yönlendirmesini
+         *     taşıyor: gömülü küçük resim ana görüntüyle aynı yönde saklanıyor, ve döndürme istemcide bir
+         *     CSS dönüşümü olarak yapılıyor — pikselleri sunucuda çevirmek, tam da kaçınılan şeyi
+         *     yapmak olurdu.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Kararlı dosya kimliği. Yol asla kimlik olarak kullanılmaz (ADR-0005). */
+                    id: components["parameters"]["FileId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Küçük resim */
+                200: {
+                    headers: {
+                        /** @description EXIF yönlendirmesi, 1–8. Bilinmiyorsa 1. */
+                        "X-Depsis-Orientation"?: number;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/jpeg": string;
+                    };
+                };
+                /** @description Girdi var ve görülebiliyor, ama gömülü küçük resmi yok. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Girdi yok ya da çağıran onu göremiyor. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["ProblemDetails"];
+                    };
+                };
+                409: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/files/{id}/content": {
         parameters: {
             query?: never;

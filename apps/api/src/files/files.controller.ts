@@ -30,6 +30,7 @@ import { z } from 'zod';
 import { AgentDataService } from '../agent/agent-data.service.js';
 import { AgentRefusedError, AgentUnavailableError } from '../agent/agent.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import { ThumbnailsService, ThumbnailUnreadableError } from './thumbnails.service.js';
 import { TrashRetentionService } from './trash-retention.service.js';
 import { ProblemException } from '../common/problem.filter.js';
 import { IdempotencyInterceptor } from '../common/idempotency.interceptor.js';
@@ -117,6 +118,7 @@ export class FilesController {
     private readonly files: FilesService,
     private readonly data: AgentDataService,
     private readonly retention: TrashRetentionService,
+    private readonly thumbs: ThumbnailsService,
   ) {}
 
   /**
@@ -684,6 +686,91 @@ export class FilesController {
     }
 
     await this.data.receive(opened.token, start, length, response);
+  }
+
+  /**
+   * Gömülü küçük resim.
+   *
+   * `download` İZNİ İSTİYOR, `read` değil. Bir küçük resim içeriğin küçültülmüş bir kopyası: adını
+   * görebilen ama baytlarını alamayan birine onu göstermek, izni tam olarak atlatmak olurdu.
+   *
+   * KÜÇÜK RESMİ OLMAYAN DOSYA İÇİN 204, 404 DEĞİL — ve fark hem anlamsal hem pratik.
+   *
+   * Anlamsal olan: 404 "böyle bir şey yok" demek, ve girdinin kendisi VAR — çağıran onu görüyor ve
+   * indirebiliyor. Olmayan tek şey gömülü bir küçük resim, ki ekran görüntülerinin ve EXIF'siz
+   * resimlerin çoğunda olmaması normal. 404'ü ikisi için birden kullanmak, "görme yetkin yok" ile
+   * "bu fotoğrafta küçük resim yok"u tek cevaba çevirirdi.
+   *
+   * Pratik olan: 4xx tarayıcı konsoluna bir hata satırı yazıyor. Yüz fotoğrafın seksen tanesinde
+   * küçük resim yoksa, bir klasörü açmak seksen kırmızı satır demek — ve bir geliştirici konsolunu
+   * okunmaz yapan gürültü, gerçek hataların görülmemesinin yolu. 204 sessiz.
+   *
+   * 404 yalnız gerçekten yokluk için: girdi yok, ya da çağıran onu göremiyor.
+   *
+   * `inline` DEĞİL, ve bu indirme ucundaki kararla aynı: `attachment`. Ama burada ek bir sebep
+   * var — dönen baytlar `exif-thumbnail.ts`'in SOI kontrolünden geçmiş, yani gerçekten bir JPEG.
+   * Yine de kendi kaynağımızda satır içi sunmuyoruz, çünkü "gerçekten bir JPEG" ile "zararsız"
+   * aynı şey değil.
+   */
+  @Get(':id/thumbnail')
+  async thumbnail(
+    @Req() request: AuthenticatedRequest,
+    @Res({ passthrough: false }) response: Response,
+    @Param('id') id: string,
+  ): Promise<void> {
+    const caller = requireSession(request);
+    requireUuid(id);
+    const entry = await this.load(caller.organizationId, id);
+    if (entry.kind !== 'file' || entry.trashed_at !== null) throw new NotFoundException();
+
+    const share = await this.shareOfEntry(caller.organizationId, entry);
+    await this.permit(caller, share.id, id, 'download');
+
+    if (!this.data.isAvailable()) {
+      throw new ServiceUnavailableException('the system agent is not reachable');
+    }
+
+    const components = await this.files
+      .componentsOf(caller.organizationId, id)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
+    const found = await this.thumbs
+      .of(id, share.name, components, randomUUID(), `GET /files/${id}/thumbnail`)
+      .catch((error: unknown) => {
+        // Ajanın reddi indirmedekiyle aynı kapalı küme, ve aynı cevaplara çevriliyor: dosya
+        // gitmiş, ya da başkası okuyor.
+        if (error instanceof AgentRefusedError) {
+          throw error.agentReason.includes('reader')
+            ? new ConflictException(error.agentReason)
+            : new NotFoundException();
+        }
+        // Okunamadı: 503, 204 DEĞİL. 204 "bu fotoğrafta küçük resim yok" demek, ve bir aksaklığı
+        // öyle çevirmek istemciye asla düzelmeyecek bir olgu bildirmek olurdu.
+        if (error instanceof ThumbnailUnreadableError) {
+          throw new ServiceUnavailableException('küçük resim okunamadı');
+        }
+        throw error;
+      });
+    if (found === null) {
+      response.status(204).end();
+      return;
+    }
+
+    response.setHeader('Content-Type', 'image/jpeg');
+    response.setHeader('Content-Length', String(found.bytes.length));
+    // Yönlendirme BAŞLIKTA, ve piksellere dokunulmadığı için burada: gömülü küçük resim ana
+    // görüntüyle aynı yönde saklanıyor, ve istemci bunu bir CSS dönüşümüne çeviriyor.
+    response.setHeader('X-Depsis-Orientation', String(found.orientation));
+    response.setHeader(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(entry.name)}.jpg`,
+    );
+    // Değişmez: anahtar girdi kimliği ARTI ajanın bildirdiği boyut, yani dosya değişirse anahtar
+    // da değişiyor. Bir saat, bir ızgarayı defalarca çizen bir oturum için yeterli.
+    response.setHeader('Cache-Control', 'private, max-age=3600');
+    response.end(found.bytes);
   }
 
   private async load(organizationId: string, id: string): Promise<FileEntryRow> {

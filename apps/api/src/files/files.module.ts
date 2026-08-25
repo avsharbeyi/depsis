@@ -8,6 +8,7 @@ import { FileOperationsController } from './file-operations.controller.js';
 import { FilesController } from './files.controller.js';
 import { TrashPolicyController } from './trash-policy.controller.js';
 import { TrashRetentionModule } from './trash-retention.module.js';
+import { ThumbnailsService } from './thumbnails.service.js';
 import { FilesService } from './files.service.js';
 import { SearchController } from './search.controller.js';
 import { TransfersController } from './transfers.controller.js';
@@ -36,7 +37,7 @@ import { UploadsController } from './uploads.controller.js';
     SearchController,
     TransfersController,
   ],
-  providers: [FilesService, TransfersService],
+  providers: [FilesService, TransfersService, ThumbnailsService],
   exports: [FilesService],
 })
 export class FilesModule {}
