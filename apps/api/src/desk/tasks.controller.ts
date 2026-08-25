@@ -1,5 +1,6 @@
 import {
   Body,
+  ConflictException,
   Controller,
   Delete,
   Get,
@@ -17,10 +18,18 @@ import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import type { Caller } from '../files/files.service.js';
+import {
+  LinkedFileNotVisibleError,
+  TaskFileLinkExistsError,
+  TaskFilesService,
+} from './task-files.service.js';
 import {
   AssigneeNotFoundError,
+  TaskBothStatusFieldsError,
   TaskNotFoundError,
   TaskRejectedError,
+  TaskStatusTransitionRefused,
   TasksService,
   type TaskRow,
 } from './tasks.service.js';
@@ -44,11 +53,22 @@ const createSchema = z.object({
   assigneeId: assigneeSchema.optional(),
 });
 
+const statusSchema = z.enum(['draft', 'assigned', 'in_progress', 'in_review', 'done', 'cancelled']);
+const prioritySchema = z.enum(['low', 'normal', 'high', 'urgent']);
+// `datetime()` ve düz string DEĞİL: ayrıştırılamayan bir tarih PostgreSQL'e gidip orada patlardı,
+// ve 500 ile 422 arasındaki fark istemcinin ne yapacağını bilip bilmemesi.
+const dueSchema = z.string().datetime({ offset: true }).nullable();
+
+const linkSchema = z.object({ fileEntryId: z.string().uuid() });
+
 const updateSchema = z
   .object({
     body: bodySchema.optional(),
     assigneeId: assigneeSchema.optional(),
     done: z.boolean().optional(),
+    status: statusSchema.optional(),
+    priority: prioritySchema.optional(),
+    dueAt: dueSchema.optional(),
     position: positionSchema.optional(),
   })
   .refine((v) => Object.keys(v).length > 0, { message: 'nothing to change' });
@@ -65,7 +85,10 @@ const updateSchema = z
 @Controller('tasks')
 @UseGuards(SessionGuard)
 export class TasksController {
-  constructor(private readonly tasks: TasksService) {}
+  constructor(
+    private readonly tasks: TasksService,
+    private readonly links: TaskFilesService,
+  ) {}
 
   @Get()
   async list(@Req() request: AuthenticatedRequest): Promise<Schemas['TaskPage']> {
@@ -115,13 +138,112 @@ export class TasksController {
       // matching branch in `notes.controller.ts`: a 2001-character body must not get one status
       // from the create route and another from the update route.
       throw new UnprocessableEntityException(
-        `one of body, assigneeId, done or position is required, and body must be 1 to ${MAX_BODY} characters`,
+        `one of body, assigneeId, done, status, priority, dueAt or position is required; ` +
+          `body must be 1 to ${MAX_BODY} characters and dueAt an ISO 8601 timestamp`,
       );
     }
 
     try {
-      const row = await this.tasks.update(session.organizationId, id, parsed.data);
+      const row = await this.tasks.update(session.organizationId, id, parsed.data, session.userId);
       return toTask(row);
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  /**
+   * GET /tasks/{id}/files — bu görevin bağlı olduğu, ÇAĞIRANIN GÖREBİLDİĞİ dosyalar.
+   *
+   * Görevin varlığı önce doğrulanıyor. Olmayan bir görev için boş bir liste, "bağ yok" ile "böyle
+   * bir görev yok"u aynı cevaba çevirirdi — ve ikincisi 404.
+   */
+  @Get(':id/files')
+  async files(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+  ): Promise<Schemas['TaskFileLinkPage']> {
+    const caller = requireCaller(request);
+    requireUuid(id);
+    try {
+      await this.tasks.find(caller.organizationId, id);
+      return await this.links.list(caller, id);
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Post(':id/files')
+  @HttpCode(201)
+  async linkFile(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ): Promise<Schemas['TaskFileLink']> {
+    const caller = requireCaller(request);
+    requireUuid(id);
+    const parsed = linkSchema.safeParse(body);
+    if (!parsed.success) throw new UnprocessableEntityException('fileEntryId must be a uuid');
+
+    try {
+      await this.tasks.find(caller.organizationId, id);
+      const link = await this.links.link(caller, id, parsed.data.fileEntryId);
+      // Denetim izine "hangi dosya" olarak YOLU yazıyor, kimliği değil. Bir uuid, altı ay sonra
+      // izi okuyan kişiye hiçbir şey söylemiyor — ve dosya o zamana kadar silinmişse, kimlik artık
+      // hiçbir şeye çözülmüyor.
+      await this.tasks.note(caller.organizationId, id, caller.userId, {
+        field: 'file_link',
+        old: null,
+        new: link.path,
+      });
+      return link;
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Delete(':id/files/:linkId')
+  @HttpCode(204)
+  async unlinkFile(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('linkId') linkId: string,
+  ): Promise<void> {
+    const caller = requireCaller(request);
+    requireUuid(id);
+    requireUuid(linkId);
+    try {
+      await this.tasks.find(caller.organizationId, id);
+      const removed = await this.links.unlink(caller.organizationId, id, linkId);
+      if (!removed) throw new NotFoundException();
+      await this.tasks.note(caller.organizationId, id, caller.userId, {
+        field: 'file_link',
+        old: linkId,
+        new: null,
+      });
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Get(':id/activity')
+  async activity(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+  ): Promise<Schemas['TaskActivityPage']> {
+    const session = requireSession(request);
+    requireUuid(id);
+    try {
+      const rows = await this.tasks.activity(session.organizationId, id);
+      return {
+        items: rows.map((row) => ({
+          id: row.id,
+          actorUsername: row.actor_username,
+          field: row.field,
+          oldValue: row.old_value,
+          newValue: row.new_value,
+          at: row.created_at.toISOString(),
+        })),
+      };
     } catch (error) {
       throw translate(error);
     }
@@ -144,6 +266,12 @@ function toTask(row: TaskRow): Schemas['Task'] {
   return {
     id: row.id,
     body: row.body,
+    status: row.status,
+    priority: row.priority,
+    // `dueAt` sözleşmede isteğe bağlı ve `exactOptionalPropertyTypes` "yok" ile "var ama
+    // undefined"ı ayırıyor, o yüzden yayılıyor. `null` GÖNDERİLİYOR çünkü "son tarih yok" bir
+    // durum, "sunucu söylemedi" değil.
+    dueAt: row.due_at === null ? null : row.due_at.toISOString(),
     assigneeId: row.assignee_id,
     // Always present, and `null` when nobody holds the job. Omitting the key for an unassigned job
     // would make the client distinguish "unassigned" from "the server did not say", which is one
@@ -153,6 +281,23 @@ function toTask(row: TaskRow): Schemas['Task'] {
     position: row.position,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+/**
+ * `Caller`, izin çözümü için.
+ *
+ * `requireSession`'dan ayrı, çünkü dosya izinleri rolü de istiyor: bir organizasyon yöneticisi
+ * `folder_grants` yürüyüşünde farklı cevap alıyor, ve o farkı burada düşürmek bir yöneticinin
+ * kendi göremediği dosyaları göremediğini sanması demek olurdu.
+ */
+function requireCaller(request: AuthenticatedRequest): Caller {
+  const session = request.depsis;
+  if (session === undefined) throw new UnauthorizedException();
+  return {
+    organizationId: session.organizationId,
+    userId: session.userId,
+    isOrganizationAdmin: session.role === 'admin',
   };
 }
 
@@ -178,5 +323,17 @@ function translate(error: unknown): Error {
   // as "no such person here", never as a confirmation that the id belongs to an account elsewhere.
   if (error instanceof AssigneeNotFoundError) return new NotFoundException(error.message);
   if (error instanceof TaskRejectedError) return new UnprocessableEntityException(error.message);
+  // 422 ve 409 DEĞİL. 409 "kaynağın şu anki hâliyle çatışıyor" der ve yeniden denemeyi çağrıştırır;
+  // reddedilen bir geçiş yeniden denemekle geçmez, isteğin kendisi yanlış.
+  if (error instanceof TaskStatusTransitionRefused) {
+    return new UnprocessableEntityException(error.message);
+  }
+  if (error instanceof TaskBothStatusFieldsError) {
+    return new UnprocessableEntityException(error.message);
+  }
+  // Dosya görülemiyor: 404, 403 DEĞİL. 403 dosyanın VAR OLDUĞUNU söyler, ve §7'nin kuralı tam da
+  // görevin dosya hakkında bilgi sızdırmaması.
+  if (error instanceof LinkedFileNotVisibleError) return new NotFoundException();
+  if (error instanceof TaskFileLinkExistsError) return new ConflictException(error.message);
   return error instanceof Error ? error : new Error(String(error));
 }

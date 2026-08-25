@@ -2333,6 +2333,177 @@ export interface paths {
         };
         trace?: never;
     };
+    "/tasks/{id}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Göreve bağlı dosyalar
+         * @description **Görev erişimi dosya erişimi vermiyor** (§7). Bu uç her bağ için dosyanın KENDİ izinlerini
+         *     çözüyor ve çağıranın göremeyeceği satırları hiç döndürmüyor — göremediği bir dosyanın adı,
+         *     yolu ya da paylaşımı bu yanıtta geçmiyor.
+         *
+         *     Görülemeyenlerin SAYISI `hidden` alanında. Sıfır göstermek "burada başka bir şey yok"
+         *     demek olurdu ve bu yanlış; sayıyı tamamen gizlemek bir görevi eksik gösterirdi. Sayı,
+         *     "buraya bakman gereken bir şey var, ama sana değil" cümlesinin en az bilgi sızdıran hâli.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Bağlar */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskFileLinkPage"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        /**
+         * Göreve dosya bağla
+         * @description Bağlayanın o dosyada **en az `read`** izni olmak zorunda. Göremediği bir dosyayı bağlamak,
+         *     onu görebilen birine "bu dosya var" demenin dolaylı yolu olurdu — ve daha kötüsü, bağın
+         *     kendisi bir izin gibi okunabilirdi.
+         *
+         *     Göremediği bir dosya için cevap **404**, 403 değil: 403 dosyanın var olduğunu söyler.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["LinkTaskFileRequest"];
+                };
+            };
+            responses: {
+                /** @description Bağlandı */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskFileLink"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{id}/files/{linkId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Bağı kaldır
+         * @description Dosyaya dokunmuyor — yalnız bağı siliyor. Bağı kaldırmak için dosyayı GÖREBİLMEK gerekmiyor:
+         *     göremediğin bir dosyanın bağı listende duruyorsa, onu kaldırabilmen gerekir, yoksa
+         *     temizleyemeyeceğin bir satır kalır.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    linkId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Kaldırıldı */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{id}/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Görev denetim izi
+         * @description §7: kim, neyi, ne zaman, hangi eski/yeni değerle değiştirdi. Silinen bir kullanıcının
+         *     satırları KALIYOR, aktör anonimleşiyor — bir denetim kaydını hesapla birlikte silmek,
+         *     onun en çok bakılacağı anı yok eder.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Aktivite */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskActivityPage"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/me/preferences": {
         parameters: {
             query?: never;
@@ -4233,6 +4404,32 @@ export interface components {
             /** Format: uuid */
             id: string;
             body: string;
+            /**
+             * @description §7'nin durum makinesi. `doneAt` KALDIRILMADI ve bu bir tereddüt değil: durum "ne
+             *     olduğu", `doneAt` "ne zaman olduğu", ve ikincisinin cevabı birinciden türetilemez.
+             *     Şema ikisinin ANLAŞMASINI zorluyor — `done` olmayan bir görevde `doneAt` dolu olamaz.
+             *
+             *     Geçişler `İncelemede → DevamEdiyor` dahil serbest bırakılmadı; izinli olanlar
+             *     `TaskStatusTransitionRefused` ile reddediliyor. Sunucu tarafında zorlanmasının sebebi,
+             *     bir durum makinesinin yalnız arayüzde yaşadığında bir durum makinesi olmaması.
+             * @enum {string}
+             */
+            status: "draft" | "assigned" | "in_progress" | "in_review" | "done" | "cancelled";
+            /** @enum {string} */
+            priority: "low" | "normal" | "high" | "urgent";
+            /**
+             * Format: date-time
+             * @description Tarih değil ZAMAN DAMGASI. "Yarın" bir zaman diliminde yarın, başkasında bugün; bir
+             *     son tarihin hangi ana denk geldiği, gecikmiş olup olmadığını belirleyen şeyin ta
+             *     kendisi.
+             */
+            dueAt?: string | null;
+            /**
+             * @description Bu görevin ÇAĞIRANIN GÖREBİLDİĞİ kaç dosyaya bağlı olduğu. Toplam sayı değil, ve fark
+             *     §7'nin kuralı: görev erişimi gizli dosya erişimi vermemeli. Göremediği bir dosyanın
+             *     varlığını sayıdan çıkarmak da bir sızıntı olurdu.
+             */
+            linkedFileCount?: number;
             /** Format: uuid */
             assigneeId: string | null;
             assigneeUsername?: string | null;
@@ -4247,6 +4444,52 @@ export interface components {
         TaskPage: {
             items: components["schemas"]["Task"][];
         };
+        TaskFileLink: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            fileEntryId: string;
+            name: string;
+            /** @enum {string} */
+            kind: "file" | "folder";
+            path: string;
+            /** Format: uuid */
+            shareId: string;
+            linkedBy?: string | null;
+            /** Format: date-time */
+            linkedAt: string;
+        };
+        TaskFileLinkPage: {
+            items: components["schemas"]["TaskFileLink"][];
+            /**
+             * @description Bu görevde bağlı olup ÇAĞIRANIN GÖREMEDİĞİ dosya sayısı.
+             *
+             *     Sayının kendisi bildiriliyor ama dosyalar hakkında hiçbir şey bildirilmiyor — ne ad,
+             *     ne yol, ne paylaşım. Sebep: sıfır göstermek "burada başka bir şey yok" demek olurdu
+             *     ve bu yanlış; sayıyı gizlemek de bir görevi eksik gösterip kimsenin sormayacağı bir
+             *     boşluk bırakırdı. Sayı, "buraya bakman gereken bir şey var, ama sana değil"
+             *     cümlesinin en az bilgi sızdıran hâli.
+             */
+            hidden: number;
+        };
+        LinkTaskFileRequest: {
+            /** Format: uuid */
+            fileEntryId: string;
+        };
+        TaskActivity: {
+            /** Format: uuid */
+            id: string;
+            actorUsername?: string | null;
+            /** @enum {string} */
+            field: "status" | "priority" | "due_at" | "assignee_id" | "body" | "file_link";
+            oldValue?: string | null;
+            newValue?: string | null;
+            /** Format: date-time */
+            at: string;
+        };
+        TaskActivityPage: {
+            items: components["schemas"]["TaskActivity"][];
+        };
         CreateTaskRequest: {
             body: string;
             /** Format: uuid */
@@ -4257,6 +4500,12 @@ export interface components {
             /** Format: uuid */
             assigneeId?: string | null;
             done?: boolean;
+            /** @enum {string} */
+            status?: "draft" | "assigned" | "in_progress" | "in_review" | "done" | "cancelled";
+            /** @enum {string} */
+            priority?: "low" | "normal" | "high" | "urgent";
+            /** Format: date-time */
+            dueAt?: string | null;
             position?: number;
         };
         /**

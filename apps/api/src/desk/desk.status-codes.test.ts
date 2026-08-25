@@ -5,6 +5,7 @@ import type { AuthenticatedRequest } from '../auth/session.guard.js';
 import { NotesController } from './notes.controller.js';
 import type { NotesService } from './notes.service.js';
 import { TasksController } from './tasks.controller.js';
+import type { TaskFilesService } from './task-files.service.js';
 import type { TasksService } from './tasks.service.js';
 
 /**
@@ -29,7 +30,13 @@ const NEVER_CALLED = {
 };
 
 const notes = new NotesController(NEVER_CALLED as unknown as NotesService);
-const tasks = new TasksController(NEVER_CALLED as unknown as TasksService);
+// `NEVER_CALLED` ikisi için de: bu süit yalnız gövde doğrulamasının hangi durum kodunu
+// ürettiğini ölçüyor, ve doğrulama servislerden ÖNCE koşuyor — bir çağrı gelirse test
+// zaten yanlış şeyi ölçüyordur.
+const tasks = new TasksController(
+  NEVER_CALLED as unknown as TasksService,
+  NEVER_CALLED as unknown as TaskFilesService,
+);
 
 /** A resolved session, which the handlers require before they look at the body. */
 function signedIn(): AuthenticatedRequest {

@@ -1014,7 +1014,11 @@ export class FilesService {
   async effectiveForRows(
     caller: Caller,
     shareId: string,
-    rows: readonly FileEntryRow[],
+    // `{ id }` ve `FileEntryRow` DEĞİL: bu fonksiyon satırın yalnız kimliğini okuyor, ve tam satır
+    // istemek onu yalnız tam satırı olan çağıranlara açık tutuyordu. `TaskFilesService` bağ
+    // tablosundan gelen kimliklerle soruyor ve bir `as never` uydurması, tipin taşımadığı bir
+    // iddiayı derleyiciye zorla kabul ettirmek olurdu.
+    rows: readonly { readonly id: string }[],
   ): Promise<ReadonlyMap<string, ReadonlySet<Permission>>> {
     const ids = rows.map((row) => row.id);
     const access = await this.accessFor(caller, shareId, ids);

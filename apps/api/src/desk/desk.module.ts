@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module.js';
+import { FilesModule } from '../files/files.module.js';
+import { TaskFilesService } from './task-files.service.js';
 import { NotesController } from './notes.controller.js';
 import { NotesService } from './notes.service.js';
 import { TasksController } from './tasks.controller.js';
@@ -16,10 +18,15 @@ import { TasksService } from './tasks.service.js';
  *
  * `AuthModule` supplies `SessionGuard`, which both controllers sit behind; `DbModule` is global.
  * Nothing is exported: a note or a job is changed through these endpoints or not at all.
+ *
+ * `FilesModule` §7'nin bir cümlesi yüzünden burada: "görev erişimi gizli dosya erişimi
+ * vermemelidir". Bir görevin dosya bağı, dosyanın KENDİ izinlerini çözmek zorunda, ve o çözümü
+ * yapan kod `FilesService`'te. Kopyalamak, iki farklı yetki yürüyüşü — yani zamanla iki farklı
+ * cevap — demek olurdu.
  */
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, FilesModule],
   controllers: [NotesController, TasksController],
-  providers: [NotesService, TasksService],
+  providers: [NotesService, TasksService, TaskFilesService],
 })
 export class DeskModule {}

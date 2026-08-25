@@ -1340,6 +1340,86 @@ paths:
         '204': { description: Silindi }
         '404': { $ref: '#/components/responses/Problem' }
 
+  /tasks/{id}/files:
+    get:
+      tags: [tasks]
+      summary: Göreve bağlı dosyalar
+      description: |
+        **Görev erişimi dosya erişimi vermiyor** (§7). Bu uç her bağ için dosyanın KENDİ izinlerini
+        çözüyor ve çağıranın göremeyeceği satırları hiç döndürmüyor — göremediği bir dosyanın adı,
+        yolu ya da paylaşımı bu yanıtta geçmiyor.
+
+        Görülemeyenlerin SAYISI `hidden` alanında. Sıfır göstermek "burada başka bir şey yok"
+        demek olurdu ve bu yanlış; sayıyı tamamen gizlemek bir görevi eksik gösterirdi. Sayı,
+        "buraya bakman gereken bir şey var, ama sana değil" cümlesinin en az bilgi sızdıran hâli.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Bağlar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskFileLinkPage' }
+        '404': { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [tasks]
+      summary: Göreve dosya bağla
+      description: |
+        Bağlayanın o dosyada **en az `read`** izni olmak zorunda. Göremediği bir dosyayı bağlamak,
+        onu görebilen birine "bu dosya var" demenin dolaylı yolu olurdu — ve daha kötüsü, bağın
+        kendisi bir izin gibi okunabilirdi.
+
+        Göremediği bir dosya için cevap **404**, 403 değil: 403 dosyanın var olduğunu söyler.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LinkTaskFileRequest' }
+      responses:
+        '201':
+          description: Bağlandı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskFileLink' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /tasks/{id}/files/{linkId}:
+    delete:
+      tags: [tasks]
+      summary: Bağı kaldır
+      description: |
+        Dosyaya dokunmuyor — yalnız bağı siliyor. Bağı kaldırmak için dosyayı GÖREBİLMEK gerekmiyor:
+        göremediğin bir dosyanın bağı listende duruyorsa, onu kaldırabilmen gerekir, yoksa
+        temizleyemeyeceğin bir satır kalır.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: linkId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Kaldırıldı }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /tasks/{id}/activity:
+    get:
+      tags: [tasks]
+      summary: Görev denetim izi
+      description: |
+        §7: kim, neyi, ne zaman, hangi eski/yeni değerle değiştirdi. Silinen bir kullanıcının
+        satırları KALIYOR, aktör anonimleşiyor — bir denetim kaydını hesapla birlikte silmek,
+        onun en çok bakılacağı anı yok eder.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Aktivite
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskActivityPage' }
+        '404': { $ref: '#/components/responses/Problem' }
+
   /me/preferences:
     get:
       tags: [me]
@@ -2739,10 +2819,37 @@ components:
 
     Task:
       type: object
-      required: [id, body, assigneeId, doneAt, position, createdAt, updatedAt]
+      required: [id, body, status, priority, assigneeId, doneAt, position, createdAt, updatedAt]
       properties:
         id: { type: string, format: uuid }
         body: { type: string, maxLength: 2000 }
+        status:
+          type: string
+          enum: [draft, assigned, in_progress, in_review, done, cancelled]
+          description: |
+            §7'nin durum makinesi. `doneAt` KALDIRILMADI ve bu bir tereddüt değil: durum "ne
+            olduğu", `doneAt` "ne zaman olduğu", ve ikincisinin cevabı birinciden türetilemez.
+            Şema ikisinin ANLAŞMASINI zorluyor — `done` olmayan bir görevde `doneAt` dolu olamaz.
+
+            Geçişler `İncelemede → DevamEdiyor` dahil serbest bırakılmadı; izinli olanlar
+            `TaskStatusTransitionRefused` ile reddediliyor. Sunucu tarafında zorlanmasının sebebi,
+            bir durum makinesinin yalnız arayüzde yaşadığında bir durum makinesi olmaması.
+        priority:
+          type: string
+          enum: [low, normal, high, urgent]
+        dueAt:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Tarih değil ZAMAN DAMGASI. "Yarın" bir zaman diliminde yarın, başkasında bugün; bir
+            son tarihin hangi ana denk geldiği, gecikmiş olup olmadığını belirleyen şeyin ta
+            kendisi.
+        linkedFileCount:
+          type: integer
+          description: |
+            Bu görevin ÇAĞIRANIN GÖREBİLDİĞİ kaç dosyaya bağlı olduğu. Toplam sayı değil, ve fark
+            §7'nin kuralı: görev erişimi gizli dosya erişimi vermemeli. Göremediği bir dosyanın
+            varlığını sayıdan çıkarmak da bir sızıntı olurdu.
         # Atanmamış bir iş gerçek bir durum: "birinin yapması lazım". Oluştururken bir isim
         # dayatmak, paylaşımlı listelerin kullanılmaz hâle gelme biçimidir.
         assigneeId: { type: [string, 'null'], format: uuid }
@@ -2762,6 +2869,64 @@ components:
           type: array
           items: { $ref: '#/components/schemas/Task' }
 
+    TaskFileLink:
+      type: object
+      required: [id, fileEntryId, name, kind, path, shareId, linkedAt]
+      properties:
+        id: { type: string, format: uuid }
+        fileEntryId: { type: string, format: uuid }
+        name: { type: string }
+        kind: { type: string, enum: [file, folder] }
+        path: { type: string }
+        shareId: { type: string, format: uuid }
+        linkedBy: { type: [string, 'null'] }
+        linkedAt: { type: string, format: date-time }
+
+    TaskFileLinkPage:
+      type: object
+      required: [items, hidden]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TaskFileLink' }
+        hidden:
+          type: integer
+          description: |
+            Bu görevde bağlı olup ÇAĞIRANIN GÖREMEDİĞİ dosya sayısı.
+
+            Sayının kendisi bildiriliyor ama dosyalar hakkında hiçbir şey bildirilmiyor — ne ad,
+            ne yol, ne paylaşım. Sebep: sıfır göstermek "burada başka bir şey yok" demek olurdu
+            ve bu yanlış; sayıyı gizlemek de bir görevi eksik gösterip kimsenin sormayacağı bir
+            boşluk bırakırdı. Sayı, "buraya bakman gereken bir şey var, ama sana değil"
+            cümlesinin en az bilgi sızdıran hâli.
+
+    LinkTaskFileRequest:
+      type: object
+      required: [fileEntryId]
+      properties:
+        fileEntryId: { type: string, format: uuid }
+
+    TaskActivity:
+      type: object
+      required: [id, field, at]
+      properties:
+        id: { type: string, format: uuid }
+        actorUsername: { type: [string, 'null'] }
+        field:
+          type: string
+          enum: [status, priority, due_at, assignee_id, body, file_link]
+        oldValue: { type: [string, 'null'] }
+        newValue: { type: [string, 'null'] }
+        at: { type: string, format: date-time }
+
+    TaskActivityPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TaskActivity' }
+
     CreateTaskRequest:
       type: object
       required: [body]
@@ -2775,7 +2940,16 @@ components:
       properties:
         body: { type: string, minLength: 1, maxLength: 2000 }
         assigneeId: { type: [string, 'null'], format: uuid }
+        # `done` KALDI ve `status` ile birlikte gönderilemez. Eski istemciler onu kullanıyor ve
+        # ikisini aynı istekte kabul etmek "hangisi kazanır" sorusunu doğurur — cevabı olan ama
+        # kimsenin bilmediği bir soru. `done: true` → `status: done`, `done: false` → `assigned`
+        # ya da `draft`, atanan varsa birincisi.
         done: { type: boolean }
+        status:
+          type: string
+          enum: [draft, assigned, in_progress, in_review, done, cancelled]
+        priority: { type: string, enum: [low, normal, high, urgent] }
+        dueAt: { type: [string, 'null'], format: date-time }
         position: { type: number }
 
     Preferences:
