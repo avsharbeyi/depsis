@@ -1777,7 +1777,27 @@ function Thumb({
   glyph: string;
 }): React.JSX.Element {
   const [source, setSource] = useState<{ url: string; spin: string | undefined } | null>(null);
-  const wanted = entry.kind === 'file' && THUMBNAILED.has(suffix(entry.name));
+  /**
+   * SUNUCUNUN REDDEDECEĞİ BİR ŞEY SORULMUYOR, ve üç koşulun üçü de ölçülmüş bir sebeple burada.
+   *
+   * `THUMBNAILED`: uç yalnız JPEG'in EXIF'ine gömülü küçük resmi çıkarıyor, PNG ve WebP öyle bir
+   * şey taşımıyor — onlar için istek her zaman 204 dönerdi.
+   *
+   * `trashedAt`: çöpteki bir girdi indirilemiyor, ve uç 404 veriyor. CI'nin mobil projesi tam
+   * bunu yakaladı: çöp görünümünde iki JPEG vardı, iki 404, ve iki konsol hatası.
+   *
+   * `download`: bir satır `read` ile görünüp `download` olmadan durabiliyor, ve küçük resim
+   * içeriğin küçültülmüş kopyası olduğu için o izni istiyor. Yine bir 4xx.
+   *
+   * Kuralı ikinci kez YAZMIYOR — reddi hâlâ sunucu veriyor. Buradaki iş, hiçbir zaman
+   * cevaplanmayacak bir isteği hiç göndermemek, ve tarayıcı konsolunu bir klasör açılışında
+   * onlarca kırmızı satırla doldurmamak.
+   */
+  const wanted =
+    entry.kind === 'file' &&
+    THUMBNAILED.has(suffix(entry.name)) &&
+    entry.trashedAt === undefined &&
+    can(entry, 'download');
 
   useEffect(() => {
     if (!wanted) return undefined;
