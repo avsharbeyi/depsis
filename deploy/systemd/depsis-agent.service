@@ -120,6 +120,23 @@ ProtectHostname=yes
 CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYSLOG CAP_SYS_TIME CAP_WAKE_ALARM
 SystemCallFilter=~@module
 
+# ─── off-site replication's own state ─────────────────────────────────────────
+#
+# The agent keeps an SSH identity and a `known_hosts` under /var/lib/depsis/offsite, creating the
+# directory on first use. No StateDirectory= here, and that is not an oversight: StateDirectory=
+# creates the path under a private mount namespace, which is the same trap the section below
+# describes for every other namespacing directive — the directory would exist for this service and
+# for nothing else. The agent runs as root with no ProtectSystem=, so an ordinary mkdir is both
+# sufficient and visible from outside.
+#
+# THE PRIVATE KEY LIVES THERE, mode 0600. Two consequences worth writing down for whoever sets a
+# machine up: a backup of /var/lib that leaves the appliance carries a credential which can write
+# to the off-site destination, and restoring an appliance from an image restores that credential
+# with it. Neither is a reason to keep the key somewhere else — anywhere the agent can read it, an
+# image of the disk can too — but both are reasons to treat that directory as secret.
+#
+# Requires: openssh-client (ssh, ssh-keygen, ssh-keyscan), at the absolute paths in dispatch.rs.
+
 # ─── hardening deliberately NOT enabled, with reasons ─────────────────────────
 #
 # ProtectSystem=, ProtectHome=, PrivateTmp=, ReadWritePaths=, ProtectProc=, PrivateDevices=,

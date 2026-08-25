@@ -19,6 +19,7 @@ import { trashPurgeHandler, TRASH_PURGE_KIND } from './trash-purge.handler.js';
 import { identitySyncHandler, IDENTITY_SYNC_KIND } from './identity-sync.handler.js';
 import { snapshotHandler, SNAPSHOT_KIND } from './snapshot.handler.js';
 import { overdueSweepHandler, OVERDUE_SWEEP_KIND } from './overdue-sweep.handler.js';
+import { offsiteHandler, OFFSITE_KIND } from './offsite.handler.js';
 import { replicateHandler, REPLICATE_KIND } from './replicate.handler.js';
 import { restoreSnapshotHandler, RESTORE_KIND } from './restore-snapshot.handler.js';
 
@@ -66,6 +67,10 @@ export function registerHandlers(
   // `zfs recv -F` destroys the target, and a retry after an ambiguous failure destroys it
   // again without knowing what state it reached.
   worker.register(REPLICATE_KIND, replicateHandler(services.agent));
+  // The THIRD destructive kind, and the only one whose destruction happens on another machine.
+  // `maxAttempts: 1` for the same reason as the two above, plus one: over a network an
+  // ambiguous failure is the ordinary case, not the rare one.
+  worker.register(OFFSITE_KIND, offsiteHandler(services.agent));
   // One file out of a snapshot. Registered beside the copy because it IS one — same service,
   // same sliced staging — and because a kind registered nowhere is a queue row nothing claims,
   // which is how `permissions.apply` once sat unclaimed for weeks behind a spinner.

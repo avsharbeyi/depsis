@@ -12,8 +12,8 @@ use crate::acl::{self, AclError};
 use crate::audit::{self, Outcome, Sink};
 use crate::authz::{Decision, Policy};
 use crate::op::{
-    AclEntry, AclType, DirEntry, PosixId, Request, Response, SafeComponent, SnapshotEntry,
-    SCHEMA_VERSION, SHARE_ROOT_MODE,
+    AclEntry, AclType, DirEntry, OffsiteHostKey, PosixId, Request, Response, SafeComponent,
+    SnapshotEntry, SCHEMA_VERSION, SHARE_ROOT_MODE,
 };
 use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource};
 use crate::transfer::{
@@ -34,6 +34,11 @@ pub mod bin {
     pub const SMARTCTL: &str = "/usr/sbin/smartctl";
     pub const TESTPARM: &str = "/usr/bin/testparm";
     pub const LSBLK: &str = crate::disks::LSBLK;
+    /// Off-site replication's three. Absolute, for the reason every path here is: the agent runs
+    /// with systemd's `PATH` and a bare program name is a supply-chain question.
+    pub const SSH: &str = "/usr/bin/ssh";
+    pub const SSH_KEYGEN: &str = "/usr/bin/ssh-keygen";
+    pub const SSH_KEYSCAN: &str = "/usr/bin/ssh-keyscan";
 }
 
 /// Where staging files live inside a share.
@@ -875,6 +880,73 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
+    /// The off-site identity and the destinations this appliance trusts.
+    ///
+    /// The PUBLIC key only. There is no path from this operation set to the private half, which is
+    /// the property that makes generating the key on the privileged side worth anything at all.
+    fn offsite_status(&self) -> Result<Response, SeamError> {
+        let key = crate::offsite::key_path();
+        let has_identity = key.exists();
+
+        let public_key = if has_identity {
+            std::fs::read_to_string(crate::offsite::public_key_path())
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        };
+        let fingerprint = if has_identity {
+            let argv = crate::offsite::fingerprint_argv(&crate::offsite::public_key_path());
+            let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+            self.runner
+                .run(bin::SSH_KEYGEN, &borrowed)
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        };
+
+        // The PATTERNS, not the key material. What a person needs to see is which destinations
+        // this box will talk to; the base64 blob answers nothing they can act on.
+        let trusted = std::fs::read_to_string(crate::offsite::known_hosts_path())
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+            .collect();
+
+        Ok(Response::Offsite {
+            has_identity,
+            public_key,
+            fingerprint,
+            trusted,
+        })
+    }
+
+    /// `ssh-keygen -l` on one host key line, through a file because that is what the tool takes.
+    ///
+    /// OpenSSH computes it, not DEPSIS. The user compares this string against what
+    /// `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` prints on the far end, and a second
+    /// implementation of the format would be a second chance for that comparison to fail for a
+    /// reason that has nothing to do with the key.
+    fn fingerprint_of(&self, line: &str) -> Result<String, SeamError> {
+        let dir = crate::offsite::state_dir();
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| SeamError::Io(format!("{}: {e}", dir.display())))?;
+        let scratch = dir.join("scan.pub");
+        (self.private_writer)(&scratch, &format!("{line}\n"))
+            .map_err(|e| SeamError::Io(format!("{}: {e}", scratch.display())))?;
+
+        let argv = crate::offsite::fingerprint_argv(&scratch);
+        let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let out = self.runner.run(bin::SSH_KEYGEN, &borrowed);
+        // Removed whether or not the fingerprint worked: a leftover file under the agent's own
+        // state directory is a public key nobody asked to keep.
+        let _ = std::fs::remove_file(&scratch);
+        Ok(out?.trim().to_string())
+    }
+
     /// One directory's contents, so the API can compare disk against `file_entries`.
     ///
     /// Names and metadata only — see `op::Request::ListDirectory` for why that is the whole point.
@@ -1490,6 +1562,162 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                         Ok(Response::Refused {
                             reason: "the target does not hold the base snapshot; a full send is \
                                      needed"
+                                .to_string(),
+                        })
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+
+            Request::OffsiteStatus {} => self.offsite_status(),
+
+            Request::OffsiteCreateIdentity {} => {
+                // CHECKED FIRST, and not left to `ssh-keygen`. Asked to overwrite, `ssh-keygen`
+                // PROMPTS — and a prompt on a daemon's stdin never returns, so the operation would
+                // hang holding the control socket rather than refuse.
+                if crate::offsite::key_path().exists() {
+                    return Ok(Response::Refused {
+                        reason: crate::offsite::Refusal::IdentityExists.reason().to_string(),
+                    });
+                }
+                let dir = crate::offsite::state_dir();
+                std::fs::create_dir_all(&dir)
+                    .map_err(|e| SeamError::Io(format!("{}: {e}", dir.display())))?;
+
+                let key = crate::offsite::key_path();
+                let argv = crate::offsite::keygen_argv(&key);
+                let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+                self.runner.run(bin::SSH_KEYGEN, &borrowed)?;
+                self.offsite_status()
+            }
+
+            Request::OffsiteScanHost { host, port } => {
+                let argv = crate::offsite::keyscan_argv(host, *port);
+                let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+                let scanned = match self.runner.run(bin::SSH_KEYSCAN, &borrowed) {
+                    Ok(out) => out,
+                    // A destination that is off, firewalled or not running SSH is an ORDINARY
+                    // state of the world, not a fault of this appliance. Reported as a refusal
+                    // with the reason so the user reads "could not reach it" rather than a 500.
+                    Err(error) => {
+                        return Ok(Response::Refused {
+                            reason: format!("could not reach {}: {error}", host.as_str()),
+                        })
+                    }
+                };
+
+                let mut keys = Vec::new();
+                for found in crate::offsite::parse_keyscan(&scanned) {
+                    // Fingerprinted by OPENSSH, through a file, because `ssh-keygen -l` takes a
+                    // file. One key per file so the pairing is by construction rather than by
+                    // trusting two outputs to come back in the same order.
+                    let fingerprint = self.fingerprint_of(&found.line)?;
+                    keys.push(OffsiteHostKey {
+                        kind: found.kind,
+                        line: found.line,
+                        fingerprint,
+                    });
+                }
+                Ok(Response::OffsiteHostKeys { keys })
+            }
+
+            Request::OffsiteTrustHost { host, port, line } => {
+                // The line must actually BE for this host and port. Without this, confirming a
+                // fingerprint the user checked for one destination would write an entry that
+                // authorises a completely different one — the exact substitution the whole
+                // confirm-the-fingerprint ritual exists to prevent.
+                let pattern = crate::offsite::host_key_pattern(host, *port);
+                let names = line.as_str().split_whitespace().next().unwrap_or("");
+                if !names.split(',').any(|name| name == pattern) {
+                    return Ok(Response::Refused {
+                        reason: format!("that host key line is for {names:?}, not for {pattern:?}"),
+                    });
+                }
+
+                let path = crate::offsite::known_hosts_path();
+                let existing = std::fs::read_to_string(&path).unwrap_or_default();
+                // Idempotent: confirming the same key twice is a user pressing a button twice,
+                // and a duplicated line is a file that grows without bound.
+                if !existing.lines().any(|had| had.trim() == line.as_str()) {
+                    let mut body = existing;
+                    if !body.is_empty() && !body.ends_with('\n') {
+                        body.push('\n');
+                    }
+                    body.push_str(line.as_str());
+                    body.push('\n');
+                    let dir = crate::offsite::state_dir();
+                    std::fs::create_dir_all(&dir)
+                        .map_err(|e| SeamError::Io(format!("{}: {e}", dir.display())))?;
+                    (self.private_writer)(&path, &body)
+                        .map_err(|e| SeamError::Io(format!("{}: {e}", path.display())))?;
+                }
+                self.offsite_status()
+            }
+
+            Request::ReplicateOffsite {
+                source,
+                snapshot,
+                base,
+                host,
+                port,
+                user,
+                target,
+            } => {
+                // BEFORE ANYTHING IS SPAWNED, and both refusals matter. Without a key `ssh` would
+                // fall back to asking for a password on a stdin nobody is holding; without a
+                // confirmed host key it would either prompt or — with the wrong options — accept
+                // whatever answered, which on a replication is an attacker receiving a copy of
+                // every file this appliance holds.
+                if !crate::offsite::key_path().exists() {
+                    return Ok(Response::Refused {
+                        reason: crate::offsite::Refusal::NoIdentity.reason().to_string(),
+                    });
+                }
+                let known =
+                    std::fs::read_to_string(crate::offsite::known_hosts_path()).unwrap_or_default();
+                if !crate::offsite::trusts(&known, host, *port) {
+                    return Ok(Response::Refused {
+                        reason: crate::offsite::Refusal::HostNotTrusted.reason().to_string(),
+                    });
+                }
+
+                let full = format!("{}@{}", source.as_str(), snapshot.as_str());
+                let from = base
+                    .as_ref()
+                    .map(|b| format!("{}@{}", source.as_str(), b.as_str()));
+                let send = crate::replicate::send_argv(&full, from.as_deref());
+                let ssh = crate::offsite::ssh_recv_argv(
+                    user,
+                    host,
+                    *port,
+                    target.as_str(),
+                    &crate::offsite::key_path(),
+                    &crate::offsite::known_hosts_path(),
+                );
+                let ssh_borrowed: Vec<&str> = ssh.iter().map(String::as_str).collect();
+
+                match self
+                    .runner
+                    .run_piped(bin::ZFS, &send, bin::SSH, &ssh_borrowed)
+                {
+                    Ok(detail) => Ok(Response::Replicated { detail, base: from }),
+                    // A CHANGED HOST KEY IS ITS OWN ANSWER. It is either a reinstalled server or
+                    // somebody standing in the middle, and DEPSIS must not guess which — the user
+                    // re-confirms deliberately or not at all.
+                    Err(error) if crate::offsite::host_key_changed(&error) => {
+                        Ok(Response::Refused {
+                            reason: format!(
+                                "{} is no longer presenting the host key that was confirmed. \
+                                 Either it was reinstalled, or something is answering in its \
+                                 place. Scan and confirm it again only if you know which.",
+                                host.as_str()
+                            ),
+                        })
+                    }
+                    Err(error) if crate::replicate::incremental_rejected(&error) => {
+                        Ok(Response::Refused {
+                            reason: "the destination does not hold the base snapshot; a full \
+                                     send is needed"
                                 .to_string(),
                         })
                     }

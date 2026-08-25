@@ -140,14 +140,38 @@ ama sınırın doğru sayı olduğu ölçülmedi.
 
    **Kalan iki şey ve neden kaldıkları:**
 
-   _Ayrı hedefe `zfs send` — İKİNCİ BİR VERİ KÜMESİNE yapılabiliyor, başka bir MAKİNEYE değil._
-   `POST /storage/replication` §8.1'in dizisiyle çalışıyor (analiz, plan, yazılı onay, yeniden
-   kimlik doğrulama, iş) ve ajan dört şeyi reddediyor: aynı veri kümesi, iç içe olanlar, paylaşım
-   kökü, paylaşım ağacının içi. İki havuzlu bir NAS'ın gerçekten sahip olduğu hedef budur.
+   _Ayrı hedefe `zfs send` — ARTIK BAŞKA BİR MAKİNEYE DE._ Bu madde bir taşıma katmanı (SSH), bir
+   kimlik deposu, host anahtarı doğrulaması ve kopan bir bağlantı için bir hata modeli istiyordu.
+   Dördü de yazıldı.
 
-   Başka bir makineye göndermek bir taşıma katmanı (SSH), bir kimlik deposu, host anahtarı
-   doğrulaması ve kopan bir bağlantı için bir hata modeli istiyor — kendi güven yüzeyi, ve tek
-   havuzlu bir kutuda hiçbiri denenemez.
+   `POST /storage/replication` ikinci bir HAVUZA kopyalıyor ve bir diskin ölmesini atlatıyor;
+   `POST /storage/offsite/replicate` başka bir MAKİNEYE kopyalıyor ve kutunun çalınmasını, evin
+   yanmasını, fidye yazılımının bağlı her veri kümesine ulaşmasını atlatıyor — ki insanlar "yedek"
+   derken çoğunlukla bunu kastediyor. İkisi de §8.1'in dizisini izliyor; ikincisinin onay metni
+   `kullanıcı@makine:veri-kümesi`, çünkü yok edilen şey karşı tarafta ve aynı ada sahip yerel bir
+   veri kümesi olabilir.
+
+   **Anahtar ayrıcalıklı tarafta üretiliyor ve orada kalıyor.** Hiçbir uç özel yarısını okuyamıyor;
+   okunabilen tek şey açık yarı — kullanıcının karşı tarafın `authorized_keys` dosyasına
+   yapıştıracağı satır. ADR-0016 cihazı, veritabanına erişimin tek başına yetmeyeceği şekilde
+   bölüyor, ve bir HTTP ucundan okunabilen özel anahtar o bölmeyi başka bir makineye ulaşan tek
+   kimlik bilgisi için ortadan kaldırırdı.
+
+   **İlk kullanımda güven yok.** `scan` karşı tarafın anahtarını soruyor ve hiçbir şeye güvenmiyor;
+   `trust` kullanıcının GÖRDÜĞÜ ve parmak izini karşılaştırdığı satırı yazıyor. İkisi ayrı uç, ve
+   birleştirilmemeleri kararın kendisi: "bağlan ve ne çıkarsa kabul et" bir replikasyonda
+   saldırganın bu cihazdaki her dosyanın kopyasını alması demek. `ssh` `StrictHostKeyChecking=yes`
+   ile çağrılıyor, `accept-new` ile değil.
+
+   **Host anahtarı DEĞİŞTİYSE kendi cevabı var.** Ya sunucu yeniden kuruldu ya da araya biri girdi,
+   ve DEPSIS hangisi olduğunu tahmin etmiyor — iş, kullanıcının bilerek yeniden onaylamasını
+   isteyen bir cümleyle duruyor.
+
+   **Yapılmayan:** IPv6 literalleri (`known_hosts` onları köşeli parantezle yazıyor ve yarım
+   ayrıştırılmış bir adres hiçbir şeyle eşleşmeyen bir arama anahtarı üretir — ad kullanmak
+   gerekiyor), ve gerçek bir uzak makineye karşı ölçüm: bu depoda ikinci bir makine yok, yani
+   ölçülen şey argv'nin şekli, parmak izi eşleştirmesi ve reddedişler; baytların gerçekten karşıya
+   varması değil.
 
    **Zamanlama yok:** çoğaltma elle başlatılıyor, gece kendiliğinden koşmuyor. `job_queue.run_after`
    zaten dayanıklı bir zamanlayıcı ve dört zincir onu kullanıyor, yani eksik olan şey mekanizma

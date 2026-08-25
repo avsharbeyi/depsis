@@ -46,6 +46,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       'permissions.apply',
       'storage.pool.create',
       'storage.replicate',
+      'storage.replicate-offsite',
       'storage.snapshot',
       'tasks.overdue-sweep',
     ]);

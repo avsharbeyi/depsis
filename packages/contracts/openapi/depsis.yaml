@@ -1999,6 +1999,135 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
 
+  /storage/offsite:
+    get:
+      operationId: getOffsiteStatus
+      tags: [system]
+      summary: Başka bir makineye yedeklemenin durumu
+      description: |
+        Bu cihazın off-site kimliği ve güvendiği hedefler.
+
+        ÖZEL ANAHTAR BURADA YOK ve hiçbir uçta yok. Anahtar ayrıcalıklı tarafta üretiliyor ve orada
+        kalıyor; okunabilen tek şey AÇIK yarısı — kullanıcının karşı tarafın `authorized_keys`
+        dosyasına yapıştıracağı şey. ADR-0016 cihazı, veritabanına erişimin tek başına
+        yetmeyeceği şekilde bölüyor, ve bir HTTP ucundan okunabilen özel anahtar o bölmeyi başka
+        bir makineye ulaşan tek kimlik bilgisi için ortadan kaldırırdı.
+
+        Kurucu yönetici.
+      responses:
+        '200':
+          description: Kimlik ve güvenilen hedefler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OffsiteStatus' }
+        '403': { $ref: '#/components/responses/Problem' }
+
+  /storage/offsite/identity:
+    post:
+      operationId: createOffsiteIdentity
+      tags: [system]
+      summary: Off-site anahtarını üret
+      description: |
+        Bir kez üretir. Zaten varsa 409 — üzerine yazmak asla doğru cevap değil: karşı tarafın
+        `authorized_keys` dosyası ESKİ anahtarın açık yarısını tutuyor, yani sessiz bir yenileme
+        her gelecekteki çoğaltmayı saatler sonra, karşı tarafta, sebebi burada hiç görünmeyen bir
+        izin hatasına çevirirdi.
+      responses:
+        '201':
+          description: Üretildi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OffsiteStatus' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /storage/offsite/scan:
+    post:
+      operationId: scanOffsiteHost
+      tags: [system]
+      summary: Hedefin host anahtarını sor
+      description: |
+        Sorar ve HİÇBİR ŞEYE GÜVENMEZ. Dönen parmak izleri, kullanıcının karşı tarafta
+        `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` ile göreceği şeyle karşılaştırması için.
+
+        Bunu `trust` ile tek bir uçta birleştirmek — "bağlan ve ne çıkarsa kabul et" — bir
+        replikasyonda saldırganın bu cihazdaki her dosyanın kopyasını alması demek. Yanlış makineye
+        giden bir yedek, hiç yedek olmamasından kötüdür.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OffsiteDestination' }
+      responses:
+        '200':
+          description: Hedefin sunduğu anahtarlar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OffsiteHostKeyPage' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503':
+          description: |
+            Hedefe ulaşılamadı — kapalı, güvenlik duvarının arkasında, ya da SSH çalışmıyor. Bu
+            cihazın arızası değil.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  /storage/offsite/trust:
+    post:
+      operationId: trustOffsiteHost
+      tags: [system]
+      summary: Görülen bir host anahtarını onayla
+      description: |
+        Kullanıcının GÖRDÜĞÜ ve parmak izini karşılaştırdığı satırı yazar. Satır bu makine ve bu
+        port için değilse reddedilir: aksi hâlde bir hedef için kontrol edilen parmak izi, bambaşka
+        bir hedefi yetkilendiren bir kayıt yazardı — parmak izi karşılaştırma ayininin engellemek
+        için var olduğu tam olarak o değiştirme.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OffsiteTrustRequest' }
+      responses:
+        '200':
+          description: Güncellenmiş durum
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OffsiteStatus' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+
+  /storage/offsite/replicate:
+    post:
+      operationId: replicateOffsite
+      tags: [system]
+      summary: Bir anlık görüntüyü başka bir makineye gönder
+      description: |
+        §8.1'in dizisi, yereldeki kardeşiyle birebir: analiz, plan, yazılı onay, yeniden kimlik
+        doğrulama, iş.
+
+        KARŞI TARAFTA `zfs recv -F` çalışıyor — yani yok edilen şey ORADA. Onay metni bu yüzden
+        `kullanıcı@makine:veri-kümesi`: aynı ada sahip yerel bir veri kümesi olabilir, ve onaylanan
+        şeyin hangisi olduğu tartışmaya açık kalmamalı.
+
+        Tek deneme. Belirsiz bir hatadan sonraki yeniden deneme, karşı tarafta ne olduğunu bilmeden
+        orayı bir daha yok etmek demek — ve ağ üzerinden "belirsiz hata" sıra dışı değil, olağan
+        durum.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OffsiteReplicateRequest' }
+      responses:
+        '202':
+          description: İş kuyruğa alındı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobAccepted' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
   /remote/peers:
     get:
       tags: [remote]
@@ -4413,6 +4542,101 @@ components:
             Dosyanın ineceği ad. Aslıyla aynı olmayabilir: hedefte o ad doluysa sunucu boş bir ad
             seçiyor, ve seçtiğini burada söylüyor — sessizce başka bir ada indirmek, kullanıcının
             aradığı dosyayı bulamaması demek olurdu.
+
+    OffsiteStatus:
+      type: object
+      required: [hasIdentity, publicKey, fingerprint, trusted]
+      properties:
+        hasIdentity:
+          type: boolean
+          description: Anahtar üretildi mi. Geri kalan her şey bu false iken anlamsız.
+        publicKey:
+          type: [string, 'null']
+          description: |
+            Karşı tarafın `authorized_keys` dosyasına yapıştırılacak AÇIK yarı. Özel yarı hiçbir
+            uçtan okunamıyor.
+        fingerprint:
+          type: [string, 'null']
+          description: '`ssh-keygen -l` çıktısı, olduğu gibi.'
+        trusted:
+          type: array
+          items: { type: string }
+          description: |
+            Bu cihazın bağlanacağı `known_hosts` kalıpları — `makine` ya da `[makine]:port`.
+            Anahtar malzemesi değil kalıplar: insanın görmesi gereken şey hangi hedeflerle
+            konuşulacağı, ve base64 bloğu üzerine hareket edilebilecek hiçbir şey söylemiyor.
+
+    OffsiteDestination:
+      type: object
+      required: [host]
+      properties:
+        host:
+          type: string
+          description: |
+            Makine adı ya da IPv4 adresi. IPv6 literalleri KABUL EDİLMİYOR — `known_hosts` onları
+            köşeli parantez içinde yazıyor ve varsayılan olmayan port sözdizimi de öyle; ham bir
+            literal kabul etmek hiçbir şeyle eşleşmeyen bir arama anahtarı üretirdi, ki kullanıcıya
+            "bu makine güvenilir değil" diye okunur ve düzeltmenin yolu olmaz.
+        port: { type: integer, minimum: 1, maximum: 65535, default: 22 }
+
+    OffsiteHostKeyPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [kind, line, fingerprint]
+            properties:
+              kind: { type: string }
+              line:
+                type: string
+                description: Onaylandığında `known_hosts` içine yazılacak satırın tamamı.
+              fingerprint:
+                type: string
+                description: |
+                  OpenSSH'in kendisi hesaplıyor, DEPSIS değil. Kullanıcı bunu karşı tarafta
+                  `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` çıktısıyla karşılaştırıyor, ve
+                  bir biçimin iki uygulaması, karşılaştırmanın anahtarla ilgisi olmayan bir sebeple
+                  başarısız olması için iki şans demek.
+
+    OffsiteTrustRequest:
+      type: object
+      required: [host, line]
+      properties:
+        host: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535, default: 22 }
+        line:
+          type: string
+          description: '`scan` çağrısından gelen ve kullanıcıya GÖSTERİLMİŞ satır.'
+
+    OffsiteReplicateRequest:
+      type: object
+      required: [host, user, source, snapshot, target, confirm, password]
+      properties:
+        host: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535, default: 22 }
+        user:
+          type: string
+          description: Karşı taraftaki hesap. Açık anahtar onun `authorized_keys` dosyasında.
+        source: { type: string }
+        snapshot: { type: string }
+        target:
+          type: string
+          description: KARŞI TARAFTAKİ veri kümesi. `zfs recv -F` bunun üzerine yazıyor.
+        base:
+          type: [string, 'null']
+          description: |
+            Artımlı gönderim için ortak taban. Verilmezse TAM gönderim. İstemci seçiyor, sunucu
+            tahmin etmiyor: karşı tarafın neyi tuttuğunu bilen taraf istemci, ve bir terabaytı
+            taşımak sunucunun kendi inisiyatifiyle başlatacağı bir şey değil.
+        confirm:
+          type: string
+          description: |
+            `kullanıcı@makine:veri-kümesi` — hedefin tam adı, elle yazılmış. Yalnız veri kümesinin
+            adı yeterli değil: aynı ada sahip yerel bir veri kümesi olabilir.
+        password: { type: string }
 
     RemoteStatus:
       type: object

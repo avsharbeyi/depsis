@@ -410,6 +410,170 @@ pub enum NetworkIdError {
     NotHex { at: usize, ch: char },
 }
 
+/// A host name or address that may be handed to `ssh` and to `ssh-keyscan`.
+///
+/// Its own type for the reason `NetworkId` has one, with the stakes a level higher: the value
+/// becomes an argv element for a program that takes `-o` options, so a "hostname" of
+/// `-oProxyCommand=id` is arbitrary command execution ON THIS BOX. It also becomes half of a
+/// `known_hosts` lookup key, where a stray `[`, `]` or `:` silently matches the wrong entry — and
+/// the whole point of that file is that it matches the right one.
+///
+/// IPv6 LITERALS ARE REFUSED rather than half-supported. `known_hosts` brackets them and so does
+/// the non-default-port syntax; accepting a bare literal here would produce a key that matches
+/// nothing, which reads to the user as "this host is not trusted" forever with no way to fix it.
+/// An IPv6 destination therefore needs a name, and that is written down rather than discovered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct SshHostName(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SshNameError {
+    #[error("empty value")]
+    Empty,
+    #[error("{len} bytes is longer than the {max} a name may be")]
+    TooLong { len: usize, max: usize },
+    #[error("a leading '-' would be read as an option by ssh")]
+    LeadingDash,
+    #[error("byte {at} is {ch:?}, which is not allowed in a host or user name")]
+    IllegalChar { at: usize, ch: char },
+}
+
+impl SshHostName {
+    const MAX: usize = 253;
+
+    pub fn parse(raw: impl Into<String>) -> Result<Self, SshNameError> {
+        let s: String = raw.into();
+        check(&s, Self::MAX, |c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '-')
+        })?;
+        Ok(Self(s))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SshHostName {
+    type Error = SshNameError;
+    fn try_from(v: String) -> Result<Self, Self::Error> {
+        Self::parse(v)
+    }
+}
+
+impl From<SshHostName> for String {
+    fn from(v: SshHostName) -> Self {
+        v.0
+    }
+}
+
+/// The account on the far end. Same argument as `SshHostName`, one character narrower.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct SshUserName(String);
+
+impl SshUserName {
+    const MAX: usize = 32;
+
+    pub fn parse(raw: impl Into<String>) -> Result<Self, SshNameError> {
+        let s: String = raw.into();
+        check(&s, Self::MAX, |c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')
+        })?;
+        Ok(Self(s))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SshUserName {
+    type Error = SshNameError;
+    fn try_from(v: String) -> Result<Self, Self::Error> {
+        Self::parse(v)
+    }
+}
+
+impl From<SshUserName> for String {
+    fn from(v: SshUserName) -> Self {
+        v.0
+    }
+}
+
+/// The three refusals both names share, in one place so they cannot drift apart.
+fn check(s: &str, max: usize, allowed: impl Fn(char) -> bool) -> Result<(), SshNameError> {
+    if s.is_empty() {
+        return Err(SshNameError::Empty);
+    }
+    if s.len() > max {
+        return Err(SshNameError::TooLong { len: s.len(), max });
+    }
+    if s.starts_with('-') {
+        return Err(SshNameError::LeadingDash);
+    }
+    if let Some((at, ch)) = s.char_indices().find(|(_, c)| !allowed(*c)) {
+        return Err(SshNameError::IllegalChar { at, ch });
+    }
+    Ok(())
+}
+
+/// A `known_hosts` line, as `ssh-keyscan` printed it and as it will be stored.
+///
+/// Validated as a WHOLE LINE rather than trusted, because it is written into a file `ssh` reads
+/// with the authority to decide which machine a copy of every file on this appliance goes to. A
+/// newline in it would let one confirmation write two entries — the second for a host nobody was
+/// shown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct KnownHostsLine(String);
+
+impl KnownHostsLine {
+    const MAX: usize = 2048;
+
+    pub fn parse(raw: impl Into<String>) -> Result<Self, SshNameError> {
+        let s: String = raw.into();
+        if s.is_empty() {
+            return Err(SshNameError::Empty);
+        }
+        if s.len() > Self::MAX {
+            return Err(SshNameError::TooLong {
+                len: s.len(),
+                max: Self::MAX,
+            });
+        }
+        // Three fields at least — a truncated entry makes `ssh` refuse to read the whole file,
+        // which would break every destination at once rather than just this one.
+        if s.split_whitespace().count() < 3 {
+            return Err(SshNameError::IllegalChar { at: 0, ch: ' ' });
+        }
+        if let Some((at, ch)) = s
+            .char_indices()
+            .find(|(_, c)| *c == '\n' || *c == '\r' || *c == '\0')
+        {
+            return Err(SshNameError::IllegalChar { at, ch });
+        }
+        Ok(Self(s))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for KnownHostsLine {
+    type Error = SshNameError;
+    fn try_from(v: String) -> Result<Self, Self::Error> {
+        Self::parse(v)
+    }
+}
+
+impl From<KnownHostsLine> for String {
+    fn from(v: KnownHostsLine) -> Self {
+        v.0
+    }
+}
+
 /// A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.
 ///
 /// Its own type, next to `SafeComponent`, for the same reason and one more. The value is
@@ -950,6 +1114,74 @@ pub enum Request {
         owner_gid: PosixId,
     },
 
+    /// What this appliance's off-site identity is, and which destinations it trusts.
+    ///
+    /// Reads only, and reads only the PUBLIC half. There is no operation that returns the private
+    /// key and there must not be: ADR-0016 splits the appliance so that database access alone is
+    /// not enough, and a key readable through an HTTP endpoint would undo that split for the one
+    /// credential that reaches another machine.
+    #[serde(rename = "offsite_status")]
+    OffsiteStatus {},
+
+    /// Generate the off-site key, once.
+    ///
+    /// REFUSES if one already exists. Replacing it would leave the far end's `authorized_keys`
+    /// holding the public half of a key this box no longer has — every future replication failing
+    /// at the far end, hours later, with nothing on this side saying why.
+    #[serde(rename = "offsite_create_identity")]
+    OffsiteCreateIdentity {},
+
+    /// Ask a destination what its host key is, WITHOUT trusting it.
+    ///
+    /// The read half of "no trust on first use": the fingerprints come back, a person compares
+    /// them against what the far end reports, and only then does `OffsiteTrustHost` write one down.
+    /// Nothing here changes what the appliance will connect to.
+    #[serde(rename = "offsite_scan_host")]
+    OffsiteScanHost {
+        host: SshHostName,
+        /// 1..=65535. Part of the `known_hosts` lookup key, so it is an operand rather than an
+        /// assumption — a key confirmed for port 22 must not authorise port 2222.
+        port: u16,
+    },
+
+    /// Write one confirmed host key into the agent's `known_hosts`.
+    ///
+    /// The line comes from a `OffsiteScanHost` the user was SHOWN. It is re-validated here as a
+    /// whole line — see `KnownHostsLine` — because it is going into a file that decides which
+    /// machine a copy of every file on this appliance may go to.
+    #[serde(rename = "offsite_trust_host")]
+    OffsiteTrustHost {
+        host: SshHostName,
+        port: u16,
+        line: KnownHostsLine,
+    },
+
+    /// Copy one dataset's snapshot onto a dataset on ANOTHER machine, over SSH.
+    ///
+    /// The half `ReplicateDataset` deliberately did not do. A second pool in the same box survives
+    /// a disk dying; it does not survive theft, fire, or ransomware reaching every mounted dataset.
+    ///
+    /// DESTRUCTIVE AT THE DESTINATION, exactly as the local one is: the far end runs
+    /// `zfs recv -F`, which rolls its target back to the common snapshot. §8.1's confirmation
+    /// sequence sits in front of it in the API, and the two refusals below sit in front of that —
+    /// no identity, and a host whose key was never confirmed.
+    ///
+    /// The local refusals of `ReplicateDataset` do NOT apply and cannot: the target is on another
+    /// machine, so this appliance has no way to know whether it is that machine's share root. What
+    /// protects the far end is that reaching it at all requires a key its owner installed.
+    #[serde(rename = "replicate_offsite")]
+    ReplicateOffsite {
+        source: DatasetName,
+        snapshot: SafeComponent,
+        /// The common snapshot to send FROM, when there is one. Absent means a full send.
+        base: Option<SafeComponent>,
+        host: SshHostName,
+        port: u16,
+        user: SshUserName,
+        /// The dataset to receive onto, ON THE FAR END.
+        target: DatasetName,
+    },
+
     /// Delete exactly ONE entry inside a share. Never a tree.
     ///
     /// `directory` is a required operand rather than something the agent works out by stat-ing the
@@ -1218,6 +1450,23 @@ pub const MAX_LISTING: usize = 5_000;
 /// Partitions are not reported as disks. They appear only through `holds`, `mounted` and
 /// `holds_system` — which is what a caller about to overwrite the device needs to know, and a
 /// per-partition inventory is not.
+/// One host key a destination offered, and the fingerprint a person compares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OffsiteHostKey {
+    /// `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ssh-rsa`.
+    pub kind: String,
+    /// The whole `known_hosts` line, which is what gets confirmed and stored.
+    pub line: String,
+    /// `256 SHA256:… (ED25519)`, computed by `ssh-keygen -l`.
+    ///
+    /// BY OPENSSH ITSELF, not by DEPSIS. The user compares this against what
+    /// `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` prints on the far end, and two
+    /// implementations of a fingerprint format are two chances for the comparison to fail for a
+    /// reason that has nothing to do with the key.
+    pub fingerprint: String,
+}
+
 /// One ZeroTier peer, as the diagnostics screen reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1456,6 +1705,25 @@ pub enum Response {
     Diff {
         lines: Vec<String>,
     },
+    /// The off-site identity and the destinations this appliance trusts.
+    #[serde(rename = "offsite")]
+    Offsite {
+        /// Has a key been generated? Everything else is meaningless while this is false.
+        has_identity: bool,
+        /// The PUBLIC half, to paste into the destination's `authorized_keys`.
+        public_key: Option<String>,
+        /// `256 SHA256:… depsis-offsite (ED25519)`, as `ssh-keygen -l` prints it.
+        fingerprint: Option<String>,
+        /// The `known_hosts` patterns this appliance will connect to — `host` or `[host]:port`.
+        trusted: Vec<String>,
+    },
+
+    /// What a destination answered when asked for its host key. Trusted by nothing yet.
+    #[serde(rename = "offsite_host_keys")]
+    OffsiteHostKeys {
+        keys: Vec<OffsiteHostKey>,
+    },
+
     #[serde(rename = "zerotier_peers")]
     ZeroTierPeers {
         peers: Vec<ZeroTierPeer>,
@@ -1771,7 +2039,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 17;
+pub const SCHEMA_VERSION: u32 = 18;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

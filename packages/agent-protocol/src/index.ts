@@ -41,7 +41,7 @@ export const MAX_REASON = 200;
  * Checked at startup rather than on the first privileged call: a mismatched pair should fail while
  * someone is watching a deployment, not halfway through creating a dataset.
  */
-export const EXPECTED_SCHEMA_VERSION = 17;
+export const EXPECTED_SCHEMA_VERSION = 18;
 
 /**
  * Bound and sanitise an envelope field before it goes on the wire.

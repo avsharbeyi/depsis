@@ -652,6 +652,142 @@
       ]
     },
     {
+      "description": "What this appliance's off-site identity is, and which destinations it trusts.\n\nReads only, and reads only the PUBLIC half. There is no operation that returns the private\nkey and there must not be: ADR-0016 splits the appliance so that database access alone is\nnot enough, and a key readable through an HTTP endpoint would undo that split for the one\ncredential that reaches another machine.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "offsite_status"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "Generate the off-site key, once.\n\nREFUSES if one already exists. Replacing it would leave the far end's `authorized_keys`\nholding the public half of a key this box no longer has — every future replication failing\nat the far end, hours later, with nothing on this side saying why.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "offsite_create_identity"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "Ask a destination what its host key is, WITHOUT trusting it.\n\nThe read half of \"no trust on first use\": the fingerprints come back, a person compares\nthem against what the far end reports, and only then does `OffsiteTrustHost` write one down.\nNothing here changes what the appliance will connect to.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "$ref": "#/$defs/SshHostName"
+        },
+        "op": {
+          "type": "string",
+          "const": "offsite_scan_host"
+        },
+        "port": {
+          "description": "1..=65535. Part of the `known_hosts` lookup key, so it is an operand rather than an\nassumption — a key confirmed for port 22 must not authorise port 2222.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "host",
+        "port"
+      ]
+    },
+    {
+      "description": "Write one confirmed host key into the agent's `known_hosts`.\n\nThe line comes from a `OffsiteScanHost` the user was SHOWN. It is re-validated here as a\nwhole line — see `KnownHostsLine` — because it is going into a file that decides which\nmachine a copy of every file on this appliance may go to.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "$ref": "#/$defs/SshHostName"
+        },
+        "line": {
+          "$ref": "#/$defs/KnownHostsLine"
+        },
+        "op": {
+          "type": "string",
+          "const": "offsite_trust_host"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "host",
+        "port",
+        "line"
+      ]
+    },
+    {
+      "description": "Copy one dataset's snapshot onto a dataset on ANOTHER machine, over SSH.\n\nThe half `ReplicateDataset` deliberately did not do. A second pool in the same box survives\na disk dying; it does not survive theft, fire, or ransomware reaching every mounted dataset.\n\nDESTRUCTIVE AT THE DESTINATION, exactly as the local one is: the far end runs\n`zfs recv -F`, which rolls its target back to the common snapshot. §8.1's confirmation\nsequence sits in front of it in the API, and the two refusals below sit in front of that —\nno identity, and a host whose key was never confirmed.\n\nThe local refusals of `ReplicateDataset` do NOT apply and cannot: the target is on another\nmachine, so this appliance has no way to know whether it is that machine's share root. What\nprotects the far end is that reaching it at all requires a key its owner installed.",
+      "type": "object",
+      "properties": {
+        "base": {
+          "description": "The common snapshot to send FROM, when there is one. Absent means a full send.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeComponent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host": {
+          "$ref": "#/$defs/SshHostName"
+        },
+        "op": {
+          "type": "string",
+          "const": "replicate_offsite"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "source": {
+          "$ref": "#/$defs/DatasetName"
+        },
+        "target": {
+          "description": "The dataset to receive onto, ON THE FAR END.",
+          "$ref": "#/$defs/DatasetName"
+        },
+        "user": {
+          "$ref": "#/$defs/SshUserName"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "source",
+        "snapshot",
+        "host",
+        "port",
+        "user",
+        "target"
+      ]
+    },
+    {
       "description": "Delete exactly ONE entry inside a share. Never a tree.\n\n`directory` is a required operand rather than something the agent works out by stat-ing the\npath, and that is deliberate twice over. `unlinkat` needs `AT_REMOVEDIR` or not, so the\ndistinction has to be made somewhere; making the CALLER state it means a caller that\nbelieves it is deleting a file and finds a directory gets a refusal instead of a surprise.\nDeciding it from a stat would also be check-then-use on the one operation that cannot be\nundone.\n\nThere is no recursive variant and there will not be one. A non-empty directory comes back\nas an error (`ENOTEMPTY`) and the API walks the tree itself. The reason is §2.2 and\nADR-0006: the closed operation set exists so that no single call the agent accepts has a\nblast radius the caller chooses. \"Delete this subtree\" is `rm -rf` behind a typed name — one\nbug in the unprivileged side, or one confused-deputy request, and it is the whole share.\nThe API knows the tree because the API stores the tree; the agent only needs to be able to\nremove a leaf.",
       "type": "object",
       "properties": {
@@ -920,6 +1056,10 @@
         "wwn"
       ]
     },
+    "KnownHostsLine": {
+      "description": "A `known_hosts` line, as `ssh-keyscan` printed it and as it will be stored.\n\nValidated as a WHOLE LINE rather than trusted, because it is written into a file `ssh` reads\nwith the authority to decide which machine a copy of every file on this appliance goes to. A\nnewline in it would let one confirmation write two entries — the second for a host nobody was\nshown.",
+      "type": "string"
+    },
     "NetworkId": {
       "description": "A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.\n\nIts own type, next to `SafeComponent`, for the same reason and one more. The value is\nCONCATENATED INTO A REQUEST PATH (`/network/<id>`) and into an HTTP request line, so a\n`String` here would have to be remembered at every call site — and the site that forgot\nwould be the one that let `../` reach the local API's router, or a `\\r\\n` split one request\ninto two. A type is a validation nobody can skip.\n\nUppercase is REFUSED rather than folded to lowercase. ZeroTier prints ids in lowercase and\nthe same value is a key in `public.remote_networks`, so accepting two spellings for one\nnetwork means the audit trail and the table can end up holding both, and \"is this the\nnetwork we joined?\" stops being a string comparison.",
       "type": "string"
@@ -1081,6 +1221,14 @@
           ]
         }
       ]
+    },
+    "SshHostName": {
+      "description": "A host name or address that may be handed to `ssh` and to `ssh-keyscan`.\n\nIts own type for the reason `NetworkId` has one, with the stakes a level higher: the value\nbecomes an argv element for a program that takes `-o` options, so a \"hostname\" of\n`-oProxyCommand=id` is arbitrary command execution ON THIS BOX. It also becomes half of a\n`known_hosts` lookup key, where a stray `[`, `]` or `:` silently matches the wrong entry — and\nthe whole point of that file is that it matches the right one.\n\nIPv6 LITERALS ARE REFUSED rather than half-supported. `known_hosts` brackets them and so does\nthe non-default-port syntax; accepting a bare literal here would produce a key that matches\nnothing, which reads to the user as \"this host is not trusted\" forever with no way to fix it.\nAn IPv6 destination therefore needs a name, and that is written down rather than discovered.",
+      "type": "string"
+    },
+    "SshUserName": {
+      "description": "The account on the far end. Same argument as `SshHostName`, one character narrower.",
+      "type": "string"
     }
   }
 },"response":{
@@ -1182,6 +1330,66 @@
       "required": [
         "status",
         "lines"
+      ]
+    },
+    {
+      "description": "The off-site identity and the destinations this appliance trusts.",
+      "type": "object",
+      "properties": {
+        "fingerprint": {
+          "description": "`256 SHA256:… depsis-offsite (ED25519)`, as `ssh-keygen -l` prints it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has_identity": {
+          "description": "Has a key been generated? Everything else is meaningless while this is false.",
+          "type": "boolean"
+        },
+        "public_key": {
+          "description": "The PUBLIC half, to paste into the destination's `authorized_keys`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "const": "offsite"
+        },
+        "trusted": {
+          "description": "The `known_hosts` patterns this appliance will connect to — `host` or `[host]:port`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "status",
+        "has_identity",
+        "trusted"
+      ]
+    },
+    {
+      "description": "What a destination answered when asked for its host key. Trusted by nothing yet.",
+      "type": "object",
+      "properties": {
+        "keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OffsiteHostKey"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "offsite_host_keys"
+        }
+      },
+      "required": [
+        "status",
+        "keys"
       ]
     },
     {
@@ -1970,6 +2178,30 @@
         "holds_system"
       ]
     },
+    "OffsiteHostKey": {
+      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.\nOne host key a destination offered, and the fingerprint a person compares.",
+      "type": "object",
+      "properties": {
+        "fingerprint": {
+          "description": "`256 SHA256:… (ED25519)`, computed by `ssh-keygen -l`.\n\nBY OPENSSH ITSELF, not by DEPSIS. The user compares this against what\n`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` prints on the far end, and two\nimplementations of a fingerprint format are two chances for the comparison to fail for a\nreason that has nothing to do with the key.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`ssh-ed25519`, `ecdsa-sha2-nistp256`, `ssh-rsa`.",
+          "type": "string"
+        },
+        "line": {
+          "description": "The whole `known_hosts` line, which is what gets confirmed and stored.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "line",
+        "fingerprint"
+      ]
+    },
     "SafeComponent": {
       "description": "A single path component under a share root — never a path, never absolute.\n\nADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access\nto `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle\n`/` or `..` through, so this type refuses them rather than sanitising.",
       "type": "string"
@@ -2056,7 +2288,7 @@
       ]
     },
     "ZeroTierPeer": {
-      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.\nOne ZeroTier peer, as the diagnostics screen reads it.",
+      "description": "One ZeroTier peer, as the diagnostics screen reads it.",
       "type": "object",
       "properties": {
         "address": {

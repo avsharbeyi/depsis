@@ -3488,6 +3488,134 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/storage/offsite": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Başka bir makineye yedeklemenin durumu
+         * @description Bu cihazın off-site kimliği ve güvendiği hedefler.
+         *
+         *     ÖZEL ANAHTAR BURADA YOK ve hiçbir uçta yok. Anahtar ayrıcalıklı tarafta üretiliyor ve orada
+         *     kalıyor; okunabilen tek şey AÇIK yarısı — kullanıcının karşı tarafın `authorized_keys`
+         *     dosyasına yapıştıracağı şey. ADR-0016 cihazı, veritabanına erişimin tek başına
+         *     yetmeyeceği şekilde bölüyor, ve bir HTTP ucundan okunabilen özel anahtar o bölmeyi başka
+         *     bir makineye ulaşan tek kimlik bilgisi için ortadan kaldırırdı.
+         *
+         *     Kurucu yönetici.
+         */
+        get: operations["getOffsiteStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/offsite/identity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Off-site anahtarını üret
+         * @description Bir kez üretir. Zaten varsa 409 — üzerine yazmak asla doğru cevap değil: karşı tarafın
+         *     `authorized_keys` dosyası ESKİ anahtarın açık yarısını tutuyor, yani sessiz bir yenileme
+         *     her gelecekteki çoğaltmayı saatler sonra, karşı tarafta, sebebi burada hiç görünmeyen bir
+         *     izin hatasına çevirirdi.
+         */
+        post: operations["createOffsiteIdentity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/offsite/scan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Hedefin host anahtarını sor
+         * @description Sorar ve HİÇBİR ŞEYE GÜVENMEZ. Dönen parmak izleri, kullanıcının karşı tarafta
+         *     `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` ile göreceği şeyle karşılaştırması için.
+         *
+         *     Bunu `trust` ile tek bir uçta birleştirmek — "bağlan ve ne çıkarsa kabul et" — bir
+         *     replikasyonda saldırganın bu cihazdaki her dosyanın kopyasını alması demek. Yanlış makineye
+         *     giden bir yedek, hiç yedek olmamasından kötüdür.
+         */
+        post: operations["scanOffsiteHost"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/offsite/trust": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Görülen bir host anahtarını onayla
+         * @description Kullanıcının GÖRDÜĞÜ ve parmak izini karşılaştırdığı satırı yazar. Satır bu makine ve bu
+         *     port için değilse reddedilir: aksi hâlde bir hedef için kontrol edilen parmak izi, bambaşka
+         *     bir hedefi yetkilendiren bir kayıt yazardı — parmak izi karşılaştırma ayininin engellemek
+         *     için var olduğu tam olarak o değiştirme.
+         */
+        post: operations["trustOffsiteHost"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/offsite/replicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bir anlık görüntüyü başka bir makineye gönder
+         * @description §8.1'in dizisi, yereldeki kardeşiyle birebir: analiz, plan, yazılı onay, yeniden kimlik
+         *     doğrulama, iş.
+         *
+         *     KARŞI TARAFTA `zfs recv -F` çalışıyor — yani yok edilen şey ORADA. Onay metni bu yüzden
+         *     `kullanıcı@makine:veri-kümesi`: aynı ada sahip yerel bir veri kümesi olabilir, ve onaylanan
+         *     şeyin hangisi olduğu tartışmaya açık kalmamalı.
+         *
+         *     Tek deneme. Belirsiz bir hatadan sonraki yeniden deneme, karşı tarafta ne olduğunu bilmeden
+         *     orayı bir daha yok etmek demek — ve ağ üzerinden "belirsiz hata" sıra dışı değil, olağan
+         *     durum.
+         */
+        post: operations["replicateOffsite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/remote/peers": {
         parameters: {
             query?: never;
@@ -6176,6 +6304,78 @@ export interface components {
              */
             name: string;
         };
+        OffsiteStatus: {
+            /** @description Anahtar üretildi mi. Geri kalan her şey bu false iken anlamsız. */
+            hasIdentity: boolean;
+            /**
+             * @description Karşı tarafın `authorized_keys` dosyasına yapıştırılacak AÇIK yarı. Özel yarı hiçbir
+             *     uçtan okunamıyor.
+             */
+            publicKey: string | null;
+            /** @description `ssh-keygen -l` çıktısı, olduğu gibi. */
+            fingerprint: string | null;
+            /**
+             * @description Bu cihazın bağlanacağı `known_hosts` kalıpları — `makine` ya da `[makine]:port`.
+             *     Anahtar malzemesi değil kalıplar: insanın görmesi gereken şey hangi hedeflerle
+             *     konuşulacağı, ve base64 bloğu üzerine hareket edilebilecek hiçbir şey söylemiyor.
+             */
+            trusted: string[];
+        };
+        OffsiteDestination: {
+            /**
+             * @description Makine adı ya da IPv4 adresi. IPv6 literalleri KABUL EDİLMİYOR — `known_hosts` onları
+             *     köşeli parantez içinde yazıyor ve varsayılan olmayan port sözdizimi de öyle; ham bir
+             *     literal kabul etmek hiçbir şeyle eşleşmeyen bir arama anahtarı üretirdi, ki kullanıcıya
+             *     "bu makine güvenilir değil" diye okunur ve düzeltmenin yolu olmaz.
+             */
+            host: string;
+            /** @default 22 */
+            port: number;
+        };
+        OffsiteHostKeyPage: {
+            items: {
+                kind: string;
+                /** @description Onaylandığında `known_hosts` içine yazılacak satırın tamamı. */
+                line: string;
+                /**
+                 * @description OpenSSH'in kendisi hesaplıyor, DEPSIS değil. Kullanıcı bunu karşı tarafta
+                 *     `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` çıktısıyla karşılaştırıyor, ve
+                 *     bir biçimin iki uygulaması, karşılaştırmanın anahtarla ilgisi olmayan bir sebeple
+                 *     başarısız olması için iki şans demek.
+                 */
+                fingerprint: string;
+            }[];
+        };
+        OffsiteTrustRequest: {
+            host: string;
+            /** @default 22 */
+            port: number;
+            /** @description `scan` çağrısından gelen ve kullanıcıya GÖSTERİLMİŞ satır. */
+            line: string;
+        };
+        OffsiteReplicateRequest: {
+            host: string;
+            /** @default 22 */
+            port: number;
+            /** @description Karşı taraftaki hesap. Açık anahtar onun `authorized_keys` dosyasında. */
+            user: string;
+            source: string;
+            snapshot: string;
+            /** @description KARŞI TARAFTAKİ veri kümesi. `zfs recv -F` bunun üzerine yazıyor. */
+            target: string;
+            /**
+             * @description Artımlı gönderim için ortak taban. Verilmezse TAM gönderim. İstemci seçiyor, sunucu
+             *     tahmin etmiyor: karşı tarafın neyi tuttuğunu bilen taraf istemci, ve bir terabaytı
+             *     taşımak sunucunun kendi inisiyatifiyle başlatacağı bir şey değil.
+             */
+            base?: string | null;
+            /**
+             * @description `kullanıcı@makine:veri-kümesi` — hedefin tam adı, elle yazılmış. Yalnız veri kümesinin
+             *     adı yeterli değil: aynı ada sahip yerel bir veri kümesi olabilir.
+             */
+            confirm: string;
+            password: string;
+        };
         RemoteStatus: {
             /** @description zerotier-one kurulu ve çalışıyor mu. DEPSIS onu paketlemiyor. */
             available: boolean;
@@ -6520,6 +6720,139 @@ export interface operations {
             403: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+        };
+    };
+    getOffsiteStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Kimlik ve güvenilen hedefler */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OffsiteStatus"];
+                };
+            };
+            403: components["responses"]["Problem"];
+        };
+    };
+    createOffsiteIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Üretildi */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OffsiteStatus"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+        };
+    };
+    scanOffsiteHost: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OffsiteDestination"];
+            };
+        };
+        responses: {
+            /** @description Hedefin sunduğu anahtarlar */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OffsiteHostKeyPage"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            /**
+             * @description Hedefe ulaşılamadı — kapalı, güvenlik duvarının arkasında, ya da SSH çalışmıyor. Bu
+             *     cihazın arızası değil.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    trustOffsiteHost: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OffsiteTrustRequest"];
+            };
+        };
+        responses: {
+            /** @description Güncellenmiş durum */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OffsiteStatus"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+        };
+    };
+    replicateOffsite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OffsiteReplicateRequest"];
+            };
+        };
+        responses: {
+            /** @description İş kuyruğa alındı */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobAccepted"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
         };
     };
 }

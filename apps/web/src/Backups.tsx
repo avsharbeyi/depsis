@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
+import { Offsite } from './Offsite.js';
 import { Replicate } from './Replicate.js';
 import { formatBytes, formatWhen, percent } from './Dashboard.js';
 import type { Snapshot as SystemSnapshot } from './snapshot.js';
@@ -204,6 +205,12 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
       {page !== null && !forbidden && (
         <Replicate backups={items} notify={notify} onQueued={reload} />
       )}
+
+      {/* İKİNCİ HAVUZ YETMİYOR, ve ayrı bir satır olması bunu söylüyor. Yukarıdaki çoğaltma bir
+          diskin ölmesini atlatıyor; kutunun çalınmasını, evin yanmasını ya da fidye yazılımının
+          bağlı her veri kümesine ulaşmasını atlatmıyor — ki insanlar "yedek" derken çoğunlukla
+          bunu kastediyor. */}
+      {page !== null && !forbidden && <Offsite backups={items} notify={notify} onQueued={reload} />}
 
       {pools.length > 0 && (
         <div>

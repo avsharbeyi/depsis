@@ -9,6 +9,7 @@ import { DbService } from '../db/db.service.js';
 import { JobsModule } from '../jobs/jobs.module.js';
 import { BackupsController } from './backups.controller.js';
 import { BackupsService } from './backups.service.js';
+import { OffsiteController } from './offsite.controller.js';
 import { PoolsController } from './pools.controller.js';
 import { ReplicationController } from './replication.controller.js';
 import { SystemController } from './system.controller.js';
@@ -16,7 +17,13 @@ import { SystemService } from './system.service.js';
 
 @Module({
   imports: [AuthModule, IdempotencyModule, JobsModule],
-  controllers: [SystemController, BackupsController, PoolsController, ReplicationController],
+  controllers: [
+    SystemController,
+    BackupsController,
+    PoolsController,
+    ReplicationController,
+    OffsiteController,
+  ],
   providers: [
     {
       provide: SystemService,

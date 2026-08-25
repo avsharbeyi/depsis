@@ -354,6 +354,48 @@ export type AgentRequest =
       to: SafeComponent[];
     }
   | {
+      op: 'offsite_status';
+    }
+  | {
+      op: 'offsite_create_identity';
+    }
+  | {
+      host: SshHostName;
+      op: 'offsite_scan_host';
+      /**
+       * 1..=65535. Part of the `known_hosts` lookup key, so it is an operand rather than an
+       * assumption — a key confirmed for port 22 must not authorise port 2222.
+       */
+      port: number;
+    }
+  | {
+      host: SshHostName;
+      line: KnownHostsLine;
+      op: 'offsite_trust_host';
+      port: number;
+    }
+  | {
+      /**
+       * The common snapshot to send FROM, when there is one. Absent means a full send.
+       */
+      base?: SafeComponent | null;
+      host: SshHostName;
+      op: 'replicate_offsite';
+      port: number;
+      snapshot: SafeComponent;
+      source: DatasetName;
+      /**
+       * A ZFS dataset name, e.g. `tank/depsis/users/1001`.
+       *
+       * The leading-dash check is not paranoia: P0-E's whole point is that `zfs`, `zpool`,
+       * `smbcacls` and `smartctl` parse their own argv, so an operand that begins with `-` becomes a
+       * flag even when it arrives as a separate argument. Inserting `--` helps but is not sufficient
+       * because these tools do not all honour it consistently, so the value is rejected outright.
+       */
+      target: string;
+      user: SshUserName;
+    }
+  | {
       /**
        * Is the entry a directory? The caller knows and has to say.
        */
@@ -525,6 +567,34 @@ export type PosixName = string;
  */
 export type PosixId = number;
 /**
+ * A host name or address that may be handed to `ssh` and to `ssh-keyscan`.
+ *
+ * Its own type for the reason `NetworkId` has one, with the stakes a level higher: the value
+ * becomes an argv element for a program that takes `-o` options, so a "hostname" of
+ * `-oProxyCommand=id` is arbitrary command execution ON THIS BOX. It also becomes half of a
+ * `known_hosts` lookup key, where a stray `[`, `]` or `:` silently matches the wrong entry — and
+ * the whole point of that file is that it matches the right one.
+ *
+ * IPv6 LITERALS ARE REFUSED rather than half-supported. `known_hosts` brackets them and so does
+ * the non-default-port syntax; accepting a bare literal here would produce a key that matches
+ * nothing, which reads to the user as "this host is not trusted" forever with no way to fix it.
+ * An IPv6 destination therefore needs a name, and that is written down rather than discovered.
+ */
+export type SshHostName = string;
+/**
+ * A `known_hosts` line, as `ssh-keyscan` printed it and as it will be stored.
+ *
+ * Validated as a WHOLE LINE rather than trusted, because it is written into a file `ssh` reads
+ * with the authority to decide which machine a copy of every file on this appliance goes to. A
+ * newline in it would let one confirmation write two entries — the second for a host nobody was
+ * shown.
+ */
+export type KnownHostsLine = string;
+/**
+ * The account on the far end. Same argument as `SshHostName`, one character narrower.
+ */
+export type SshUserName = string;
+/**
  * An NTLM password hash — `MD4(UTF-16LE(password))`, uppercase hex.
  *
  * A TYPE rather than a `String`, because the failure it prevents is silent. The smbpasswd import
@@ -688,6 +758,29 @@ export type AgentResponse =
   | {
       lines: string[];
       status: 'diff';
+    }
+  | {
+      /**
+       * `256 SHA256:… depsis-offsite (ED25519)`, as `ssh-keygen -l` prints it.
+       */
+      fingerprint?: string | null;
+      /**
+       * Has a key been generated? Everything else is meaningless while this is false.
+       */
+      has_identity: boolean;
+      /**
+       * The PUBLIC half, to paste into the destination's `authorized_keys`.
+       */
+      public_key?: string | null;
+      status: 'offsite';
+      /**
+       * The `known_hosts` patterns this appliance will connect to — `host` or `[host]:port`.
+       */
+      trusted: string[];
+    }
+  | {
+      keys: OffsiteHostKey[];
+      status: 'offsite_host_keys';
     }
   | {
       peers: ZeroTierPeer[];
@@ -896,6 +989,28 @@ export type ZeroTierNetworkStatus =
  * Partitions are not reported as disks. They appear only through `holds`, `mounted` and
  * `holds_system` — which is what a caller about to overwrite the device needs to know, and a
  * per-partition inventory is not.
+ * One host key a destination offered, and the fingerprint a person compares.
+ */
+export interface OffsiteHostKey {
+  /**
+   * `256 SHA256:… (ED25519)`, computed by `ssh-keygen -l`.
+   *
+   * BY OPENSSH ITSELF, not by DEPSIS. The user compares this against what
+   * `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` prints on the far end, and two
+   * implementations of a fingerprint format are two chances for the comparison to fail for a
+   * reason that has nothing to do with the key.
+   */
+  fingerprint: string;
+  /**
+   * `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ssh-rsa`.
+   */
+  kind: string;
+  /**
+   * The whole `known_hosts` line, which is what gets confirmed and stored.
+   */
+  line: string;
+}
+/**
  * One ZeroTier peer, as the diagnostics screen reads it.
  */
 export interface ZeroTierPeer {

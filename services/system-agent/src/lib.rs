@@ -42,6 +42,7 @@ pub mod data;
 pub mod disks;
 pub mod dispatch;
 pub mod identity;
+pub mod offsite;
 pub mod op;
 pub mod pools;
 pub mod replicate;

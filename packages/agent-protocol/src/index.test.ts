@@ -100,6 +100,14 @@ describe('the emitted agent schema', () => {
       'list_pools',
       'list_snapshots',
       'move_entry',
+      // ADR-0006's closed set, five entries wider. `offsite_scan_host` and `offsite_trust_host`
+      // are TWO operations and not one on purpose: scanning trusts nothing, and merging them
+      // into "connect and accept whatever answers" is how a backup ends up at an attacker's
+      // machine holding a copy of every file on the appliance.
+      'offsite_create_identity',
+      'offsite_scan_host',
+      'offsite_status',
+      'offsite_trust_host',
       // The bulk data path's control half. `open_transfer` resolves and opens a staging file and
       // returns a one-time token; the bytes travel on a separate socket, because Node cannot
       // receive an SCM_RIGHTS descriptor and so the cleanest design — the agent passing the fd —
@@ -129,6 +137,7 @@ describe('the emitted agent schema', () => {
       // the tree from the leaves up, because the API is the side that stores it (§2.2, ADR-0006).
       'remove_entry',
       'replicate_dataset',
+      'replicate_offsite',
       'restore_from_snapshot',
       // The one operation that touches a share root's MODE, and the reason it is separate from
       // `create_dataset`. `zfs create` leaves a mountpoint at 0755 root:root and `apply_folder_acl`
@@ -229,7 +238,11 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 17 since
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 18 since the five
+    // off-site operations — a stale agent that did not know `replicate_offsite` would answer a
+    // backup to another machine with a parse failure rather than half-performing one, and a
+    // stale agent that did not know `offsite_trust_host` would leave the appliance believing it
+    // had confirmed a host key it had not. 17 since
     // `SnapshotEntries` and `RestoreFromSnapshot` — per-file restore, and the one place the
     // agent is allowed to cross a mount boundary. A stale agent that did not know them would
     // answer a restore with a parse failure rather than half-performing one. 16 since
@@ -244,7 +257,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(17);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(18);
   });
 
   it('agrees with the number the agent actually reports', () => {
