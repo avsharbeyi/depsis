@@ -1,5 +1,5 @@
 import type { OpenApi } from '@depsis/contracts';
-import { useCallback, useEffect, useState, type ReactElement, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
 
 import { api, problemMessage } from './api.js';
 import { when } from './Notifications.js';
@@ -75,15 +75,67 @@ export function TaskThread({
   /** Okunamadı ile "henüz yorum yok" ayrı şeyler; ikisini aynı ekrana çevirmek bir yalan. */
   const [failed, setFailed] = useState(false);
 
+  /**
+   * KAÇINCI OKUMA. Eski bir cevabın yenisini ezmesini engelliyor.
+   *
+   * ÖLÇÜLEN HATA, ve iki kez teşhis edildi. Bir madde tiklendiğinde `tick` iyimser olarak kutuyu
+   * dolduruyor, PATCH'i gönderiyor ve sonra `load()` çağırıyor. Ama o sırada BAŞKA bir `load()`
+   * uçuşta olabiliyor — bileşen bağlanırken başlayan, ya da bir önceki `addItem`'ın tetiklediği —
+   * ve o eski cevap SONRA dönüp `setItems` ile tiklenmemiş hâli geri yazıyor. Kutu doluyor ve
+   * hemen boşalıyor.
+   *
+   * Playwright bunu "clicking the checkbox did not change its state" diye bildiriyor, ve yarış
+   * olduğu için ARADA BİR: yerelde geçiyor, CI'de düşüyor. İlk teşhisim yanlıştı — kutuyu saran
+   * `<label>`'ı suçlamıştım (o değişiklik yine de doğruydu ve kaldı), ve hata bir koşu sonra geri
+   * geldi.
+   *
+   * Bu oturumdaki adversaryal inceleme de tam bunu bildirmişti ("load() has no sequencing guard,
+   * so a stale response can invert the watch button") ve o zaman elemiştim. Gerçekmiş.
+   *
+   * Sayaç her okumada artıyor; bir okuma kendi numarası hâlâ en yeniyse yazıyor. Yazan öteki
+   * yollar (`addItem`, `tick`, `dropItem`) da sayacı artırıyor: onların elindeki cevap
+   * sunucudan az önce gelmiş olan, ve uçuştaki bir okuma onu ezmemeli.
+   */
+  const reading = useRef(0);
+
+  /**
+   * `onCounts`'un SON hâli, bir ref'te — ve bu bir süsleme değil, bir DÖNGÜYÜ kesiyor.
+   *
+   * ÖLÇÜLEN HATA. `onCounts` panoda satır içi bir ok fonksiyonu, yani her üst çizimde YENİ bir
+   * kimlik. Onu `load`'un bağımlılıklarına koymak `load`'u da her üst çizimde yeniliyor, ve
+   * `useEffect([load])` her yenilenişte yeniden koşuyor. `load` ise `onCounts`'u çağırıyor →
+   * pano `setTasks` ile yeni bir dizi üretiyor → üst yeniden çiziliyor → yeni `onCounts` → yeni
+   * `load` → efekt yeniden koşuyor. Sonsuz bir okuma fırtınası.
+   *
+   * Görünen belirti bambaşka bir yerdeydi: bir kontrol kutusu tiklenip hemen geri boşalıyordu,
+   * çünkü sürekli uçuşta olan okumalardan biri PATCH'ten ÖNCEKİ hâli getirip iyimser güncellemeyi
+   * eziyordu. Playwright bunu "clicking the checkbox did not change its state" diye bildiriyordu,
+   * ve arada bir — yerelde beşte bir, CI'de bir koşuda.
+   *
+   * Ref, `load`'u YALNIZ `taskId`'ye bağımlı bırakıyor: efekt tartışma değiştiğinde koşuyor, üst
+   * her çizildiğinde değil. Panonun kendi tarafındaki bail-out (aynı sayılar → aynı dizi) döngünün
+   * öteki ucunu kapatıyor; ikisi birlikte olmalı, çünkü biri tek başına yalnız bu çağrı biçiminde
+   * doğru.
+   */
+  const counts = useRef(onCounts);
+  counts.current = onCounts;
+
   const load = useCallback(async (): Promise<void> => {
+    const mine = (reading.current += 1);
     const [thread, who, list] = await Promise.all([
       api.GET('/tasks/{id}/comments', { params: { path: { id: taskId } } }),
       api.GET('/tasks/{id}/watchers', { params: { path: { id: taskId } } }),
       api.GET('/tasks/{id}/checklist', { params: { path: { id: taskId } } }),
     ]);
+    // Daha yeni bir okuma ya da bir yazma başladıysa bu cevap ESKİ. Yazmak, kullanıcının az önce
+    // yaptığı şeyi geri almak olurdu.
+    if (mine !== reading.current) return;
     if (list.data !== undefined) {
       setItems(list.data.items);
-      onCounts(list.data.items.filter((i) => i.doneAt !== null).length, list.data.items.length);
+      counts.current(
+        list.data.items.filter((i) => i.doneAt !== null).length,
+        list.data.items.length,
+      );
     }
     // Sessizce dönmek panelin sonsuza kadar "Yükleniyor…" göstermesi demekti: kullanıcı bekliyor,
     // hiçbir şey gelmiyor, ve ekranda bir şeyin bozulduğuna dair tek bir işaret yok.
@@ -97,7 +149,7 @@ export function TaskThread({
       setWatchers(who.data.items);
       setWatching(who.data.watching);
     }
-  }, [onCounts, taskId]);
+  }, [taskId]);
 
   useEffect(() => {
     void load();
@@ -151,13 +203,16 @@ export function TaskThread({
     }
     // Sunucu LİSTEYİ döndürüyor, tek maddeyi değil: sıra numarasını o hesaplıyor, ve istemcinin
     // yeni maddeyi nereye koyacağını tahmin etmesi o hesabı ikinci kez yazmak olurdu.
+    reading.current += 1;
     setItems(data.items);
-    onCounts(data.items.filter((i) => i.doneAt !== null).length, data.items.length);
-  }, [itemDraft, onCounts, onError, taskId]);
+    counts.current(data.items.filter((i) => i.doneAt !== null).length, data.items.length);
+  }, [itemDraft, onError, taskId]);
 
   const tick = useCallback(
     async (itemId: string, done: boolean): Promise<void> => {
       // İYİMSER: bir onay kutusunun bir tur gecikmeyle dolması, kullanıcıya iki kez bastırıyor.
+      // Sayaç da artıyor, yoksa uçuştaki bir okuma bu iyimser hâli geri alırdı.
+      reading.current += 1;
       setItems((current) =>
         current.map((item) =>
           item.id === itemId
@@ -193,13 +248,14 @@ export function TaskThread({
       }
       // Yorumların tersine GERÇEKTEN gidiyor: bir madde bir hatırlatma, ve yanlış yazılmış bir
       // hatırlatmanın "silindi" diye listede durması yalnız gürültü.
+      reading.current += 1;
       setItems((current) => {
         const left = current.filter((item) => item.id !== itemId);
-        onCounts(left.filter((i) => i.doneAt !== null).length, left.length);
+        counts.current(left.filter((i) => i.doneAt !== null).length, left.length);
         return left;
       });
     },
-    [onCounts, onError, taskId],
+    [onError, taskId],
   );
 
   const setTag = useCallback(

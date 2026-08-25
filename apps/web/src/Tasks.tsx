@@ -317,13 +317,20 @@ export function Tasks({
    * kullanmıyor, yalnız olay anında çağırıyor.
    */
   function setChecklistCount(taskId: string, done: number, total: number): void {
-    setTasks((current) =>
-      current === null
-        ? current
-        : current.map((it) =>
-            it.id === taskId ? { ...it, checklistDone: done, checklistTotal: total } : it,
-          ),
-    );
+    setTasks((current) => {
+      if (current === null) return current;
+      const at = current.find((it) => it.id === taskId);
+      // AYNI SAYILARSA AYNI DİZİ. Yeni bir dizi döndürmek React'i her seferinde yeniden çizdiriyor,
+      // ve panel her okumasında bu fonksiyonu çağırdığı için o çizim yeni bir `onCounts` üretip
+      // paneldeki efekti yeniden tetikliyordu — kendi kendini besleyen bir okuma döngüsü. Bail-out
+      // onun bir ucu; ötekisi `TaskThread`'in `onCounts`'u bir ref'te tutması.
+      if (at === undefined || (at.checklistDone === done && at.checklistTotal === total)) {
+        return current;
+      }
+      return current.map((it) =>
+        it.id === taskId ? { ...it, checklistDone: done, checklistTotal: total } : it,
+      );
+    });
   }
 
   async function remove(task: Task): Promise<void> {
