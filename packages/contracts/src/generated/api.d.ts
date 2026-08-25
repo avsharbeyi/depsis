@@ -3403,6 +3403,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/remote/peers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bağlantı tanılaması
+         * @description Bu düğüm kimi görüyor ve NASIL ulaşıyor.
+         *
+         *     `GET /remote` "çevrimiçi" ve "ağa katıldı" diyor — ve her baytı bir ZeroTier kökü üzerinden
+         *     AKTARILAN bir bağlantı için de aynı şeyi diyor. Doğru, ve bir kat daha yavaş. Kullanıcının
+         *     "neden yavaş" sorusunun cevabı burada, `direct` alanında.
+         *
+         *     **`direct` ZeroTier tarafından bildirilmiyor, ajanda TÜRETİLİYOR:** aktif bir yolu olan eşe
+         *     o yoldan ulaşılıyor, olmayan bir eşe kök üzerinden. Türetme ajanda duruyor ki API ve tarayıcı
+         *     kendi kopyalarını büyütmesin.
+         *
+         *     **YALNIZ YÖNETİCİ.** Eş listesi kiracıya değil kutuya ait — daemon kimin sorduğunu bilmiyor
+         *     — ve bu cihazın kiminle konuştuğunun haritası sıradan bir üyenin işi değil.
+         *
+         *     `GET /remote` gibi HER ZAMAN 200: ZeroTier kurulu değilse `available: false` ve boş liste.
+         *     İki uçtan biri hata döndürüp öteki dönmeseydi, arayüz aynı olguyu iki yolla öğrenirdi.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Eşler */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RemotePeerPage"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/me/preferences": {
         parameters: {
             query?: never;
@@ -5633,6 +5687,29 @@ export interface components {
             confirm: string;
             /** @description §0.5 yeniden kimlik doğrulama. Girişle aynı kısıtlamaya tabi ve aynı yere kaydediliyor. */
             password: string;
+        };
+        RemotePeer: {
+            /** @description On altılık haneli düğüm adresi. */
+            address: string;
+            /** @description `LEAF`, `PLANET` ya da `MOON`. */
+            role: string;
+            version: string;
+            /**
+             * @description Gidiş dönüş, milisaniye. **null = henüz ölçülmedi.** ZeroTier bunu -1 olarak yazıyor ve
+             *     ajan onu null'a çeviriyor: "-1 ms" yazan bir ekran, hiç yapılmamış bir ölçümü kötü bir
+             *     ölçüm gibi gösterirdi.
+             */
+            latencyMs: number | null;
+            /**
+             * @description Doğrudan bir yol var mı, yoksa her bayt bir kök üzerinden mi aktarılıyor. Yavaş bir
+             *     bağlantının cevabı neredeyse her zaman burada.
+             */
+            direct: boolean;
+        };
+        RemotePeerPage: {
+            /** @description ZeroTier bu kutuda çalışıyor mu. false ise liste boş ve bu bir arıza değil. */
+            available: boolean;
+            items: components["schemas"]["RemotePeer"][];
         };
         Snapshot: {
             /**

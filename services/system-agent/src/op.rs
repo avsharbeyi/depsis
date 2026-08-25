@@ -527,6 +527,14 @@ pub enum Request {
         name: SafeComponent,
     },
 
+    /// Who this node can see, and how it is reaching them.
+    ///
+    /// The diagnostic `ZerotierStatus` and `ZerotierNetworks` cannot give: both report "online"
+    /// and "joined" for a link whose every byte is being relayed through a ZeroTier root, which is
+    /// correct and an order of magnitude slower. No operands.
+    #[serde(rename = "zerotier_peers")]
+    ZeroTierPeers {},
+
     /// Copy one dataset's snapshot onto another dataset, on THIS appliance.
     ///
     /// `zfs send | zfs recv`, and the most destructive operation in the set after `CreatePool`:
@@ -1152,6 +1160,28 @@ pub const MAX_LISTING: usize = 5_000;
 /// Partitions are not reported as disks. They appear only through `holds`, `mounted` and
 /// `holds_system` — which is what a caller about to overwrite the device needs to know, and a
 /// per-partition inventory is not.
+/// One ZeroTier peer, as the diagnostics screen reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ZeroTierPeer {
+    /// The 10-hex-digit node address.
+    pub address: String,
+    /// `LEAF`, `PLANET` or `MOON`, as the daemon words it.
+    pub role: String,
+    pub version: String,
+    /// Round trip in milliseconds, or absent when it has not been measured.
+    ///
+    /// Absent rather than -1, which is what ZeroTier writes: a screen printing "-1 ms" would be
+    /// showing a measurement that was never taken as though it were a bad one.
+    pub latency_ms: Option<i64>,
+    /// Is there an active path to this peer, or is every byte going through a root?
+    ///
+    /// DERIVED here, not reported by ZeroTier: a peer with an active path is reached over it, one
+    /// with none is relayed. The derivation lives in the agent so the API and the browser cannot
+    /// each grow their own copy of it.
+    pub direct: bool,
+}
+
 /// One snapshot on the wire.
 ///
 /// Its own type rather than `snapshots::SnapshotInfo` for the reason every other wire type here is
@@ -1367,6 +1397,10 @@ pub enum Response {
     },
     Diff {
         lines: Vec<String>,
+    },
+    #[serde(rename = "zerotier_peers")]
+    ZeroTierPeers {
+        peers: Vec<ZeroTierPeer>,
     },
     Replicated {
         /// What `zfs recv` printed, kept so an operator can read the real words on a bad day.
@@ -1679,7 +1713,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

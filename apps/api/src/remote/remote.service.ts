@@ -22,6 +22,7 @@ export type RemoteNetwork = Schemas['RemoteNetwork'];
  * fails to compile, which is the point.
  */
 type AgentNetwork = Extract<AgentResponse, { status: 'zerotier_networks' }>['networks'][number];
+export type AgentPeer = Extract<AgentResponse, { status: 'zerotier_peers' }>['peers'][number];
 
 /**
  * Exactly sixteen lowercase hexadecimal digits.
@@ -96,6 +97,27 @@ export class RemoteService {
     private readonly agent: AgentService,
     private readonly db: DbService,
   ) {}
+
+  /**
+   * Who this node can see, and how.
+   *
+   * The question `status` cannot answer. It reports the node online and the network joined for a
+   * link whose every byte is being relayed through a ZeroTier root — correct, and an order of
+   * magnitude slower. `direct` is what the reader came for.
+   *
+   * NOT TENANT-SCOPED, and it cannot be: peers belong to the BOX, not to an organisation, and the
+   * daemon has no idea which tenant is asking. That is why the route is administrators only —
+   * the peer list is a map of who this appliance talks to.
+   */
+  async peers(correlationId: string): Promise<AgentPeer[]> {
+    const answer = await this.ask(
+      { op: 'zerotier_peers' },
+      'remote access: read the peer list for diagnostics',
+      correlationId,
+    );
+    if (answer.status !== 'zerotier_peers') throw this.unexpected('zerotier_peers', answer);
+    return answer.peers;
+  }
 
   /**
    * The node, and the networks it has joined.

@@ -1668,6 +1668,15 @@ canvas.spark {
   outline: none;
 }
 
+/* ─── bağlantı tanılaması ───────────────────────────────────────────────────── */
+
+.diag {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 2px;
+}
+
 /* ─── bu bilgisayara bağla ──────────────────────────────────────────────────── */
 
 .conn {

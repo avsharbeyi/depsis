@@ -37,7 +37,7 @@
 //! `Transfer-Encoding: chunked` out loud rather than parsing the chunk headers as body, and
 //! bounding the response so that a reply decides at most a fixed amount of the agent's memory.
 
-use crate::op::{NetworkId, ZeroTierNetwork, ZeroTierNetworkStatus};
+use crate::op::{NetworkId, ZeroTierNetwork, ZeroTierNetworkStatus, ZeroTierPeer};
 use serde::Deserialize;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
@@ -152,6 +152,19 @@ pub fn join(network_id: &NetworkId) -> Result<ZeroTierNetwork, ZeroTierError> {
 pub fn leave(network_id: &NetworkId) -> Result<(), ZeroTierError> {
     call(Method::Delete, &network_path(network_id), "")?;
     Ok(())
+}
+
+/// Who this node can see, and HOW it is reaching them.
+///
+/// The question `/status` and `/network` cannot answer. Both say the node is online and the network
+/// is joined, and a user whose transfers crawl reads that as "everything is fine". What is actually
+/// wrong in that case is almost always the same thing: no direct path could be negotiated, so every
+/// byte is going through a ZeroTier root — correct, and an order of magnitude slower.
+///
+/// A read-only GET on the same local API the other four calls use. No new trust surface: the token
+/// is the same, the socket is the same, and nothing here is caller-supplied.
+pub fn peers() -> Result<Vec<ZeroTierPeer>, ZeroTierError> {
+    parse_peers_body(&call(Method::Get, "/peer", "")?)
 }
 
 /// The one place a caller-supplied value becomes part of a request path.
@@ -531,6 +544,63 @@ fn parse_status_body(body: &[u8]) -> Result<NodeStatus, ZeroTierError> {
     })
 }
 
+/// One entry of `/peer`, as the daemon writes it.
+#[derive(serde::Deserialize)]
+struct RawPeer {
+    #[serde(default)]
+    address: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    latency: i64,
+    #[serde(default)]
+    paths: Vec<RawPath>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawPath {
+    #[serde(default)]
+    active: bool,
+    #[serde(default)]
+    preferred: bool,
+}
+
+/// Parse `/peer`.
+///
+/// `direct` is the answer the screen exists for, and it is derived rather than reported: ZeroTier
+/// has no "am I relaying" field. A peer with an ACTIVE path is being reached over that path; a peer
+/// with none is being reached through a root. Reporting the raw path list instead would push that
+/// derivation into the API and then into the browser, and three copies of one rule drift.
+///
+/// A peer whose address is missing is DROPPED. The address is the only thing that identifies a row,
+/// and a diagnostics table with an unnamed line tells the reader nothing they can act on.
+///
+/// PLANET peers — ZeroTier's own roots — are kept. They are always relayed by definition, and
+/// hiding them would make the table look like it was hiding the slow ones.
+fn parse_peers_body(body: &[u8]) -> Result<Vec<ZeroTierPeer>, ZeroTierError> {
+    let raw: Vec<RawPeer> =
+        serde_json::from_slice(body).map_err(|e| ZeroTierError::Protocol(format!("/peer: {e}")))?;
+    Ok(raw
+        .into_iter()
+        .filter(|peer| !peer.address.is_empty())
+        .map(|peer| ZeroTierPeer {
+            // A negative latency means "not measured yet", which ZeroTier writes as -1. Carried as
+            // `None` so a screen cannot print "-1 ms" as though it were a measurement.
+            latency_ms: if peer.latency < 0 {
+                None
+            } else {
+                Some(peer.latency)
+            },
+            direct: peer.paths.iter().any(|path| path.active || path.preferred),
+            address: peer.address,
+            role: peer.role,
+            version: peer.version,
+        })
+        .collect())
+}
+
 fn parse_networks_body(body: &[u8]) -> Result<Vec<ZeroTierNetwork>, ZeroTierError> {
     let raw: Vec<RawNetwork> = serde_json::from_slice(body)
         .map_err(|e| ZeroTierError::Protocol(format!("/network: {e}")))?;
@@ -571,6 +641,101 @@ fn parse_network_body(
     reason = "The crate-level denials exist because a panic in a root daemon is a denial of               service on the one component that cannot be restarted casually. In tests the               opposite is true: a failed assertion SHOULD panic, and indexing a fixture is               clearer than unwrapping an Option."
 )]
 mod tests {
+
+    /// `/peer`, ve asıl olarak `direct`.
+    ///
+    /// Bu alan ZeroTier tarafından BİLDİRİLMİYOR, buradan türetiliyor: aktif bir yolu olan eşe o
+    /// yoldan ulaşılıyor, olmayan bir eşe kök üzerinden aktarmayla. Ekranın cevapladığı soru
+    /// ("neden yavaş") tam olarak bu, ve türetmenin yanlış olması ekranın "doğrudan" yazıp
+    /// aktarmayı gizlemesi demek — kullanıcının bakma sebebini ortadan kaldıran hâl.
+    mod peers {
+        use super::*;
+
+        #[test]
+        fn a_peer_with_an_active_path_is_direct() {
+            let body = br#"[{"address":"1122334455","role":"LEAF","version":"1.14.0",
+                             "latency":12,"paths":[{"active":true,"preferred":true}]}]"#;
+            let peers = parse_peers_body(body).expect("a well formed body parses");
+            assert_eq!(peers.len(), 1);
+            assert!(peers[0].direct, "an active path means a direct link");
+            assert_eq!(peers[0].latency_ms, Some(12));
+            assert_eq!(peers[0].address, "1122334455");
+        }
+
+        #[test]
+        fn a_peer_with_no_paths_is_relayed() {
+            // THE CASE THE SCREEN EXISTS FOR: online, joined, and every byte going through a root.
+            let body = br#"[{"address":"aabbccddee","role":"LEAF","version":"1.14.0",
+                             "latency":180,"paths":[]}]"#;
+            let peers = parse_peers_body(body).expect("parses");
+            assert!(!peers[0].direct, "no path means the traffic is relayed");
+        }
+
+        #[test]
+        fn a_path_that_exists_but_is_not_active_is_not_a_direct_link() {
+            // ZeroTier keeps dead paths in the list for a while. Counting them would report a
+            // direct link over a route that stopped working.
+            let body = br#"[{"address":"aabbccddee","role":"LEAF","version":"1.14.0",
+                             "latency":5,"paths":[{"active":false,"preferred":false}]}]"#;
+            assert!(!parse_peers_body(body).expect("parses")[0].direct);
+        }
+
+        #[test]
+        fn an_unmeasured_latency_is_absent_rather_than_minus_one() {
+            // ZeroTier writes -1 before the first measurement. Carried through, a screen would
+            // print "-1 ms" as though it were a reading.
+            let body = br#"[{"address":"aabbccddee","role":"LEAF","version":"1.14.0",
+                             "latency":-1,"paths":[]}]"#;
+            assert_eq!(parse_peers_body(body).expect("parses")[0].latency_ms, None);
+        }
+
+        #[test]
+        fn the_roots_are_kept() {
+            // PLANET peers are relayed by definition. Hiding them would make the table look like
+            // it was hiding the slow rows.
+            let body = br#"[{"address":"778899aabb","role":"PLANET","version":"1.14.0",
+                             "latency":40,"paths":[{"active":true,"preferred":true}]}]"#;
+            let peers = parse_peers_body(body).expect("parses");
+            assert_eq!(peers[0].role, "PLANET");
+        }
+
+        #[test]
+        fn a_row_with_no_address_is_dropped() {
+            // The address is the only thing identifying a line; an unnamed row in a diagnostics
+            // table tells the reader nothing they can act on.
+            let body = br#"[{"address":"","role":"LEAF","version":"1","latency":1,"paths":[]},
+                            {"address":"aabbccddee","role":"LEAF","version":"1","latency":1,"paths":[]}]"#;
+            let peers = parse_peers_body(body).expect("parses");
+            assert_eq!(peers.len(), 1);
+            assert_eq!(peers[0].address, "aabbccddee");
+        }
+
+        #[test]
+        fn missing_fields_do_not_fail_the_whole_listing() {
+            // A future daemon may drop or rename a field. Losing one column is a worse screen;
+            // losing the whole table is no screen at all.
+            let body = br#"[{"address":"aabbccddee"}]"#;
+            let peers = parse_peers_body(body).expect("a sparse row still parses");
+            assert_eq!(peers[0].role, "");
+            assert!(!peers[0].direct);
+        }
+
+        #[test]
+        fn an_empty_network_is_an_empty_list_and_not_an_error() {
+            assert_eq!(parse_peers_body(b"[]").expect("parses").len(), 0);
+        }
+
+        #[test]
+        fn something_that_is_not_the_expected_shape_is_a_protocol_error() {
+            // Reported rather than swallowed into an empty list: "no peers" and "I could not read
+            // the answer" are different things to a person looking at a connection problem.
+            assert!(matches!(
+                parse_peers_body(b"{\"not\":\"a list\"}"),
+                Err(ZeroTierError::Protocol(_))
+            ));
+        }
+    }
+
     use super::*;
 
     /// A reader that hands back one byte at a time.

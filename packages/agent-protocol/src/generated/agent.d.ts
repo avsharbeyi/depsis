@@ -37,6 +37,9 @@ export type AgentRequest =
       op: 'create_snapshot';
     }
   | {
+      op: 'zerotier_peers';
+    }
+  | {
       /**
        * A snapshot both sides already have, for an incremental send.
        *
@@ -618,6 +621,10 @@ export type AgentResponse =
       status: 'diff';
     }
   | {
+      peers: ZeroTierPeer[];
+      status: 'zerotier_peers';
+    }
+  | {
       /**
        * The send was incremental from this snapshot, or absent for a full send.
        *
@@ -820,6 +827,35 @@ export type ZeroTierNetworkStatus =
  * Partitions are not reported as disks. They appear only through `holds`, `mounted` and
  * `holds_system` — which is what a caller about to overwrite the device needs to know, and a
  * per-partition inventory is not.
+ * One ZeroTier peer, as the diagnostics screen reads it.
+ */
+export interface ZeroTierPeer {
+  /**
+   * The 10-hex-digit node address.
+   */
+  address: string;
+  /**
+   * Is there an active path to this peer, or is every byte going through a root?
+   *
+   * DERIVED here, not reported by ZeroTier: a peer with an active path is reached over it, one
+   * with none is relayed. The derivation lives in the agent so the API and the browser cannot
+   * each grow their own copy of it.
+   */
+  direct: boolean;
+  /**
+   * Round trip in milliseconds, or absent when it has not been measured.
+   *
+   * Absent rather than -1, which is what ZeroTier writes: a screen printing "-1 ms" would be
+   * showing a measurement that was never taken as though it were a bad one.
+   */
+  latency_ms?: number | null;
+  /**
+   * `LEAF`, `PLANET` or `MOON`, as the daemon words it.
+   */
+  role: string;
+  version: string;
+}
+/**
  * One snapshot on the wire.
  *
  * Its own type rather than `snapshots::SnapshotInfo` for the reason every other wire type here is

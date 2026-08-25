@@ -88,6 +88,20 @@
       ]
     },
     {
+      "description": "Who this node can see, and how it is reaching them.\n\nThe diagnostic `ZerotierStatus` and `ZerotierNetworks` cannot give: both report \"online\"\nand \"joined\" for a link whose every byte is being relayed through a ZeroTier root, which is\ncorrect and an order of magnitude slower. No operands.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "zerotier_peers"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
       "description": "Copy one dataset's snapshot onto another dataset, on THIS appliance.\n\n`zfs send | zfs recv`, and the most destructive operation in the set after `CreatePool`:\n`recv -F` destroys whatever is at the target and any snapshot newer than the base. Pointed\nat the share dataset it erases every tenant's files.\n\nFour refusals sit in front of it in `replicate::check` — same dataset, nested either way,\nthe share root, inside the share tree — and §8.1's written confirmation and\nre-authentication sit in front of THOSE in the API. Neither is redundant: the API's\nsequence protects against a person in a hurry, and these refuse a request that reached the\nagent by any other route at all.\n\nNOT REPLICATION TO ANOTHER MACHINE. That needs a transport, a credential store and\nhost-key verification, and none of it can be exercised here. This is the target a two-pool\nNAS has: a second set of disks.",
       "type": "object",
       "properties": {
@@ -1076,6 +1090,25 @@
     {
       "type": "object",
       "properties": {
+        "peers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ZeroTierPeer"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "zerotier_peers"
+        }
+      },
+      "required": [
+        "status",
+        "peers"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
         "base": {
           "description": "The send was incremental from this snapshot, or absent for a full send.\n\nEchoed back because the caller's request is not proof of what happened: an incremental\nthat the target refused is retried as a full send, and a job history that recorded the\nREQUEST would say \"incremental\" about a transfer that moved the whole dataset.",
           "type": [
@@ -1845,7 +1878,7 @@
       "type": "string"
     },
     "SnapshotEntry": {
-      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.\nOne snapshot on the wire.\n\nIts own type rather than `snapshots::SnapshotInfo` for the reason every other wire type here is\nseparate: the protocol is a contract with another process, and a parser's internal shape\nchanging must not silently change what the API receives.",
+      "description": "One snapshot on the wire.\n\nIts own type rather than `snapshots::SnapshotInfo` for the reason every other wire type here is\nseparate: the protocol is a contract with another process, and a parser's internal shape\nchanging must not silently change what the API receives.",
       "type": "object",
       "properties": {
         "created_at": {
@@ -1923,6 +1956,42 @@
           "type": "string",
           "const": "UNKNOWN"
         }
+      ]
+    },
+    "ZeroTierPeer": {
+      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.\nOne ZeroTier peer, as the diagnostics screen reads it.",
+      "type": "object",
+      "properties": {
+        "address": {
+          "description": "The 10-hex-digit node address.",
+          "type": "string"
+        },
+        "direct": {
+          "description": "Is there an active path to this peer, or is every byte going through a root?\n\nDERIVED here, not reported by ZeroTier: a peer with an active path is reached over it, one\nwith none is relayed. The derivation lives in the agent so the API and the browser cannot\neach grow their own copy of it.",
+          "type": "boolean"
+        },
+        "latency_ms": {
+          "description": "Round trip in milliseconds, or absent when it has not been measured.\n\nAbsent rather than -1, which is what ZeroTier writes: a screen printing \"-1 ms\" would be\nshowing a measurement that was never taken as though it were a bad one.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "role": {
+          "description": "`LEAF`, `PLANET` or `MOON`, as the daemon words it.",
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "address",
+        "role",
+        "version",
+        "direct"
       ]
     }
   }

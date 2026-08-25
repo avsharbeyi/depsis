@@ -14,6 +14,7 @@ import {
   UnprocessableEntityException,
   UseGuards,
 } from '@nestjs/common';
+import type { OpenApi } from '@depsis/contracts';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
@@ -59,6 +60,8 @@ const joinSchema = z.object({
  * does not package zerotier-one, so "not installed" is an ordinary state of the box rather than a
  * fault, and the difference between "broken" and "off" is the one an operator needs most.
  */
+type Schemas = OpenApi.components['schemas'];
+
 @Controller('remote')
 @UseGuards(SessionGuard)
 export class RemoteController {
@@ -89,6 +92,47 @@ export class RemoteController {
       // Only unavailability degrades. Anything else is still a fault and still propagates.
       if (error instanceof RemoteUnavailableError || error instanceof AgentUnavailableError) {
         return { available: false, online: false, networks: [] };
+      }
+      throw translate(error);
+    }
+  }
+
+  /**
+   * Bağlantı tanılaması: bu düğüm kimi görüyor ve NASIL ulaşıyor.
+   *
+   * `GET /remote` "çevrimiçi" ve "ağa katıldı" diyor, ve her baytı bir ZeroTier kökü üzerinden
+   * aktarılan bir bağlantı için de aynı şeyi diyor — doğru, ve bir kat daha yavaş. Kullanıcının
+   * "neden yavaş" sorusunun cevabı bu listede, `direct` sütununda.
+   *
+   * YALNIZ YÖNETİCİ. Eş listesi kiracıya değil KUTUYA ait — daemon kimin sorduğunu bilmiyor — ve
+   * bu cihazın kiminle konuştuğunun haritası sıradan bir üyenin işi değil.
+   *
+   * Bu rota da 200 ile cevaplıyor: ZeroTier kurulu değilse boş bir liste ve `available: false`.
+   * `GET /remote` ile aynı gerekçe, ve aynı olması gerekiyor — iki uçtan biri hata döndürüp öteki
+   * dönmeseydi, arayüz aynı olguyu iki farklı yolla öğrenmek zorunda kalırdı.
+   */
+  @Get('peers')
+  // `AdminGuard` sınıfın `SessionGuard`'ının üstüne ve YALNIZ bu rotaya: komşu uçlar üyelere açık,
+  // ve sınıfa koymak onları da kapatırdı.
+  @UseGuards(AdminGuard)
+  async peers(@Req() request: AuthenticatedRequest): Promise<Schemas['RemotePeerPage']> {
+    requireSession(request);
+    const correlationId = randomUUID();
+    try {
+      const peers = await this.remote.peers(correlationId);
+      return {
+        available: true,
+        items: peers.map((peer) => ({
+          address: peer.address,
+          role: peer.role,
+          version: peer.version,
+          latencyMs: peer.latency_ms ?? null,
+          direct: peer.direct,
+        })),
+      };
+    } catch (error) {
+      if (error instanceof RemoteUnavailableError || error instanceof AgentUnavailableError) {
+        return { available: false, items: [] };
       }
       throw translate(error);
     }

@@ -164,6 +164,7 @@ describe('the emitted agent schema', () => {
       'zerotier_join',
       'zerotier_leave',
       'zerotier_networks',
+      'zerotier_peers',
       'zerotier_status',
     ]);
 
@@ -223,7 +224,8 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 15 since
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 16 since
+    // `ZeroTierPeers`, the connection diagnostic. 15 since
     // `ReplicateDataset`, the second most destructive operation in the set: a stale agent
     // that did not know it would answer with a parse failure rather than running a
     // `zfs recv -F` it did not understand. 14 since `ListSnapshots`,
@@ -234,7 +236,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(15);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(16);
   });
 
   it('agrees with the number the agent actually reports', () => {

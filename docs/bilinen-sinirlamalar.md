@@ -214,8 +214,24 @@ ama sınırın doğru sayı olduğu ölçülmedi.
 
 ### Faz 3
 
-8. **Self-hosted ZeroTier controller paneli**, enrollment QR, bağlantı tanılama. Bugün `/remote`
-   yalnız durum okuyor, ağa katılıyor ve ayrılıyor.
+8. **ZeroTier: bağlantı tanılaması YAPILDI, self-hosted controller ve QR yapılmadı.**
+
+   `GET /remote/peers` bu düğümün kimi gördüğünü ve NASIL ulaştığını söylüyor. Eksik olan tam da
+   buydu: `GET /remote` "çevrimiçi" ve "ağa katıldı" diyor, ve her baytı bir ZeroTier kökü
+   üzerinden aktarılan bir bağlantı için de aynı şeyi diyor — doğru, ve bir kat daha yavaş.
+   Kullanıcının "neden yavaş" sorusunun cevabı başka hiçbir ekranda yoktu.
+
+   `direct` ZeroTier tarafından bildirilmiyor, ajanda türetiliyor (aktif yol var mı), ve türetme
+   orada duruyor ki API ile tarayıcı kendi kopyalarını büyütmesin.
+
+   **Self-hosted controller yok.** Kendi ağ kimliklerini ÜRETEN ve üyeleri yetkilendiren bir
+   controller, ayrı bir servis (`ztncui` ya da `zerotier-one`'ın controller API'si) ve kendi kalıcı
+   durumu demek. Bugün DEPSIS başkasının ağına KATILIYOR; ağı kendisi kurmuyor.
+
+   **Enrollment QR yok.** Ağ kimliğini bir QR'a çevirmek küçük bir iş ama bir QR kütüphanesi
+   demek, ve tek kazancı telefonda on altı hane yazmamak. Controller geldiğinde onunla birlikte
+   anlamlı olur.
+
 9. **Nextcloud ve Immich reçeteleri.** Katalog altyapısı (`/apps`) var.
 10. **Android** yerel bağlantı kabuğu.
 

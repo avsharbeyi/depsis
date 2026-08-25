@@ -1778,6 +1778,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 Err(e) => zerotier_error(e),
             },
 
+            Request::ZeroTierPeers {} => match zerotier::peers() {
+                Ok(peers) => Ok(Response::ZeroTierPeers { peers }),
+                Err(e) => zerotier_error(e),
+            },
+
             Request::ZeroTierLeave { network_id } => match zerotier::leave(network_id) {
                 Ok(()) => Ok(Response::ZeroTierLeft {
                     network_id: network_id.as_str().to_string(),
