@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 
 import { AgentService, expectStatus } from '../agent/agent.service.js';
@@ -29,6 +30,30 @@ export class UnknownDatasetError extends Error {
 }
 
 /** This dataset already has a snapshot by that name in DEPSIS's own record. */
+/** Havuzda gerçekten duran bir anlık görüntü. */
+export interface PoolSnapshot {
+  dataset: string;
+  name: string;
+  usedBytes: number;
+  createdAt: Date;
+}
+
+/**
+ * Bir veri kümesinin havuzdaki GERÇEK anlık görüntüleri.
+ *
+ * En çok kaç veri kümesi soruluyor: `MAX_DATASETS`. Kayıtlı satırlardan gelen küme listesi
+ * kullanıcı verisinden türüyor, ve sınırsız bir liste bir ekran çizimini yüzlerce ajan çağrısına
+ * çevirebilirdi — ajan bağlantıları da sıralı.
+ */
+export const MAX_DATASETS = 16;
+
+/** Ajanın cevabındaki bir satır. */
+interface AgentSnapshot {
+  name: string;
+  used_bytes: number;
+  created_at: number;
+}
+
 export class SnapshotNameTakenError extends Error {
   constructor() {
     super('a snapshot with that name already exists on this dataset');
@@ -88,6 +113,50 @@ export class BackupsService {
     private readonly db: DbService,
     private readonly agent: AgentService,
   ) {}
+
+  /**
+   * Havuzun kendi envanteri, veri kümesi başına.
+   *
+   * BU, LİSTENİN DOĞRU OLMASINI SAĞLAYAN ŞEY. `list` DEPSIS'in kendi kaydını okuyor; o kayıt iki
+   * yönde de yanılabilir. Kabuktan alınmış bir görüntü kayıtta yok, ve kabuktan SİLİNMİŞ bir
+   * görüntü kayıtta duruyor — ikincisi tehlikeli olan, çünkü ekran var olmayan bir geri dönüş
+   * noktası öneriyor ve okuyan bunu tam ihtiyaç duyduğu an öğreniyor.
+   *
+   * `null` DÖNÜYOR, boş liste değil, ajana ulaşılamadığında: boş bir envanter "hiç görüntü yok"
+   * demek, ve onu "soramadım" ile aynı şeye çevirmek her kayıtlı satırı kayıp göstermek olurdu —
+   * yani ajanı bir dakikalığına düşmüş bir kutuda bütün yedekleri silinmiş gibi göstermek.
+   */
+  async inventory(datasets: readonly string[], reason: string): Promise<PoolSnapshot[] | null> {
+    const wanted = [...new Set(datasets)].slice(0, MAX_DATASETS);
+    if (wanted.length === 0) return [];
+
+    const found: PoolSnapshot[] = [];
+    for (const dataset of wanted) {
+      let response;
+      try {
+        response = await this.agent.call({ op: 'list_snapshots', dataset }, reason, randomUUID());
+      } catch (error) {
+        this.logger.warn(
+          `could not list snapshots of ${dataset}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return null;
+      }
+      if (response.status !== 'snapshots') return null;
+      // `missing: true` = veri kümesi yok. Kayıtlı satırları için doğru cevap "kayıp", ve boş bir
+      // liste zaten onu veriyor — ayrı bir dal gerekmiyor.
+      for (const row of (response.snapshots ?? []) as AgentSnapshot[]) {
+        found.push({
+          dataset,
+          name: row.name,
+          usedBytes: row.used_bytes,
+          createdAt: new Date(row.created_at * 1000),
+        });
+      }
+    }
+    return found;
+  }
 
   /** Newest first — a backup list is read from the top. */
   async list(organizationId: string): Promise<SnapshotRow[]> {

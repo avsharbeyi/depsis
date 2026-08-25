@@ -12,8 +12,8 @@ use crate::acl::{self, AclError};
 use crate::audit::{self, Outcome, Sink};
 use crate::authz::{Decision, Policy};
 use crate::op::{
-    AclEntry, AclType, DirEntry, PosixId, Request, Response, SafeComponent, SCHEMA_VERSION,
-    SHARE_ROOT_MODE,
+    AclEntry, AclType, DirEntry, PosixId, Request, Response, SafeComponent, SnapshotEntry,
+    SCHEMA_VERSION, SHARE_ROOT_MODE,
 };
 use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource};
 use crate::transfer::{
@@ -1396,6 +1396,33 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 let full = format!("{}@{}", dataset.as_str(), name.as_str());
                 self.runner.run(bin::ZFS, &["snapshot", &full])?;
                 Ok(Response::Snapshot { full_name: full })
+            }
+
+            Request::ListSnapshots { dataset } => {
+                let argv = crate::snapshots::list_snapshots_argv(dataset.as_str());
+                match self.runner.run(bin::ZFS, &argv) {
+                    Ok(out) => Ok(Response::Snapshots {
+                        snapshots: crate::snapshots::parse_snapshots(dataset.as_str(), &out)
+                            .into_iter()
+                            .map(|s| SnapshotEntry {
+                                name: s.name,
+                                used_bytes: s.used_bytes,
+                                created_at: s.created_at,
+                            })
+                            .collect(),
+                        missing: false,
+                    }),
+                    // A dataset that is not there is an ANSWER, not a fault: it is the ordinary
+                    // state of a box the setup wizard has not run on. Reporting it as an error
+                    // would make an unconfigured appliance look broken.
+                    Err(error) if crate::snapshots::missing_dataset(&error) => {
+                        Ok(Response::Snapshots {
+                            snapshots: Vec::new(),
+                            missing: true,
+                        })
+                    }
+                    Err(error) => Err(error),
+                }
             }
 
             Request::DiffSnapshots { dataset, from, to } => {

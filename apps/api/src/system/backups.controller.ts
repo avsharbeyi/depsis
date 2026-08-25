@@ -26,6 +26,7 @@ import {
   SnapshotNameTakenError,
   UnknownDatasetError,
   defaultSnapshotName,
+  type PoolSnapshot,
   type SnapshotRow,
 } from './backups.service.js';
 
@@ -62,18 +63,66 @@ const createSchema = z.object({
 export class BackupsController {
   constructor(private readonly backups: BackupsService) {}
 
+  /**
+   * Kaydedilen yedekler, HAVUZUN KENDİSİYLE karşılaştırılmış.
+   *
+   * Bu uç bir zamanlar yalnız `snapshots` tablosunu okuyordu ve `complete: false` diyordu — ve
+   * sözleşme de "ajanda anlık görüntüleri listele işlemi yok" diye yazıyordu. Artık var, ve fark
+   * bir listenin doğru olup olmaması: kabuktan silinmiş bir görüntü kayıtta duruyordu, yani ekran
+   * var olmayan bir geri dönüş noktası öneriyordu. Bir yedek listesinin yanıldığı an, tam olarak
+   * ona bakılan an.
+   *
+   * Üç durum çıkıyor, ve üçü de okuyanın yapacağı şeyi değiştiriyor:
+   *   * `present` — kayıtta var, havuzda var. Güvenilir.
+   *   * `missing` — kayıtta var, havuzda YOK. Kabuktan silinmiş; geri dönülemez.
+   *   * `unmanaged` — havuzda var, kayıtta yok. Kabuktan alınmış; DEPSIS silmiyor ama gösteriyor.
+   *
+   * Ajana ulaşılamıyorsa hiçbiri: `complete: false` ve durumlar `unknown`. Kayıtlı satırları
+   * "kayıp" göstermek, ajanı bir dakikalığına düşmüş bir kutuda bütün yedekleri silinmiş gibi
+   * göstermek olurdu.
+   */
   @Get()
   async list(@Req() request: AuthenticatedRequest): Promise<Schemas['SnapshotPage']> {
     const session = requireSession(request);
     const rows = await this.backups.list(session.organizationId);
-    return {
-      items: rows.map(toSnapshot),
-      // Always false, and it is a fact rather than a placeholder. The agent has no "list snapshots"
-      // operation, so this is DEPSIS's record of what it took and NOT the pool's inventory — a
-      // snapshot made from a shell on the box is missing from it. The client is required to tell
-      // the user that, and the contract is where it learns it has to.
-      complete: false,
-    };
+    const pool = await this.backups.inventory(
+      rows.map((row) => row.dataset),
+      'GET /backups: comparing the record against the pool',
+    );
+
+    if (pool === null) {
+      return { items: rows.map((row) => toSnapshot(row, 'unknown')), complete: false };
+    }
+
+    const onPool = new Map(pool.map((s) => [`${s.dataset}@${s.name}`, s]));
+    const recorded = new Set(rows.map((row) => row.full_name));
+
+    const items: Schemas['Snapshot'][] = rows.map((row) =>
+      toSnapshot(row, onPool.has(row.full_name) ? 'present' : 'missing', onPool.get(row.full_name)),
+    );
+
+    // Havuzda olup kayıtta olmayanlar. Kimliği YOK, çünkü DEPSIS'in onlar için bir satırı yok —
+    // ve uydurulmuş bir kimlik, istemciye silme gibi işlemler için gerçek olmayan bir tutamak
+    // verirdi.
+    for (const found of pool) {
+      const full = `${found.dataset}@${found.name}`;
+      if (recorded.has(full)) continue;
+      items.push({
+        id: null,
+        dataset: found.dataset,
+        name: found.name,
+        fullName: full,
+        createdBy: null,
+        createdAt: found.createdAt.toISOString(),
+        state: 'unmanaged',
+        usedBytes: found.usedBytes,
+      });
+    }
+
+    // En yeni önce, ikisi birleştikten SONRA: iki listeyi ayrı sıralayıp uç uca eklemek, ekranda
+    // tarihlerin bir yerde geri sarması demek olurdu.
+    items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return { items, complete: true };
   }
 
   // §8's `Idempotency-Key`, on the route the contract declares it on. Without a key the request
@@ -107,14 +156,27 @@ export class BackupsController {
         name,
         correlationId,
       );
-      return toSnapshot(row);
+      // Az önce ALINDI: ajan onu yarattı ve satır ondan sonra yazıldı, yani havuzda olduğu
+      // biliniyor. Yeniden sormak, bilinen bir cevabı bir ajan gidiş dönüşüne çevirirdi.
+      return toSnapshot(row, 'present');
     } catch (error) {
       throw translate(error, correlationId);
     }
   }
 }
 
-function toSnapshot(row: SnapshotRow): Schemas['Snapshot'] {
+/**
+ * `usedBytes` HAVUZDAN geliyor, kayıttan değil, ve yoksa hiç gönderilmiyor.
+ *
+ * DEPSIS bir görüntünün ne kadar yer tuttuğunu bilemez: rakam zamanla DEĞİŞİYOR — ZFS bir
+ * görüntüye yalnız artık başka hiçbir yerden referans verilmeyen blokları yazıyor — yani alındığı
+ * andaki bir sayıyı saklamak, bir hafta sonra yanlış olan bir sayı saklamak olurdu.
+ */
+function toSnapshot(
+  row: SnapshotRow,
+  state: NonNullable<Schemas['Snapshot']['state']>,
+  onPool?: PoolSnapshot,
+): Schemas['Snapshot'] {
   return {
     id: row.id,
     dataset: row.dataset,
@@ -122,6 +184,8 @@ function toSnapshot(row: SnapshotRow): Schemas['Snapshot'] {
     fullName: row.full_name,
     createdBy: row.created_by_username,
     createdAt: row.created_at.toISOString(),
+    state,
+    ...(onPool === undefined ? {} : { usedBytes: onPool.usedBytes }),
   };
 }
 

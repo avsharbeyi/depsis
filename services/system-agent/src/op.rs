@@ -527,6 +527,19 @@ pub enum Request {
         name: SafeComponent,
     },
 
+    /// What snapshots this dataset ACTUALLY has.
+    ///
+    /// The read that was missing beside `CreateSnapshot`. DEPSIS could take a snapshot and record
+    /// it, but never ask — so its backups list was a table, not an inventory, and the screen said
+    /// so in a warning box. The failure direction is the one that costs data: a snapshot destroyed
+    /// from a shell keeps its row, and the screen goes on offering a restore point that is gone.
+    ///
+    /// ONE OPERAND, and it is a validated `DatasetName`. `zfs list -t snapshot` with no operand
+    /// walks every dataset on the box; on an appliance holding several tenants' shares that is one
+    /// tenant being told what another has. The depth limit in the argv (`-d 1`) is the other half
+    /// of the same fence.
+    ListSnapshots { dataset: DatasetName },
+
     /// Diff two snapshots for reconciliation (ADR-0011 layer 3). Runs unprivileged via
     /// `zfs allow` — P0-D disproved the earlier belief that this needed root.
     DiffSnapshots {
@@ -1110,6 +1123,21 @@ pub const MAX_LISTING: usize = 5_000;
 /// Partitions are not reported as disks. They appear only through `holds`, `mounted` and
 /// `holds_system` — which is what a caller about to overwrite the device needs to know, and a
 /// per-partition inventory is not.
+/// One snapshot on the wire.
+///
+/// Its own type rather than `snapshots::SnapshotInfo` for the reason every other wire type here is
+/// separate: the protocol is a contract with another process, and a parser's internal shape
+/// changing must not silently change what the API receives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotEntry {
+    pub name: String,
+    /// What destroying it would free — not what it "contains". See `snapshots::SnapshotInfo`.
+    pub used_bytes: u64,
+    /// Seconds since the epoch.
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DiskInfo {
@@ -1310,6 +1338,15 @@ pub enum Response {
     },
     Diff {
         lines: Vec<String>,
+    },
+    Snapshots {
+        snapshots: Vec<SnapshotEntry>,
+        /// The dataset is not there at all.
+        ///
+        /// Reported rather than collapsed into an empty list because the two mean different things
+        /// to the screen: "no snapshots yet" invites taking one, "no dataset" means the box has not
+        /// been set up. An empty list for both would offer an action that cannot work.
+        missing: bool,
     },
     Smart {
         healthy: bool,
@@ -1603,7 +1640,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

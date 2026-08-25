@@ -98,6 +98,7 @@ describe('the emitted agent schema', () => {
       // being so the moment the product could create one: the wizard finished and the pool
       // appeared nowhere until somebody edited a file and restarted the API.
       'list_pools',
+      'list_snapshots',
       'move_entry',
       // The bulk data path's control half. `open_transfer` resolves and opens a staging file and
       // returns a one-time token; the bytes travel on a separate socket, because Node cannot
@@ -221,12 +222,15 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 6 since
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 14 since `ListSnapshots`,
+    // which is what turned the backups list from DEPSIS's own record into the pool's inventory —
+    // an API that believed it could ask a stale agent would show every recorded snapshot as
+    // unverified forever. 6 since
     // `SyncPosixIdentity`; the pair is what makes a new API against a stale agent fail at the
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(13);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(14);
   });
 
   it('agrees with the number the agent actually reports', () => {

@@ -38,6 +38,10 @@ export type AgentRequest =
     }
   | {
       dataset: DatasetName;
+      op: 'list_snapshots';
+    }
+  | {
+      dataset: DatasetName;
       from: SafeComponent;
       op: 'diff_snapshots';
       to: SafeComponent;
@@ -584,6 +588,18 @@ export type AgentResponse =
       status: 'diff';
     }
   | {
+      /**
+       * The dataset is not there at all.
+       *
+       * Reported rather than collapsed into an empty list because the two mean different things
+       * to the screen: "no snapshots yet" invites taking one, "no dataset" means the box has not
+       * been set up. An empty list for both would offer an action that cannot work.
+       */
+      missing: boolean;
+      snapshots: SnapshotEntry[];
+      status: 'snapshots';
+    }
+  | {
       healthy: boolean;
       raw: string;
       status: 'smart';
@@ -759,7 +775,23 @@ export type ZeroTierNetworkStatus =
  * Partitions are not reported as disks. They appear only through `holds`, `mounted` and
  * `holds_system` — which is what a caller about to overwrite the device needs to know, and a
  * per-partition inventory is not.
+ * One snapshot on the wire.
+ *
+ * Its own type rather than `snapshots::SnapshotInfo` for the reason every other wire type here is
+ * separate: the protocol is a contract with another process, and a parser's internal shape
+ * changing must not silently change what the API receives.
  */
+export interface SnapshotEntry {
+  /**
+   * Seconds since the epoch.
+   */
+  created_at: number;
+  name: string;
+  /**
+   * What destroying it would free — not what it "contains". See `snapshots::SnapshotInfo`.
+   */
+  used_bytes: number;
+}
 export interface DiskInfo {
   /**
    * The `/dev/disk/by-id` name, when the kernel gave the device a stable link.

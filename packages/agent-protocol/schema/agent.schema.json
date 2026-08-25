@@ -88,6 +88,24 @@
       ]
     },
     {
+      "description": "What snapshots this dataset ACTUALLY has.\n\nThe read that was missing beside `CreateSnapshot`. DEPSIS could take a snapshot and record\nit, but never ask — so its backups list was a table, not an inventory, and the screen said\nso in a warning box. The failure direction is the one that costs data: a snapshot destroyed\nfrom a shell keeps its row, and the screen goes on offering a restore point that is gone.\n\nONE OPERAND, and it is a validated `DatasetName`. `zfs list -t snapshot` with no operand\nwalks every dataset on the box; on an appliance holding several tenants' shares that is one\ntenant being told what another has. The depth limit in the argv (`-d 1`) is the other half\nof the same fence.",
+      "type": "object",
+      "properties": {
+        "dataset": {
+          "$ref": "#/$defs/DatasetName"
+        },
+        "op": {
+          "type": "string",
+          "const": "list_snapshots"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "dataset"
+      ]
+    },
+    {
       "description": "Diff two snapshots for reconciliation (ADR-0011 layer 3). Runs unprivileged via\n`zfs allow` — P0-D disproved the earlier belief that this needed root.",
       "type": "object",
       "properties": {
@@ -1019,6 +1037,30 @@
     {
       "type": "object",
       "properties": {
+        "missing": {
+          "description": "The dataset is not there at all.\n\nReported rather than collapsed into an empty list because the two mean different things\nto the screen: \"no snapshots yet\" invites taking one, \"no dataset\" means the box has not\nbeen set up. An empty list for both would offer an action that cannot work.",
+          "type": "boolean"
+        },
+        "snapshots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SnapshotEntry"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "snapshots"
+        }
+      },
+      "required": [
+        "status",
+        "snapshots",
+        "missing"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
         "healthy": {
           "type": "boolean"
         },
@@ -1655,7 +1697,6 @@
       ]
     },
     "DiskInfo": {
-      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.",
       "type": "object",
       "properties": {
         "by_id": {
@@ -1739,6 +1780,32 @@
     "SafeComponent": {
       "description": "A single path component under a share root — never a path, never absolute.\n\nADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access\nto `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle\n`/` or `..` through, so this type refuses them rather than sanitising.",
       "type": "string"
+    },
+    "SnapshotEntry": {
+      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.\nOne snapshot on the wire.\n\nIts own type rather than `snapshots::SnapshotInfo` for the reason every other wire type here is\nseparate: the protocol is a contract with another process, and a parser's internal shape\nchanging must not silently change what the API receives.",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "description": "Seconds since the epoch.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "name": {
+          "type": "string"
+        },
+        "used_bytes": {
+          "description": "What destroying it would free — not what it \"contains\". See `snapshots::SnapshotInfo`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "used_bytes",
+        "created_at"
+      ]
     },
     "ZeroTierNetwork": {
       "description": "One joined network, as the agent reports it.\n\nA typed projection, not the daemon's JSON. Passing the raw object through would make every\nfield ZeroTier ever adds part of the DEPSIS contract, and would put the agent in the position\nof forwarding something it has not read.",

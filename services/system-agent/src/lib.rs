@@ -47,6 +47,7 @@ pub mod pools;
 pub mod samba;
 pub mod seams;
 pub mod smart;
+pub mod snapshots;
 pub mod sweep;
 pub mod transfer;
 pub mod zerotier;

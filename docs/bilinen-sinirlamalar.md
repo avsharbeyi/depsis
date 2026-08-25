@@ -133,8 +133,28 @@ ama sınırın doğru sayı olduğu ölçülmedi.
 4. **Bildirim, akışta değil yoklamada.** Zil altmış saniyede bir `/notifications` soruyor; SSE
    akışı (`/events`) bildirim taşımıyor. Taşısaydı bildirim anında düşerdi — bugün en kötü ihtimalle
    bir dakika gecikiyor. Ölçülüp değiştirilecek bir sayı, çalışmayan bir şey değil.
-5. **Replikasyon ve restore arayüzü.** Anlık görüntü var; ayrı hedefe `zfs send` ve geri yükleme
-   ekranı yok. (Bugün `restore` yalnız çöp kutusundan geri alma.)
+5. **Replikasyon ve restore.** Yedek listesi artık HAVUZLA karşılaştırılıyor (`list_snapshots`):
+   kayıtta olup havuzda olmayan bir görüntü `missing`, kabuktan alınmış olan `unmanaged` görünüyor.
+   Ekrandaki "bu liste havuzun envanteri değil" uyarısı kalktı; yerine yalnız ajana ulaşılamadığında
+   çıkan bir uyarı geldi.
+
+   **Kalan iki şey ve neden kaldıkları:**
+
+   _Ayrı hedefe `zfs send`._ Bir hedef (SSH ya da ikinci bir havuz), bir zamanlama ve bir ilerleme
+   göstergesi gerekiyor. Bu makinede hiçbiri denenemiyor.
+
+   _Dosya bazında geri yükleme._ Bu bir eksiklik değil bir TASARIM ENGELİ, ve yazılı kalması gerek:
+   ZFS'te bir anlık görüntü `.zfs/snapshot/<ad>/` altında AYRI BİR MOUNT olarak beliriyor, ve
+   ajanın güvenli yol dikişi `openat2`'yi `RESOLVE_NO_XDEV` ile çağırıyor — yani mount sınırını
+   geçmeyi kasten reddediyor. O bayrak paylaşım ağacından çıkmayı engelleyen şey (`unix.rs`'in
+   kendi yorumu: "her dataset kendi mount'u, onsuz iç içe bir dataset paylaşımdan çıkış yolu").
+
+   Yani geri yükleme, o dikişe YENİ bir metot eklemek demek: kökü `<root>/.zfs/snapshot/<ad>`
+   olan, o tek mount atlamasına izin verip içeride yine `BENEATH` ile kapanan bir çözüm. Yazılabilir
+   ama kendi güvenlik argümanı ve gerçek ZFS'e karşı ölçümü olmadan yazılmamalı — çalışıp
+   çalışmadığı bu makinede hiçbir testle görülemez, ve körlemesine yazılmış bir kapı, açık olduğunu
+   sanılan bir kapı.
+
 6. **Önizleme ve küçük resim — yarısı var, ve eksik olan yarı bilinçli.**
 
    Satırdaki kare, JPEG'in EXIF'ine GÖMÜLÜ küçük resmi gösteriyor: telefon ve fotoğraf makinesi

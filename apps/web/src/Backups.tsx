@@ -30,6 +30,36 @@ interface Props {
  * the server answered rather than by a role this component was handed: a 403 on the listing is the
  * same fact the POST would produce, and it cannot drift from it.
  */
+/**
+ * Durumun insan tarafı, ve rengi.
+ *
+ * `missing` GÜL: kayıtta duran ama havuzda olmayan bir görüntü, var olmayan bir geri dönüş
+ * noktası — ve bu listenin bir zamanlar sessizce yalan söylediği durumun ta kendisi. Ekranda
+ * uyarı rengiyle durması, onu bir bilgi değil bir eylem çağrısı yapıyor.
+ *
+ * `unmanaged` NÖTR, uyarı değil: kabuktan alınmış bir görüntü tamamen meşru, ve DEPSIS onu
+ * silmiyor. Yalnız artık saklamıyormuş gibi davranmıyor.
+ */
+const STATE: Record<string, { text: string; tone: string }> = {
+  present: { text: 'Havuzda', tone: 'pill ok' },
+  missing: { text: 'Havuzda yok', tone: 'pill bad' },
+  unmanaged: { text: 'Kabuktan', tone: 'pill dim' },
+  unknown: { text: 'Doğrulanmadı', tone: 'pill dim' },
+};
+
+/**
+ * Durum rozeti.
+ *
+ * Kendi bileşeni, çünkü `state` sözleşmede isteğe bağlı ve bir sözlük araması `undefined`
+ * dönebiliyor. Sunucu her zaman dolduruyor ama tip onu bilmiyor, ve bilmediği için bir varsayılan
+ * gerekiyor — "doğrulanmadı", çünkü bilinmeyen bir durumu "havuzda" göstermek, listenin yeniden
+ * yalan söylemesi olurdu.
+ */
+function Durum({ state }: { state: Backup['state'] }): React.JSX.Element {
+  const shown = STATE[state ?? 'unknown'] ?? STATE['unknown'];
+  return <span className={shown?.tone}>{shown?.text}</span>;
+}
+
 export function Backups({ notify, snapshot }: Props): React.JSX.Element {
   const [page, setPage] = useState<BackupPage | null>(null);
   const [forbidden, setForbidden] = useState(false);
@@ -98,18 +128,20 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
 
   return (
     <>
-      {/* Driven by `complete`, not hard-coded. The schema documents that field as the signal the
-          client is supposed to read in order to say this, so a banner that merely happens to agree
-          with it today would be decoupled from the thing it is reporting. */}
+      {/* `complete` false OLDUĞUNDA, ve artık bunun tek bir sebebi var: ajana ulaşılamadı.
+          Eskiden her zaman false'tu — ajanda anlık görüntüleri listeleyecek bir işlem yoktu ve bu
+          kutu "bu liste havuzun envanteri değil" diyordu. Artık liste havuzla karşılaştırılıyor,
+          ve kutu yalnız karşılaştırmanın YAPILAMADIĞI hâlde çıkıyor. */}
       {page !== null && !page.complete && (
         <div className="warn">
           <span className="ic" aria-hidden>
             ⚠
           </span>
           <span className="tx">
-            <b>Bu liste havuzun envanteri değil.</b>
-            DEPSIS yalnız kendi aldığı anlık görüntüleri kaydeder. Kabuktan `zfs snapshot` ile
-            alınmış bir görüntü burada görünmez — yokluğu, olmadığı anlamına gelmez.
+            <b>Havuza sorulamadı.</b>
+            Aşağıdakiler DEPSIS'in kendi kaydı, ve doğrulanmadı: kabuktan silinmiş bir görüntü
+            burada hâlâ görünüyor olabilir. Depolama ajanı geri geldiğinde her satırın durumu
+            yazacak.
           </span>
         </div>
       )}
@@ -136,16 +168,29 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
             <tr>
               <th>Ad</th>
               <th>Dataset</th>
+              <th>Durum</th>
               <th>Alındı</th>
-              <th>Alan</th>
+              <th>Yer</th>
+              <th>Alan kişi</th>
             </tr>
           </thead>
           <tbody>
+            {/* Anahtar `fullName`, `id` DEĞİL: havuzda bulunup kayıtta olmayan satırların kimliği
+                null, ve null bir anahtar React'te aynı satırı iki kez çizdirir. `fullName`
+                (`dataset@ad`) havuzda zaten benzersiz. */}
             {items.map((item) => (
-              <tr key={item.id}>
+              <tr key={item.fullName}>
                 <td>{item.name}</td>
                 <td className="m">{item.dataset}</td>
+                <td>
+                  <Durum state={item.state} />
+                </td>
                 <td className="m">{formatWhen(item.createdAt)}</td>
+                {/* Yalnız havuzda bulunanlarda var: DEPSIS bir görüntünün yerini kaydetmiyor,
+                    çünkü rakam zamanla değişiyor. */}
+                <td className="m">
+                  {item.usedBytes === undefined ? '—' : formatBytes(item.usedBytes)}
+                </td>
                 <td>{item.createdBy ?? '—'}</td>
               </tr>
             ))}

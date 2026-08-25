@@ -5543,21 +5543,57 @@ export interface components {
             items: components["schemas"]["Transfer"][];
         };
         Snapshot: {
-            /** Format: uuid */
-            id: string;
+            /**
+             * Format: uuid
+             * @description DEPSIS'in kaydındaki kimlik. `state: unmanaged` olan bir satırda **null**: o görüntü
+             *     havuzda var ama DEPSIS'in onun için bir satırı yok, ve uydurulmuş bir kimlik istemciye
+             *     gerçek olmayan bir tutamak verirdi.
+             */
+            id: string | null;
             dataset: string;
             name: string;
             fullName: string;
             createdBy?: string | null;
             /** Format: date-time */
             createdAt: string;
+            /**
+             * @description Kayıt ile HAVUZUN karşılaştırılması. Üçü de okuyanın yapacağı şeyi değiştiriyor:
+             *
+             *     * `present` — kayıtta var, havuzda var. Güvenilir bir geri dönüş noktası.
+             *     * `missing` — kayıtta var, havuzda YOK. Kabuktan silinmiş; geri dönülemez. Bu satırın
+             *       var olması, listenin bir zamanlar sessizce yalan söylediği durumun ta kendisi.
+             *     * `unmanaged` — havuzda var, kayıtta yok. Kabuktan alınmış.
+             *     * `unknown` — ajana ulaşılamadı, karşılaştırma yapılamadı. Kayıtlı satırları `missing`
+             *       göstermek, ajanı bir dakikalığına düşmüş bir kutuda bütün yedekleri silinmiş gibi
+             *       göstermek olurdu.
+             * @enum {string}
+             */
+            state: "present" | "missing" | "unmanaged" | "unknown";
+            /**
+             * Format: int64
+             * @description Bu görüntüyü silmenin GERÇEKTEN boşaltacağı yer, havuzdan okunmuş. Yalnız havuzda
+             *     bulunan satırlarda var.
+             *
+             *     İçerdiği veri DEĞİL: ZFS bir görüntüye yalnız artık canlı dosya sisteminden ya da daha
+             *     yeni bir görüntüden referans verilmeyen blokları yazıyor, yani hiçbir şeyin değişmediği
+             *     bir terabaytlık görüntü neredeyse sıfır tutuyor. Kaydedilmiyor da: rakam zamanla
+             *     değişiyor, ve alındığı andaki bir sayı bir hafta sonra yanlış olurdu.
+             */
+            usedBytes?: number;
         };
         SnapshotPage: {
             items: components["schemas"]["Snapshot"][];
             /**
-             * @description Her zaman false. Ajanda "anlık görüntüleri listele" işlemi yok, yani bu liste havuzun
-             *     envanteri değil DEPSIS'in kendi kaydı. Alan bir yer tutucu değil: istemcinin bunu
-             *     kullanıcıya söylemesi gerekiyor ve söylemesi gerektiğini sözleşmeden öğrenmeli.
+             * @description Liste havuzla KARŞILAŞTIRILDI mı.
+             *
+             *     Bu alan bir zamanlar "her zaman false" diyordu, çünkü ajanda anlık görüntüleri
+             *     listeleyecek bir işlem yoktu ve liste DEPSIS'in kendi kaydından ibaretti. Artık
+             *     `list_snapshots` var: true olduğunda her satırın `state`'i havuza sorularak
+             *     doldurulmuş demek, ve havuzda olup kayıtta olmayanlar da listede.
+             *
+             *     false, yalnız ajana ulaşılamadığında. O durumda her `state` `unknown`, ve istemcinin
+             *     bunu söylemesi gerekiyor — sessizce eski davranışa dönmek, doğrulanmamış bir listeyi
+             *     doğrulanmış gibi göstermek olurdu.
              */
             complete: boolean;
         };
