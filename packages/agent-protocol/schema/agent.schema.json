@@ -555,6 +555,103 @@
       ]
     },
     {
+      "description": "List ONE directory inside ONE snapshot of a share.\n\nThe read half of per-file restore, and the answer to the question a NAS is bought for: \"I\ndeleted it yesterday — where is it?\" Until now the only thing DEPSIS could do with a\nsnapshot was report that it existed. Rolling a whole dataset back to it is not an answer:\nit also discards every file written since.\n\nSAME SHAPE AS `ListDirectory`, deliberately — same operands plus a snapshot name, same\none-level rule, same refusal for the agent's own tree. The API walks the tree itself.\n\nREAD-ONLY, and it could not be otherwise: a ZFS snapshot is immutable. There is no\noperation that writes into one, and the restore below reads here and writes through the\nordinary confined path.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "snapshot_entries"
+        },
+        "path": {
+          "description": "Relative to the snapshot's root. Empty means the snapshot of the share root itself.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "snapshot": {
+          "description": "The snapshot's own name — the part after `@`, not `dataset@name`.\n\nThe dataset is derived from the share, not supplied: a caller that could name the\ndataset could name somebody else's.",
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "snapshot",
+        "path"
+      ]
+    },
+    {
+      "description": "Copy one file OUT of a snapshot and back into the live share.\n\nEvery operand `CopyFile` has, plus the snapshot to read from — and that is not a\ncoincidence, it is the design. A restore IS a copy whose source happens to be immutable, so\nit goes through the same sliced staging, the same out-of-space answer, the same ownership\nfix-up and the same `RENAME_NOREPLACE` publish. One implementation of the steps people skip\n(fsync before publish, refuse rather than overwrite), not two.\n\nIT NEVER OVERWRITES. `to` names a destination that must not exist; a restore onto a live\nfile would be the one operation in this set that destroys data the user still has, and the\nentire point of restoring is that the user is not sure which copy they want.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "The file to read, relative to the SNAPSHOT's root. The last element is its name.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "max_bytes": {
+          "description": "The most this call will copy before returning. Bounded by `MAX_COPY_SLICE`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "offset": {
+          "description": "How many bytes are already staged. The file is the authority; see `CopyFile`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "op": {
+          "type": "string",
+          "const": "restore_from_snapshot"
+        },
+        "owner_gid": {
+          "$ref": "#/$defs/PosixId"
+        },
+        "owner_uid": {
+          "description": "Who owns the restored copy. NOT the snapshot's owner: the file may predate the account\nthat is restoring it, and a restore that arrived owned by somebody else is a file the\nperson who asked for it cannot delete.",
+          "$ref": "#/$defs/PosixId"
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "staging_name": {
+          "description": "The name to stage under, inside `.depsis/staging/`.",
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "to": {
+          "description": "Where the restored copy goes, relative to the LIVE share root. The last element is the\nnew name and must not already exist; every element before it must.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "snapshot",
+        "from",
+        "to",
+        "staging_name",
+        "offset",
+        "max_bytes",
+        "owner_uid",
+        "owner_gid"
+      ]
+    },
+    {
       "description": "Delete exactly ONE entry inside a share. Never a tree.\n\n`directory` is a required operand rather than something the agent works out by stat-ing the\npath, and that is deliberate twice over. `unlinkat` needs `AT_REMOVEDIR` or not, so the\ndistinction has to be made somewhere; making the CALLER state it means a caller that\nbelieves it is deleting a file and finds a directory gets a refusal instead of a surprise.\nDeciding it from a stat would also be check-then-use on the one operation that cannot be\nundone.\n\nThere is no recursive variant and there will not be one. A non-empty directory comes back\nas an error (`ENOTEMPTY`) and the API walks the tree itself. The reason is §2.2 and\nADR-0006: the closed operation set exists so that no single call the agent accepts has a\nblast radius the caller chooses. \"Delete this subtree\" is `rm -rf` behind a typed name — one\nbug in the unprivileged side, or one confused-deputy request, and it is the whole share.\nThe API knows the tree because the API stores the tree; the agent only needs to be able to\nremove a leaf.",
       "type": "object",
       "properties": {

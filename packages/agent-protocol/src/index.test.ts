@@ -129,6 +129,7 @@ describe('the emitted agent schema', () => {
       // the tree from the leaves up, because the API is the side that stores it (§2.2, ADR-0006).
       'remove_entry',
       'replicate_dataset',
+      'restore_from_snapshot',
       // The one operation that touches a share root's MODE, and the reason it is separate from
       // `create_dataset`. `zfs create` leaves a mountpoint at 0755 root:root and `apply_folder_acl`
       // refuses to touch the user::/group::/other:: triple, so every share root was `other::r-x`
@@ -154,6 +155,10 @@ describe('the emitted agent schema', () => {
       // The question `DEPSIS_SHARE_PARENT_DATASET` was configuration for — and getting that
       // pairing wrong produces an appliance that creates datasets nothing serves.
       'share_root_status',
+      // Per-file restore, and the pair is deliberate: one reads a snapshot, one copies out of
+      // it. Neither writes into one — a ZFS snapshot is immutable, so a write variant could
+      // only ever fail, and its presence would suggest otherwise.
+      'snapshot_entries',
       'sync_posix_identity',
       // ADR-0020's four, and the shape of them is the point. A general `ZeroTierRequest { path }`
       // proxy would have been the network form of the free-form command §2.2 forbids: one variant
@@ -224,7 +229,10 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 16 since
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 17 since
+    // `SnapshotEntries` and `RestoreFromSnapshot` — per-file restore, and the one place the
+    // agent is allowed to cross a mount boundary. A stale agent that did not know them would
+    // answer a restore with a parse failure rather than half-performing one. 16 since
     // `ZeroTierPeers`, the connection diagnostic. 15 since
     // `ReplicateDataset`, the second most destructive operation in the set: a stale agent
     // that did not know it would answer with a parse failure rather than running a
@@ -236,7 +244,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(16);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(17);
   });
 
   it('agrees with the number the agent actually reports', () => {

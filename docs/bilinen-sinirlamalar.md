@@ -157,17 +157,48 @@ ama sınırın doğru sayı olduğu ölçülmedi.
    stderr'ine yazıyor; ajan onu ayrıştırmıyor. Bir zamanlayıcıyla ilerleyen çubuk, hiçbir şeyin
    resmi olurdu. İş "çalışıyor" diyor, bitince `zfs recv`'in kendi sözlerini gösteriyor.
 
-   _Dosya bazında geri yükleme._ Bu bir eksiklik değil bir TASARIM ENGELİ, ve yazılı kalması gerek:
-   ZFS'te bir anlık görüntü `.zfs/snapshot/<ad>/` altında AYRI BİR MOUNT olarak beliriyor, ve
-   ajanın güvenli yol dikişi `openat2`'yi `RESOLVE_NO_XDEV` ile çağırıyor — yani mount sınırını
-   geçmeyi kasten reddediyor. O bayrak paylaşım ağacından çıkmayı engelleyen şey (`unix.rs`'in
-   kendi yorumu: "her dataset kendi mount'u, onsuz iç içe bir dataset paylaşımdan çıkış yolu").
+   _Dosya bazında geri yükleme YAPILDI._ Bu madde bir TASARIM ENGELİ olarak yazılmıştı ve engel
+   gerçekti: ZFS'te bir anlık görüntü `.zfs/snapshot/<ad>/` altında AYRI BİR MOUNT olarak beliriyor,
+   ve ajanın güvenli yol dikişi `openat2`'yi `RESOLVE_NO_XDEV` ile çağırıyor — mount sınırını
+   geçmeyi kasten reddediyor. O bayrak paylaşım ağacından çıkmayı engelleyen şey.
 
-   Yani geri yükleme, o dikişe YENİ bir metot eklemek demek: kökü `<root>/.zfs/snapshot/<ad>`
-   olan, o tek mount atlamasına izin verip içeride yine `BENEATH` ile kapanan bir çözüm. Yazılabilir
-   ama kendi güvenlik argümanı ve gerçek ZFS'e karşı ölçümü olmadan yazılmamalı — çalışıp
-   çalışmadığı bu makinede hiçbir testle görülemez, ve körlemesine yazılmış bir kapı, açık olduğunu
-   sanılan bir kapı.
+   Çözüm, bayrağı kaldırmak değil, TEK BİR ADIMDA düşürmek oldu. Yürüyüş dört adım ve yalnız
+   üçüncüden dördüncüye geçerken sınır aşılıyor: `<paylaşım>` tam bayrak kümesiyle, `.zfs` ve
+   `snapshot` yine tam bayrak kümesiyle (ikisi de paylaşımın kendi mount'unda), sonra TEK BİR
+   bileşen — görüntünün adı — `NO_XDEV` olmadan ama `BENEATH`, `NO_SYMLINKS` ve `NO_MAGICLINKS`
+   hâlâ açıkken, ve nihayet görüntünün içindeki yol yine tam bayrak kümesiyle. İç içe bir dataset
+   bir üst görüntünün parçası olmadığı için geçilecek ikinci bir sınır zaten yok; olsaydı son adım
+   reddederdi.
+
+   **VE ÖLÇÜLDÜ.** Bu maddenin eski hâli "körlemesine yazılmış bir kapı, açık olduğunu sanılan bir
+   kapıdır" diyordu; ölçüm o yüzden şart. Bu makinede ZFS yok, ama `RESOLVE_NO_XDEV` mount'ları
+   karşılaştırıyor, dosya sistemi TÜRLERİNİ değil — yani `mount --bind` tam olarak aynı sınırı
+   üretiyor. Testler gerçek bir bind mount kuruyor ve dört şeyi ölçüyor: sıradan çözümlemenin aynı
+   dizini REDDETTİĞİNİ (yoksa test hiçbir şey kanıtlamazdı), yeni metodun okuduğunu, görüntünün
+   İÇİNDEN dışarı çıkmanın hâlâ reddedildiğini, ve görüntünün içine konmuş İKİNCİ bir mount'un
+   reddedildiğini. `DEPSIS_REQUIRE_MOUNT_TESTS=1` atlamayı hataya çeviriyor; WSL koşucusu onu
+   veriyor.
+
+   **ÖLÇÜLMEYEN, ve açıkça yazılıyor:** ZFS bir görüntüyü ilk erişimde mount ediyor, ve o otomatik
+   mount'un `openat2` altında tetiklenip tetiklenmediğini bir bind mount cevaplayamaz. Tetiklenmezse
+   sonuç sessiz bir boş liste DEĞİL, görüntüyü adıyla anan bir hata — bu ayrım bilerek kuruldu,
+   çünkü boş bir liste "bu görüntüde bir şey yok" diye okunur ve silinmiş dosyasını arayan biri onu
+   okuyup arayışı bırakır.
+
+   Ürün tarafı: paylaşımın geçmiş sürümleri `Dosyalar` panelinden açılıyor, bir görüntü seçilip
+   içinde gezilebiliyor, ve tek bir dosya canlı ağaca geri getirilebiliyor. Geri getirme, kaynağı
+   değişmez olan bir KOPYALAMA — aynı dilimli hazırlık, aynı yer-yok cevabı, aynı sahiplik
+   düzeltmesi, aynı `RENAME_NOREPLACE` yayını. Üzerine asla yazmıyor: ad doluysa sunucu boş bir ad
+   seçiyor ve SEÇTİĞİNİ söylüyor.
+
+   **Yetki paylaşım çapında**, ve bu bir daraltma. İzinler klasör bazlı, ama bir görüntünün ağacı
+   onlara eşlenemiyor — geri istenen klasör çoğu zaman artık yok, yani izni taşıyacak canlı bir
+   satır yok. Kural, paylaşımın KÖKÜNDE `download`: yalnız bir alt klasöre yetkisi olan biri
+   geçmişe hiç bakamıyor. Kapalı tarafa düşüyor, ve sözleşmede yazıyor.
+
+   **Yapılmayan:** bir klasörün tamamını geri getirmek (ajanın kapalı işlem kümesi tek dosya
+   kopyalıyor; bir ağaç, çağıranın maliyetini seçtiği bir çağrı olurdu), ve görüntüler arası fark
+   göstermek.
 
 6. **Önizleme ve küçük resim — yarısı var, ve eksik olan yarı bilinçli.**
 

@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module.js';
 import { IdempotencyModule } from '../common/idempotency.module.js';
 import { JobsModule } from '../jobs/jobs.module.js';
+import { SystemModule } from '../system/system.module.js';
 import { CopyModule } from './copy.module.js';
 import { FileOperationsController } from './file-operations.controller.js';
 import { FilesController } from './files.controller.js';
@@ -11,6 +12,7 @@ import { TrashRetentionModule } from './trash-retention.module.js';
 import { ThumbnailsService } from './thumbnails.service.js';
 import { FilesService } from './files.service.js';
 import { SearchController } from './search.controller.js';
+import { SnapshotBrowseController } from './snapshots.controller.js';
 import { TransfersController } from './transfers.controller.js';
 import { TransfersService } from './transfers.service.js';
 import { UploadsController } from './uploads.controller.js';
@@ -28,7 +30,17 @@ import { UploadsController } from './uploads.controller.js';
  * supplies `SessionGuard`, which every route in all four controllers sits behind.
  */
 @Module({
-  imports: [AuthModule, JobsModule, IdempotencyModule, CopyModule, TrashRetentionModule],
+  imports: [
+    AuthModule,
+    JobsModule,
+    IdempotencyModule,
+    CopyModule,
+    TrashRetentionModule,
+    // For `BackupsService` alone — the snapshot browser needs the pool's own inventory, and
+    // asking the agent a second time from here would be a second answer to "which snapshots
+    // exist", one of which would eventually be wrong.
+    SystemModule,
+  ],
   controllers: [
     FilesController,
     FileOperationsController,
@@ -36,6 +48,7 @@ import { UploadsController } from './uploads.controller.js';
     UploadsController,
     SearchController,
     TransfersController,
+    SnapshotBrowseController,
   ],
   providers: [FilesService, TransfersService, ThumbnailsService],
   exports: [FilesService],

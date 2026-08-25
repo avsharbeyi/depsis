@@ -90,6 +90,8 @@ export {
 export {
   COPY_KIND,
   COPY_MAX_ATTEMPTS,
+  RESTORE_KIND,
+  type RestorePayload,
   CopyService,
   CopyDestinationOccupiedError,
   CopyNameExhaustedError,

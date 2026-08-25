@@ -892,6 +892,64 @@ pub enum Request {
         path: Vec<SafeComponent>,
     },
 
+    /// List ONE directory inside ONE snapshot of a share.
+    ///
+    /// The read half of per-file restore, and the answer to the question a NAS is bought for: "I
+    /// deleted it yesterday — where is it?" Until now the only thing DEPSIS could do with a
+    /// snapshot was report that it existed. Rolling a whole dataset back to it is not an answer:
+    /// it also discards every file written since.
+    ///
+    /// SAME SHAPE AS `ListDirectory`, deliberately — same operands plus a snapshot name, same
+    /// one-level rule, same refusal for the agent's own tree. The API walks the tree itself.
+    ///
+    /// READ-ONLY, and it could not be otherwise: a ZFS snapshot is immutable. There is no
+    /// operation that writes into one, and the restore below reads here and writes through the
+    /// ordinary confined path.
+    #[serde(rename = "snapshot_entries")]
+    SnapshotEntries {
+        share: SafeComponent,
+        /// The snapshot's own name — the part after `@`, not `dataset@name`.
+        ///
+        /// The dataset is derived from the share, not supplied: a caller that could name the
+        /// dataset could name somebody else's.
+        snapshot: SafeComponent,
+        /// Relative to the snapshot's root. Empty means the snapshot of the share root itself.
+        path: Vec<SafeComponent>,
+    },
+
+    /// Copy one file OUT of a snapshot and back into the live share.
+    ///
+    /// Every operand `CopyFile` has, plus the snapshot to read from — and that is not a
+    /// coincidence, it is the design. A restore IS a copy whose source happens to be immutable, so
+    /// it goes through the same sliced staging, the same out-of-space answer, the same ownership
+    /// fix-up and the same `RENAME_NOREPLACE` publish. One implementation of the steps people skip
+    /// (fsync before publish, refuse rather than overwrite), not two.
+    ///
+    /// IT NEVER OVERWRITES. `to` names a destination that must not exist; a restore onto a live
+    /// file would be the one operation in this set that destroys data the user still has, and the
+    /// entire point of restoring is that the user is not sure which copy they want.
+    #[serde(rename = "restore_from_snapshot")]
+    RestoreFromSnapshot {
+        share: SafeComponent,
+        snapshot: SafeComponent,
+        /// The file to read, relative to the SNAPSHOT's root. The last element is its name.
+        from: Vec<SafeComponent>,
+        /// Where the restored copy goes, relative to the LIVE share root. The last element is the
+        /// new name and must not already exist; every element before it must.
+        to: Vec<SafeComponent>,
+        /// The name to stage under, inside `.depsis/staging/`.
+        staging_name: SafeComponent,
+        /// How many bytes are already staged. The file is the authority; see `CopyFile`.
+        offset: u64,
+        /// The most this call will copy before returning. Bounded by `MAX_COPY_SLICE`.
+        max_bytes: u64,
+        /// Who owns the restored copy. NOT the snapshot's owner: the file may predate the account
+        /// that is restoring it, and a restore that arrived owned by somebody else is a file the
+        /// person who asked for it cannot delete.
+        owner_uid: PosixId,
+        owner_gid: PosixId,
+    },
+
     /// Delete exactly ONE entry inside a share. Never a tree.
     ///
     /// `directory` is a required operand rather than something the agent works out by stat-ing the
@@ -1713,7 +1771,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 16;
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

@@ -44,6 +44,10 @@ import { SystemService } from './system.service.js';
   // to be a string fixed at construction from `DEPSIS_SHARE_PARENT_DATASET`, so the only way to
   // change it was to edit a file and restart — the last shell step in the flow the pool wizard
   // exists to remove.
-  exports: [SystemService],
+  // `BackupsService` as well as `SystemService`: `FilesModule`'s snapshot browser asks the pool
+  // what snapshots a share's dataset actually holds, and the rule that makes that answer
+  // trustworthy — null when the agent could not be asked, never an empty list — has one
+  // implementation here rather than a second one beside the file tree.
+  exports: [SystemService, BackupsService],
 })
 export class SystemModule {}

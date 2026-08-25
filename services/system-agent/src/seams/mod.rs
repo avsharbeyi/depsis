@@ -277,6 +277,54 @@ pub trait SafePath {
     /// row that claimed otherwise would be a lie the interface then has to act on.
     fn list_entries(&self, relative: &[&str]) -> Result<Vec<DirEntryInfo>, SeamError>;
 
+    /// Everything directly under `relative` INSIDE one snapshot of one share.
+    ///
+    /// This is the method that made per-file restore possible, and it is the only place in this
+    /// trait that is allowed to cross a mount boundary — so the argument for it belongs here,
+    /// where the next person will read it before implementing another one.
+    ///
+    /// WHY A CROSSING IS NEEDED AT ALL. On ZFS a snapshot appears under `<dataset>/.zfs/snapshot/
+    /// <name>/` as a SEPARATE MOUNT, materialised by the kernel module on first access. Every
+    /// other resolution in this file runs with `RESOLVE_NO_XDEV`, which refuses exactly that —
+    /// and it has to, because on a box where every share is a dataset, a nested dataset's
+    /// mountpoint is otherwise a way out of the share the caller was confined to.
+    ///
+    /// HOW IT STAYS CLOSED ANYWAY. The walk is four steps and only the third-to-fourth crosses:
+    ///
+    ///   1. `<share>` — resolved from the root fd with the FULL flag set. Same mount as always.
+    ///   2. `.zfs` and `snapshot` — still the share's own mount; ZFS's control directory is not a
+    ///      mount of its own. Still the full flag set, so a share that somehow contained a real
+    ///      symlink or a nested dataset called `.zfs` is refused here.
+    ///   3. `<snapshot>` — ONE component, resolved with `NO_XDEV` dropped and `BENEATH`,
+    ///      `NO_SYMLINKS` and `NO_MAGICLINKS` still on. This is the crossing, and it can only land
+    ///      in a mount that ZFS itself created under that directory.
+    ///   4. `relative` — resolved from the snapshot's root with the FULL flag set again. A nested
+    ///      dataset is NOT part of its parent's snapshot, so there is nothing further to cross
+    ///      into, and if there were, this step refuses it.
+    ///
+    /// WHAT IS STILL TRUSTED. That only root can create a mount, and that the only thing mounting
+    /// anything under `<share>/.zfs/snapshot/` is ZFS. An attacker who can already mount over that
+    /// directory is root on the appliance and has no need of this method.
+    ///
+    /// READ-ONLY BY CONSTRUCTION. There is no snapshot-rooted write method and there must not be:
+    /// a ZFS snapshot is immutable, so a write path could only ever fail, and restoring a file
+    /// means READING it here and writing through the ordinary confined path.
+    fn list_snapshot_entries(
+        &self,
+        share: &str,
+        snapshot: &str,
+        relative: &[&str],
+    ) -> Result<Vec<DirEntryInfo>, SeamError>;
+
+    /// One file inside one snapshot, opened read-only. See `list_snapshot_entries` for the walk
+    /// and the argument; this method takes the same four steps and ends at a regular file.
+    fn open_snapshot(
+        &self,
+        share: &str,
+        snapshot: &str,
+        relative: &[&str],
+    ) -> Result<std::fs::File, SeamError>;
+
     /// The names of the regular files directly under `relative` last modified more than
     /// `older_than` ago.
     ///

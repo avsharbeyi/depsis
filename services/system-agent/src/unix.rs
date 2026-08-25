@@ -112,6 +112,122 @@ impl Openat2SafePath {
             | rustix::fs::ResolveFlags::NO_XDEV
     }
 
+    /// The flags for the ONE resolution step that is allowed to cross a mount boundary.
+    ///
+    /// `resolve_flags()` minus `NO_XDEV`, and nothing else changes: `BENEATH` still refuses to
+    /// climb out, `NO_SYMLINKS` still refuses to follow a link, `NO_MAGICLINKS` still refuses
+    /// `/proc/*/fd`. Written as a subtraction from the real set rather than as its own list so
+    /// that a flag added to the main set is inherited here instead of being silently omitted.
+    fn snapshot_crossing_flags() -> rustix::fs::ResolveFlags {
+        Self::resolve_flags() - rustix::fs::ResolveFlags::NO_XDEV
+    }
+
+    /// `<share>/.zfs/snapshot/<snapshot>`, as a directory descriptor.
+    ///
+    /// Steps 1 to 3 of the walk documented on `SafePath::list_snapshot_entries`. The first three
+    /// components go through the ordinary confined resolution — same mount, full flags — and only
+    /// the snapshot's own name is resolved with the crossing flag set, from a descriptor that is
+    /// already inside the share.
+    fn snapshot_dir(&self, share: &str, snapshot: &str) -> Result<std::fs::File, SeamError> {
+        let control = self.openat2(
+            &[share, ".zfs", "snapshot"],
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        )?;
+
+        let fd = rustix::fs::openat2(
+            &control,
+            OsStr::new(snapshot).as_bytes(),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+            Self::snapshot_crossing_flags(),
+        )
+        .map_err(|e| classify_openat2(snapshot, e))?;
+        Ok(std::fs::File::from(fd))
+    }
+
+    /// Step 4: `relative`, from inside the snapshot, under the FULL flag set again.
+    fn under_snapshot(
+        &self,
+        share: &str,
+        snapshot: &str,
+        relative: &[&str],
+        oflags: rustix::fs::OFlags,
+    ) -> Result<std::fs::File, SeamError> {
+        let snap = self.snapshot_dir(share, snapshot)?;
+        if relative.is_empty() {
+            // The snapshot's own root. Only a directory listing asks for this; `open_snapshot`
+            // refuses an empty path before it gets here, because "read the file at no path" has
+            // no meaning and returning the directory would be a silent substitution.
+            return Ok(snap);
+        }
+        let joined = relative.join("/");
+        let fd = rustix::fs::openat2(
+            &snap,
+            OsStr::new(&joined).as_bytes(),
+            oflags | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+            Self::resolve_flags(),
+        )
+        .map_err(|e| classify_openat2(&joined, e))?;
+        Ok(std::fs::File::from(fd))
+    }
+
+    /// Name, kind and size of everything directly under an ALREADY-RESOLVED directory.
+    ///
+    /// Factored out of `list_entries` when the snapshot listing needed the same loop. One copy,
+    /// because the rules it enforces — symlinks dropped, device nodes dropped, non-UTF-8 names
+    /// dropped, a racing removal not an error — are rules about what DEPSIS can represent, and two
+    /// copies would eventually disagree about them.
+    fn entries_of(dir_fd: &std::fs::File) -> Result<Vec<DirEntryInfo>, SeamError> {
+        let mut reader = rustix::fs::Dir::read_from(dir_fd)
+            .map_err(|e| SeamError::Io(format!("open directory stream: {e}")))?;
+        let mut found = Vec::new();
+
+        while let Some(entry) = reader.read() {
+            let entry = entry.map_err(|e| SeamError::Io(format!("readdir: {e}")))?;
+            let raw = entry.file_name();
+            if raw.to_bytes() == b"." || raw.to_bytes() == b".." {
+                continue;
+            }
+            let stat = match rustix::fs::statat(dir_fd, raw, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            {
+                Ok(stat) => stat,
+                // Raced with something removing it between the readdir and the stat. Not an error:
+                // a reconciliation is a snapshot, and the next one will see the same absence.
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(e) => return Err(SeamError::Io(format!("stat entry: {e}"))),
+            };
+            let kind = rustix::fs::FileType::from_raw_mode(stat.st_mode);
+            let directory = kind == rustix::fs::FileType::Directory;
+            // Regular files and directories only. A symlink, a socket, a device node — DEPSIS has
+            // no row shape for any of them, and inventing one would produce an entry the agent
+            // itself refuses to open.
+            if !directory && kind != rustix::fs::FileType::RegularFile {
+                continue;
+            }
+            let Ok(name) = raw.to_str() else {
+                // A name that is not UTF-8 cannot be a `SafeComponent`, so nothing downstream
+                // could ever address it. Reported as absent rather than as a fault: it is a real
+                // file, and the honest thing is that DEPSIS cannot represent it.
+                continue;
+            };
+            found.push(DirEntryInfo {
+                name: name.to_string(),
+                directory,
+                size: if directory {
+                    0
+                } else {
+                    stat.st_size.unsigned_abs()
+                },
+                modified_unix: stat.st_mtime as i64,
+            });
+        }
+        Ok(found)
+    }
+
     fn openat2(
         &self,
         relative: &[&str],
@@ -470,51 +586,37 @@ impl SafePath for Openat2SafePath {
     /// sweeper's loop — which deletes as root — read less clearly for the sake of sharing twenty
     /// lines.
     fn list_entries(&self, relative: &[&str]) -> Result<Vec<DirEntryInfo>, SeamError> {
-        let dir_fd = self.open_dir(relative)?;
-        let mut reader = rustix::fs::Dir::read_from(&dir_fd)
-            .map_err(|e| SeamError::Io(format!("open directory stream: {e}")))?;
-        let mut found = Vec::new();
+        Self::entries_of(&self.open_dir(relative)?)
+    }
 
-        while let Some(entry) = reader.read() {
-            let entry = entry.map_err(|e| SeamError::Io(format!("readdir: {e}")))?;
-            let raw = entry.file_name();
-            if raw.to_bytes() == b"." || raw.to_bytes() == b".." {
-                continue;
-            }
-            let stat = match rustix::fs::statat(&dir_fd, raw, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
-            {
-                Ok(stat) => stat,
-                // Raced with something removing it between the readdir and the stat. Not an error:
-                // a reconciliation is a snapshot, and the next one will see the same absence.
-                Err(rustix::io::Errno::NOENT) => continue,
-                Err(e) => return Err(SeamError::Io(format!("stat entry: {e}"))),
-            };
-            let kind = rustix::fs::FileType::from_raw_mode(stat.st_mode);
-            let directory = kind == rustix::fs::FileType::Directory;
-            // Regular files and directories only. A symlink, a socket, a device node — DEPSIS has
-            // no row shape for any of them, and inventing one would produce an entry the agent
-            // itself refuses to open.
-            if !directory && kind != rustix::fs::FileType::RegularFile {
-                continue;
-            }
-            let Ok(name) = raw.to_str() else {
-                // A name that is not UTF-8 cannot be a `SafeComponent`, so nothing downstream
-                // could ever address it. Reported as absent rather than as a fault: it is a real
-                // file, and the honest thing is that DEPSIS cannot represent it.
-                continue;
-            };
-            found.push(DirEntryInfo {
-                name: name.to_string(),
-                directory,
-                size: if directory {
-                    0
-                } else {
-                    stat.st_size.unsigned_abs()
-                },
-                modified_unix: stat.st_mtime as i64,
-            });
+    fn list_snapshot_entries(
+        &self,
+        share: &str,
+        snapshot: &str,
+        relative: &[&str],
+    ) -> Result<Vec<DirEntryInfo>, SeamError> {
+        let dir = self.under_snapshot(
+            share,
+            snapshot,
+            relative,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+        )?;
+        Self::entries_of(&dir)
+    }
+
+    fn open_snapshot(
+        &self,
+        share: &str,
+        snapshot: &str,
+        relative: &[&str],
+    ) -> Result<std::fs::File, SeamError> {
+        if relative.is_empty() {
+            // A refusal rather than the snapshot's root directory: "read the file at no path" has
+            // no meaning, and answering with a directory would be a silent substitution the caller
+            // would then try to stream bytes from.
+            return Err(SeamError::NotFound("no file named inside the snapshot".into()));
         }
-        Ok(found)
+        self.under_snapshot(share, snapshot, relative, rustix::fs::OFlags::RDONLY)
     }
 
     fn list_stale_files(
@@ -2495,6 +2597,200 @@ mod tests {
             Err(other) => panic!("expected PathEscape crossing into {child}, got {other:?}"),
             Ok(_) => panic!("NO_XDEV did not stop the crossing: the nested mount opened"),
         }
+    }
+
+    // ── the snapshot walk, against a real mount boundary ──
+    //
+    // These are the tests the limitations document said had to exist before this seam was written:
+    // "körlemesine yazılmış bir kapı, açık olduğunu sanılan bir kapı" — a door written blind is a
+    // door only believed to be shut.
+    //
+    // There is no ZFS on any machine this suite runs on, so the snapshot is a `mount --bind` at
+    // `<share>/.zfs/snapshot/<name>`. That substitution is honest for exactly the property under
+    // test: `RESOLVE_NO_XDEV` compares MOUNTS, not filesystem types, so a bind mount crosses a
+    // boundary in precisely the way a ZFS snapshot does.
+    //
+    // WHAT REMAINS UNMEASURED, stated plainly rather than left to be assumed: ZFS materialises a
+    // snapshot mount on first access, and whether that automount triggers under `openat2` is not
+    // something a bind mount can answer. If it does not, `snapshot_dir` fails with `NotFound` —
+    // loudly, at the operation, naming the snapshot — rather than returning an empty listing.
+
+    /// Make a bind mount, or say why not.
+    ///
+    /// Returns `false` when the process cannot mount, which is the normal case for an unprivileged
+    /// CI runner. Set `DEPSIS_REQUIRE_MOUNT_TESTS=1` to turn that skip into a failure — the WSL
+    /// runner does, so the crossing is measured somewhere on every change rather than nowhere.
+    #[cfg(target_os = "linux")]
+    fn bind_mount(source: &std::path::Path, target: &std::path::Path) -> bool {
+        let status = std::process::Command::new("mount")
+            .arg("--bind")
+            .arg(source)
+            .arg(target)
+            .status();
+        let mounted = matches!(status, Ok(s) if s.success());
+        if !mounted && std::env::var("DEPSIS_REQUIRE_MOUNT_TESTS").as_deref() == Ok("1") {
+            panic!("DEPSIS_REQUIRE_MOUNT_TESTS=1 but `mount --bind` failed: {status:?}");
+        }
+        if !mounted {
+            eprintln!(
+                "SKIPPING the snapshot crossing test: `mount --bind` failed ({status:?}). \
+                 This test is the only measurement of the one place the agent crosses a mount \
+                 boundary; run it as root, or set DEPSIS_REQUIRE_MOUNT_TESTS=1 to make the skip \
+                 a failure."
+            );
+        }
+        mounted
+    }
+
+    /// Take the mount back down, and do not leave one behind if the polite form fails.
+    ///
+    /// The lazy fallback is not tidiness. A `umount` that reports "target is busy" leaves a real
+    /// mount inside a temporary directory that is about to be deleted, and the next run of this
+    /// suite finds it still there — so the test that measures a mount boundary starts depending on
+    /// which mounts a previous run happened to leak. `-l` detaches it from the tree immediately
+    /// and lets the kernel finish when the last reference goes.
+    #[cfg(target_os = "linux")]
+    fn unmount(target: &std::path::Path) {
+        let polite = std::process::Command::new("umount").arg(target).status();
+        if matches!(polite, Ok(status) if status.success()) {
+            return;
+        }
+        let _ = std::process::Command::new("umount")
+            .arg("-l")
+            .arg(target)
+            .status();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_snapshot_is_readable_through_the_one_permitted_crossing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        // The live share, and a directory standing in for the snapshot's contents.
+        std::fs::create_dir_all(root.join("share/.zfs/snapshot/daily-1")).expect("mkdir control");
+        let backing = root.join("backing");
+        std::fs::create_dir_all(backing.join("belgeler")).expect("mkdir backing");
+        std::fs::write(backing.join("belgeler/rapor.txt"), b"the old copy").expect("write");
+
+        let target = root.join("share/.zfs/snapshot/daily-1");
+        if !bind_mount(&backing, &target) {
+            return;
+        }
+
+        let sp = Openat2SafePath::open_root(root).expect("open root");
+
+        // The ordinary resolution REFUSES the same directory, which is what makes the rest of this
+        // test mean something: without the refusal, the crossing method would be proving nothing
+        // that `open_dir` could not already do.
+        match sp.open_dir(&["share", ".zfs", "snapshot", "daily-1"]) {
+            Err(SeamError::PathEscape(_)) => {}
+            other => {
+                unmount(&target);
+                panic!("NO_XDEV should have refused the snapshot mount, got {other:?}");
+            }
+        }
+
+        let listed = sp.list_snapshot_entries("share", "daily-1", &[]);
+        let nested = sp.list_snapshot_entries("share", "daily-1", &["belgeler"]);
+        let opened = sp.open_snapshot("share", "daily-1", &["belgeler", "rapor.txt"]);
+        let empty = sp.open_snapshot("share", "daily-1", &[]);
+        let escape = sp.open_snapshot("share", "daily-1", &["..", "..", "..", "etc"]);
+        unmount(&target);
+
+        let listed = listed.expect("the snapshot root must list");
+        assert_eq!(
+            listed.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["belgeler"]
+        );
+
+        let nested = nested.expect("a directory inside the snapshot must list");
+        assert_eq!(nested.len(), 1);
+        let entry = nested.first().expect("one entry");
+        assert_eq!(entry.name, "rapor.txt");
+        assert_eq!(entry.size, 12);
+
+        let mut buffer = String::new();
+        std::io::Read::read_to_string(&mut opened.expect("the file must open"), &mut buffer)
+            .expect("read");
+        assert_eq!(buffer, "the old copy");
+
+        // An empty path is a refusal and not the snapshot's own directory: answering with a
+        // directory would be a silent substitution the caller then streams bytes from.
+        assert!(
+            matches!(empty, Err(SeamError::NotFound(_))),
+            "an empty path inside a snapshot must be refused, got {empty:?}"
+        );
+
+        // And BENEATH still holds INSIDE the snapshot. This is the half that would be easy to lose:
+        // the crossing step drops NO_XDEV, and dropping the rest of the flag set with it would be
+        // a single-line mistake that opens the whole filesystem to a read-only browser.
+        assert!(
+            matches!(escape, Err(SeamError::PathEscape(_))),
+            "traversal out of a snapshot must be refused, got {escape:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_crossing_is_permitted_at_exactly_one_component() {
+        // The flag set is dropped for the snapshot's own name and NOWHERE ELSE. Measured by
+        // putting a second mount one level deeper, where a ZFS box would have a nested dataset,
+        // and requiring it to be refused.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("share/.zfs/snapshot/daily-1")).expect("mkdir");
+        let outer = root.join("outer");
+        std::fs::create_dir_all(outer.join("nested")).expect("mkdir outer");
+        let inner = root.join("inner");
+        std::fs::create_dir_all(&inner).expect("mkdir inner");
+        std::fs::write(inner.join("secret.txt"), b"another dataset").expect("write");
+
+        let snap = root.join("share/.zfs/snapshot/daily-1");
+        if !bind_mount(&outer, &snap) {
+            return;
+        }
+        let deeper = snap.join("nested");
+        if !bind_mount(&inner, &deeper) {
+            unmount(&snap);
+            return;
+        }
+
+        let sp = Openat2SafePath::open_root(root).expect("open root");
+        let deeper_listing = sp.list_snapshot_entries("share", "daily-1", &["nested"]);
+        let deeper_file = sp.open_snapshot("share", "daily-1", &["nested", "secret.txt"]);
+        unmount(&deeper);
+        unmount(&snap);
+
+        assert!(
+            matches!(deeper_listing, Err(SeamError::PathEscape(_))),
+            "a second mount inside the snapshot must be refused, got {deeper_listing:?}"
+        );
+        assert!(
+            matches!(deeper_file, Err(SeamError::PathEscape(_))),
+            "a file behind a second mount must be refused, got {deeper_file:?}"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_that_is_not_there_is_not_found_rather_than_empty() {
+        // The failure mode this guards against is the one the limitations document called a door
+        // believed to be shut: if the control directory or the snapshot cannot be opened, the
+        // answer must be an error naming it, not an empty listing that reads as "this snapshot
+        // holds nothing" — which is what a user would act on by concluding their file is gone.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("share")).expect("mkdir");
+        let sp = Openat2SafePath::open_root(tmp.path()).expect("open root");
+
+        assert!(matches!(
+            sp.list_snapshot_entries("share", "daily-1", &[]),
+            Err(SeamError::NotFound(_))
+        ));
+        assert!(matches!(
+            sp.open_snapshot("share", "daily-1", &["a.txt"]),
+            Err(SeamError::NotFound(_))
+        ));
     }
 
     #[test]

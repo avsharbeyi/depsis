@@ -20,6 +20,7 @@ import { identitySyncHandler, IDENTITY_SYNC_KIND } from './identity-sync.handler
 import { snapshotHandler, SNAPSHOT_KIND } from './snapshot.handler.js';
 import { overdueSweepHandler, OVERDUE_SWEEP_KIND } from './overdue-sweep.handler.js';
 import { replicateHandler, REPLICATE_KIND } from './replicate.handler.js';
+import { restoreSnapshotHandler, RESTORE_KIND } from './restore-snapshot.handler.js';
 
 /**
  * Every job kind this worker consumes, in one place a test can read.
@@ -65,6 +66,10 @@ export function registerHandlers(
   // `zfs recv -F` destroys the target, and a retry after an ambiguous failure destroys it
   // again without knowing what state it reached.
   worker.register(REPLICATE_KIND, replicateHandler(services.agent));
+  // One file out of a snapshot. Registered beside the copy because it IS one — same service,
+  // same sliced staging — and because a kind registered nowhere is a queue row nothing claims,
+  // which is how `permissions.apply` once sat unclaimed for weeks behind a spinner.
+  worker.register(RESTORE_KIND, restoreSnapshotHandler(services.copies));
   worker.register(RECONCILE_KIND, reconcileHandler(services.indexer));
   // ADR-0011 Layer 1's consumer: what Samba said, acted on within seconds. The walk above
   // stays — it is what this degrades to when an event is missed.

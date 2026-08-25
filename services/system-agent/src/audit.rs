@@ -39,6 +39,8 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::ListSnapshots { .. } => "list_snapshots",
         Request::ReplicateDataset { .. } => "replicate_dataset",
         Request::ZeroTierPeers {} => "zerotier_peers",
+        Request::SnapshotEntries { .. } => "snapshot_entries",
+        Request::RestoreFromSnapshot { .. } => "restore_from_snapshot",
         Request::DiffSnapshots { .. } => "diff_snapshots",
         Request::ReadSmartSummary { .. } => "read_smart_summary",
         Request::ListDisks {} => "list_disks",

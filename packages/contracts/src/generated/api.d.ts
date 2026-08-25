@@ -3403,6 +3403,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/shares/{shareId}/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bu paylaşımın geçmiş sürümleri
+         * @description Paylaşımın veri kümesindeki anlık görüntüler, yenisi önce. HAVUZDAN okunuyor, DEPSIS'in
+         *     kendi kaydından değil: kabuktan silinmiş bir görüntü kayıtta durur, ve ekranın var olmayan
+         *     bir geri dönüş noktası önermesi, okuyanın bunu tam ihtiyaç duyduğu an öğrenmesi demektir.
+         *
+         *     `available: false` ajana ulaşılamadığında. Boş liste DEĞİL: boş liste "hiç görüntü yok"
+         *     demek olurdu, ve bir dakikalığına düşmüş bir ajan bütün yedekleri silinmiş gibi gösterirdi.
+         *
+         *     YETKİ: paylaşımın KÖKÜNDE `download`. Bir anlık görüntüde gezinmek, o paylaşımın geçmişteki
+         *     bütün adlarını görmek demek, ve klasör bazlı bir izin bu ağaca eşlenemiyor — geri
+         *     yüklenecek klasör çoğu zaman artık yok. Dar taraf seçildi: yalnız alt klasörüne yetkisi
+         *     olan biri geçmiş sürümlere hiç bakamıyor.
+         */
+        get: operations["listShareSnapshots"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/{shareId}/snapshots/{snapshot}/entries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bir anlık görüntünün içinde bir klasör
+         * @description Anlık görüntünün içindeki TEK bir klasörün içeriği. Ağaç değil — çağıranın maliyetini
+         *     seçtiği bir çağrı olmaması için (ADR-0006 §2.2), arayüz ağacı kendisi geziyor.
+         *
+         *     Salt okunur, ve başka türlüsü mümkün değil: bir ZFS anlık görüntüsü değiştirilemez.
+         */
+        get: operations["listSnapshotEntries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/{shareId}/snapshots/{snapshot}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bir dosyayı anlık görüntüden geri getir
+         * @description Anlık görüntüdeki BİR dosyayı canlı paylaşıma kopyalar. Veri kümesini geri almaz — bunu
+         *     yapmak, o görüntüden beri yazılmış her şeyi de atmak olurdu.
+         *
+         *     ÜZERİNE YAZMAZ. Hedefteki ad doluysa sunucu boş bir ad seçiyor ve SEÇTİĞİ ADI cevapta
+         *     döndürüyor, böylece kullanıcı dosyanın nereye ineceğini onaylamadan önce görüyor. Ajan
+         *     tarafında da `RENAME_NOREPLACE` var: iki kapı, çünkü geri yüklemenin tamamı "hangi kopyayı
+         *     istediğimden emin değilim" demek.
+         *
+         *     Bir İŞ döndürüyor. Ajanın denetim soketi aynı anda tek bağlantıya hizmet ediyor, yani
+         *     baytlar dilimler hâlinde taşınıyor ve büyük bir dosya hiçbir HTTP isteğinin beklememesi
+         *     gereken kadar sürüyor.
+         *
+         *     YETKİ: paylaşımın kökünde `download`, hedef klasörde `create`.
+         */
+        post: operations["restoreFromSnapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/remote/peers": {
         parameters: {
             query?: never;
@@ -6037,6 +6122,60 @@ export interface components {
         AppLogs: {
             lines: string[];
         };
+        ShareSnapshotPage: {
+            /**
+             * @description Havuz sorulabildi mi. `false` ise `items` boş, ve bu "görüntü yok" DEĞİL "soramadım"
+             *     demek — arayüzün ikisini ayırt etmesi gerekiyor.
+             */
+            available: boolean;
+            items: {
+                /** @description Görüntünün kendi adı, `@`'den sonraki kısım. */
+                name: string;
+                /** Format: date-time */
+                createdAt: string;
+                /**
+                 * @description Bu görüntünün TEK BAŞINA tuttuğu yer — silinirse geri kazanılacak olan. Görüntünün
+                 *     içindeki verinin boyutu değil.
+                 */
+                usedBytes: number;
+            }[];
+        };
+        SnapshotListing: {
+            /** @description Görüntünün kökünden itibaren, sunucunun ayrıştırdığı hâliyle. */
+            path: string[];
+            items: {
+                name: string;
+                directory: boolean;
+                sizeBytes: number;
+                /** Format: date-time */
+                modifiedAt: string;
+            }[];
+            /**
+             * @description Klasör ajanın liste sınırından büyüktü ve liste KESİLDİ. Kesilmiş bir listeyi tam
+             *     gibi göstermek, aradığı dosyayı bulamayan kullanıcıya onun hiç olmadığını söylemek
+             *     olurdu.
+             */
+            truncated: boolean;
+        };
+        RestoreRequest: {
+            /** @description Geri getirilecek dosya, görüntünün kökünden itibaren. */
+            path: string[];
+            /**
+             * Format: uuid
+             * @description İneceği canlı klasör; `null` paylaşımın kökü.
+             */
+            destinationId?: string | null;
+        };
+        RestoreAccepted: {
+            /** Format: uuid */
+            jobId: string;
+            /**
+             * @description Dosyanın ineceği ad. Aslıyla aynı olmayabilir: hedefte o ad doluysa sunucu boş bir ad
+             *     seçiyor, ve seçtiğini burada söylüyor — sessizce başka bir ada indirmek, kullanıcının
+             *     aradığı dosyayı bulamaması demek olurdu.
+             */
+            name: string;
+        };
         RemoteStatus: {
             /** @description zerotier-one kurulu ve çalışıyor mu. DEPSIS onu paketlemiyor. */
             available: boolean;
@@ -6296,4 +6435,91 @@ export interface components {
     pathItems: never;
 }
 export type $defs = Record<string, never>;
-export type operations = Record<string, never>;
+export interface operations {
+    listShareSnapshots: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                shareId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Anlık görüntüler */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareSnapshotPage"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+        };
+    };
+    listSnapshotEntries: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Görüntünün kökünden itibaren, `/` ile ayrılmış. Boş bırakılırsa paylaşımın kökünün o
+                 *     günkü hâli.
+                 */
+                path?: string;
+            };
+            header?: never;
+            path: {
+                shareId: string;
+                /** @description Görüntünün kendi adı — `@`'den sonraki kısım. */
+                snapshot: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Klasörün içeriği */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnapshotListing"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+        };
+    };
+    restoreFromSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                shareId: string;
+                snapshot: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RestoreRequest"];
+            };
+        };
+        responses: {
+            /** @description Geri yükleme kuyruğa alındı */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RestoreAccepted"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+        };
+    };
+}

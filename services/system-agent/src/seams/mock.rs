@@ -334,6 +334,38 @@ impl SafePath for MockSafePath {
     /// The exclusions are copied deliberately rather than left out: a mock that reported symlinks
     /// and sockets would make the dispatcher's filtering untestable here, which is the same
     /// fidelity gap `open_dir` and `open` each had to have fixed.
+    /// A snapshot, as an ORDINARY DIRECTORY at `<share>/.zfs/snapshot/<name>`.
+    ///
+    /// The mock cannot reproduce the one property that makes the real method interesting — that
+    /// the snapshot is a separate mount — because a temporary directory has no mount boundary in
+    /// it. What it does reproduce is the SHAPE: the same four components, the same read-only
+    /// access, the same refusal for an empty path. The crossing itself is measured against a real
+    /// `mount --bind` in `unix.rs`, which is the only place it can be.
+    fn list_snapshot_entries(
+        &self,
+        share: &str,
+        snapshot: &str,
+        relative: &[&str],
+    ) -> Result<Vec<DirEntryInfo>, SeamError> {
+        let mut walk = vec![share, ".zfs", "snapshot", snapshot];
+        walk.extend_from_slice(relative);
+        self.list_entries(&walk)
+    }
+
+    fn open_snapshot(
+        &self,
+        share: &str,
+        snapshot: &str,
+        relative: &[&str],
+    ) -> Result<std::fs::File, SeamError> {
+        if relative.is_empty() {
+            return Err(SeamError::NotFound("no file named inside the snapshot".into()));
+        }
+        let mut walk = vec![share, ".zfs", "snapshot", snapshot];
+        walk.extend_from_slice(relative);
+        self.open(&walk, OpenIntent::Read)
+    }
+
     fn list_entries(&self, relative: &[&str]) -> Result<Vec<DirEntryInfo>, SeamError> {
         let path = self.join(relative)?;
         let mut found = Vec::new();

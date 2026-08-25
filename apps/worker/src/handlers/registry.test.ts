@@ -40,6 +40,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       'files.copy',
       'files.index-drain',
       'files.reconcile',
+      'files.restore-snapshot',
       'files.trash.purge',
       'identity.sync',
       'permissions.apply',

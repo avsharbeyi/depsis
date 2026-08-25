@@ -71,6 +71,13 @@ fn zerotier_error(e: ZeroTierError) -> Result<Response, SeamError> {
 /// a file that looks complete and is not.
 struct CopySlice<'a> {
     share: &'a str,
+    /// `Some` when the source is inside a snapshot rather than the live share.
+    ///
+    /// The ONE field that separates a copy from a restore. Everything else — the slicing, the
+    /// staging file, the out-of-space answer, the ownership fix-up, the `RENAME_NOREPLACE`
+    /// publish — is identical, and giving restore its own implementation would have meant two
+    /// copies of the steps people skip.
+    snapshot: Option<&'a str>,
     from: &'a [&'a str],
     to: &'a [&'a str],
     staging_name: &'a str,
@@ -708,6 +715,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     fn copy_file(&self, spec: &CopySlice<'_>) -> Result<Response, SeamError> {
         let &CopySlice {
             share,
+            snapshot,
             from,
             to,
             staging_name,
@@ -746,11 +754,25 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         let mut source: Vec<&str> = vec![share];
         source.extend_from_slice(from);
 
-        let source_file = match paths.open(&source, OpenIntent::Read) {
+        let opened = match snapshot {
+            // Four steps and exactly one mount crossing; the argument is on
+            // `SafePath::list_snapshot_entries`.
+            Some(name) => paths.open_snapshot(share, name, from),
+            None => paths.open(&source, OpenIntent::Read),
+        };
+        let source_file = match opened {
             Ok(file) => file,
             Err(SeamError::NotFound(what)) => {
                 return Ok(Response::NotFound {
                     reason: format!("{what}: no such entry"),
+                });
+            }
+            // A snapshot whose mount could not be crossed lands here rather than looking like an
+            // empty directory. "This snapshot holds nothing" is what a user acts on by concluding
+            // their file is really gone.
+            Err(SeamError::PathEscape(what)) => {
+                return Ok(Response::Refused {
+                    reason: format!("{what}: refused by the path confinement"),
                 });
             }
             Err(other) => return Err(other),
@@ -859,7 +881,12 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// The seam drops symlinks and everything that is neither a regular file nor a directory, and
     /// this drops anything whose name is not a `SafeComponent`: a name DEPSIS could never address
     /// must not become a row, because the row would be permanently unreachable.
-    fn list_directory(&self, share: &str, path: &[&str]) -> Result<Response, SeamError> {
+    fn list_directory(
+        &self,
+        share: &str,
+        path: &[&str],
+        snapshot: Option<&str>,
+    ) -> Result<Response, SeamError> {
         let Some(paths) = self.paths else {
             return Ok(Response::Refused {
                 reason: "no share root is configured; storage is not set up".to_string(),
@@ -877,7 +904,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         let mut relative: Vec<&str> = vec![share];
         relative.extend_from_slice(path);
 
-        let found = match paths.list_entries(&relative) {
+        let listed = match snapshot {
+            Some(name) => paths.list_snapshot_entries(share, name, path),
+            None => paths.list_entries(&relative),
+        };
+        let found = match listed {
             Ok(found) => found,
             Err(SeamError::NotFound(what)) => {
                 return Ok(Response::NotFound {
@@ -887,6 +918,14 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             Err(SeamError::NotADirectory(what)) => {
                 return Ok(Response::NotFound {
                     reason: format!("{what}: not a directory"),
+                });
+            }
+            // A snapshot mount that could not be crossed. Reported, not flattened into an empty
+            // listing: an empty listing reads as "the snapshot holds nothing", and a person
+            // looking for a file they deleted would act on that by giving up.
+            Err(SeamError::PathEscape(what)) => {
+                return Ok(Response::Refused {
+                    reason: format!("{what}: refused by the path confinement"),
                 });
             }
             Err(other) => return Err(other),
@@ -1598,6 +1637,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 let to: Vec<&str> = to.iter().map(|c| c.as_str()).collect();
                 self.copy_file(&CopySlice {
                     share: share.as_str(),
+                    snapshot: None,
                     from: &from,
                     to: &to,
                     staging_name: staging_name.as_str(),
@@ -1610,7 +1650,42 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
 
             Request::ListDirectory { share, path } => {
                 let parts: Vec<&str> = path.iter().map(|c| c.as_str()).collect();
-                self.list_directory(share.as_str(), &parts)
+                self.list_directory(share.as_str(), &parts, None)
+            }
+
+            Request::SnapshotEntries {
+                share,
+                snapshot,
+                path,
+            } => {
+                let parts: Vec<&str> = path.iter().map(|c| c.as_str()).collect();
+                self.list_directory(share.as_str(), &parts, Some(snapshot.as_str()))
+            }
+
+            Request::RestoreFromSnapshot {
+                share,
+                snapshot,
+                from,
+                to,
+                staging_name,
+                offset,
+                max_bytes,
+                owner_uid,
+                owner_gid,
+            } => {
+                let from: Vec<&str> = from.iter().map(|c| c.as_str()).collect();
+                let to: Vec<&str> = to.iter().map(|c| c.as_str()).collect();
+                self.copy_file(&CopySlice {
+                    share: share.as_str(),
+                    snapshot: Some(snapshot.as_str()),
+                    from: &from,
+                    to: &to,
+                    staging_name: staging_name.as_str(),
+                    offset: *offset,
+                    max_bytes: *max_bytes,
+                    owner_uid: owner_uid.get(),
+                    owner_gid: owner_gid.get(),
+                })
             }
 
             Request::RemoveEntry {

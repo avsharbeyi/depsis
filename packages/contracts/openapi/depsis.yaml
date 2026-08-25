@@ -1889,6 +1889,116 @@ paths:
         '409': { $ref: '#/components/responses/Problem' }
         '429': { $ref: '#/components/responses/Problem' }
 
+  /shares/{shareId}/snapshots:
+    get:
+      operationId: listShareSnapshots
+      tags: [files]
+      summary: Bu paylaşımın geçmiş sürümleri
+      description: |
+        Paylaşımın veri kümesindeki anlık görüntüler, yenisi önce. HAVUZDAN okunuyor, DEPSIS'in
+        kendi kaydından değil: kabuktan silinmiş bir görüntü kayıtta durur, ve ekranın var olmayan
+        bir geri dönüş noktası önermesi, okuyanın bunu tam ihtiyaç duyduğu an öğrenmesi demektir.
+
+        `available: false` ajana ulaşılamadığında. Boş liste DEĞİL: boş liste "hiç görüntü yok"
+        demek olurdu, ve bir dakikalığına düşmüş bir ajan bütün yedekleri silinmiş gibi gösterirdi.
+
+        YETKİ: paylaşımın KÖKÜNDE `download`. Bir anlık görüntüde gezinmek, o paylaşımın geçmişteki
+        bütün adlarını görmek demek, ve klasör bazlı bir izin bu ağaca eşlenemiyor — geri
+        yüklenecek klasör çoğu zaman artık yok. Dar taraf seçildi: yalnız alt klasörüne yetkisi
+        olan biri geçmiş sürümlere hiç bakamıyor.
+      parameters:
+        - name: shareId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Anlık görüntüler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareSnapshotPage' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /shares/{shareId}/snapshots/{snapshot}/entries:
+    get:
+      operationId: listSnapshotEntries
+      tags: [files]
+      summary: Bir anlık görüntünün içinde bir klasör
+      description: |
+        Anlık görüntünün içindeki TEK bir klasörün içeriği. Ağaç değil — çağıranın maliyetini
+        seçtiği bir çağrı olmaması için (ADR-0006 §2.2), arayüz ağacı kendisi geziyor.
+
+        Salt okunur, ve başka türlüsü mümkün değil: bir ZFS anlık görüntüsü değiştirilemez.
+      parameters:
+        - name: shareId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: snapshot
+          in: path
+          required: true
+          description: Görüntünün kendi adı — `@`'den sonraki kısım.
+          schema: { type: string }
+        - name: path
+          in: query
+          required: false
+          description: |
+            Görüntünün kökünden itibaren, `/` ile ayrılmış. Boş bırakılırsa paylaşımın kökünün o
+            günkü hâli.
+          schema: { type: string }
+      responses:
+        '200':
+          description: Klasörün içeriği
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SnapshotListing' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /shares/{shareId}/snapshots/{snapshot}/restore:
+    post:
+      operationId: restoreFromSnapshot
+      tags: [files]
+      summary: Bir dosyayı anlık görüntüden geri getir
+      description: |
+        Anlık görüntüdeki BİR dosyayı canlı paylaşıma kopyalar. Veri kümesini geri almaz — bunu
+        yapmak, o görüntüden beri yazılmış her şeyi de atmak olurdu.
+
+        ÜZERİNE YAZMAZ. Hedefteki ad doluysa sunucu boş bir ad seçiyor ve SEÇTİĞİ ADI cevapta
+        döndürüyor, böylece kullanıcı dosyanın nereye ineceğini onaylamadan önce görüyor. Ajan
+        tarafında da `RENAME_NOREPLACE` var: iki kapı, çünkü geri yüklemenin tamamı "hangi kopyayı
+        istediğimden emin değilim" demek.
+
+        Bir İŞ döndürüyor. Ajanın denetim soketi aynı anda tek bağlantıya hizmet ediyor, yani
+        baytlar dilimler hâlinde taşınıyor ve büyük bir dosya hiçbir HTTP isteğinin beklememesi
+        gereken kadar sürüyor.
+
+        YETKİ: paylaşımın kökünde `download`, hedef klasörde `create`.
+      parameters:
+        - name: shareId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: snapshot
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RestoreRequest' }
+      responses:
+        '202':
+          description: Geri yükleme kuyruğa alındı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RestoreAccepted' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
   /remote/peers:
     get:
       tags: [remote]
@@ -4226,6 +4336,83 @@ components:
         lines:
           type: array
           items: { type: string }
+
+    ShareSnapshotPage:
+      type: object
+      required: [available, items]
+      properties:
+        available:
+          type: boolean
+          description: |
+            Havuz sorulabildi mi. `false` ise `items` boş, ve bu "görüntü yok" DEĞİL "soramadım"
+            demek — arayüzün ikisini ayırt etmesi gerekiyor.
+        items:
+          type: array
+          items:
+            type: object
+            required: [name, createdAt, usedBytes]
+            properties:
+              name:
+                type: string
+                description: Görüntünün kendi adı, `@`'den sonraki kısım.
+              createdAt: { type: string, format: date-time }
+              usedBytes:
+                type: integer
+                description: |
+                  Bu görüntünün TEK BAŞINA tuttuğu yer — silinirse geri kazanılacak olan. Görüntünün
+                  içindeki verinin boyutu değil.
+
+    SnapshotListing:
+      type: object
+      required: [path, items, truncated]
+      properties:
+        path:
+          type: array
+          items: { type: string }
+          description: Görüntünün kökünden itibaren, sunucunun ayrıştırdığı hâliyle.
+        items:
+          type: array
+          items:
+            type: object
+            required: [name, directory, sizeBytes, modifiedAt]
+            properties:
+              name: { type: string }
+              directory: { type: boolean }
+              sizeBytes: { type: integer }
+              modifiedAt: { type: string, format: date-time }
+        truncated:
+          type: boolean
+          description: |
+            Klasör ajanın liste sınırından büyüktü ve liste KESİLDİ. Kesilmiş bir listeyi tam
+            gibi göstermek, aradığı dosyayı bulamayan kullanıcıya onun hiç olmadığını söylemek
+            olurdu.
+
+    RestoreRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items: { type: string }
+          description: Geri getirilecek dosya, görüntünün kökünden itibaren.
+        destinationId:
+          type: [string, 'null']
+          format: uuid
+          description: İneceği canlı klasör; `null` paylaşımın kökü.
+
+    RestoreAccepted:
+      type: object
+      required: [jobId, name]
+      properties:
+        jobId: { type: string, format: uuid }
+        name:
+          type: string
+          description: |
+            Dosyanın ineceği ad. Aslıyla aynı olmayabilir: hedefte o ad doluysa sunucu boş bir ad
+            seçiyor, ve seçtiğini burada söylüyor — sessizce başka bir ada indirmek, kullanıcının
+            aradığı dosyayı bulamaması demek olurdu.
 
     RemoteStatus:
       type: object

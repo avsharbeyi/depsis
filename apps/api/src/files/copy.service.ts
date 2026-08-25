@@ -22,6 +22,21 @@ export interface CopyPayload {
   actorId: string;
 }
 
+/** What one `files.restore-snapshot` job was asked to do. */
+export interface RestorePayload {
+  shareId: string;
+  /** The snapshot's own name — the part after `@`. */
+  snapshot: string;
+  /** The file to read, relative to the SNAPSHOT's root. The last element is its name. */
+  from: string[];
+  /** The live folder it lands in, or null for the share root. */
+  destinationId: string | null;
+  /** The name it lands under. Chosen at enqueue time and shown to the user before they agree. */
+  name: string;
+  /** Who asked. Re-read when the job runs, for the reason `CopyPayload.actorId` gives. */
+  actorId: string;
+}
+
 /** What the job accomplished. */
 export interface CopyProgress {
   copied: number;
@@ -331,6 +346,60 @@ export class CopyService {
   }
 
   /**
+   * Bring one file out of a snapshot and back into the live share.
+   *
+   * THE OPERATION A NAS IS BOUGHT FOR, and until now DEPSIS could not do it. Snapshots existed and
+   * were listed; the only thing that could be done with one was roll a whole dataset back to it,
+   * which also discards every file written since. "I deleted a report yesterday" had no answer.
+   *
+   * It reuses `stream` — the same sliced staging, the same out-of-space handling, the same
+   * `RENAME_NOREPLACE` publish — because a restore IS a copy whose source happens to be immutable.
+   * The only difference reaches the agent as one extra operand.
+   *
+   * A `conflict` from the publish is not adopted as success here either, and the reason is sharper
+   * than it is for a copy: the name was checked as free when the job was enqueued, so something
+   * took it in between. Recording a row would attach that stranger's file to the tree as though it
+   * were the restored one — the user would open a file they did not restore, believing they had.
+   */
+  async restore(
+    organizationId: string,
+    payload: RestorePayload,
+    reason: string,
+  ): Promise<{ bytes: number }> {
+    const share = await this.files.shareFor(organizationId, payload.shareId);
+    const ownerUid = await this.posix.posixUidFor(organizationId, payload.actorId);
+
+    const parentComponents =
+      payload.destinationId === null
+        ? []
+        : await this.files.componentsOf(organizationId, payload.destinationId);
+
+    const bytes = await this.stream(
+      share.name,
+      payload.from,
+      [...parentComponents, payload.name],
+      ownerUid,
+      reason,
+      payload.snapshot,
+    );
+
+    await this.files.recordPublishedFile(
+      organizationId,
+      share.id,
+      payload.destinationId,
+      payload.name,
+      bytes,
+      null,
+      // No `copied_from_entry_id`: the source is a file in a snapshot, which has no row and by
+      // definition may have none — being deleted is the usual reason to restore it. The
+      // idempotence a redelivery needs comes from the agent instead, which refuses to publish
+      // over a name that is taken.
+      null,
+    );
+    return { bytes };
+  }
+
+  /**
    * Move one file's bytes, a slice at a time.
    *
    * The loop is here because the agent refuses to be held: the control socket is served one
@@ -350,25 +419,29 @@ export class CopyService {
     to: readonly string[],
     ownerUid: number,
     reason: string,
+    /** Read from this snapshot instead of the live tree. See `restore`. */
+    snapshot?: string,
   ): Promise<number> {
     const stagingName = `${randomUUID()}.copy`;
     let offset = 0;
 
     for (let slice = 0; slice < 1_000_000; slice += 1) {
+      const common = {
+        share: shareName,
+        from: [...from],
+        to: [...to],
+        staging_name: stagingName,
+        offset,
+        max_bytes: CopyService.SLICE_BYTES,
+        owner_uid: ownerUid,
+        // The user's own private group, which is their uid. ADR-0004 allocates user uids and team
+        // gids from ONE counter precisely so a uid can serve as a group id without colliding.
+        owner_gid: ownerUid,
+      };
       const response = await this.agent.call(
-        {
-          op: 'copy_file',
-          share: shareName,
-          from: [...from],
-          to: [...to],
-          staging_name: stagingName,
-          offset,
-          max_bytes: CopyService.SLICE_BYTES,
-          owner_uid: ownerUid,
-          // The user's own private group, which is their uid. ADR-0004 allocates user uids and team
-          // gids from ONE counter precisely so a uid can serve as a group id without colliding.
-          owner_gid: ownerUid,
-        },
+        snapshot === undefined
+          ? { op: 'copy_file', ...common }
+          : { op: 'restore_from_snapshot', snapshot, ...common },
         reason,
       );
 
@@ -541,8 +614,12 @@ export class CopyService {
    * name — the one thing `RENAME_NOREPLACE` exists to prevent, all the way down to the syscall —
    * and implementing it would mean giving the agent an overwrite it does not have. `version` needs
    * a version store that does not exist. `skip` is defensible and simply not built.
+   *
+   * PUBLIC because the restore endpoint calls it before enqueuing, not after: a restore has to
+   * tell the user which name the file will land under BEFORE they agree to it, and a name chosen
+   * inside the job would only be discoverable once the job had finished.
    */
-  private async freeName(
+  async freeName(
     organizationId: string,
     shareId: string,
     parentId: string | null,
@@ -565,6 +642,15 @@ export class CopyService {
 }
 
 export const COPY_KIND = 'files.copy';
+
+/**
+ * Its own kind, not a flavour of `files.copy`.
+ *
+ * The two payloads name their sources differently and cannot be one shape: a copy names entry ids
+ * in `file_entries`, and a restore names a PATH inside a snapshot — where there is no row, and
+ * usually never will be, because the file being restored is one that was deleted.
+ */
+export const RESTORE_KIND = 'files.restore-snapshot';
 
 /**
  * Five, the queue's own default, and deliberately NOT twenty.
