@@ -27,13 +27,31 @@ budget() {
   echo "${left:-?}"
 }
 
+# HEAD'IN koşusu, en yeni koşu DEĞİL.
+#
+# Ölçülen şey: `?per_page=1` en yeni koşuyu veriyor, ve bir push'tan hemen sonra o koşu henüz
+# GÖRÜNMÜYOR — GitHub onu birkaç saniye içinde kuyruğa alıyor. Bu pencerede betik bir ÖNCEKİ
+# koşuyu kilitliyor, onun bitmiş sonucunu okuyor ve hemen dönüyor. Sonuç: yeni gönderilen bir
+# düzeltme için "failure" yazıyor — düzeltilmiş olan hatanın sonucunu. İki kez üst üste oldu.
+#
+# Bir izleme aracının verebileceği en kötü cevap, BAŞKA BİR ŞEYİN doğru cevabı.
+#
+# `head_sha` ile sorulduğunda böyle bir pencere yok: koşu ya var ya yok, ve yoksa bekleniyor.
 run_id="${1:-}"
 if [ -z "$run_id" ]; then
-  run_id=$(curl -s "$API/actions/runs?per_page=1" |
-    python3 -c 'import sys,json;print(json.load(sys.stdin)["workflow_runs"][0]["id"])' 2>/dev/null)
+  head=$(git rev-parse HEAD 2>/dev/null)
+  for _ in $(seq 1 20); do
+    run_id=$(curl -s "$API/actions/runs?head_sha=$head&per_page=1" |
+      python3 -c 'import sys,json
+runs = json.load(sys.stdin).get("workflow_runs") or []
+print(runs[0]["id"] if runs else "")' 2>/dev/null)
+    [ -n "$run_id" ] && break
+    echo "$(date +%H:%M:%S)  waiting for a run on ${head:0:8}"
+    sleep 15
+  done
 fi
 [ -n "$run_id" ] || {
-  echo "could not find a run (rate limit? $(budget) requests left this hour)"
+  echo "no run for $(git rev-parse --short HEAD) yet (rate limit? $(budget) requests left this hour)"
   exit 1
 }
 
