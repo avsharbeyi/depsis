@@ -17,6 +17,15 @@ export const BACKUP_TICK_KIND = 'storage.backup-tick';
  */
 export const TICK_INTERVAL_MS = 5 * 60_000;
 
+/**
+ * Bir doğrulamanın ne kadar eskiyebileceği.
+ *
+ * Yirmi dört saat, ve daha sık olması bir şey kazandırmıyordu: doğrulanan şey en yeni görüntü, ve
+ * en yeni görüntü günde bir kez değişiyor (saatlik bir zamanlamada daha sık, ama o durumda da
+ * arızanın türü aynı kalıyor — bir görüntü açılamıyorsa bir sonraki de açılamaz).
+ */
+export const VERIFY_INTERVAL_MS = 24 * 60 * 60_000;
+
 export type Cadence = 'hourly' | 'daily' | 'weekly';
 
 export interface ScheduleRow {
@@ -38,6 +47,8 @@ export interface ScheduleRow {
   last_result: string | null;
   /** Artımlı gönderimin tabanı: en son BAŞARIYLA çoğaltılmış görüntü. */
   last_replicated_snapshot: string | null;
+  last_verified_at: Date | null;
+  last_verify_result: string | null;
 }
 
 export interface ScheduleInput {
@@ -243,7 +254,8 @@ export class BackupSchedulesService {
       db.query<ScheduleRow>(
         `SELECT id::text AS id, dataset, label, cadence, at_hour, at_minute, weekday, keep,
                 replicate_target, offsite_host, offsite_port, offsite_user, enabled,
-                next_run_at, last_run_at, last_result, last_replicated_snapshot
+                next_run_at, last_run_at, last_result, last_replicated_snapshot,
+                last_verified_at, last_verify_result
            FROM public.backup_schedules
           ORDER BY label`,
       ),
@@ -261,7 +273,8 @@ export class BackupSchedulesService {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
          RETURNING id::text AS id, dataset, label, cadence, at_hour, at_minute, weekday, keep,
                    replicate_target, offsite_host, offsite_port, offsite_user, enabled,
-                   next_run_at, last_run_at, last_result, last_replicated_snapshot`,
+                   next_run_at, last_run_at, last_result, last_replicated_snapshot,
+                last_verified_at, last_verify_result`,
         [
           organizationId,
           input.dataset,
@@ -305,7 +318,8 @@ export class BackupSchedulesService {
           WHERE organization_id = $1 AND id = $2
          RETURNING id::text AS id, dataset, label, cadence, at_hour, at_minute, weekday, keep,
                    replicate_target, offsite_host, offsite_port, offsite_user, enabled,
-                   next_run_at, last_run_at, last_result, last_replicated_snapshot`,
+                   next_run_at, last_run_at, last_result, last_replicated_snapshot,
+                last_verified_at, last_verify_result`,
         [
           organizationId,
           id,
@@ -360,7 +374,8 @@ export class BackupSchedulesService {
       db.query<ScheduleRow>(
         `SELECT id::text AS id, dataset, label, cadence, at_hour, at_minute, weekday, keep,
                 replicate_target, offsite_host, offsite_port, offsite_user, enabled,
-                next_run_at, last_run_at, last_result, last_replicated_snapshot
+                next_run_at, last_run_at, last_result, last_replicated_snapshot,
+                last_verified_at, last_verify_result
            FROM public.backup_schedules
           WHERE organization_id = $1 AND enabled AND next_run_at <= $2
           ORDER BY next_run_at
@@ -384,6 +399,124 @@ export class BackupSchedulesService {
       await this.advance(organizationId, schedule, now, result);
     }
     return { ran, failed };
+  }
+
+  /**
+   * Yedekleri DOĞRULA: en yeni görüntü duruyor mu, açılıyor mu, boş mu.
+   *
+   * HİÇ GERİ YÜKLENMEMİŞ BİR YEDEK, YEDEK DEĞİLDİR. `last_result` bir tek şeyi söylüyor —
+   * `zfs snapshot` komutunun hata vermediğini. Söylemediği şey o görüntünün AÇILABİLİR olduğu, ve
+   * bir yedeğin sessizce işe yaramaz olmasının yolları tam olarak orada: kabuktan silinmiş bir
+   * görüntü, mount edilemeyen bir görüntü, ve boş bir görüntü. Üçü de "yedeğim var" diyen birini,
+   * olmadığını ihtiyaç duyduğu gün öğrenen birine çeviriyor.
+   *
+   * NE KANITLADIĞI, VE NE KANITLAMADIĞI — ikisi de yazılmalı, çünkü "doğrulandı" diyen ama yalnız
+   * satır sayan bir alan, kapalı görünüp hiçbir şey tutmayan bir kapı olur. Bu kontrol görüntünün
+   * havuzda DURDUĞUNU, açılıp LİSTELENEBİLDİĞİNİ ve BOŞ OLMADIĞINI gösteriyor. Baytların sağlam
+   * olduğunu göstermiyor; onu ZFS'in sağlama toplamları ve `zpool scrub` yapıyor.
+   *
+   * İKİ SEVİYE, ve hangisinin koştuğu cümlede yazıyor. Veri kümesi bir PAYLAŞIMIN kümesiyse
+   * görüntünün kökü gerçekten listeleniyor — ajanın `.zfs/snapshot/<ad>` yürüyüşü, yani mount
+   * sınırının geçilebildiğinin kanıtı. Değilse yalnız havuzun envanterine bakılıyor: paylaşım
+   * olmayan bir veri kümesinin içine bakmanın yolu yok, ve varmış gibi yapmak yanlış olurdu.
+   *
+   * TUR BAŞINA BİR TANE. Doğrulama bir mount tetikliyor ve her turda her zamanlama için koşması
+   * gereksiz; en eski doğrulanmış olan sıraya giriyor.
+   */
+  async verifyOne(organizationId: string, now: Date): Promise<string | null> {
+    const stale = new Date(now.getTime() - VERIFY_INTERVAL_MS);
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<ScheduleRow>(
+        `SELECT id::text AS id, dataset, label, cadence, at_hour, at_minute, weekday, keep,
+                replicate_target, offsite_host, offsite_port, offsite_user, enabled,
+                next_run_at, last_run_at, last_result, last_replicated_snapshot,
+                last_verified_at, last_verify_result
+           FROM public.backup_schedules
+          WHERE organization_id = $1
+            AND enabled
+            AND (last_verified_at IS NULL OR last_verified_at < $2)
+          ORDER BY last_verified_at NULLS FIRST
+          LIMIT 1`,
+        [organizationId, stale],
+      ),
+    );
+    const schedule = rows[0];
+    if (schedule === undefined) return null;
+
+    let result: string;
+    try {
+      result = await this.verify(organizationId, schedule);
+    } catch (error) {
+      result = error instanceof Error ? error.message.slice(0, 500) : 'bilinmeyen hata';
+    }
+
+    await this.db.withTenant(organizationId, (db) =>
+      db.query(
+        `UPDATE public.backup_schedules
+            SET last_verified_at = $3, last_verify_result = $4, updated_at = now()
+          WHERE organization_id = $1 AND id = $2`,
+        [organizationId, schedule.id, now, result],
+      ),
+    );
+    return result;
+  }
+
+  private async verify(organizationId: string, schedule: ScheduleRow): Promise<string> {
+    const correlationId = randomUUID();
+
+    const listed = await this.agent.call(
+      { op: 'list_snapshots', dataset: schedule.dataset },
+      `verifying ${schedule.label}`,
+      correlationId,
+    );
+    if (listed.status !== 'snapshots') {
+      return `havuz sorulamadı: ajan '${listed.status}' cevabı verdi`;
+    }
+    if (listed.missing) {
+      // THE FAILURE THIS EXISTS FOR. `last_result` still says the last run succeeded, and the
+      // dataset it wrote into is gone.
+      return `${schedule.dataset} artık yok — bu zamanlamanın yedeği kalmadı`;
+    }
+
+    const prefix = prefixFor(schedule.cadence);
+    const mine = listed.snapshots
+      .filter((snapshot) => snapshot.name.startsWith(prefix))
+      .sort((a, b) => b.created_at - a.created_at);
+    const newest = mine[0];
+    if (newest === undefined) {
+      return `havuzda bu zamanlamanın hiçbir görüntüsü yok`;
+    }
+
+    // Paylaşım mı? Öyleyse görüntünün İÇİNE bakılabiliyor.
+    const shares = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ name: string }>(
+        `SELECT name FROM public.shares WHERE organization_id = $1 AND dataset = $2 LIMIT 1`,
+        [organizationId, schedule.dataset],
+      ),
+    );
+    const share = shares[0]?.name;
+    if (share === undefined) {
+      return `${newest.name} havuzda duruyor (içine bakılmadı: bu veri kümesi bir paylaşım değil)`;
+    }
+
+    const entries = await this.agent.call(
+      { op: 'snapshot_entries', share, snapshot: newest.name, path: [] },
+      `verifying ${schedule.label}: opening ${newest.name}`,
+      correlationId,
+    );
+    if (entries.status === 'refused' || entries.status === 'not_found') {
+      const reason = 'reason' in entries ? entries.reason : 'bilinmiyor';
+      return `${newest.name} AÇILAMADI: ${reason}`;
+    }
+    if (entries.status !== 'listing') {
+      return `${newest.name} açılamadı: ajan '${entries.status}' cevabı verdi`;
+    }
+    if (entries.entries.length === 0) {
+      // Bir görüntü boş olabilir ve bu bazen doğrudur — ama bir YEDEK için neredeyse hiçbir zaman
+      // değil, ve sessizce "başarılı" demek yedeği olduğunu sanan birini o hâlde bırakmak olurdu.
+      return `${newest.name} açıldı ama BOŞ — bu veri kümesinde yedeklenecek bir şey var mı?`;
+    }
+    return `${newest.name} açıldı, ${entries.entries.length} öğe okundu`;
   }
 
   private async runOne(organizationId: string, schedule: ScheduleRow, now: Date): Promise<void> {

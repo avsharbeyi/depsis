@@ -6387,6 +6387,22 @@ export interface components {
              *     silindikten sonra da duran tek kayıt.
              */
             lastResult: string | null;
+            /** Format: date-time */
+            lastVerifiedAt: string | null;
+            /**
+             * @description Son doğrulamanın cümlesi. HİÇ GERİ YÜKLENMEMİŞ BİR YEDEK, YEDEK DEĞİLDİR: `lastResult`
+             *     yalnız `zfs snapshot` komutunun hata vermediğini söylüyor, bu ise en yeni görüntünün
+             *     havuzda DURDUĞUNU, açılıp LİSTELENEBİLDİĞİNİ ve BOŞ OLMADIĞINI.
+             *
+             *     Baytların sağlam olduğunu SÖYLEMİYOR — onu ZFS'in sağlama toplamları ve `zpool scrub`
+             *     yapıyor, ve bu ürün henüz scrub'ı ne zamanlıyor ne de raporluyor. Cümle bu ayrımı
+             *     taşıyor; "doğrulandı" diyen ama yalnız satır sayan bir alan, kapalı görünüp hiçbir şey
+             *     tutmayan bir kapı olurdu.
+             *
+             *     Veri kümesi bir paylaşımın kümesi değilse görüntünün içine bakılamıyor, ve cümle bunu
+             *     da söylüyor.
+             */
+            lastVerifyResult: string | null;
             /**
              * @description Artımlı gönderimin tabanı: en son BAŞARIYLA çoğaltılmış görüntü. `null` ise bir sonraki
              *     çoğaltma TAM gönderim yapacak — ilk turda, ve başarısız bir turdan sonra. İkincisi

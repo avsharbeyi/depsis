@@ -193,6 +193,8 @@ function toWire(row: ScheduleRow): Schemas['BackupSchedule'] {
     lastRunAt: row.last_run_at?.toISOString() ?? null,
     lastResult: row.last_result,
     lastReplicatedSnapshot: row.last_replicated_snapshot,
+    lastVerifiedAt: row.last_verified_at?.toISOString() ?? null,
+    lastVerifyResult: row.last_verify_result,
   };
 }
 

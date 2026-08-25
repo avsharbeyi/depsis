@@ -182,6 +182,19 @@ ama sınırın doğru sayı olduğu ölçülmedi.
    ekini taşıyor. Elle alınmış bir görüntüyü ya da başka bir aracın aldığını silen bir budama, veri
    kaybının fark edilmeyen biçimi olurdu.
 
+   **Yedekler DOĞRULANIYOR, ve doğrulamanın ne kanıtladığı yazılı.** Zamanlamanın `last_result`
+   alanı bir tek şeyi söylüyordu: `zfs snapshot` komutunun hata vermediğini. Bir yedeğin sessizce
+   işe yaramaz olmasının üç yolu o cümlenin dışında kalıyordu — görüntü kabuktan silinmiş,
+   görüntü mount edilemiyor, ya da görüntü BOŞ. Turda bir zamanlama (en eski doğrulanmış olandan
+   başlayarak) en yeni görüntüsünü açıp listeliyor, ve sonucun cümlesi ekranda ayrı bir sütunda
+   duruyor.
+
+   **Baytların sağlam olduğunu göstermiyor**, ve bu da yazılı: onu ZFS'in sağlama toplamları ve
+   `zpool scrub` yapıyor, ve DEPSIS scrub'ı henüz ne zamanlıyor ne raporluyor. Veri kümesi bir
+   paylaşımın kümesi değilse görüntünün içine bakılamıyor; cümle onu da söylüyor, çünkü
+   "doğrulandı" deyip yalnız satır sayan bir alan kapalı görünüp hiçbir şey tutmayan bir kapı
+   olurdu.
+
    **Zamanlanmış çoğaltma ARTIMLI gönderiyor.** Taban, en son BAŞARIYLA gönderilmiş görüntü;
    zamanlamanın kendi satırında duruyor çünkü hedef başka bir makinede olabilir ve ona her tur
    "sende ne var" diye sormak fazladan bir bağlantı demek. İlk turda ve başarısız bir turdan sonra

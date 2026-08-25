@@ -4647,6 +4647,8 @@ components:
           lastRunAt,
           lastResult,
           lastReplicatedSnapshot,
+          lastVerifiedAt,
+          lastVerifyResult,
         ]
       properties:
         id: { type: string, format: uuid }
@@ -4684,6 +4686,21 @@ components:
           description: |
             Son turun ne yaptığı: `ok`, ya da başarısızlığın kendi cümlesi. İş satırı kuyruktan
             silindikten sonra da duran tek kayıt.
+        lastVerifiedAt: { type: [string, 'null'], format: date-time }
+        lastVerifyResult:
+          type: [string, 'null']
+          description: |
+            Son doğrulamanın cümlesi. HİÇ GERİ YÜKLENMEMİŞ BİR YEDEK, YEDEK DEĞİLDİR: `lastResult`
+            yalnız `zfs snapshot` komutunun hata vermediğini söylüyor, bu ise en yeni görüntünün
+            havuzda DURDUĞUNU, açılıp LİSTELENEBİLDİĞİNİ ve BOŞ OLMADIĞINI.
+
+            Baytların sağlam olduğunu SÖYLEMİYOR — onu ZFS'in sağlama toplamları ve `zpool scrub`
+            yapıyor, ve bu ürün henüz scrub'ı ne zamanlıyor ne de raporluyor. Cümle bu ayrımı
+            taşıyor; "doğrulandı" diyen ama yalnız satır sayan bir alan, kapalı görünüp hiçbir şey
+            tutmayan bir kapı olurdu.
+
+            Veri kümesi bir paylaşımın kümesi değilse görüntünün içine bakılamıyor, ve cümle bunu
+            da söylüyor.
         lastReplicatedSnapshot:
           type: [string, 'null']
           description: |

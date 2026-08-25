@@ -37,10 +37,18 @@ export function backupTickHandler(schedules: BackupSchedulesService): JobHandler
     await schedules.scheduleTick(organizationId, new Date(Date.now() + TICK_INTERVAL_MS));
 
     const { ran, failed } = await schedules.runDue(organizationId, new Date());
+
+    // BİR YEDEĞİN ALINMASI, GERİ YÜKLENEBİLMESİ DEMEK DEĞİL. `runDue` yalnız `zfs snapshot`'ın
+    // hata vermediğini biliyor; bu, en yeni görüntünün havuzda durduğunu ve açılabildiğini
+    // kontrol ediyor. Tur başına bir zamanlama, en eski doğrulanmış olandan başlayarak.
+    const verified = await schedules.verifyOne(organizationId, new Date());
     // Sessiz bir tur normal ve çoğunluk: vakti gelmiş bir zamanlama yoksa yazacak bir şey yok. Her
     // beş dakikada bir "0 koştu" satırı, günlüğü okunmaz yapan şeyin ta kendisi.
     if (ran > 0 || failed > 0) {
       logger.log(`${ran} scheduled backup(s) ran, ${failed} failed, for job ${job.id}`);
+    }
+    if (verified !== null) {
+      logger.log(`backup verification: ${verified}`);
     }
 
     await report(1);

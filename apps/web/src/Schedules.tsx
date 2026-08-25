@@ -17,6 +17,20 @@ const CADENCE: Record<Cadence, string> = {
 const DAYS = ['Pazar', 'Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi'];
 
 /**
+ * Doğrulama cümlesinin rengi.
+ *
+ * Cümleyi AYRIŞTIRMIYOR, iki kelimesine bakıyor — `AÇILAMADI` ve `BOŞ`, ikisi de sunucu
+ * tarafında büyük harfle yazılıyor çünkü ikisi de kullanıcının bir şey yapması gereken hâller.
+ * Geri kalan her şey nötr: "içine bakılmadı" bir arıza değil, bir kapsam sınırı.
+ */
+function verifyTone(result: string): string {
+  if (result.includes('AÇILAMADI') || result.includes('BOŞ') || result.includes('artık yok')) {
+    return 'pill warn';
+  }
+  return result.includes('okundu') ? 'pill ok' : 'm';
+}
+
+/**
  * Zamanlanmış yedekler: elle başlatılan bir yedek, alınmayan bir yedektir.
  *
  * Bir NAS'ın verisini kaybetme yolu bozuk bir yedekleme değil, ALINMAMIŞ bir yedek — ve sebebi
@@ -163,6 +177,7 @@ export function Schedules({ notify }: { notify: Notify }): ReactElement {
               <th>Saklanan</th>
               <th>Sıradaki</th>
               <th>Son tur</th>
+              <th>Doğrulama</th>
               <th />
             </tr>
           </thead>
@@ -195,6 +210,22 @@ export function Schedules({ notify }: { notify: Notify }): ReactElement {
                     </span>
                   )}
                   {item.lastRunAt !== null && <div className="m">{formatWhen(item.lastRunAt)}</div>}
+                </td>
+                <td>
+                  {/* AYRI BİR SÜTUN, ve `lastResult`'ın yanına sıkıştırılmaması bilinçli: ikisi
+                      farklı şeyler söylüyor. Soldaki "`zfs snapshot` hata vermedi" diyor; bu, en
+                      yeni görüntünün havuzda durduğunu ve AÇILABİLDİĞİNİ. Bir yedeğin sessizce
+                      işe yaramaz olması ikisinin arasındaki boşlukta oluyor. */}
+                  {item.lastVerifyResult === null ? (
+                    <span className="m">henüz bakılmadı</span>
+                  ) : (
+                    <span className={verifyTone(item.lastVerifyResult)}>
+                      {item.lastVerifyResult}
+                    </span>
+                  )}
+                  {item.lastVerifiedAt !== null && (
+                    <div className="m">{formatWhen(item.lastVerifiedAt)}</div>
+                  )}
                 </td>
                 <td>
                   <button

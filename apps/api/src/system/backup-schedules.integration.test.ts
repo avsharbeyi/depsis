@@ -33,6 +33,10 @@ interface Behaviour {
   inventory?: { name: string; used_bytes: number; created_at: number }[];
   /** Make `create_snapshot` fail, as a full pool or a missing dataset would. */
   snapshotFails?: boolean;
+  /** The dataset is gone: `zfs list` says so, and every recorded snapshot with it. */
+  datasetMissing?: boolean;
+  /** What `snapshot_entries` answers — the check that the snapshot actually opens. */
+  entries?: AgentResponse;
 }
 
 function stubAgent(behaviour: Behaviour = {}): { agent: AgentService; calls: AgentRequest[] } {
@@ -56,9 +60,18 @@ function stubAgent(behaviour: Behaviour = {}): { agent: AgentService; calls: Age
       if (request.op === 'list_snapshots') {
         return Promise.resolve<AgentResponse>({
           status: 'snapshots',
-          snapshots: behaviour.inventory ?? [],
-          missing: false,
+          snapshots: behaviour.datasetMissing === true ? [] : (behaviour.inventory ?? []),
+          missing: behaviour.datasetMissing === true,
         });
+      }
+      if (request.op === 'snapshot_entries') {
+        return Promise.resolve<AgentResponse>(
+          behaviour.entries ?? {
+            status: 'listing',
+            truncated: false,
+            entries: [{ name: 'belgeler', directory: true, size: 0, modified_unix: 1_787_000_000 }],
+          },
+        );
       }
       if (request.op === 'destroy_snapshot') {
         return Promise.resolve<AgentResponse>({
@@ -129,6 +142,13 @@ describeDb('a scheduled backup', () => {
     );
   }
 
+  /** Put the verification clock back so the next call picks this schedule up. */
+  async function unverify(id: string): Promise<void> {
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE public.backup_schedules SET last_verified_at = NULL WHERE id = $1`, [id]),
+    );
+  }
+
   async function makeDue(id: string): Promise<void> {
     await owner.withoutTenant('migration-status', (q) =>
       q.query(
@@ -174,6 +194,12 @@ describeDb('a scheduled backup', () => {
       await owner.withoutTenant('migration-status', async (q) => {
         await q.query(`DELETE FROM backup_schedules WHERE organization_id = $1`, [org]);
         await q.query(`DELETE FROM job_queue WHERE organization_id = $1`, [org]);
+        // The verification test makes a share so the snapshot walk has somewhere to go; its
+        // implicit grant and team have to come out first, both being ON DELETE RESTRICT.
+        await q.query(`DELETE FROM folder_grants WHERE organization_id = $1`, [org]);
+        await q.query(`DELETE FROM shares WHERE organization_id = $1`, [org]);
+        await q.query(`DELETE FROM team_members WHERE organization_id = $1`, [org]);
+        await q.query(`DELETE FROM teams WHERE organization_id = $1`, [org]);
         await q.query(`DELETE FROM users WHERE organization_id = $1`, [org]);
         await q.query(`DELETE FROM organizations WHERE id = $1`, [org]);
       });
@@ -333,6 +359,94 @@ describeDb('a scheduled backup', () => {
     await clearJobs();
     await service().schedules.runDue(org, new Date());
     expect((await queuedReplication())?.base).toBeNull();
+  });
+
+  it('verifies that the newest snapshot actually opens, not just that a job said ok', async () => {
+    // HICBIR ZAMAN GERI YUKLENMEMIS BIR YEDEK, YEDEK DEGILDIR. `last_result` says one thing: that
+    // `zfs snapshot` did not error. Every failure in the test below it leaves that field saying
+    // `ok`, which is why this check exists at all.
+    const rows = await service().schedules.list(org);
+    const schedule = rows[0];
+    if (schedule === undefined) return;
+
+    const inventory = [
+      { name: 'depsis-daily-20260824T030000Z', used_bytes: 1, created_at: 1_787_000_000 },
+      { name: 'depsis-daily-20260825T030000Z', used_bytes: 1, created_at: 1_787_086_400 },
+    ];
+
+    // The dataset is not a share, so the snapshot cannot be opened from here — and the sentence
+    // SAYS that rather than claiming a check it did not make.
+    await unverify(schedule.id);
+    const outside = await service({ inventory }).schedules.verifyOne(org, new Date());
+    expect(outside).toContain('depsis-daily-20260825T030000Z');
+    expect(outside).toContain('paylaşım değil');
+
+    // Now make it a share, so the agent's `.zfs/snapshot/<name>` walk is what answers.
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO shares (organization_id, name, dataset) VALUES ($1,'Yedekli',$2)
+         ON CONFLICT DO NOTHING`,
+        [org, INPUT.dataset],
+      ),
+    );
+
+    await unverify(schedule.id);
+    const opened = await service({ inventory }).schedules.verifyOne(org, new Date());
+    expect(opened).toContain('açıldı');
+    expect(opened).toContain('1 ');
+
+    const after = (await service().schedules.list(org))[0];
+    expect(after?.last_verified_at).not.toBeNull();
+  });
+
+  it('names each of the three ways a backup is silently useless', async () => {
+    const rows = await service().schedules.list(org);
+    const schedule = rows[0];
+    if (schedule === undefined) return;
+    const inventory = [
+      { name: 'depsis-daily-20260825T030000Z', used_bytes: 1, created_at: 1_787_086_400 },
+    ];
+
+    // ONE: the dataset is gone, and the schedule's own record still says the last run succeeded.
+    await unverify(schedule.id);
+    expect(await service({ datasetMissing: true }).schedules.verifyOne(org, new Date())).toContain(
+      'artık yok',
+    );
+
+    // TWO: the snapshot is there and will not open. On ZFS that is a mount which did not
+    // materialise — and it reads as an empty folder to anything that does not check.
+    await unverify(schedule.id);
+    const refused = await service({
+      inventory,
+      entries: { status: 'refused', reason: 'refused by the path confinement' },
+    }).schedules.verifyOne(org, new Date());
+    expect(refused).toContain('AÇILAMADI');
+
+    // THREE: it opens and is EMPTY. Sometimes legitimate; almost never for a backup, and calling
+    // it "ok" would leave somebody believing they hold a copy of nothing.
+    await unverify(schedule.id);
+    const empty = await service({
+      inventory,
+      entries: { status: 'listing', truncated: false, entries: [] },
+    }).schedules.verifyOne(org, new Date());
+    expect(empty).toContain('BOŞ');
+
+    // And the pool holding no snapshot of this schedule at all.
+    await unverify(schedule.id);
+    expect(await service({ inventory: [] }).schedules.verifyOne(org, new Date())).toContain(
+      'görüntüsü yok',
+    );
+  });
+
+  it('verifies at most one schedule a turn, and not one it just looked at', async () => {
+    // A mount per schedule per tick would be pointless work every five minutes, and re-verifying
+    // the one it just did would starve every other schedule for ever.
+    const rows = await service().schedules.list(org);
+    if (rows[0] === undefined) return;
+    await unverify(rows[0].id);
+
+    expect(await service({ inventory: [] }).schedules.verifyOne(org, new Date())).not.toBeNull();
+    expect(await service({ inventory: [] }).schedules.verifyOne(org, new Date())).toBeNull();
   });
 
   it('removing a schedule does not remove what it took', async () => {
