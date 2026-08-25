@@ -92,9 +92,16 @@ export class TasksController {
 
   @Get()
   async list(@Req() request: AuthenticatedRequest): Promise<Schemas['TaskPage']> {
-    const session = requireSession(request);
-    const rows = await this.tasks.list(session.organizationId);
-    return { items: rows.map(toTask) };
+    const caller = requireCaller(request);
+    const rows = await this.tasks.list(caller.organizationId);
+    // TEK ÇAĞRIDA, görev başına değil: elli görevlik bir pano, görev başına bir çözümle elli
+    // yetki yürüyüşü demek olurdu. Sayı çağıranın GÖREBİLDİKLERİ — toplamı göstermek,
+    // göremediği dosyaların varlığını söylerdi.
+    const counts = await this.links.visibleCounts(
+      caller,
+      rows.map((row) => row.id),
+    );
+    return { items: rows.map((row) => toTask(row, counts.get(row.id) ?? 0)) };
   }
 
   @Post()
@@ -262,9 +269,10 @@ export class TasksController {
   }
 }
 
-function toTask(row: TaskRow): Schemas['Task'] {
+function toTask(row: TaskRow, linkedFileCount = 0): Schemas['Task'] {
   return {
     id: row.id,
+    linkedFileCount,
     body: row.body,
     status: row.status,
     priority: row.priority,

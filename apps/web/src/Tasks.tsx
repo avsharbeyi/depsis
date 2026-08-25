@@ -6,6 +6,56 @@ import type { Tone } from './ui.js';
 import { Empty, Glyph } from './ui.js';
 
 type Task = OpenApi.components['schemas']['Task'];
+type Status = Task['status'];
+type Priority = Task['priority'];
+
+/**
+ * Durumların insan tarafı.
+ *
+ * Sunucudaki makine yalnız iki geçişi yasaklıyor (bkz. `TRANSITIONS`), o yüzden burada bir liste
+ * kutusu yeterli: reddedilen bir seçim 422 ile geri geliyor ve mesajı iki durumu da adlandırıyor.
+ * Seçenekleri istemcide filtrelemek, sunucunun kuralını ikinci kez — ve zamanla farklı biçimde —
+ * yazmak olurdu.
+ */
+const STATUS_LABEL: Record<Status, string> = {
+  draft: 'Taslak',
+  assigned: 'Atandı',
+  in_progress: 'Devam ediyor',
+  in_review: 'İncelemede',
+  done: 'Tamamlandı',
+  cancelled: 'İptal',
+};
+
+const PRIORITY_LABEL: Record<Priority, string> = {
+  low: 'Düşük',
+  normal: 'Normal',
+  high: 'Yüksek',
+  urgent: 'Acil',
+};
+
+/** Yalnız yükseltilmiş öncelikler işaretleniyor: her satırda bir rozet, hiçbirinde yok demektir. */
+const PRIORITY_TONE: Partial<Record<Priority, string>> = {
+  high: 'pill warn',
+  urgent: 'pill bad',
+};
+
+/**
+ * Son tarih, okunabilir ve GEÇMİŞSE söyleyerek.
+ *
+ * Gecikmiş bir işi normal bir tarih gibi göstermek, son tarihin var olma sebebini boşa çıkarır —
+ * ve "3 gün geçti" bir tarihten daha hızlı okunuyor.
+ */
+function dueLabel(dueAt: string | null | undefined): { text: string; late: boolean } | null {
+  if (dueAt === null || dueAt === undefined) return null;
+  const at = new Date(dueAt);
+  if (Number.isNaN(at.getTime())) return null;
+  const days = Math.round((at.getTime() - Date.now()) / 86_400_000);
+  if (days < 0) return { text: `${-days} gün geçti`, late: true };
+  if (days === 0) return { text: 'bugün', late: false };
+  if (days === 1) return { text: 'yarın', late: false };
+  if (days <= 7) return { text: `${days} gün`, late: false };
+  return { text: at.toLocaleDateString('tr-TR'), late: false };
+}
 type User = OpenApi.components['schemas']['User'];
 type CurrentUser = OpenApi.components['schemas']['CurrentUser'];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
@@ -84,10 +134,29 @@ function people(tasks: Task[], me: CurrentUser, users: User[] | null): Person[] 
  * exists to answer — but they stay at the bottom, newest first, so they never push a live task
  * out of view.
  */
+/**
+ * Kapanmış işler aşağı, gecikmişler yukarı.
+ *
+ * `cancelled` de `done` gibi aşağıda: ikisi de "buna bakmana gerek yok" demek, ve iptal edilmiş
+ * bir işi açık işlerin arasında tutmak listeyi okunmaz yapardı. Aralarında ise iptal önce gelmiyor
+ * — sıralamayı `doneAt` belirliyor ve iptalin öyle bir damgası yok, o yüzden yaşına düşüyor.
+ *
+ * GECİKMİŞLER en üstte, ve bu tek gerçek sıralama kararı: son tarihi geçmiş bir iş, elle
+ * sürüklenmiş bir sıradan daha acil bir bilgi.
+ */
+function closed(task: Task): boolean {
+  return task.status === 'done' || task.status === 'cancelled';
+}
+
+function overdue(task: Task): boolean {
+  return !closed(task) && dueLabel(task.dueAt)?.late === true;
+}
+
 function order(items: Task[]): Task[] {
   return [...items].sort((a, b) => {
-    if ((a.doneAt === null) !== (b.doneAt === null)) return a.doneAt === null ? -1 : 1;
+    if (closed(a) !== closed(b)) return closed(a) ? 1 : -1;
     if (a.doneAt !== null && b.doneAt !== null) return b.doneAt.localeCompare(a.doneAt);
+    if (overdue(a) !== overdue(b)) return overdue(a) ? -1 : 1;
     if (a.position !== b.position) return a.position - b.position;
     return a.createdAt.localeCompare(b.createdAt);
   });
@@ -137,7 +206,14 @@ export function Tasks({
 
   async function update(
     task: Task,
-    patch: { body?: string; assigneeId?: string | null; done?: boolean },
+    patch: {
+      body?: string;
+      assigneeId?: string | null;
+      done?: boolean;
+      status?: Status;
+      priority?: Priority;
+      dueAt?: string | null;
+    },
     failure: string,
   ): Promise<void> {
     setBusy(true);
@@ -251,8 +327,10 @@ export function Tasks({
 
             {group.items.map((task) => {
               const done = task.doneAt !== null;
+              const due = dueLabel(task.dueAt);
+              const shut = closed(task);
               return (
-                <div className={done ? 'jitem done' : 'jitem'} key={task.id}>
+                <div className={shut ? 'jitem done' : 'jitem'} key={task.id}>
                   <button
                     type="button"
                     className={done ? 'jck on' : 'jck'}
@@ -332,6 +410,91 @@ export function Tasks({
                         </option>
                       )}
                   </select>
+
+                  <select
+                    value={task.status}
+                    disabled={busy}
+                    aria-label="Durum"
+                    style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7 }}
+                    onChange={(event) => {
+                      // Seçenekler FİLTRELENMİYOR. Sunucudaki makine yalnız iki geçişi yasaklıyor
+                      // ve reddi 422 ile iki durumu da adlandırarak geliyor; burada ikinci bir
+                      // kopya tutmak, zamanla ayrışacak iki kural demek olurdu.
+                      void update(
+                        task,
+                        { status: event.target.value as Status },
+                        'Durum değiştirilemedi.',
+                      );
+                    }}
+                  >
+                    {(Object.keys(STATUS_LABEL) as Status[]).map((value) => (
+                      <option key={value} value={value}>
+                        {STATUS_LABEL[value]}
+                      </option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={task.priority}
+                    disabled={busy}
+                    aria-label="Öncelik"
+                    className={PRIORITY_TONE[task.priority]}
+                    style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7 }}
+                    onChange={(event) => {
+                      void update(
+                        task,
+                        { priority: event.target.value as Priority },
+                        'Öncelik değiştirilemedi.',
+                      );
+                    }}
+                  >
+                    {(Object.keys(PRIORITY_LABEL) as Priority[]).map((value) => (
+                      <option key={value} value={value}>
+                        {PRIORITY_LABEL[value]}
+                      </option>
+                    ))}
+                  </select>
+
+                  <label
+                    className="m"
+                    style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}
+                  >
+                    <input
+                      type="date"
+                      disabled={busy}
+                      aria-label="Son tarih"
+                      // `<input type=date>` yerel bir GÜN veriyor, sunucu ise bir AN istiyor —
+                      // "yarın" bir zaman diliminde yarın, başkasında bugün. Günün sonuna
+                      // sabitleniyor: bir son tarih, o günün bitmesiyle geçiyor.
+                      value={
+                        task.dueAt === null || task.dueAt === undefined
+                          ? ''
+                          : task.dueAt.slice(0, 10)
+                      }
+                      onChange={(event) => {
+                        const day = event.target.value;
+                        void update(
+                          task,
+                          {
+                            dueAt: day === '' ? null : new Date(`${day}T23:59:59`).toISOString(),
+                          },
+                          'Son tarih değiştirilemedi.',
+                        );
+                      }}
+                      style={{ fontSize: 11, padding: '2px 4px', borderRadius: 6, width: 122 }}
+                    />
+                    {due !== null && (
+                      <span className={due.late ? 'pill bad' : 'pill dim'}>{due.text}</span>
+                    )}
+                  </label>
+
+                  {task.linkedFileCount !== undefined && task.linkedFileCount > 0 && (
+                    // Sayı ÇAĞIRANIN GÖREBİLDİKLERİ. Toplamı göstermek, göremediği dosyaların
+                    // varlığını söylerdi — §7'nin yasakladığı şeyin sayı hâli.
+                    <span className="pill dim" title="Bağlı dosya">
+                      🗂 {task.linkedFileCount}
+                    </span>
+                  )}
 
                   <button
                     type="button"
