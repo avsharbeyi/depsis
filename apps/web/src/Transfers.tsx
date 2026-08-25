@@ -114,6 +114,7 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
                 <div
                   className="bar2"
                   role="progressbar"
+                  aria-label={`${item.filename} aktarımı`}
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={Math.round(ratio * 100)}

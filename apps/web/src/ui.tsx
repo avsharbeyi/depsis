@@ -165,13 +165,21 @@ export function Card({
   );
 }
 
-/** A thin progress track. `ratio` is 0…1; anything else is treated as empty rather than drawn. */
-export function Bar({ ratio }: { ratio: number }): React.JSX.Element {
+/**
+ * A thin progress track. `ratio` is 0…1; anything else is treated as empty rather than drawn.
+ *
+ * `label` is REQUIRED, and it is not decoration. `role="progressbar"` without an accessible name
+ * reads to a screen reader as "42 percent" with no answer to "percent of what" — which is worse
+ * than no bar at all, because the number sounds like information. It was missing, and eight of
+ * them on every screen is what the accessibility suite caught in CI.
+ */
+export function Bar({ ratio, label }: { ratio: number; label: string }): React.JSX.Element {
   const safe = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0;
   return (
     <div
       className="bar2"
       role="progressbar"
+      aria-label={label}
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={Math.round(safe * 100)}

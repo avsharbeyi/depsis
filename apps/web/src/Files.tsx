@@ -1398,7 +1398,7 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
         // the file manager's columns are inset by 13px, so the row is aligned to them here.
         <div className="prog" role="status" style={{ padding: '0 13px 9px' }}>
           <span>{progress.label}</span>
-          <Bar ratio={progress.percent / 100} />
+          <Bar ratio={progress.percent / 100} label={progress.label} />
           <em>%{progress.percent}</em>
         </div>
       )}

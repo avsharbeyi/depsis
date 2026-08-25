@@ -614,7 +614,9 @@ impl SafePath for Openat2SafePath {
             // A refusal rather than the snapshot's root directory: "read the file at no path" has
             // no meaning, and answering with a directory would be a silent substitution the caller
             // would then try to stream bytes from.
-            return Err(SeamError::NotFound("no file named inside the snapshot".into()));
+            return Err(SeamError::NotFound(
+                "no file named inside the snapshot".into(),
+            ));
         }
         self.under_snapshot(share, snapshot, relative, rustix::fs::OFlags::RDONLY)
     }

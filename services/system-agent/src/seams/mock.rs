@@ -359,7 +359,9 @@ impl SafePath for MockSafePath {
         relative: &[&str],
     ) -> Result<std::fs::File, SeamError> {
         if relative.is_empty() {
-            return Err(SeamError::NotFound("no file named inside the snapshot".into()));
+            return Err(SeamError::NotFound(
+                "no file named inside the snapshot".into(),
+            ));
         }
         let mut walk = vec![share, ".zfs", "snapshot", snapshot];
         walk.extend_from_slice(relative);

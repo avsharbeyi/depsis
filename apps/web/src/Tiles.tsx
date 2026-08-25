@@ -245,7 +245,7 @@ function TasksTile({
           ) : (
             <>
               <div className="prog">
-                <Bar ratio={done / total} />
+                <Bar ratio={done / total} label="Tamamlanan işler" />
                 <em>{percent(done, total)}</em>
               </div>
               {shown.map((task) => (
