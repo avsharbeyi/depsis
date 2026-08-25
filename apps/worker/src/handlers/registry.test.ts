@@ -7,6 +7,7 @@ import type {
   IdentitySyncService,
   IndexerService,
   JobsService,
+  NotificationsService,
   TrashRetentionService,
 } from '@depsis/api/worker-surface';
 
@@ -33,6 +34,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       copies: {} as unknown as CopyService,
       retention: {} as unknown as TrashRetentionService,
       indexer: {} as unknown as IndexerService,
+      notifications: {} as unknown as NotificationsService,
     });
     expect(worker.kinds.sort()).toEqual([
       'files.copy',
@@ -43,6 +45,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       'permissions.apply',
       'storage.pool.create',
       'storage.snapshot',
+      'tasks.overdue-sweep',
     ]);
   });
 });

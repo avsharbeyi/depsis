@@ -136,7 +136,6 @@ erDiagram
     job_queue ||--o| job_history : "biten satır buraya taşınır"
     organizations ||--o{ snapshots : ""
     organizations ||--o{ notes : ""
-    organizations ||--o{ tasks : ""
     organizations ||--o{ remote_networks : ""
     organizations ||--o{ idempotency_keys : ""
     app_catalogue ||--o{ app_instances : ""
@@ -176,7 +175,70 @@ sonraki yeniden denemeyi engelliyor; çökmüş bir işçinin işinin geri alın
 
 ---
 
-## 5. Diyagramın gösteremediği: satır düzeyi güvenlik
+## 5. Masa: işler ve bildirimler
+
+```mermaid
+erDiagram
+    organizations ||--o{ tasks : ""
+    users ||--o{ tasks : "atanan"
+    tasks ||--o{ task_activity : "ne değişti, kim değiştirdi"
+    tasks ||--o{ task_file_links : ""
+    file_entries ||--o{ task_file_links : ""
+    tasks ||--o{ notifications : ""
+    users ||--o{ notifications : "ALICI"
+
+    tasks {
+        uuid id PK
+        text status "draft|assigned|in_progress|in_review|done|cancelled"
+        text priority "low|normal|high|urgent"
+        timestamptz due_at "NULL = son tarih yok"
+        uuid assignee_id FK "NULL = kimseye atanmamış"
+        uuid created_by FK
+    }
+    task_activity {
+        uuid id PK
+        text field "hangi alan"
+        text before
+        text after
+    }
+    task_file_links {
+        uuid id PK
+        uuid task_id FK
+        uuid entry_id FK
+    }
+    notifications {
+        uuid id PK
+        uuid user_id FK "ALICI, aktör değil"
+        text kind "task.assigned|task.unassigned|task.status|task.due|task.overdue"
+        uuid task_id FK "NULL olabilir"
+        text title "O AN üretilmiş cümle"
+        timestamptz read_at "NULL = okunmamış"
+    }
+```
+
+**Bildirim ALICI BAŞINA bir satır, olay başına değil.** Bir işin el değiştirmesi tek olay ama iki
+farklı cümle: yeni atanan "sana bir iş atandı" okuyor, eski atanan "bu iş artık sende değil". Tek
+satırla ikisinden biri yanlış cümleyi görürdü.
+
+**`title` o an donduruluyor, `task_id` ise canlı.** Bildirim "ne olmuştu" sorusunu, işin kendisi
+"şimdi ne durumda" sorusunu cevaplıyor; ikisi farklı sorular ve zamanla farklı cevaplar veriyorlar.
+
+**Kimse kendi yaptığı şey için bildirim almıyor**, ve bu bir görgü kuralı değil bir işlevsellik
+kararı: sürekli yanan bir zil okunmayan bir zile dönüşüyor.
+
+**`notifications` üzerinde kısmi benzersiz indeks var** — `(organization_id, user_id, task_id,
+kind)`, yalnız `read_at IS NULL` ve `task_id IS NOT NULL` için. Gecikme taraması on beş dakikada
+bir koşuyor ve onsuz gecikmiş bir iş bir haftada bin satır üretirdi.
+
+**RLS kiracıyı tutuyor, kişiyi SORGU tutuyor.** Politika `depsis.organization_id`'yi biliyor,
+oturumdaki kullanıcıyı bilmiyor — `depsis.user_id` diye bir oturum değişkeni yok. Yani "başkasının
+bildirimini okuyamazsın" cümlesini tutan tek şey her sorgudaki `user_id`, ve bu bilinçli: ikinci bir
+oturum değişkeni eklemek, unutulduğunda SESSİZCE herkesin her şeyi gördüğü bir sistem üretirdi.
+İkinci bir oturum değişkeni yoksa o risk kiracı sınırını geçemiyor.
+
+---
+
+## 6. Diyagramın gösteremediği: satır düzeyi güvenlik
 
 Yukarıdaki okların hiçbiri erişim kontrolü değil. Kiracı yalıtımını **RLS** yapıyor:
 

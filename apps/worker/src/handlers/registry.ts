@@ -5,6 +5,7 @@ import type {
   IdentitySyncService,
   IndexerService,
   JobsService,
+  NotificationsService,
   TrashRetentionService,
 } from '@depsis/api/worker-surface';
 
@@ -17,6 +18,7 @@ import { reconcileHandler, RECONCILE_KIND } from './reconcile.handler.js';
 import { trashPurgeHandler, TRASH_PURGE_KIND } from './trash-purge.handler.js';
 import { identitySyncHandler, IDENTITY_SYNC_KIND } from './identity-sync.handler.js';
 import { snapshotHandler, SNAPSHOT_KIND } from './snapshot.handler.js';
+import { overdueSweepHandler, OVERDUE_SWEEP_KIND } from './overdue-sweep.handler.js';
 
 /**
  * Every job kind this worker consumes, in one place a test can read.
@@ -37,6 +39,7 @@ export function registerHandlers(
     copies: CopyService;
     retention: TrashRetentionService;
     indexer: IndexerService;
+    notifications: NotificationsService;
   },
 ): void {
   worker.register(SNAPSHOT_KIND, snapshotHandler(services.agent));
@@ -61,4 +64,8 @@ export function registerHandlers(
   // ADR-0011 Layer 1's consumer: what Samba said, acted on within seconds. The walk above
   // stays — it is what this degrades to when an event is missed.
   worker.register(INDEX_DRAIN_KIND, indexDrainHandler(services.indexer));
+  // §7's reminders. Self-scheduling like the trash purge, and for the same reason: the queue's
+  // `run_after` is the only timer that survives a restart. Its failure is also the quietest one
+  // in this list — what goes missing is a notification nobody was told to expect.
+  worker.register(OVERDUE_SWEEP_KIND, overdueSweepHandler(services.notifications));
 }

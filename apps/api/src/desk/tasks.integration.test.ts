@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { DbService } from '../db/db.service.js';
+import { NotificationsService } from './notifications.service.js';
 import {
   AssigneeNotFoundError,
   TaskNotFoundError,
@@ -46,7 +47,7 @@ describeDb('the job board, against a real PostgreSQL', () => {
     db = new DbService(APP_URL as string);
     await db.onModuleInit();
     owner = new DbService(OWNER_URL as string);
-    tasks = new TasksService(db);
+    tasks = new TasksService(db, new NotificationsService(db));
 
     await owner.withoutTenant('migration-status', async (q) => {
       await q.query(

@@ -1420,6 +1420,57 @@ paths:
               schema: { $ref: '#/components/schemas/TaskActivityPage' }
         '404': { $ref: '#/components/responses/Problem' }
 
+  /notifications:
+    get:
+      tags: [desk]
+      summary: Bildirim merkezi
+      description: |
+        §7: "Hatırlatma, gecikme, mention ve görev değişiklikleri bildirim merkezine düşer."
+
+        **Mention henüz yok** ve bir tür değeri de yok: bir mention bir yorumun içinde yaşıyor,
+        yorumlar da yazılmadı. Hiçbir şeyin üretmediği bir tür eklemek, boş bir sözü şemaya
+        yazmak olurdu.
+
+        Bildirimler ALICI BAŞINA satır. Aynı olay iki kişiye iki farklı şey söylüyor — bir işin
+        atanması, atanan için "sana iş geldi", eski atanan için "iş senden alındı" — ve tek satır
+        ikisinden birini yanlış cümleyle karşılamak zorunda kalırdı.
+
+        Kimse KENDİ yaptığı şey için bildirim almıyor.
+      parameters:
+        - name: unread
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: Yalnız okunmamışlar.
+      responses:
+        '200':
+          description: Gelen kutusu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationPage' }
+
+  /notifications/read:
+    post:
+      tags: [desk]
+      summary: Okundu işaretle
+      description: |
+        Gövdedeki id'ler, ya da gövde yoksa HEPSİ. Zaten okunmuş olanlar atlanıyor — yeniden
+        işaretlemek "ne zaman okudum" cevabını bugüne kaydırırdı.
+
+        Başkasının bildirimi sessizce atlanıyor: RLS kiracıyı tutuyor, kişiyi sorgu tutuyor, ve
+        "bu senin değil" demek başkasının gelen kutusu hakkında bilgi vermek olurdu.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MarkNotificationsReadRequest' }
+      responses:
+        '200':
+          description: Kaç tanesi işaretlendi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationsRead' }
+
   /me/preferences:
     get:
       tags: [me]
@@ -2951,6 +3002,53 @@ components:
         priority: { type: string, enum: [low, normal, high, urgent] }
         dueAt: { type: [string, 'null'], format: date-time }
         position: { type: number }
+
+    Notification:
+      type: object
+      required: [id, kind, title, readAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        kind:
+          type: string
+          enum: [task.assigned, task.unassigned, task.status, task.due, task.overdue]
+        taskId: { type: [string, 'null'], format: uuid }
+        taskBody:
+          type: [string, 'null']
+          description: |
+            İşin ŞU ANKİ gövdesi, `title` ise o AN üretilmiş cümle. İkisi birden var çünkü ikisi
+            farklı soruları cevaplıyor: "ne olmuştu" ve "o iş şimdi ne durumda".
+        title: { type: string, maxLength: 300 }
+        readAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    NotificationPage:
+      type: object
+      required: [items, unread]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Notification' }
+        unread:
+          type: integer
+          description: |
+            Okunmamış TOPLAM sayı — `items` filtrelenmiş ya da kırpılmış olsa bile. Zilin
+            gösterdiği sayı bu, ve listenin uzunluğundan türetilemez.
+
+    MarkNotificationsReadRequest:
+      type: object
+      properties:
+        ids:
+          type: array
+          maxItems: 200
+          items: { type: string, format: uuid }
+          description: Verilmezse hepsi işaretleniyor.
+
+    NotificationsRead:
+      type: object
+      required: [marked, unread]
+      properties:
+        marked: { type: integer }
+        unread: { type: integer }
 
     Preferences:
       type: object

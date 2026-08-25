@@ -10,6 +10,7 @@ import { Background } from './Background.js';
 import { formatBytes } from './Dashboard.js';
 import { Files } from './Files.js';
 import { Notes } from './Notes.js';
+import { Notifications } from './Notifications.js';
 import { usePrefs, type Prefs } from './prefs.js';
 import { Remote } from './Remote.js';
 import { SetupWizard } from './SetupWizard.js';
@@ -659,6 +660,11 @@ function Desktop({
         <div className="pill" title="En sıcak disk">
           <span>{temperature === null ? '— °C' : `${temperature} °C`}</span>
         </div>
+
+        {/* Ses düğmesinin SOLUNDA ve güç düğmesinin solunda: sağdaki iki düğme her oturumda
+            aynı yerde duran şeyler, ve zil onların arasına girseydi her yeni bildirimde
+            değişmeyen bir düzende gözün aradığı yer kayardı. */}
+        <Notifications onOpenPane={openPane} />
 
         <button
           type="button"

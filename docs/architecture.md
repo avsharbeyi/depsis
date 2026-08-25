@@ -64,6 +64,22 @@ bağlantı havuzu için yarışmak demek; CPU'yu tüketen bir iş, sebebi görü
 dönüşür. Ayrı olmasının ikinci faydası: hiçbir şeyi dinlemediği için unit dosyası API'ninkinden
 daha sıkı.
 
+**Zamanlayıcı kuyruğun kendisi.** TypeScript tarafında `setInterval` yok — yalnız o süreç ayaktayken
+çalışan ve yeniden başlatmada kaybolan bir zamanlayıcı, tekrar eden bir işin sessizce durması demek.
+Bunun yerine `job_queue.run_after`: her koşu bir sonrakini kuyruğa alıyor, ve API açılışta yeniden
+tohumluyor. Şu an dört zincir böyle dönüyor — `files.reconcile`, `files.index-drain`,
+`files.trash.purge` ve `tasks.overdue-sweep`.
+
+**Ardıl önce, iş sonra.** Zincirleyen her işleyici bir sonrakini kuyruğa aldıktan SONRA asıl işi
+yapıyor. Ters sırada, iş sırasında ölen bir worker zinciri koparırdı: satır `failed` olur, hiçbir
+ardıl kuyrukta olmaz, ve tekrar bir daha hiç gelmez. Bu sırada en kötü olan bir turun iki kez
+koşması, ve dördü de yeniden koşmaya dayanıklı.
+
+**Zincirin en sessiz hâli bildirimlerinki.** `tasks.overdue-sweep` durduğunda eksik olan şey bir
+bildirimin YOKLUĞU, ve kimse gelmeyen bir bildirimi fark etmiyor. O yüzden hem işleyici hem açılış
+tohumu var, ve hangisi önce davranırsa `job_queue_one_scheduled_overdue_sweep` kısmi indeksi
+ikincisini sessizce düşürüyor.
+
 ---
 
 ## 2. İki soket, ve neden iki

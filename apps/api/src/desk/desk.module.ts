@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module.js';
 import { FilesModule } from '../files/files.module.js';
+import { NotificationsController } from './notifications.controller.js';
+import { NotificationsModule } from './notifications.module.js';
 import { TaskFilesService } from './task-files.service.js';
 import { NotesController } from './notes.controller.js';
 import { NotesService } from './notes.service.js';
@@ -25,8 +27,8 @@ import { TasksService } from './tasks.service.js';
  * cevap — demek olurdu.
  */
 @Module({
-  imports: [AuthModule, FilesModule],
-  controllers: [NotesController, TasksController],
+  imports: [AuthModule, FilesModule, NotificationsModule],
+  controllers: [NotesController, TasksController, NotificationsController],
   providers: [NotesService, TasksService, TaskFilesService],
 })
 export class DeskModule {}

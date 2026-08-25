@@ -20,6 +20,8 @@ import {
   IndexerService,
   OrganizationsModule,
   OrganizationsService,
+  NotificationsModule,
+  NotificationsService,
 } from '@depsis/api/worker-surface';
 
 import { registerHandlers } from './handlers/registry.js';
@@ -50,6 +52,7 @@ import { WorkerService } from './worker.service.js';
     TrashRetentionModule,
     IndexerModule,
     OrganizationsModule,
+    NotificationsModule,
   ],
 })
 class WorkerAppModule {}
@@ -75,6 +78,7 @@ async function bootstrap(): Promise<void> {
     copies: app.get(CopyService),
     retention: app.get(TrashRetentionService),
     indexer: app.get(IndexerService),
+    notifications: app.get(NotificationsService),
   });
   // ADR-0011 Layer 1. Started after the handlers so an event that arrives immediately has a
   // consumer registered; the reader only writes to `index_queue`, so the ordering is a courtesy

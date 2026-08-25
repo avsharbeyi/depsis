@@ -1276,6 +1276,145 @@ canvas.spark {
   padding: 6px 11px 3px;
 }
 
+/* ─── bildirim merkezi ──────────────────────────────────────────────────────── */
+
+/* Zil, üst çubuğun diğer düğmeleriyle aynı hap; rozeti için konumlandırma çapası. */
+.tbtn.bell {
+  position: relative;
+  font-size: 12px;
+  letter-spacing: 0;
+  padding: 5px 11px;
+}
+/* Okunmamış varken zil AYNI hap, yalnız kenarı ve mürekkebi canlanıyor. Yanıp sönen ya da
+   büyüyen bir zil, göz ucuyla bakılan bir çubuğa konmuş bir dikkat tuzağı olurdu. */
+.tbtn.bell.has {
+  border-color: rgba(143, 166, 255, 0.55);
+  color: var(--ink);
+}
+.tbtn .badge {
+  position: absolute;
+  top: -5px;
+  right: -4px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--iris);
+  color: #06101f;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 15px;
+  text-align: center;
+  letter-spacing: 0;
+  box-shadow: 0 0 10px rgba(143, 166, 255, 0.5);
+}
+
+/* Güç menüsünden geniş: burada cümleler var, komut adları değil. */
+.pmenu.notif {
+  min-width: 316px;
+  max-width: 360px;
+  max-height: 420px;
+  right: 60px;
+}
+.pmenu.notif .pmh {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.pmenu.notif .note {
+  padding: 10px 11px 12px;
+  margin: 0;
+}
+.nrow {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 9px;
+  background: none;
+  color: var(--ink2);
+  font-family: var(--sans);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.nrow:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--ink);
+}
+.nrow .tx {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+/* İki satıra kadar, sonra kesiliyor: başlıklar sunucuda zaten kısaltılıyor, bu onun görsel
+   güvencesi — uzun bir cümle paneli tek satırın panosuna çevirmesin. */
+.nrow .t {
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.nrow .s {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--dim);
+}
+/* OKUNMAMIŞ olan kalın değil, SOLU İŞARETLİ. Kalınlık okunmuşları soluk gösterirdi ve panelin
+   tamamı okununca hiçbir şey kalmazdı; şerit, satır okunduğunda sessizce kayboluyor. */
+.nrow.new {
+  color: var(--ink);
+  box-shadow: inset 2px 0 0 var(--iris);
+}
+.nrow .dotk {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-top: 5px;
+  flex: none;
+  background: var(--dim);
+}
+/* Türe göre renk, ve renkler durum sözlüğünün kendisinden: mint = sana bir iş geldi,
+   kehribar = yaklaşıyor, gül = geçti. */
+.nrow .k-task-assigned {
+  background: var(--live);
+}
+.nrow .k-task-unassigned {
+  background: var(--dim);
+}
+.nrow .k-task-status {
+  background: var(--cool);
+}
+.nrow .k-task-due {
+  background: var(--warn);
+}
+.nrow .k-task-overdue {
+  background: var(--rose);
+}
+.lnk {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--cool);
+  font-family: var(--sans);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-weight: 700;
+  cursor: pointer;
+}
+.lnk:hover {
+  color: var(--ink);
+}
+
 /* ─── overlays ─────────────────────────────────────────────────────────────── */
 
 .ovl {
@@ -2475,6 +2614,14 @@ label textarea,
     right: auto;
     transform: none;
     bottom: 78px;
+  }
+  /* Dar ekranda panel iki kenara da yapışıyor: 316px sabit bir genişlik 360px'lik bir telefonda
+     ekranın dışına taşardı, ve taşan tarafta "hepsini okundu yap" kalırdı. */
+  .pmenu.notif {
+    left: 10px;
+    right: 10px;
+    min-width: 0;
+    max-width: none;
   }
   .pmenu.top {
     top: 88px;

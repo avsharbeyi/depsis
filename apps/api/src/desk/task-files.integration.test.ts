@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { DbService } from '../db/db.service.js';
+import { NotificationsService } from './notifications.service.js';
 import { FilesService, type Caller } from '../files/files.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
@@ -59,7 +60,7 @@ describeDb('görev–dosya bağı, §7 kuralıyla', () => {
     db = new DbService(APP_URL as string);
     await db.onModuleInit();
     owner = new DbService(OWNER_URL as string);
-    tasks = new TasksService(db);
+    tasks = new TasksService(db, new NotificationsService(db));
     files = new FilesService(
       db,
       { isAvailable: () => false } as never,

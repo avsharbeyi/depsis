@@ -2504,6 +2504,105 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bildirim merkezi
+         * @description §7: "Hatırlatma, gecikme, mention ve görev değişiklikleri bildirim merkezine düşer."
+         *
+         *     **Mention henüz yok** ve bir tür değeri de yok: bir mention bir yorumun içinde yaşıyor,
+         *     yorumlar da yazılmadı. Hiçbir şeyin üretmediği bir tür eklemek, boş bir sözü şemaya
+         *     yazmak olurdu.
+         *
+         *     Bildirimler ALICI BAŞINA satır. Aynı olay iki kişiye iki farklı şey söylüyor — bir işin
+         *     atanması, atanan için "sana iş geldi", eski atanan için "iş senden alındı" — ve tek satır
+         *     ikisinden birini yanlış cümleyle karşılamak zorunda kalırdı.
+         *
+         *     Kimse KENDİ yaptığı şey için bildirim almıyor.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Yalnız okunmamışlar. */
+                    unread?: boolean;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Gelen kutusu */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["NotificationPage"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Okundu işaretle
+         * @description Gövdedeki id'ler, ya da gövde yoksa HEPSİ. Zaten okunmuş olanlar atlanıyor — yeniden
+         *     işaretlemek "ne zaman okudum" cevabını bugüne kaydırırdı.
+         *
+         *     Başkasının bildirimi sessizce atlanıyor: RLS kiracıyı tutuyor, kişiyi sorgu tutuyor, ve
+         *     "bu senin değil" demek başkasının gelen kutusu hakkında bilgi vermek olurdu.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["MarkNotificationsReadRequest"];
+                };
+            };
+            responses: {
+                /** @description Kaç tanesi işaretlendi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["NotificationsRead"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/me/preferences": {
         parameters: {
             query?: never;
@@ -4507,6 +4606,40 @@ export interface components {
             /** Format: date-time */
             dueAt?: string | null;
             position?: number;
+        };
+        Notification: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            kind: "task.assigned" | "task.unassigned" | "task.status" | "task.due" | "task.overdue";
+            /** Format: uuid */
+            taskId?: string | null;
+            /**
+             * @description İşin ŞU ANKİ gövdesi, `title` ise o AN üretilmiş cümle. İkisi birden var çünkü ikisi
+             *     farklı soruları cevaplıyor: "ne olmuştu" ve "o iş şimdi ne durumda".
+             */
+            taskBody?: string | null;
+            title: string;
+            /** Format: date-time */
+            readAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        NotificationPage: {
+            items: components["schemas"]["Notification"][];
+            /**
+             * @description Okunmamış TOPLAM sayı — `items` filtrelenmiş ya da kırpılmış olsa bile. Zilin
+             *     gösterdiği sayı bu, ve listenin uzunluğundan türetilemez.
+             */
+            unread: number;
+        };
+        MarkNotificationsReadRequest: {
+            /** @description Verilmezse hepsi işaretleniyor. */
+            ids?: string[];
+        };
+        NotificationsRead: {
+            marked: number;
+            unread: number;
         };
         /**
          * @description Arayüz tercihleri. Şema BİLEREK dar: sunucu bu belgeyi doğruluyor ve tanımadığı bir alan

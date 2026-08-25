@@ -1,10 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { DbService, type TenantQuery } from '../db/db.service.js';
+import { NotificationsService } from './notifications.service.js';
 
 export interface TaskRow {
   id: string;
   body: string;
+  /**
+   * İşi kim açtı.
+   *
+   * Bildirim için seçiliyor: durum değişimi işin SAHİPLERİNE gidiyor, ve oluşturan onlardan biri
+   * — işi verdiği için sonucunu bekleyen kişi. Silinen hesapta NULL.
+   */
+  created_by: string | null;
   status: TaskStatus;
   priority: TaskPriority;
   due_at: Date | null;
@@ -61,6 +69,28 @@ export interface TaskChange {
   field: 'status' | 'priority' | 'due_at' | 'assignee_id' | 'body' | 'file_link';
   old: string | null;
   new: string | null;
+}
+
+/** Bildirim metninde geçen durum adları. Sunucuda, çünkü metin o an üretiliyor. */
+const STATUS_TEXT: Record<TaskStatus, string> = {
+  draft: 'Taslağa alındı',
+  assigned: 'Atandı',
+  in_progress: 'Başlandı',
+  in_review: 'İncelemeye girdi',
+  done: 'Tamamlandı',
+  cancelled: 'İptal edildi',
+};
+
+/**
+ * Bir işin gövdesinin bildirime sığan hâli.
+ *
+ * Kesme YERİNDE yapılıyor, sonuna üç nokta konuyor — ve şemadaki 300 karakterlik sınır bunun
+ * altında kalmasını garanti ediyor. Sınırı aşan bir başlık, bildirimi hiç yazılmayan bir satıra
+ * çevirirdi.
+ */
+function short(body: string): string {
+  const trimmed = body.trim();
+  return trimmed.length <= 80 ? trimmed : `${trimmed.slice(0, 79)}…`;
 }
 
 /** Bir denetim satırı, okunmak için. */
@@ -166,6 +196,7 @@ export class TaskRejectedError extends Error {
  */
 const SELECT_COLUMNS = `t.id::text          AS id,
           t.body,
+          t.created_by::text  AS created_by,
           t.status,
           t.priority,
           t.due_at,
@@ -188,7 +219,10 @@ const SELECT_COLUMNS = `t.id::text          AS id,
 export class TasksService {
   private readonly logger = new Logger(TasksService.name);
 
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   /**
    * The whole board, completed jobs included.
@@ -243,6 +277,19 @@ export class TasksService {
       });
       const row = rows[0];
       if (!row) throw new Error('the task row was not returned');
+      // Doğarken atanmış bir iş de bir atama, ve bunu atlamak en sık düşen bildirimi eksik
+      // bırakırdı: panoya bir iş çoğu zaman zaten birine verilmek için ekleniyor. Birine iş verip
+      // haber vermemek, bildirim merkezinin cevaplaması gereken İLK soruyu cevapsız bırakmak.
+      if (row.assignee_id !== null) {
+        await this.notifications.notify({
+          organizationId,
+          userId: row.assignee_id,
+          actorId: createdBy,
+          kind: 'task.assigned',
+          taskId: row.id,
+          title: `Sana bir iş atandı: ${short(row.body)}`,
+        });
+      }
       return row;
     } catch (error) {
       throw translateDbError(error);
@@ -351,7 +398,11 @@ export class TasksService {
       });
       const row = rows[0];
       if (!row) throw new TaskNotFoundError();
-      await this.record(organizationId, id, actorId, diff(before, row));
+      // `fields` ve `changes` DEĞİL: aynı blokta `changes` adında bir sabit tanımlamak, dışarıdaki
+      // parametreyi bloğun TAMAMI için gölgeliyor — yukarıdaki `changes.assigneeId` dahil.
+      const fields = diff(before, row);
+      await this.record(organizationId, id, actorId, fields);
+      await this.announce(organizationId, actorId, before, row, fields);
       return row;
     } catch (error) {
       throw translateDbError(error);
@@ -397,6 +448,72 @@ export class TasksService {
         }`,
       );
     }
+  }
+
+  /**
+   * Değişiklikleri ilgili kişilere bildir (§7).
+   *
+   * KİM İLGİLİ: işin atananı ve onu oluşturan. İzleyici kavramı henüz yok — §7 istiyor ve kendi
+   * tablosunu istiyor — o yüzden burada uydurulmuyor.
+   *
+   * Kendi yaptığını yapan kişiye hiçbir şey gitmiyor; o kontrol `NotificationsService.notify`'da,
+   * yani hiçbir çağıran onu unutamıyor.
+   *
+   * ATAMA DEĞİŞİMİ İKİ FARKLI CÜMLE. Yeni atanan "sana bir iş atandı" alıyor; eski atanan "iş
+   * senden alındı" alıyor. Aynı olay, iki alıcı, iki anlam — ve bu, bildirimin alıcı başına bir
+   * satır olmasının sebebi.
+   */
+  private async announce(
+    organizationId: string,
+    actorId: string | null,
+    before: TaskRow,
+    after: TaskRow,
+    changes: readonly TaskChange[],
+  ): Promise<void> {
+    const summary = short(after.body);
+    const items: Parameters<NotificationsService['notifyMany']>[0][number][] = [];
+
+    if (changes.some((c) => c.field === 'assignee_id')) {
+      if (after.assignee_id !== null) {
+        items.push({
+          organizationId,
+          userId: after.assignee_id,
+          actorId,
+          kind: 'task.assigned',
+          taskId: after.id,
+          title: `Sana bir iş atandı: ${summary}`,
+        });
+      }
+      if (before.assignee_id !== null) {
+        items.push({
+          organizationId,
+          userId: before.assignee_id,
+          actorId,
+          kind: 'task.unassigned',
+          taskId: after.id,
+          title: `Bu iş artık sende değil: ${summary}`,
+        });
+      }
+    }
+
+    if (changes.some((c) => c.field === 'status')) {
+      // Durum değişimi işin SAHİPLERİNE gidiyor: atananı ve oluşturanı. Oluşturan, işi verdiği
+      // için sonucunu bekleyen kişi — ve "incelemede" onun bakması gereken an.
+      for (const userId of new Set(
+        [after.assignee_id, before.created_by].filter((id): id is string => id !== null),
+      )) {
+        items.push({
+          organizationId,
+          userId,
+          actorId,
+          kind: 'task.status',
+          taskId: after.id,
+          title: `${STATUS_TEXT[after.status]}: ${summary}`,
+        });
+      }
+    }
+
+    await this.notifications.notifyMany(items);
   }
 
   /**

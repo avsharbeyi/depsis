@@ -108,28 +108,33 @@ ama sınırın doğru sayı olduğu ölçülmedi.
 
 ### Faz 2
 
-1. **Görev modülünün gerçek hâli.** Bugünkü `tasks` dört alan: gövde, atanan, bitiş zamanı, sıra.
-   §7 durum makinesi, alt görev, kontrol listesi, yorum, etiket, öncelik, son tarih, izleyici ve
-   aktivite istiyor. **Dosya bağlantısının kendi güvenlik kuralı var:** görev erişimi gizli dosya
-   erişimi vermemeli — eklenen dosya için ayrıca ACL kontrolü gerekiyor.
-2. **Bildirim merkezi** — hatırlatma, gecikme, mention, görev değişiklikleri.
-3. **Replikasyon ve restore arayüzü.** Anlık görüntü var; ayrı hedefe `zfs send` ve geri yükleme
+1. **Görev modülünün kalanı.** Durum, öncelik, son tarih, aktivite ve dosya bağı yazıldı. Kalanlar:
+   alt görev, kontrol listesi, yorum, etiket ve **izleyici**. İzleyici kendi tablosunu istiyor, ve
+   bildirim şu an onun yerine "atanan + oluşturan" diyor — yani bir işi izlemek isteyen üçüncü bir
+   kişinin yolu yok.
+2. **Mention'lar** ve dolayısıyla bildirimin mention türü. Bir mention bir YORUMUN içinde yaşıyor,
+   yorumlar da yazılmadı; hiçbir şeyin üretmediği bir türü sözleşmeye koymak boş bir söz vermek
+   olurdu. Yorum geldiğinde tür de gelecek.
+3. **Bildirim, akışta değil yoklamada.** Zil altmış saniyede bir `/notifications` soruyor; SSE
+   akışı (`/events`) bildirim taşımıyor. Taşısaydı bildirim anında düşerdi — bugün en kötü ihtimalle
+   bir dakika gecikiyor. Ölçülüp değiştirilecek bir sayı, çalışmayan bir şey değil.
+4. **Replikasyon ve restore arayüzü.** Anlık görüntü var; ayrı hedefe `zfs send` ve geri yükleme
    ekranı yok. (Bugün `restore` yalnız çöp kutusundan geri alma.)
-4. **Önizleme ve küçük resim.**
-5. **Masaüstü istemci ve Windows sürücü eşleme.**
+5. **Önizleme ve küçük resim.**
+6. **Masaüstü istemci ve Windows sürücü eşleme.**
 
 ### Faz 3
 
-6. **Self-hosted ZeroTier controller paneli**, enrollment QR, bağlantı tanılama. Bugün `/remote`
+7. **Self-hosted ZeroTier controller paneli**, enrollment QR, bağlantı tanılama. Bugün `/remote`
    yalnız durum okuyor, ağa katılıyor ve ayrılıyor.
-7. **Nextcloud ve Immich reçeteleri.** Katalog altyapısı (`/apps`) var.
-8. **Android** yerel bağlantı kabuğu.
+8. **Nextcloud ve Immich reçeteleri.** Katalog altyapısı (`/apps`) var.
+9. **Android** yerel bağlantı kabuğu.
 
 ### Faz 4
 
-9. Off-site backup, PITR, otomatik restore testi.
-10. Güncelleme ve geri alma, HA controller, relay.
-11. Performans, chaos, erişilebilirlik ve penetrasyon testleri.
+10. Off-site backup, PITR, otomatik restore testi.
+11. Güncelleme ve geri alma, HA controller, relay.
+12. Performans, chaos, erişilebilirlik ve penetrasyon testleri.
 
 ### §21'in kalan teslimatları
 

@@ -121,6 +121,21 @@ export {
   APPLY_ACL_MAX_ATTEMPTS,
 } from './permissions/permissions.service.js';
 
+/**
+ * §7'nin hatırlatmaları. API bildirimleri üretiyor ve açılışta zamanı yeniden tohumluyor; worker
+ * gecikme taramasını koşuyor ve her koşuda bir sonrakini kuyruğa alıyor.
+ *
+ * `DeskModule` DEĞİL, kendi modülü: masanın modülü `AuthModule`'ü ve onunla birlikte oturum kapısını
+ * içeri alıyor, ve bir arka plan sürecinin kimliğini doğrulayacağı bir istek yok.
+ */
+export { NotificationsModule } from './desk/notifications.module.js';
+export {
+  NotificationsService,
+  OVERDUE_SWEEP_KIND,
+  SWEEP_INTERVAL_MS,
+  type NotificationKind,
+} from './desk/notifications.service.js';
+
 export { loadConfig, type AppConfig } from './config.js';
 
 /**
