@@ -3,12 +3,14 @@ import {
   ConflictException,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   HttpCode,
   NotFoundException,
   Param,
   Patch,
   Post,
+  Put,
   Req,
   UnauthorizedException,
   UnprocessableEntityException,
@@ -24,6 +26,14 @@ import {
   TaskFileLinkExistsError,
   TaskFilesService,
 } from './task-files.service.js';
+import {
+  CommentNotFoundError,
+  CommentNotYoursError,
+  CommentRejectedError,
+  TaskCommentsService,
+  type CommentRow,
+} from './task-comments.service.js';
+import { TaskWatchersService } from './task-watchers.service.js';
 import {
   AssigneeNotFoundError,
   TaskBothStatusFieldsError,
@@ -61,6 +71,11 @@ const dueSchema = z.string().datetime({ offset: true }).nullable();
 
 const linkSchema = z.object({ fileEntryId: z.string().uuid() });
 
+// Şemadaki `task_comments_body_sane` ile aynı sayı. Burada da olması, kısıt ihlalinin 500'e
+// dönüşmesini engelliyor — aynı sınırın iki yerde durması, iki farklı şeyi koruduğu için tekrar
+// değil.
+const commentSchema = z.object({ body: z.string().trim().min(1).max(4000) });
+
 const updateSchema = z
   .object({
     body: bodySchema.optional(),
@@ -88,6 +103,8 @@ export class TasksController {
   constructor(
     private readonly tasks: TasksService,
     private readonly links: TaskFilesService,
+    private readonly thread: TaskCommentsService,
+    private readonly watching: TaskWatchersService,
   ) {}
 
   @Get()
@@ -237,20 +254,176 @@ export class TasksController {
     @Req() request: AuthenticatedRequest,
     @Param('id') id: string,
   ): Promise<Schemas['TaskActivityPage']> {
-    const session = requireSession(request);
+    const caller = requireCaller(request);
     requireUuid(id);
     try {
-      const rows = await this.tasks.activity(session.organizationId, id);
+      const rows = await this.tasks.activity(caller.organizationId, id);
       return {
         items: rows.map((row) => ({
           id: row.id,
           actorUsername: row.actor_username,
           field: row.field,
-          oldValue: row.old_value,
+          // SİLİNEN YORUMUN GÖVDESİ YÖNETİCİDEN BAŞKASINA DÖNMÜYOR.
+          //
+          // Denetim satırı gövdeyi TUTUYOR — §7 istiyor, ve bir yorumun silinmiş olması en çok
+          // bakılacak an geldiğinde ne yazdığını da bilmeyi gerektirir. Ama onu bu akıştan HER
+          // ÜYEYE geri vermek, silmeyi tamamen görüntüden ibaret yapardı: cümle yorum listesinden
+          // kalkıyor, bir sekme ötede aynen duruyor. Kayıt yönetici için var, akran için değil.
+          oldValue: row.field === 'comment' && !caller.isOrganizationAdmin ? null : row.old_value,
           newValue: row.new_value,
           at: row.created_at.toISOString(),
         })),
       };
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  /* ─── yorumlar ────────────────────────────────────────────────────────────── */
+
+  @Get(':id/comments')
+  async comments(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+  ): Promise<Schemas['TaskCommentPage']> {
+    const session = requireSession(request);
+    requireUuid(id);
+    try {
+      const rows = await this.thread.list(session.organizationId, id);
+      return { items: rows.map(toComment) };
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Post(':id/comments')
+  @HttpCode(201)
+  async addComment(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ): Promise<Schemas['TaskComment']> {
+    const session = requireSession(request);
+    requireUuid(id);
+    const parsed = commentSchema.safeParse(body);
+    if (!parsed.success) throw new UnprocessableEntityException('geçersiz yorum');
+    try {
+      return toComment(
+        await this.thread.add(session.organizationId, id, session.userId, parsed.data.body),
+      );
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Patch(':id/comments/:commentId')
+  async editComment(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('commentId') commentId: string,
+    @Body() body: unknown,
+  ): Promise<Schemas['TaskComment']> {
+    const session = requireSession(request);
+    requireUuid(id);
+    requireUuid(commentId);
+    const parsed = commentSchema.safeParse(body);
+    if (!parsed.success) throw new UnprocessableEntityException('geçersiz yorum');
+    try {
+      return toComment(
+        await this.thread.edit(
+          session.organizationId,
+          id,
+          commentId,
+          session.userId,
+          parsed.data.body,
+        ),
+      );
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Delete(':id/comments/:commentId')
+  @HttpCode(204)
+  async removeComment(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('commentId') commentId: string,
+  ): Promise<void> {
+    const caller = requireCaller(request);
+    requireUuid(id);
+    requireUuid(commentId);
+    try {
+      await this.thread.remove(
+        caller.organizationId,
+        id,
+        commentId,
+        caller.userId,
+        caller.isOrganizationAdmin,
+      );
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  /* ─── izleyiciler ─────────────────────────────────────────────────────────── */
+
+  @Get(':id/watchers')
+  async watchers(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+  ): Promise<Schemas['TaskWatcherPage']> {
+    const session = requireSession(request);
+    requireUuid(id);
+    try {
+      // Görevin varlığı önce: olmayan bir görev için boş liste, "kimse izlemiyor" ile "böyle bir
+      // görev yok"u aynı cevaba çevirirdi.
+      await this.tasks.find(session.organizationId, id);
+      const rows = await this.watching.list(session.organizationId, id);
+      return {
+        items: rows.map((row) => ({
+          userId: row.user_id,
+          username: row.username,
+          source: row.source,
+          since: row.created_at.toISOString(),
+        })),
+        // Çağıranın kendi durumu, listeden türetilmek yerine ayrı bir alan: arayüzün sorduğu soru
+        // "ben izliyor muyum", ve onu her istemcinin listede kendini araması gerekmiyor.
+        watching: rows.some((row) => row.user_id === session.userId),
+      };
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  /**
+   * Bu işi izlemeye başla — YALNIZ ÇAĞIRAN İÇİN.
+   *
+   * Gövde yok ve bir `userId` parametresi de yok, bilerek: başkası adına abone olabilmek, bir
+   * kişiye istemediği bildirimleri göndermenin yolu olurdu ve o kişinin geri almaktan başka
+   * yapabileceği bir şey olmazdı.
+   */
+  @Put(':id/watch')
+  @HttpCode(204)
+  async watch(@Req() request: AuthenticatedRequest, @Param('id') id: string): Promise<void> {
+    const session = requireSession(request);
+    requireUuid(id);
+    try {
+      await this.tasks.find(session.organizationId, id);
+      await this.watching.watch(session.organizationId, id, session.userId, 'manual');
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Delete(':id/watch')
+  @HttpCode(204)
+  async unwatch(@Req() request: AuthenticatedRequest, @Param('id') id: string): Promise<void> {
+    const session = requireSession(request);
+    requireUuid(id);
+    try {
+      await this.tasks.find(session.organizationId, id);
+      await this.watching.unwatch(session.organizationId, id, session.userId);
     } catch (error) {
       throw translate(error);
     }
@@ -343,5 +516,30 @@ function translate(error: unknown): Error {
   // görevin dosya hakkında bilgi sızdırmaması.
   if (error instanceof LinkedFileNotVisibleError) return new NotFoundException();
   if (error instanceof TaskFileLinkExistsError) return new ConflictException(error.message);
+  if (error instanceof CommentNotFoundError) return new NotFoundException();
+  // 403, ve 404 DEĞİL. Yorumun VAR OLDUĞU zaten görünüyor — listede duruyor, yazanın adıyla — o
+  // yüzden gizlenecek bir şey yok, ve "böyle bir yorum yok" demek okuyanı kendi ekranıyla çelişkiye
+  // düşürürdü. Dosya bağındaki 404'ün sebebi başkaydı: orada gizlenen şey dosyanın varlığıydı.
+  if (error instanceof CommentNotYoursError) return new ForbiddenException(error.message);
+  if (error instanceof CommentRejectedError) return new UnprocessableEntityException(error.message);
   return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * Silinmiş bir yorumun gövdesi ASLA dışarı çıkmıyor.
+ *
+ * Servis sorgusu zaten maskeliyor; burada ikinci kez yapılmıyor, ama `deleted` bayrağı buradan
+ * geçiyor ve arayüzün "bu yorum silindi" diyebilmesinin tek kaynağı o. Boş bir gövde ile silinmiş
+ * bir yorumu ayırt etmenin başka yolu yok — ve şema boş gövdeyi zaten reddediyor, yani boş gelen
+ * her gövde silinmiş bir yorumun gövdesi.
+ */
+function toComment(row: CommentRow): Schemas['TaskComment'] {
+  return {
+    id: row.id,
+    authorUsername: row.author_username,
+    body: row.body,
+    deleted: row.deleted_at !== null,
+    editedAt: row.edited_at === null ? null : row.edited_at.toISOString(),
+    createdAt: row.created_at.toISOString(),
+  };
 }

@@ -2515,9 +2515,10 @@ export interface paths {
          * Bildirim merkezi
          * @description §7: "Hatırlatma, gecikme, mention ve görev değişiklikleri bildirim merkezine düşer."
          *
-         *     **Mention henüz yok** ve bir tür değeri de yok: bir mention bir yorumun içinde yaşıyor,
-         *     yorumlar da yazılmadı. Hiçbir şeyin üretmediği bir tür eklemek, boş bir sözü şemaya
-         *     yazmak olurdu.
+         *     `task.comment` ve `task.mention` bir İŞARETÇİ, içeriğin kopyası değil: başlık yorumun
+         *     metnini değil İŞİN metnini taşıyor. Sebep, aynı iş için okunmamış ikinci bir bildirimin
+         *     yazılmaması — ilk başlık beş yorum sonra da ekranda duruyor, ve o başlık bir yorumun metni
+         *     olsaydı yanıltıcı olurdu. Okuyan işe gidiyor ve hepsini orada görüyor.
          *
          *     Bildirimler ALICI BAŞINA satır. Aynı olay iki kişiye iki farklı şey söylüyor — bir işin
          *     atanması, atanan için "sana iş geldi", eski atanan için "iş senden alındı" — ve tek satır
@@ -2598,6 +2599,288 @@ export interface paths {
             };
         };
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{id}/comments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Görevin yorumları
+         * @description ESKİ ÖNCE: bir tartışma yukarıdan aşağı okunuyor. (Bildirim listesi en yeni önce, çünkü
+         *     orada okunacak olan son olay.)
+         *
+         *     Silinmiş bir yorumun SATIRI dönüyor, GÖVDESİ dönmüyor — `deleted: true` ve boş bir `body`.
+         *     Bir konuşmadan sessizce kaybolan bir replika okuyanı kendi hafızasından şüphe ettirir;
+         *     "bu yorum silindi" ise okunabilir bir kayıt.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Yorumlar */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskCommentPage"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        /**
+         * Yorum ekle
+         * @description MENTION SUNUCUDA ÇÖZÜLÜYOR. İstek bir alıcı listesi TAŞIMIYOR ve taşıyamaz: öyle bir alan,
+         *     gövdede adı hiç geçmeyen birine bildirim göndermenin yolu olurdu. Sunucu yalnız gövdede
+         *     gerçekten yazan `@ad`'leri, yalnız kendi kiracısında çözüyor.
+         *
+         *     Bulunamayan ad sessizce düşüyor — "böyle bir kullanıcı yok" demek, yorum kutusunu bir
+         *     kullanıcı adı yoklama aracına çevirirdi.
+         *
+         *     Yorum yazmak İZLEYİCİ YAPIYOR: konuşmaya girmek, devamını duymak istemek demek. Anılmak
+         *     izleyici YAPMIYOR — bir kez anılmanın kişiyi işin bütün gelecek gürültüsüne kaydetmesi,
+         *     insanların bildirimleri okumayı bırakma sebebi.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["TaskCommentRequest"];
+                };
+            };
+            responses: {
+                /** @description Eklendi */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskComment"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{id}/comments/{commentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Yorumu sil
+         * @description Yazan ya da yönetici. YUMUŞAK silme: satır ve gövdesi tabloda kalıyor, API gövdeyi bir daha
+         *     döndürmüyor, ve `task_activity`'ye bir denetim satırı düşüyor. Bir yorumun silinmiş olması,
+         *     en çok bakılacak an geldiğinde ne yazdığını da bilmeyi gerektirir.
+         *
+         *     403, 404 DEĞİL: yorumun var olduğu zaten listede görünüyor, o yüzden gizlenecek bir şey yok
+         *     ve "böyle bir yorum yok" demek okuyanı kendi ekranıyla çelişkiye düşürürdü.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    commentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Silindi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Kendi yorumunu düzenle
+         * @description YALNIZ YAZAN, yönetici bile değil. Bir yöneticinin başkasının ağzından cümle
+         *     değiştirebilmesi, yorum listesini alıntılanamaz yapardı — ve bir tartışma kaydının tek işi
+         *     alıntılanabilir olmak. Yöneticinin yapabileceği şey silmek, ve silinen bir yorum silindiğini
+         *     söylüyor.
+         *
+         *     Düzenleme yeni bildirim üretmiyor, mention eklense bile: bir düzenlemeyle birine bildirim
+         *     göndermek, yazılmış bir cümleyi sonradan bir çağrıya çevirmek olurdu.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    commentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["TaskCommentRequest"];
+                };
+            };
+            responses: {
+                /** @description Düzenlendi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskComment"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        trace?: never;
+    };
+    "/tasks/{id}/watchers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Görevi kim izliyor */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description İzleyiciler */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskWatcherPage"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{id}/watch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Bu işi izlemeye başla
+         * @description YALNIZ ÇAĞIRAN İÇİN. Gövde yok ve bir `userId` parametresi de yok, bilerek: başkası adına
+         *     abone olabilmek, bir kişiye istemediği bildirimleri göndermenin yolu olurdu, ve o kişinin
+         *     geri almaktan başka yapabileceği bir şey olmazdı.
+         *
+         *     Zaten izliyorsa hiçbir şey olmuyor; cevap yine 204.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description İzleniyor */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        post?: never;
+        /**
+         * İzlemeyi bırak
+         * @description Nasıl abone olduğuna bakmıyor: atandığı için otomatik eklenmiş biri de çıkabiliyor. "Bu işi
+         *     bırakamazsın, çünkü sana atandı" demek bildirimi bir cezaya çevirirdi — ve o kişi işi
+         *     bıraktığında değil, bildirimleri okumayı bıraktığında kaybediliyor.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description İzlenmiyor */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -4579,8 +4862,14 @@ export interface components {
             /** Format: uuid */
             id: string;
             actorUsername?: string | null;
-            /** @enum {string} */
-            field: "status" | "priority" | "due_at" | "assignee_id" | "body" | "file_link";
+            /**
+             * @description `comment` yalnız bir yorumun SİLİNMESİ için düşüyor, eklenmesi için değil: yorum
+             *     listesinin kendisi eklendiğinin kaydı, ve iki yere yazmak iki farklı doğruluk kaynağı
+             *     demek. Kaybolan şeyin izi ise başka hiçbir yerde kalmıyor — `oldValue` silinen gövdenin
+             *     ilk 200 karakteri, `newValue` null.
+             * @enum {string}
+             */
+            field: "status" | "priority" | "due_at" | "assignee_id" | "body" | "file_link" | "comment";
             oldValue?: string | null;
             newValue?: string | null;
             /** Format: date-time */
@@ -4607,11 +4896,55 @@ export interface components {
             dueAt?: string | null;
             position?: number;
         };
+        TaskComment: {
+            /** Format: uuid */
+            id: string;
+            /** @description Hesap silindiyse null; yorum kalıyor, çünkü yorum işin bilgisi. */
+            authorUsername: string | null;
+            /** @description Silinmiş bir yorumda BOŞ. `deleted` ile birlikte okunuyor. */
+            body: string;
+            deleted: boolean;
+            /**
+             * Format: date-time
+             * @description null = hiç düzenlenmedi. Arayüz farkı söylüyor: sonradan değişmiş bir cümleyi hiç
+             *     değişmemiş gibi göstermek, alıntılanabilir olmayan bir kayıt üretir.
+             */
+            editedAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        TaskCommentPage: {
+            items: components["schemas"]["TaskComment"][];
+        };
+        TaskCommentRequest: {
+            body: string;
+        };
+        TaskWatcher: {
+            /** Format: uuid */
+            userId: string;
+            username: string | null;
+            /**
+             * @description Kendi mi seçti, yoksa bir eylem yüzünden mi eklendi. Bugün ikisi de aynı davranıyor;
+             *     ayrım, kaybolmaması için taşınıyor.
+             * @enum {string}
+             */
+            source: "manual" | "created" | "assigned" | "commented";
+            /** Format: date-time */
+            since: string;
+        };
+        TaskWatcherPage: {
+            items: components["schemas"]["TaskWatcher"][];
+            /**
+             * @description Çağıranın kendi durumu. Listeden türetilmek yerine ayrı bir alan: arayüzün sorduğu soru
+             *     "ben izliyor muyum", ve onu her istemcinin listede kendini araması gerekmiyor.
+             */
+            watching: boolean;
+        };
         Notification: {
             /** Format: uuid */
             id: string;
             /** @enum {string} */
-            kind: "task.assigned" | "task.unassigned" | "task.status" | "task.due" | "task.overdue";
+            kind: "task.assigned" | "task.unassigned" | "task.status" | "task.due" | "task.overdue" | "task.comment" | "task.mention";
             /** Format: uuid */
             taskId?: string | null;
             /**

@@ -1427,9 +1427,10 @@ paths:
       description: |
         §7: "Hatırlatma, gecikme, mention ve görev değişiklikleri bildirim merkezine düşer."
 
-        **Mention henüz yok** ve bir tür değeri de yok: bir mention bir yorumun içinde yaşıyor,
-        yorumlar da yazılmadı. Hiçbir şeyin üretmediği bir tür eklemek, boş bir sözü şemaya
-        yazmak olurdu.
+        `task.comment` ve `task.mention` bir İŞARETÇİ, içeriğin kopyası değil: başlık yorumun
+        metnini değil İŞİN metnini taşıyor. Sebep, aynı iş için okunmamış ikinci bir bildirimin
+        yazılmaması — ilk başlık beş yorum sonra da ekranda duruyor, ve o başlık bir yorumun metni
+        olsaydı yanıltıcı olurdu. Okuyan işe gidiyor ve hepsini orada görüyor.
 
         Bildirimler ALICI BAŞINA satır. Aynı olay iki kişiye iki farklı şey söylüyor — bir işin
         atanması, atanan için "sana iş geldi", eski atanan için "iş senden alındı" — ve tek satır
@@ -1470,6 +1471,148 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/NotificationsRead' }
+
+  /tasks/{id}/comments:
+    get:
+      tags: [tasks]
+      summary: Görevin yorumları
+      description: |
+        ESKİ ÖNCE: bir tartışma yukarıdan aşağı okunuyor. (Bildirim listesi en yeni önce, çünkü
+        orada okunacak olan son olay.)
+
+        Silinmiş bir yorumun SATIRI dönüyor, GÖVDESİ dönmüyor — `deleted: true` ve boş bir `body`.
+        Bir konuşmadan sessizce kaybolan bir replika okuyanı kendi hafızasından şüphe ettirir;
+        "bu yorum silindi" ise okunabilir bir kayıt.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Yorumlar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskCommentPage' }
+        '404': { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [tasks]
+      summary: Yorum ekle
+      description: |
+        MENTION SUNUCUDA ÇÖZÜLÜYOR. İstek bir alıcı listesi TAŞIMIYOR ve taşıyamaz: öyle bir alan,
+        gövdede adı hiç geçmeyen birine bildirim göndermenin yolu olurdu. Sunucu yalnız gövdede
+        gerçekten yazan `@ad`'leri, yalnız kendi kiracısında çözüyor.
+
+        Bulunamayan ad sessizce düşüyor — "böyle bir kullanıcı yok" demek, yorum kutusunu bir
+        kullanıcı adı yoklama aracına çevirirdi.
+
+        Yorum yazmak İZLEYİCİ YAPIYOR: konuşmaya girmek, devamını duymak istemek demek. Anılmak
+        izleyici YAPMIYOR — bir kez anılmanın kişiyi işin bütün gelecek gürültüsüne kaydetmesi,
+        insanların bildirimleri okumayı bırakma sebebi.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskCommentRequest' }
+      responses:
+        '201':
+          description: Eklendi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskComment' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /tasks/{id}/comments/{commentId}:
+    patch:
+      tags: [tasks]
+      summary: Kendi yorumunu düzenle
+      description: |
+        YALNIZ YAZAN, yönetici bile değil. Bir yöneticinin başkasının ağzından cümle
+        değiştirebilmesi, yorum listesini alıntılanamaz yapardı — ve bir tartışma kaydının tek işi
+        alıntılanabilir olmak. Yöneticinin yapabileceği şey silmek, ve silinen bir yorum silindiğini
+        söylüyor.
+
+        Düzenleme yeni bildirim üretmiyor, mention eklense bile: bir düzenlemeyle birine bildirim
+        göndermek, yazılmış bir cümleyi sonradan bir çağrıya çevirmek olurdu.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: commentId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskCommentRequest' }
+      responses:
+        '200':
+          description: Düzenlendi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskComment' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [tasks]
+      summary: Yorumu sil
+      description: |
+        Yazan ya da yönetici. YUMUŞAK silme: satır ve gövdesi tabloda kalıyor, API gövdeyi bir daha
+        döndürmüyor, ve `task_activity`'ye bir denetim satırı düşüyor. Bir yorumun silinmiş olması,
+        en çok bakılacak an geldiğinde ne yazdığını da bilmeyi gerektirir.
+
+        403, 404 DEĞİL: yorumun var olduğu zaten listede görünüyor, o yüzden gizlenecek bir şey yok
+        ve "böyle bir yorum yok" demek okuyanı kendi ekranıyla çelişkiye düşürürdü.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: commentId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204':
+          description: Silindi
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /tasks/{id}/watchers:
+    get:
+      tags: [tasks]
+      summary: Görevi kim izliyor
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: İzleyiciler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskWatcherPage' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /tasks/{id}/watch:
+    put:
+      tags: [tasks]
+      summary: Bu işi izlemeye başla
+      description: |
+        YALNIZ ÇAĞIRAN İÇİN. Gövde yok ve bir `userId` parametresi de yok, bilerek: başkası adına
+        abone olabilmek, bir kişiye istemediği bildirimleri göndermenin yolu olurdu, ve o kişinin
+        geri almaktan başka yapabileceği bir şey olmazdı.
+
+        Zaten izliyorsa hiçbir şey olmuyor; cevap yine 204.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204':
+          description: İzleniyor
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [tasks]
+      summary: İzlemeyi bırak
+      description: |
+        Nasıl abone olduğuna bakmıyor: atandığı için otomatik eklenmiş biri de çıkabiliyor. "Bu işi
+        bırakamazsın, çünkü sana atandı" demek bildirimi bir cezaya çevirirdi — ve o kişi işi
+        bıraktığında değil, bildirimleri okumayı bıraktığında kaybediliyor.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204':
+          description: İzlenmiyor
+        '404': { $ref: '#/components/responses/Problem' }
 
   /me/preferences:
     get:
@@ -2965,7 +3108,12 @@ components:
         actorUsername: { type: [string, 'null'] }
         field:
           type: string
-          enum: [status, priority, due_at, assignee_id, body, file_link]
+          enum: [status, priority, due_at, assignee_id, body, file_link, comment]
+          description: |
+            `comment` yalnız bir yorumun SİLİNMESİ için düşüyor, eklenmesi için değil: yorum
+            listesinin kendisi eklendiğinin kaydı, ve iki yere yazmak iki farklı doğruluk kaynağı
+            demek. Kaybolan şeyin izi ise başka hiçbir yerde kalmıyor — `oldValue` silinen gövdenin
+            ilk 200 karakteri, `newValue` null.
         oldValue: { type: [string, 'null'] }
         newValue: { type: [string, 'null'] }
         at: { type: string, format: date-time }
@@ -3003,6 +3151,68 @@ components:
         dueAt: { type: [string, 'null'], format: date-time }
         position: { type: number }
 
+    TaskComment:
+      type: object
+      required: [id, authorUsername, body, deleted, editedAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        authorUsername:
+          type: [string, 'null']
+          description: Hesap silindiyse null; yorum kalıyor, çünkü yorum işin bilgisi.
+        body:
+          type: string
+          maxLength: 4000
+          description: Silinmiş bir yorumda BOŞ. `deleted` ile birlikte okunuyor.
+        deleted: { type: boolean }
+        editedAt:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            null = hiç düzenlenmedi. Arayüz farkı söylüyor: sonradan değişmiş bir cümleyi hiç
+            değişmemiş gibi göstermek, alıntılanabilir olmayan bir kayıt üretir.
+        createdAt: { type: string, format: date-time }
+
+    TaskCommentPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TaskComment' }
+
+    TaskCommentRequest:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 4000 }
+
+    TaskWatcher:
+      type: object
+      required: [userId, username, source, since]
+      properties:
+        userId: { type: string, format: uuid }
+        username: { type: [string, 'null'] }
+        source:
+          type: string
+          enum: [manual, created, assigned, commented]
+          description: |
+            Kendi mi seçti, yoksa bir eylem yüzünden mi eklendi. Bugün ikisi de aynı davranıyor;
+            ayrım, kaybolmaması için taşınıyor.
+        since: { type: string, format: date-time }
+
+    TaskWatcherPage:
+      type: object
+      required: [items, watching]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TaskWatcher' }
+        watching:
+          type: boolean
+          description: |
+            Çağıranın kendi durumu. Listeden türetilmek yerine ayrı bir alan: arayüzün sorduğu soru
+            "ben izliyor muyum", ve onu her istemcinin listede kendini araması gerekmiyor.
+
     Notification:
       type: object
       required: [id, kind, title, readAt, createdAt]
@@ -3010,7 +3220,16 @@ components:
         id: { type: string, format: uuid }
         kind:
           type: string
-          enum: [task.assigned, task.unassigned, task.status, task.due, task.overdue]
+          enum:
+            [
+              task.assigned,
+              task.unassigned,
+              task.status,
+              task.due,
+              task.overdue,
+              task.comment,
+              task.mention,
+            ]
         taskId: { type: [string, 'null'], format: uuid }
         taskBody:
           type: [string, 'null']

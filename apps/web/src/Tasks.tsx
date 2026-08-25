@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
+import { TaskThread } from './TaskThread.js';
 import type { Tone } from './ui.js';
 import { Empty, Glyph } from './ui.js';
 
@@ -183,6 +184,9 @@ export function Tasks({
   const [reloadKey, setReloadKey] = useState(0);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  // Aynı anda TEK tartışma açık. İkisi birden açıkken pano bir listeden çok bir yığına dönüşüyor,
+  // ve zaten okunan şey her seferinde tek bir işin konuşması.
+  const [open, setOpen] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -329,183 +333,208 @@ export function Tasks({
               const done = task.doneAt !== null;
               const due = dueLabel(task.dueAt);
               const shut = closed(task);
+              const talking = open === task.id;
               return (
-                <div className={shut ? 'jitem done' : 'jitem'} key={task.id}>
-                  <button
-                    type="button"
-                    className={done ? 'jck on' : 'jck'}
-                    disabled={busy}
-                    aria-pressed={done}
-                    aria-label={
-                      done ? 'Tamamlanmadı olarak işaretle' : 'Tamamlandı olarak işaretle'
-                    }
-                    onClick={() => void update(task, { done: !done }, 'İş güncellenemedi.')}
-                  >
-                    ✓
-                  </button>
+                <div className={talking ? 'jwrap on' : 'jwrap'} key={task.id}>
+                  <div className={shut ? 'jitem done' : 'jitem'}>
+                    <button
+                      type="button"
+                      className={done ? 'jck on' : 'jck'}
+                      disabled={busy}
+                      aria-pressed={done}
+                      aria-label={
+                        done ? 'Tamamlanmadı olarak işaretle' : 'Tamamlandı olarak işaretle'
+                      }
+                      onClick={() => void update(task, { done: !done }, 'İş güncellenemedi.')}
+                    >
+                      ✓
+                    </button>
 
-                  {/* Keyed by the server's own timestamp so a value the API normalised replaces
+                    {/* Keyed by the server's own timestamp so a value the API normalised replaces
                       what is in the DOM. A contenteditable node React never re-renders keeps
                       whatever the browser left in it, which is how a rejected edit stays on
                       screen looking accepted. */}
-                  <span
-                    key={task.updatedAt}
-                    className="tx"
-                    contentEditable
-                    suppressContentEditableWarning
-                    role="textbox"
-                    tabIndex={0}
-                    aria-label="İş metni"
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        // A task is one line. Enter commits it instead of growing the row.
-                        event.preventDefault();
-                        event.currentTarget.blur();
-                        return;
-                      }
-                      if (event.key !== 'Escape') return;
-                      event.currentTarget.textContent = task.body;
-                      event.currentTarget.blur();
-                    }}
-                    onBlur={(event) => {
-                      const next = (event.currentTarget.textContent ?? '').trim();
-                      if (next === task.body) return;
-                      if (next === '') {
-                        // Emptying the text is not how a task is deleted; the ✕ is.
+                    <span
+                      key={task.updatedAt}
+                      className="tx"
+                      contentEditable
+                      suppressContentEditableWarning
+                      role="textbox"
+                      tabIndex={0}
+                      aria-label="İş metni"
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          // A task is one line. Enter commits it instead of growing the row.
+                          event.preventDefault();
+                          event.currentTarget.blur();
+                          return;
+                        }
+                        if (event.key !== 'Escape') return;
                         event.currentTarget.textContent = task.body;
-                        return;
-                      }
-                      void update(task, { body: next }, 'İş metni kaydedilemedi.');
-                    }}
-                  >
-                    {task.body}
-                  </span>
+                        event.currentTarget.blur();
+                      }}
+                      onBlur={(event) => {
+                        const next = (event.currentTarget.textContent ?? '').trim();
+                        if (next === task.body) return;
+                        if (next === '') {
+                          // Emptying the text is not how a task is deleted; the ✕ is.
+                          event.currentTarget.textContent = task.body;
+                          return;
+                        }
+                        void update(task, { body: next }, 'İş metni kaydedilemedi.');
+                      }}
+                    >
+                      {task.body}
+                    </span>
 
-                  <select
-                    value={task.assigneeId ?? ''}
-                    disabled={busy}
-                    aria-label="Atanan kişi"
-                    style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7, maxWidth: 130 }}
-                    onChange={(event) => {
-                      const chosen = event.target.value;
-                      void update(
-                        task,
-                        { assigneeId: chosen === '' ? null : chosen },
-                        'Atama değiştirilemedi.',
-                      );
-                    }}
-                  >
-                    <option value="">Atanmamış</option>
-                    {assignable.map((person) => (
-                      <option key={person.id ?? NOBODY} value={person.id ?? ''}>
-                        {person.name}
-                      </option>
-                    ))}
-                    {/* The current assignee may be someone this client cannot enumerate. Without
-                        this the select would silently show the wrong name. */}
-                    {task.assigneeId !== null &&
-                      !assignable.some((person) => person.id === task.assigneeId) && (
-                        <option value={task.assigneeId}>
-                          {task.assigneeUsername ?? 'Bilinmeyen hesap'}
-                        </option>
-                      )}
-                  </select>
-
-                  <select
-                    value={task.status}
-                    disabled={busy}
-                    aria-label="Durum"
-                    style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7 }}
-                    onChange={(event) => {
-                      // Seçenekler FİLTRELENMİYOR. Sunucudaki makine yalnız iki geçişi yasaklıyor
-                      // ve reddi 422 ile iki durumu da adlandırarak geliyor; burada ikinci bir
-                      // kopya tutmak, zamanla ayrışacak iki kural demek olurdu.
-                      void update(
-                        task,
-                        { status: event.target.value as Status },
-                        'Durum değiştirilemedi.',
-                      );
-                    }}
-                  >
-                    {(Object.keys(STATUS_LABEL) as Status[]).map((value) => (
-                      <option key={value} value={value}>
-                        {STATUS_LABEL[value]}
-                      </option>
-                    ))}
-                  </select>
-
-                  <select
-                    value={task.priority}
-                    disabled={busy}
-                    aria-label="Öncelik"
-                    className={PRIORITY_TONE[task.priority]}
-                    style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7 }}
-                    onChange={(event) => {
-                      void update(
-                        task,
-                        { priority: event.target.value as Priority },
-                        'Öncelik değiştirilemedi.',
-                      );
-                    }}
-                  >
-                    {(Object.keys(PRIORITY_LABEL) as Priority[]).map((value) => (
-                      <option key={value} value={value}>
-                        {PRIORITY_LABEL[value]}
-                      </option>
-                    ))}
-                  </select>
-
-                  <label
-                    className="m"
-                    style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}
-                  >
-                    <input
-                      type="date"
+                    <select
+                      value={task.assigneeId ?? ''}
                       disabled={busy}
-                      aria-label="Son tarih"
-                      // `<input type=date>` yerel bir GÜN veriyor, sunucu ise bir AN istiyor —
-                      // "yarın" bir zaman diliminde yarın, başkasında bugün. Günün sonuna
-                      // sabitleniyor: bir son tarih, o günün bitmesiyle geçiyor.
-                      value={
-                        task.dueAt === null || task.dueAt === undefined
-                          ? ''
-                          : task.dueAt.slice(0, 10)
-                      }
+                      aria-label="Atanan kişi"
+                      style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7, maxWidth: 130 }}
                       onChange={(event) => {
-                        const day = event.target.value;
+                        const chosen = event.target.value;
                         void update(
                           task,
-                          {
-                            dueAt: day === '' ? null : new Date(`${day}T23:59:59`).toISOString(),
-                          },
-                          'Son tarih değiştirilemedi.',
+                          { assigneeId: chosen === '' ? null : chosen },
+                          'Atama değiştirilemedi.',
                         );
                       }}
-                      style={{ fontSize: 11, padding: '2px 4px', borderRadius: 6, width: 122 }}
-                    />
-                    {due !== null && (
-                      <span className={due.late ? 'pill bad' : 'pill dim'}>{due.text}</span>
+                    >
+                      <option value="">Atanmamış</option>
+                      {assignable.map((person) => (
+                        <option key={person.id ?? NOBODY} value={person.id ?? ''}>
+                          {person.name}
+                        </option>
+                      ))}
+                      {/* The current assignee may be someone this client cannot enumerate. Without
+                        this the select would silently show the wrong name. */}
+                      {task.assigneeId !== null &&
+                        !assignable.some((person) => person.id === task.assigneeId) && (
+                          <option value={task.assigneeId}>
+                            {task.assigneeUsername ?? 'Bilinmeyen hesap'}
+                          </option>
+                        )}
+                    </select>
+
+                    <select
+                      value={task.status}
+                      disabled={busy}
+                      aria-label="Durum"
+                      style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7 }}
+                      onChange={(event) => {
+                        // Seçenekler FİLTRELENMİYOR. Sunucudaki makine yalnız iki geçişi yasaklıyor
+                        // ve reddi 422 ile iki durumu da adlandırarak geliyor; burada ikinci bir
+                        // kopya tutmak, zamanla ayrışacak iki kural demek olurdu.
+                        void update(
+                          task,
+                          { status: event.target.value as Status },
+                          'Durum değiştirilemedi.',
+                        );
+                      }}
+                    >
+                      {(Object.keys(STATUS_LABEL) as Status[]).map((value) => (
+                        <option key={value} value={value}>
+                          {STATUS_LABEL[value]}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={task.priority}
+                      disabled={busy}
+                      aria-label="Öncelik"
+                      className={PRIORITY_TONE[task.priority]}
+                      style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7 }}
+                      onChange={(event) => {
+                        void update(
+                          task,
+                          { priority: event.target.value as Priority },
+                          'Öncelik değiştirilemedi.',
+                        );
+                      }}
+                    >
+                      {(Object.keys(PRIORITY_LABEL) as Priority[]).map((value) => (
+                        <option key={value} value={value}>
+                          {PRIORITY_LABEL[value]}
+                        </option>
+                      ))}
+                    </select>
+
+                    <label
+                      className="m"
+                      style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}
+                    >
+                      <input
+                        type="date"
+                        disabled={busy}
+                        aria-label="Son tarih"
+                        // `<input type=date>` yerel bir GÜN veriyor, sunucu ise bir AN istiyor —
+                        // "yarın" bir zaman diliminde yarın, başkasında bugün. Günün sonuna
+                        // sabitleniyor: bir son tarih, o günün bitmesiyle geçiyor.
+                        value={
+                          task.dueAt === null || task.dueAt === undefined
+                            ? ''
+                            : task.dueAt.slice(0, 10)
+                        }
+                        onChange={(event) => {
+                          const day = event.target.value;
+                          void update(
+                            task,
+                            {
+                              dueAt: day === '' ? null : new Date(`${day}T23:59:59`).toISOString(),
+                            },
+                            'Son tarih değiştirilemedi.',
+                          );
+                        }}
+                        style={{ fontSize: 11, padding: '2px 4px', borderRadius: 6, width: 122 }}
+                      />
+                      {due !== null && (
+                        <span className={due.late ? 'pill bad' : 'pill dim'}>{due.text}</span>
+                      )}
+                    </label>
+
+                    {task.linkedFileCount !== undefined && task.linkedFileCount > 0 && (
+                      // Sayı ÇAĞIRANIN GÖREBİLDİKLERİ. Toplamı göstermek, göremediği dosyaların
+                      // varlığını söylerdi — §7'nin yasakladığı şeyin sayı hâli.
+                      <span className="pill dim" title="Bağlı dosya">
+                        🗂 {task.linkedFileCount}
+                      </span>
                     )}
-                  </label>
 
-                  {task.linkedFileCount !== undefined && task.linkedFileCount > 0 && (
-                    // Sayı ÇAĞIRANIN GÖREBİLDİKLERİ. Toplamı göstermek, göremediği dosyaların
-                    // varlığını söylerdi — §7'nin yasakladığı şeyin sayı hâli.
-                    <span className="pill dim" title="Bağlı dosya">
-                      🗂 {task.linkedFileCount}
-                    </span>
+                    {/* Tartışmayı açan düğme. Yorum SAYISI YOK, ve bu bir eksiklik değil: sayıyı
+                      göstermek, pano her yüklendiğinde her iş için bir sorgu demek — otuz işlik
+                      bir panoda otuz sorgu, kimsenin bakmadığı bir sayı için. Açan görüyor. */}
+                    <button
+                      type="button"
+                      className={talking ? 'jtalk on' : 'jtalk'}
+                      aria-expanded={talking}
+                      aria-label={`"${task.body}" işinin yorumları`}
+                      title="Yorumlar ve izleyiciler"
+                      onClick={() => setOpen(talking ? null : task.id)}
+                    >
+                      💬
+                    </button>
+
+                    <button
+                      type="button"
+                      className="del"
+                      disabled={busy}
+                      aria-label={`"${task.body}" işini sil`}
+                      title="İşi sil"
+                      onClick={() => void remove(task)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  {talking && (
+                    <TaskThread
+                      taskId={task.id}
+                      me={me.username}
+                      isAdmin={me.role === 'admin'}
+                      onError={(text) => notify('error', text)}
+                    />
                   )}
-
-                  <button
-                    type="button"
-                    className="del"
-                    disabled={busy}
-                    aria-label={`"${task.body}" işini sil`}
-                    title="İşi sil"
-                    onClick={() => void remove(task)}
-                  >
-                    ✕
-                  </button>
                 </div>
               );
             })}

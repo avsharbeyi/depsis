@@ -10,6 +10,7 @@ import {
   TaskFileLinkExistsError,
   TaskFilesService,
 } from './task-files.service.js';
+import { TaskWatchersService } from './task-watchers.service.js';
 import { TasksService } from './tasks.service.js';
 
 /**
@@ -60,7 +61,7 @@ describeDb('görev–dosya bağı, §7 kuralıyla', () => {
     db = new DbService(APP_URL as string);
     await db.onModuleInit();
     owner = new DbService(OWNER_URL as string);
-    tasks = new TasksService(db, new NotificationsService(db));
+    tasks = new TasksService(db, new NotificationsService(db), new TaskWatchersService(db));
     files = new FilesService(
       db,
       { isAvailable: () => false } as never,

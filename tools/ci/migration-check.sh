@@ -163,6 +163,35 @@ else
   bad "migration(s) missing the RLS role guard:$MISSING_GUARD"       'applying them onto a BYPASSRLS role would install policies that role ignores'
 fi
 
+# Her göç dosyası `-- Up Migration` işaretini TAŞIMAK ZORUNDA, ve altında çalıştırılacak bir şey
+# olmak zorunda.
+#
+# Ölçülen şey: 0028 bu işaret olmadan yazıldı. node-pg-migrate dosyayı sessizce ATLADI, sıfır ifade
+# çalıştırdı, ve satırı `depsis_migrations`'a UYGULANMIŞ olarak yazdı. Bu kapı da 56/56 geçti —
+# çünkü geri alınacak bir şey olmayan bir göç, kusursuz biçimde geri alınabiliyor. Şema
+# değişmemişti, kapı yeşildi, ve arıza ancak entegrasyon süiti "relation does not exist" diyene
+# kadar görünmedi.
+#
+# Bir kapının en kötü hâli, kontrol ettiği şeyin YOKLUĞUNDA geçmesidir.
+MISSING_UP=""
+EMPTY_UP=""
+for f in "$DB_DIR"/migrations/*.sql; do
+  if ! grep -q '^-- Up Migration' "$f"; then
+    MISSING_UP="$MISSING_UP $(basename "$f")"
+    continue
+  fi
+  # `-- Up Migration` ile `-- Down Migration` arasında, yorum ve boş satır olmayan en az bir satır.
+  BODY=$(awk '/^-- Up Migration/{on=1;next} /^-- Down Migration/{on=0} on' "$f" \
+           | grep -v '^[[:space:]]*--' | grep -c '[^[:space:]]' || true)
+  [ "$BODY" -eq 0 ] && EMPTY_UP="$EMPTY_UP $(basename "$f")"
+done
+if [ -z "$MISSING_UP" ] && [ -z "$EMPTY_UP" ]; then
+  ok 'every migration has a non-empty -- Up Migration section'
+else
+  bad "migration(s) with no usable up section:$MISSING_UP$EMPTY_UP" \
+      'node-pg-migrate skips the file, runs nothing, and still records it as applied — the schema never changes and every other check here passes'
+fi
+
 if [ -f "$DB_DIR/migrate.config.js" ] && ! grep -q -- '-f\|--config-file' "$DB_DIR/package.json"; then
   bad 'migrate.config.js exists but no script passes -f' 'it is never read; every option in it is silently a CLI default'
 else
@@ -184,6 +213,34 @@ case "$HIST" in
   *.up*|*.down*) bad 'a suffixed file was applied as a migration in its own right' "$HIST" ;;
   *)        ok "history: $HIST" ;;
 esac
+
+# FORCE RLS olan her tablo, GÖÇÜ KOŞAN ROLÜ kabul eden bir politika taşımak zorunda.
+#
+# Ölçülen şey: 0026, 0027 ve 0028 kiracı politikalarını `TO` cümleciği olmadan yazdı, yani
+# `TO PUBLIC` — ve `bootstrap.sql` `depsis_owner`'ı `NOBYPASSRLS` yaptığı için göçün kendisi kendi
+# tablosuna yazamaz oldu. 0028'in geri doldurması, üzerinde en az bir görev olan HER cihazda
+# `new row violates row-level security policy` ile ölüyordu.
+#
+# Bu kapı onu göremiyordu, ve göremeyeceği de baştan belliydi: burası göçleri BOŞ bir veritabanına
+# uyguluyor, yani geri doldurma sıfır satır yazıyor ve tek bir WITH CHECK bile değerlendirilmiyor.
+# 56/56 yeşildi. Statik bir kontrol değil CANLI bir kontrol gerekiyordu — şemanın kendisine sorulan.
+step 'owner escape'
+NO_OWNER=$(db -c "
+  SELECT string_agg(c.relname, ' ' ORDER BY c.relname)
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'public' AND c.relrowsecurity AND c.relforcerowsecurity
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_policies p
+        WHERE p.schemaname = 'public' AND p.tablename = c.relname
+          AND 'depsis_owner' = ANY (p.roles)
+     )")
+if [ -z "$NO_OWNER" ]; then
+  ok 'every FORCE RLS table admits depsis_owner, so a migration can write to it'
+else
+  bad "table(s) with FORCE RLS and no depsis_owner policy: $NO_OWNER" \
+      'a data migration touching them dies with "new row violates row-level security policy" on any appliance that already has rows — and never on an empty one, so this gate would not otherwise see it'
+fi
 
 # ─── 4. the application role has no DDL ───────────────────────────────────────
 step 'app role privileges'

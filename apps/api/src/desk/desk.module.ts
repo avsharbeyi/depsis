@@ -4,7 +4,9 @@ import { AuthModule } from '../auth/auth.module.js';
 import { FilesModule } from '../files/files.module.js';
 import { NotificationsController } from './notifications.controller.js';
 import { NotificationsModule } from './notifications.module.js';
+import { TaskCommentsService } from './task-comments.service.js';
 import { TaskFilesService } from './task-files.service.js';
+import { TaskWatchersService } from './task-watchers.service.js';
 import { NotesController } from './notes.controller.js';
 import { NotesService } from './notes.service.js';
 import { TasksController } from './tasks.controller.js';
@@ -29,6 +31,12 @@ import { TasksService } from './tasks.service.js';
 @Module({
   imports: [AuthModule, FilesModule, NotificationsModule],
   controllers: [NotesController, TasksController, NotificationsController],
-  providers: [NotesService, TasksService, TaskFilesService],
+  providers: [
+    NotesService,
+    TasksService,
+    TaskFilesService,
+    TaskCommentsService,
+    TaskWatchersService,
+  ],
 })
 export class DeskModule {}

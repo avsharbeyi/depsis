@@ -108,33 +108,37 @@ ama sınırın doğru sayı olduğu ölçülmedi.
 
 ### Faz 2
 
-1. **Görev modülünün kalanı.** Durum, öncelik, son tarih, aktivite ve dosya bağı yazıldı. Kalanlar:
-   alt görev, kontrol listesi, yorum, etiket ve **izleyici**. İzleyici kendi tablosunu istiyor, ve
-   bildirim şu an onun yerine "atanan + oluşturan" diyor — yani bir işi izlemek isteyen üçüncü bir
-   kişinin yolu yok.
-2. **Mention'lar** ve dolayısıyla bildirimin mention türü. Bir mention bir YORUMUN içinde yaşıyor,
-   yorumlar da yazılmadı; hiçbir şeyin üretmediği bir türü sözleşmeye koymak boş bir söz vermek
-   olurdu. Yorum geldiğinde tür de gelecek.
-3. **Bildirim, akışta değil yoklamada.** Zil altmış saniyede bir `/notifications` soruyor; SSE
+1. **Görev modülünün kalanı.** Durum, öncelik, son tarih, aktivite, dosya bağı, yorum, mention ve
+   izleyici yazıldı. Kalanlar: **alt görev**, **kontrol listesi** ve **etiket**. Üçü de kendi
+   tablolarını istiyor ve birbirinden bağımsız; hiçbiri bugünkü davranışı bozmuyor, yalnız eksik.
+2. **Yorumda biçimlendirme yok.** Gövde düz metin: kalın, liste, kod bloğu ya da bağlantı yok.
+   Markdown eklemek bir işaretleme çözümleyicisi ve onunla birlikte bir XSS yüzeyi getiriyor, ve
+   bir NAS'ın iş panosunda düz metnin yetmediği ölçülmedi. `@ad` işaretleniyor ama TIKLANABİLİR
+   değil — istemci bir adın gerçek bir kullanıcı olduğunu bilmiyor, ve bilmediği bir şeyi iddia
+   eden bir bağlantı, bozuk bir bağlantı.
+3. **Yorum düzenlemenin geçmişi tutulmuyor.** `edited_at` düzenlendiğini söylüyor, önceki hâli
+   söylemiyor. Sürüm geçmişi tutmak yeni bir tablo, ve düzenlemenin denetim değeri bugün
+   "değişti"nin ötesine geçmiyor.
+4. **Bildirim, akışta değil yoklamada.** Zil altmış saniyede bir `/notifications` soruyor; SSE
    akışı (`/events`) bildirim taşımıyor. Taşısaydı bildirim anında düşerdi — bugün en kötü ihtimalle
    bir dakika gecikiyor. Ölçülüp değiştirilecek bir sayı, çalışmayan bir şey değil.
-4. **Replikasyon ve restore arayüzü.** Anlık görüntü var; ayrı hedefe `zfs send` ve geri yükleme
+5. **Replikasyon ve restore arayüzü.** Anlık görüntü var; ayrı hedefe `zfs send` ve geri yükleme
    ekranı yok. (Bugün `restore` yalnız çöp kutusundan geri alma.)
-5. **Önizleme ve küçük resim.**
-6. **Masaüstü istemci ve Windows sürücü eşleme.**
+6. **Önizleme ve küçük resim.**
+7. **Masaüstü istemci ve Windows sürücü eşleme.**
 
 ### Faz 3
 
-7. **Self-hosted ZeroTier controller paneli**, enrollment QR, bağlantı tanılama. Bugün `/remote`
+8. **Self-hosted ZeroTier controller paneli**, enrollment QR, bağlantı tanılama. Bugün `/remote`
    yalnız durum okuyor, ağa katılıyor ve ayrılıyor.
-8. **Nextcloud ve Immich reçeteleri.** Katalog altyapısı (`/apps`) var.
-9. **Android** yerel bağlantı kabuğu.
+9. **Nextcloud ve Immich reçeteleri.** Katalog altyapısı (`/apps`) var.
+10. **Android** yerel bağlantı kabuğu.
 
 ### Faz 4
 
-10. Off-site backup, PITR, otomatik restore testi.
-11. Güncelleme ve geri alma, HA controller, relay.
-12. Performans, chaos, erişilebilirlik ve penetrasyon testleri.
+11. Off-site backup, PITR, otomatik restore testi.
+12. Güncelleme ve geri alma, HA controller, relay.
+13. Performans, chaos, erişilebilirlik ve penetrasyon testleri.
 
 ### §21'in kalan teslimatları
 

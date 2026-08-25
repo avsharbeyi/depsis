@@ -1399,6 +1399,14 @@ canvas.spark {
 .nrow .k-task-overdue {
   background: var(--rose);
 }
+/* Yorum ve anma kendi renklerini alıyor. Renksiz bıraksaydık ikisi de `--dim`e düşer ve
+   "iş senden alındı" ile aynı görünürlerdi — nokta, türü ayırt etmek için var. */
+.nrow .k-task-comment {
+  background: var(--ink2);
+}
+.nrow .k-task-mention {
+  background: var(--iris);
+}
 .lnk {
   border: none;
   background: none;
@@ -1413,6 +1421,141 @@ canvas.spark {
 }
 .lnk:hover {
   color: var(--ink);
+}
+
+/* ─── görev tartışması ──────────────────────────────────────────────────────── */
+
+/* Satır ve altındaki tartışma tek bir kutu: açıkken ikisinin AYNI şeye ait olduğu görünmeli,
+   yoksa panel bağımsız bir kart gibi okunur ve hangi işe ait olduğu kaybolur. */
+.jwrap.on {
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.03);
+  box-shadow: inset 0 0 0 1px var(--edge);
+}
+.jtalk {
+  border: none;
+  background: none;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 5px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.jtalk:hover,
+.jtalk.on {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.thread {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 4px 12px 12px 34px;
+}
+.thead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+/* İzleme düğmesi bir DURUM, bir eylem değil: basılıyken açık renkli duruyor, çünkü sorulan soru
+   "izliyor muyum" ve cevabın düğmenin üstünde okunması gerekiyor. */
+.lnk.on {
+  color: var(--live);
+}
+.tw {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--dim);
+  cursor: help;
+}
+
+.cmt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 9px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.chead {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 11px;
+}
+.chead b {
+  color: var(--ink);
+  font-weight: 650;
+}
+.chead .s {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+}
+/* Silme düğmesi satırın SAĞ ucunda ve normalde görünmez: her yorumun yanında duran bir çarpı,
+   listeyi bir silme aracı gibi gösterirdi. */
+.chead .del {
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.15s var(--e);
+}
+.cmt:hover .chead .del,
+.chead .del:focus-visible {
+  opacity: 1;
+}
+/* Dokunmatik ekranda hover YOK, ve görünmez ama basılabilir bir silme düğmesi tam olarak kazayla
+   basılan düğme. İşaretçisi kaba olan cihazlarda hep görünür. */
+@media (hover: none) {
+  .chead .del {
+    opacity: 1;
+  }
+}
+.cbody {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Silinmiş yorum listede KALIYOR, soluk ve italik. Sessizce kaybolan bir replika, okuyanı kendi
+   hafızasından şüphe ettirir. */
+.cmt.gone .cbody {
+  color: var(--dim);
+}
+/* Anma yalnız İŞARETLENİYOR, bağlantı değil: istemci bir adın gerçek bir kullanıcı olup olmadığını
+   bilmiyor, ve tıklanabilir göstermek bilmediği bir şeyi iddia etmek olurdu. */
+.mention {
+  font-style: normal;
+  color: var(--iris);
+  background: rgba(143, 166, 255, 0.13);
+  border-radius: 5px;
+  padding: 0 3px;
+}
+
+.cadd {
+  display: flex;
+  align-items: flex-end;
+  gap: 7px;
+}
+.cadd textarea {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  line-height: 1.45;
+  padding: 7px 9px;
+  border-radius: 9px;
+  border: 1px solid var(--edge);
+  background: rgba(8, 14, 22, 0.55);
+  color: var(--ink);
+}
+.cadd textarea:focus-visible {
+  border-color: var(--edge2);
+  outline: none;
 }
 
 /* ─── overlays ─────────────────────────────────────────────────────────────── */

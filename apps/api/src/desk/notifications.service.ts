@@ -10,7 +10,13 @@ export const OVERDUE_SWEEP_KIND = 'tasks.overdue-sweep';
 export const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 
 export type NotificationKind =
-  'task.assigned' | 'task.unassigned' | 'task.status' | 'task.due' | 'task.overdue';
+  | 'task.assigned'
+  | 'task.unassigned'
+  | 'task.status'
+  | 'task.due'
+  | 'task.overdue'
+  | 'task.comment'
+  | 'task.mention';
 
 export interface NotificationRow {
   id: string;

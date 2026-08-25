@@ -184,6 +184,9 @@ erDiagram
     tasks ||--o{ task_activity : "ne değişti, kim değiştirdi"
     tasks ||--o{ task_file_links : ""
     file_entries ||--o{ task_file_links : ""
+    tasks ||--o{ task_comments : ""
+    tasks ||--o{ task_watchers : ""
+    users ||--o{ task_watchers : "abone"
     tasks ||--o{ notifications : ""
     users ||--o{ notifications : "ALICI"
 
@@ -206,6 +209,18 @@ erDiagram
         uuid task_id FK
         uuid entry_id FK
     }
+    task_comments {
+        uuid id PK
+        uuid author_id FK "silinen hesapta NULL; yorum kalır"
+        text body "silinince de KALIR"
+        timestamptz deleted_at "yumuşak silme"
+        timestamptz edited_at "NULL = hiç düzenlenmedi"
+    }
+    task_watchers {
+        uuid id PK
+        uuid user_id FK
+        text source "manual|created|assigned|commented"
+    }
     notifications {
         uuid id PK
         uuid user_id FK "ALICI, aktör değil"
@@ -215,6 +230,23 @@ erDiagram
         timestamptz read_at "NULL = okunmamış"
     }
 ```
+
+**`task_watchers` bir TAHMİNİN yerini aldı.** Bildirim bir zamanlar "atanan + oluşturan" diyordu,
+ve o çoğu zaman doğru cevaptı — ama yalnızca çoğu zaman, ve yanlış olduğunda hiçbir belirti
+vermiyordu. İş oluşturmak, atanmak ve yorum yazmak otomatik abone ediyor, yani eski davranış hâlâ
+varsayılan; artık ilgilenen üçüncü bir kişinin de bir yolu var. **Anılmak abone ETMİYOR:** bir kez
+anılmanın kişiyi işin bütün gelecek gürültüsüne kaydetmesi, insanların bildirimleri okumayı bırakma
+sebebi.
+
+**Yorumlar YUMUŞAK siliniyor** ve `task_comments`'ta `DELETE` yetkisi yok — silme bir `UPDATE`.
+Gövde tabloda kalıyor, API onu bir daha döndürmüyor, ve `task_activity`'ye bir denetim satırı
+düşüyor. Uygulamanın satırı gerçekten kaldıracak bir yolu olmaması, yumuşak silmenin yumuşak
+kalmasının tek garantisi.
+
+**Mention'ın kendi tablosu YOK, ve bilerek.** Bir mention gövdenin içinde yaşıyor; onu ayrıca
+saklamak, gövdeyle ayrışabilen ikinci bir doğruluk kaynağı olurdu. Kalıcı olan şey, çözümün o an
+ürettiği BİLDİRİM — yani "kime gitti" sorusunun cevabı, adların bugünkü hâline değil o günküne
+bağlı.
 
 **Bildirim ALICI BAŞINA bir satır, olay başına değil.** Bir işin el değiştirmesi tek olay ama iki
 farklı cümle: yeni atanan "sana bir iş atandı" okuyor, eski atanan "bu iş artık sende değil". Tek

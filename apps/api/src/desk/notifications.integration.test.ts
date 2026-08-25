@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { DbService } from '../db/db.service.js';
 import { NotificationsService, OVERDUE_SWEEP_KIND } from './notifications.service.js';
+import { TaskWatchersService } from './task-watchers.service.js';
 import { TasksService } from './tasks.service.js';
 
 /**
@@ -48,7 +49,7 @@ describeDb('the notification centre, against a real PostgreSQL', () => {
     await db.onModuleInit();
     owner = new DbService(OWNER_URL as string);
     notifications = new NotificationsService(db);
-    tasks = new TasksService(db, notifications);
+    tasks = new TasksService(db, notifications, new TaskWatchersService(db));
 
     await owner.withoutTenant('migration-status', async (q) => {
       await q.query(

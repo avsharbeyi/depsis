@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { DbService, type TenantQuery } from '../db/db.service.js';
 import { NotificationsService } from './notifications.service.js';
+import { TaskWatchersService } from './task-watchers.service.js';
 
 export interface TaskRow {
   id: string;
@@ -66,7 +67,7 @@ const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
 
 /** Bir alanın eski hâli, denetim izine yazmak için. */
 export interface TaskChange {
-  field: 'status' | 'priority' | 'due_at' | 'assignee_id' | 'body' | 'file_link';
+  field: 'status' | 'priority' | 'due_at' | 'assignee_id' | 'body' | 'file_link' | 'comment';
   old: string | null;
   new: string | null;
 }
@@ -222,6 +223,7 @@ export class TasksService {
   constructor(
     private readonly db: DbService,
     private readonly notifications: NotificationsService,
+    private readonly watchers: TaskWatchersService,
   ) {}
 
   /**
@@ -260,7 +262,7 @@ export class TasksService {
         // not that they are one of us.
         await assertAssignee(db, organizationId, assigneeId);
 
-        return db.query<TaskRow>(
+        const inserted = await db.query<TaskRow>(
           `WITH inserted AS (
              INSERT INTO public.tasks (organization_id, created_by, body, assignee_id, status)
              -- Atananı olan bir is 'assigned' doguyor, olmayan 'draft'. 0026'nin var olan
@@ -274,6 +276,21 @@ export class TasksService {
              LEFT JOIN public.users u ON u.id = t.assignee_id`,
           [organizationId, createdBy, body, assigneeId],
         );
+        const created = inserted[0];
+        // AYNI İŞLEMDE, ve bu bir düzen tercihi değil: iş oluşup izleyicisi oluşmazsa, o iş
+        // bildirimsiz doğar ve bunu kimse fark etmez — eksik olan şey bir bildirimin yokluğu.
+        // Ya ikisi birden var, ya ikisi birden yok.
+        if (created !== undefined) {
+          await TaskWatchersService.attach(db, organizationId, created.id, [createdBy], 'created');
+          await TaskWatchersService.attach(
+            db,
+            organizationId,
+            created.id,
+            [assigneeId],
+            'assigned',
+          );
+        }
+        return inserted;
       });
       const row = rows[0];
       if (!row) throw new Error('the task row was not returned');
@@ -401,6 +418,23 @@ export class TasksService {
       // `fields` ve `changes` DEĞİL: aynı blokta `changes` adında bir sabit tanımlamak, dışarıdaki
       // parametreyi bloğun TAMAMI için gölgeliyor — yukarıdaki `changes.assigneeId` dahil.
       const fields = diff(before, row);
+      // Atanan biri, işin devamını duyması gereken kişi.
+      //
+      // YUTULUYOR, ve yorumun kendisi bir zamanlar bunu iddia edip yapmıyordu: `watch` kendi
+      // işlemini açıyor, ve atama YUKARIDA çoktan COMMIT edildi — buradan çıkan bir hata,
+      // gerçekleşmiş bir atamayı çağırana başarısız gösterirdi. `record` ve `announce` zaten
+      // kendi hatalarını yutuyor; eksik olan tek yer burasıydı.
+      if (row.assignee_id !== null && before.assignee_id !== row.assignee_id) {
+        try {
+          await this.watchers.watch(organizationId, id, row.assignee_id, 'assigned');
+        } catch (error) {
+          this.logger.warn(
+            `task ${id}: assigned, but the watcher row was not written: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
       await this.record(organizationId, id, actorId, fields);
       await this.announce(organizationId, actorId, before, row, fields);
       return row;
@@ -453,15 +487,20 @@ export class TasksService {
   /**
    * Değişiklikleri ilgili kişilere bildir (§7).
    *
-   * KİM İLGİLİ: işin atananı ve onu oluşturan. İzleyici kavramı henüz yok — §7 istiyor ve kendi
-   * tablosunu istiyor — o yüzden burada uydurulmuyor.
+   * KİM İLGİLİ: işin İZLEYİCİLERİ. Burada bir zamanlar "atanan + oluşturan" yazıyordu, ve o çoğu
+   * zaman doğru cevaptı — ama yalnızca çoğu zaman, ve yanlış olduğunda hiçbir belirti vermiyordu.
+   * `task_watchers` o listeyi bir tahmin olmaktan çıkarıp bir satır yaptı; iş oluşturmak, atanmak
+   * ve yorum yazmak otomatik abone ediyor, yani eski davranış hâlâ varsayılan — ama artık
+   * ilgilenen üçüncü bir kişinin de bir yolu var.
    *
    * Kendi yaptığını yapan kişiye hiçbir şey gitmiyor; o kontrol `NotificationsService.notify`'da,
-   * yani hiçbir çağıran onu unutamıyor.
+   * yani hiçbir çağıran onu unutamıyor. İzleyici listesinden aktörü elemek de bu yüzden burada
+   * YAPILMIYOR: tek bir yerde olması, iki yerde olmasından güvenli.
    *
-   * ATAMA DEĞİŞİMİ İKİ FARKLI CÜMLE. Yeni atanan "sana bir iş atandı" alıyor; eski atanan "iş
-   * senden alındı" alıyor. Aynı olay, iki alıcı, iki anlam — ve bu, bildirimin alıcı başına bir
-   * satır olmasının sebebi.
+   * ATAMA DEĞİŞİMİ İKİ FARKLI CÜMLE, ve ikisi izleyici listesinin DIŞINDA. Yeni atanan "sana bir iş
+   * atandı" alıyor — o an henüz izleyici bile olmayabilir. Eski atanan "iş senden alındı" alıyor,
+   * ve izlemeyi bıraktıysa bile alıyor: elinden alınan bir işi öğrenmek, bir aboneliğin konusu
+   * değil.
    */
   private async announce(
     organizationId: string,
@@ -497,11 +536,7 @@ export class TasksService {
     }
 
     if (changes.some((c) => c.field === 'status')) {
-      // Durum değişimi işin SAHİPLERİNE gidiyor: atananı ve oluşturanı. Oluşturan, işi verdiği
-      // için sonucunu bekleyen kişi — ve "incelemede" onun bakması gereken an.
-      for (const userId of new Set(
-        [after.assignee_id, before.created_by].filter((id): id is string => id !== null),
-      )) {
+      for (const userId of await this.watchers.recipients(organizationId, after.id)) {
         items.push({
           organizationId,
           userId,
