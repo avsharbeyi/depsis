@@ -80,7 +80,9 @@ const INPUT: ScheduleInput = {
   atMinute: 0,
   weekday: null,
   keep: 2,
-  replicateTarget: null,
+  // A local replication target, so the tick has a job to queue and the incremental base
+  // has somewhere to show up.
+  replicateTarget: 'yedek/sched',
   offsite: null,
   enabled: true,
 };
@@ -100,6 +102,31 @@ describeDb('a scheduled backup', () => {
       schedules: new BackupSchedulesService(db, agent, new JobsService(db)),
       calls,
     };
+  }
+
+  /** The `storage.replicate` job the tick queued, if any. */
+  async function queuedReplication(): Promise<{
+    base: string | null;
+    snapshot: string;
+    scheduleId: string;
+  } | null> {
+    const rows = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ payload: { base: string | null; snapshot: string; scheduleId: string } }>(
+        `SELECT payload FROM job_queue
+          WHERE organization_id = $1 AND kind = 'storage.replicate'
+          ORDER BY created_at DESC LIMIT 1`,
+        [org],
+      ),
+    );
+    return rows[0]?.payload ?? null;
+  }
+
+  async function clearJobs(): Promise<void> {
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`DELETE FROM job_queue WHERE organization_id = $1 AND kind = 'storage.replicate'`, [
+        org,
+      ]),
+    );
   }
 
   async function makeDue(id: string): Promise<void> {
@@ -264,6 +291,48 @@ describeDb('a scheduled backup', () => {
     const { ran } = await schedules.runDue(org, new Date());
     expect(ran).toBe(0);
     expect(calls.filter((call) => call.op === 'create_snapshot')).toHaveLength(0);
+  });
+
+  it('sends incrementally from the last success, and fully again after a failure', async () => {
+    // 0032 shipped without this and said so: every run was a FULL send. On a terabyte share that
+    // is a terabyte a night, for ever. The base is the last snapshot that actually arrived.
+    const rows = await service().schedules.list(org);
+    const schedule = rows[0];
+    if (schedule === undefined) return;
+
+    // The test above left it disabled, and an earlier one left a job in the queue. Both are
+    // cleared FIRST — reading a job an earlier test queued would have made this pass while
+    // measuring nothing, which is exactly what it did the first time it was written.
+    const first = service();
+    await first.schedules.update(org, schedule.id, INPUT);
+    await clearJobs();
+
+    // First run: no base yet, so a full send. The job carries `base: null`.
+    await makeDue(schedule.id);
+    await first.schedules.runDue(org, new Date());
+    const firstJob = await queuedReplication();
+    expect(firstJob).not.toBeNull();
+    expect(firstJob?.base).toBeNull();
+    expect(firstJob?.scheduleId).toBe(schedule.id);
+
+    // The job succeeded, so the handler records what arrived.
+    const taken = String(firstJob?.snapshot);
+    await first.schedules.recordReplicated(org, schedule.id, taken);
+
+    // Second run: incremental from that snapshot.
+    await makeDue(schedule.id);
+    await clearJobs();
+    await service().schedules.runDue(org, new Date());
+    expect((await queuedReplication())?.base).toBe(taken);
+
+    // A failure clears it, deliberately bluntly: after a broken send this side does not know what
+    // the target holds, and an incremental stream that names a base the target does not have is
+    // refused — so the next run, and the one after, would fail too.
+    await first.schedules.recordReplicated(org, schedule.id, null);
+    await makeDue(schedule.id);
+    await clearJobs();
+    await service().schedules.runDue(org, new Date());
+    expect((await queuedReplication())?.base).toBeNull();
   });
 
   it('removing a schedule does not remove what it took', async () => {

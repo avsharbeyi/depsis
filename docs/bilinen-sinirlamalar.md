@@ -182,9 +182,13 @@ ama sınırın doğru sayı olduğu ölçülmedi.
    ekini taşıyor. Elle alınmış bir görüntüyü ya da başka bir aracın aldığını silen bir budama, veri
    kaybının fark edilmeyen biçimi olurdu.
 
-   **Zamanlanmış çoğaltma her turda TAM gönderiyor.** Artımlı taban, karşı tarafın neyi tuttuğunu
-   bilmeyi gerektiriyor, ve bu henüz yapılmadı — yani her gece bütün veri kümesi taşınıyor. Küçük
-   bir paylaşımda fark edilmez, bir terabaytta gecenin tamamı.
+   **Zamanlanmış çoğaltma ARTIMLI gönderiyor.** Taban, en son BAŞARIYLA gönderilmiş görüntü;
+   zamanlamanın kendi satırında duruyor çünkü hedef başka bir makinede olabilir ve ona her tur
+   "sende ne var" diye sormak fazladan bir bağlantı demek. İlk turda ve başarısız bir turdan sonra
+   taban `null` — yani tam gönderim. İkincisi bilerek kaba: kopmuş bir gönderimden sonra hedefin ne
+   tuttuğu bu taraftan bilinmiyor, ve olmayan bir tabana dayanan artımlı bir akış reddedilir, yani
+   bir sonraki tur da başarısız olurdu. Bir fazladan tam gönderim, sessizce hiç çoğaltmayan bir
+   zamanlamadan ucuz.
 
    **İlerleme göstergesi yok, ve bu bilinçli.** `zfs send` ilerlemeyi yalnız `-v` ile kendi
    stderr'ine yazıyor; ajan onu ayrıştırmıyor. Bir zamanlayıcıyla ilerleyen çubuk, hiçbir şeyin

@@ -4646,6 +4646,7 @@ components:
           nextRunAt,
           lastRunAt,
           lastResult,
+          lastReplicatedSnapshot,
         ]
       properties:
         id: { type: string, format: uuid }
@@ -4683,6 +4684,13 @@ components:
           description: |
             Son turun ne yaptığı: `ok`, ya da başarısızlığın kendi cümlesi. İş satırı kuyruktan
             silindikten sonra da duran tek kayıt.
+        lastReplicatedSnapshot:
+          type: [string, 'null']
+          description: |
+            Artımlı gönderimin tabanı: en son BAŞARIYLA çoğaltılmış görüntü. `null` ise bir sonraki
+            çoğaltma TAM gönderim yapacak — ilk turda, ve başarısız bir turdan sonra. İkincisi
+            bilerek kaba: kopmuş bir gönderimden sonra hedefin ne tuttuğu bu taraftan bilinmiyor,
+            ve olmayan bir tabana dayanan artımlı bir akış reddedilir.
 
     BackupSchedulePage:
       type: object

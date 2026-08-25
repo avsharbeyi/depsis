@@ -1,5 +1,10 @@
 import { Logger } from '@nestjs/common';
-import { AgentRefusedError, expectStatus, type AgentService } from '@depsis/api/worker-surface';
+import {
+  AgentRefusedError,
+  expectStatus,
+  type AgentService,
+  type BackupSchedulesService,
+} from '@depsis/api/worker-surface';
 
 import type { JobHandler } from '../worker.service.js';
 
@@ -14,6 +19,8 @@ interface OffsitePayload {
   port?: unknown;
   user?: unknown;
   target?: unknown;
+  /** Zamanlanmış bir çoğaltmada, hangi zamanlamaya ait olduğu. Elle başlatılanda yok. */
+  scheduleId?: unknown;
 }
 
 /**
@@ -37,7 +44,7 @@ interface OffsitePayload {
  * The third is the one that must never be swallowed — it is either a reinstalled server or
  * somebody standing in the middle, and a generic "replication failed" would hide the difference.
  */
-export function offsiteHandler(agent: AgentService): JobHandler {
+export function offsiteHandler(agent: AgentService, schedules: BackupSchedulesService): JobHandler {
   const logger = new Logger('OffsiteHandler');
 
   return async ({ job, report }) => {
@@ -81,8 +88,14 @@ export function offsiteHandler(agent: AgentService): JobHandler {
         // reinstall or an interception.
         logger.warn(`off-site replication refused: ${error.agentReason}`);
       }
+      // Tabanı DÜŞÜR: bundan sonra karşı tarafın ne tuttuğu bu taraftan bilinmiyor. Ağ üzerinden
+      // bu daha da geçerli — kopan bir bağlantı tam olarak "ne kadarı gitti" sorusunu cevapsız
+      // bırakan hata.
+      await recordScheduleBase(schedules, logger, organizationId, payload, null);
       throw error;
     }
+
+    await recordScheduleBase(schedules, logger, organizationId, payload, snapshot);
 
     logger.log(
       `${source}@${snapshot} → ${user}@${host}:${target}` +
@@ -90,4 +103,37 @@ export function offsiteHandler(agent: AgentService): JobHandler {
     );
     await report(1);
   };
+}
+
+/**
+ * Bir zamanlamanın tabanını güncelle — VARSA.
+ *
+ * Elle başlatılan bir çoğaltmanın zamanlaması yok, ve payload'ında `scheduleId` de yok: o durumda
+ * bu fonksiyon hiçbir şey yapmıyor.
+ *
+ * BAŞARISIZLIKTA `null` yazıyor, ve bu bilerek kaba. Kopmuş bir gönderimden sonra hedefin ne
+ * tuttuğu bu taraftan bilinmiyor, ve olmayan bir tabana dayanan artımlı bir akış reddedilir — yani
+ * bir sonraki tur da başarısız olurdu, ve sonraki de. Bir fazladan tam gönderim, sessizce hiç
+ * çoğaltmayan bir zamanlamadan ucuz.
+ *
+ * Kendi hatasını YUTUYOR: bir çoğaltma başarıyla bittiyse, tabanı yazamamak onu başarısız
+ * göstermemeli. En kötü sonucu bir sonraki turun tam gönderim yapması.
+ */
+async function recordScheduleBase(
+  schedules: BackupSchedulesService,
+  logger: Logger,
+  organizationId: string,
+  payload: { scheduleId?: unknown },
+  snapshot: string | null,
+): Promise<void> {
+  const scheduleId = payload.scheduleId;
+  if (typeof scheduleId !== 'string') return;
+  try {
+    await schedules.recordReplicated(organizationId, scheduleId, snapshot);
+  } catch (error) {
+    logger.warn(
+      `could not record the replication base for schedule ${scheduleId}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }

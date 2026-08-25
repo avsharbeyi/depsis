@@ -69,11 +69,11 @@ export function registerHandlers(
   // The OTHER destructive kind, and enqueued with `maxAttempts: 1` for the same reason:
   // `zfs recv -F` destroys the target, and a retry after an ambiguous failure destroys it
   // again without knowing what state it reached.
-  worker.register(REPLICATE_KIND, replicateHandler(services.agent));
+  worker.register(REPLICATE_KIND, replicateHandler(services.agent, services.schedules));
   // The THIRD destructive kind, and the only one whose destruction happens on another machine.
   // `maxAttempts: 1` for the same reason as the two above, plus one: over a network an
   // ambiguous failure is the ordinary case, not the rare one.
-  worker.register(OFFSITE_KIND, offsiteHandler(services.agent));
+  worker.register(OFFSITE_KIND, offsiteHandler(services.agent, services.schedules));
   // One file out of a snapshot. Registered beside the copy because it IS one — same service,
   // same sliced staging — and because a kind registered nowhere is a queue row nothing claims,
   // which is how `permissions.apply` once sat unclaimed for weeks behind a spinner.

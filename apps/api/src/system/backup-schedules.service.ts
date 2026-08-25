@@ -36,6 +36,8 @@ export interface ScheduleRow {
   next_run_at: Date;
   last_run_at: Date | null;
   last_result: string | null;
+  /** Artımlı gönderimin tabanı: en son BAŞARIYLA çoğaltılmış görüntü. */
+  last_replicated_snapshot: string | null;
 }
 
 export interface ScheduleInput {
@@ -211,12 +213,37 @@ export class BackupSchedulesService {
     );
   }
 
+  /**
+   * Bir çoğaltmanın sonucunu zamanlamaya yaz — artımlı gönderimin tabanı bu.
+   *
+   * BAŞARIDA görüntünün adı, BAŞARISIZLIKTA `null`. İkincisi bilerek kaba: kopmuş bir gönderimden
+   * sonra hedefin ne tuttuğu bu taraftan bilinmiyor, ve olmayan bir tabana dayanan artımlı bir
+   * akış reddedilir — yani bir sonraki tur da başarısız olurdu, ve sonraki de. Bir fazladan tam
+   * gönderim, sessizce hiç çoğaltmayan bir zamanlamadan ucuz.
+   *
+   * İşleyiciden çağrılıyor, buradan değil: çoğaltma bir İŞ, ve saatler sonra bitiyor.
+   */
+  async recordReplicated(
+    organizationId: string,
+    scheduleId: string,
+    snapshot: string | null,
+  ): Promise<void> {
+    await this.db.withTenant(organizationId, (db) =>
+      db.query(
+        `UPDATE public.backup_schedules
+            SET last_replicated_snapshot = $3, updated_at = now()
+          WHERE organization_id = $1 AND id = $2`,
+        [organizationId, scheduleId, snapshot],
+      ),
+    );
+  }
+
   async list(organizationId: string): Promise<ScheduleRow[]> {
     return this.db.withTenant(organizationId, (db) =>
       db.query<ScheduleRow>(
         `SELECT id::text AS id, dataset, label, cadence, at_hour, at_minute, weekday, keep,
                 replicate_target, offsite_host, offsite_port, offsite_user, enabled,
-                next_run_at, last_run_at, last_result
+                next_run_at, last_run_at, last_result, last_replicated_snapshot
            FROM public.backup_schedules
           ORDER BY label`,
       ),
@@ -234,7 +261,7 @@ export class BackupSchedulesService {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
          RETURNING id::text AS id, dataset, label, cadence, at_hour, at_minute, weekday, keep,
                    replicate_target, offsite_host, offsite_port, offsite_user, enabled,
-                   next_run_at, last_run_at, last_result`,
+                   next_run_at, last_run_at, last_result, last_replicated_snapshot`,
         [
           organizationId,
           input.dataset,
@@ -278,7 +305,7 @@ export class BackupSchedulesService {
           WHERE organization_id = $1 AND id = $2
          RETURNING id::text AS id, dataset, label, cadence, at_hour, at_minute, weekday, keep,
                    replicate_target, offsite_host, offsite_port, offsite_user, enabled,
-                   next_run_at, last_run_at, last_result`,
+                   next_run_at, last_run_at, last_result, last_replicated_snapshot`,
         [
           organizationId,
           id,
@@ -333,7 +360,7 @@ export class BackupSchedulesService {
       db.query<ScheduleRow>(
         `SELECT id::text AS id, dataset, label, cadence, at_hour, at_minute, weekday, keep,
                 replicate_target, offsite_host, offsite_port, offsite_user, enabled,
-                next_run_at, last_run_at, last_result
+                next_run_at, last_run_at, last_result, last_replicated_snapshot
            FROM public.backup_schedules
           WHERE organization_id = $1 AND enabled AND next_run_at <= $2
           ORDER BY next_run_at
@@ -401,10 +428,12 @@ export class BackupSchedulesService {
           source: schedule.dataset,
           snapshot,
           target: schedule.replicate_target,
-          // TAM gönderim, ve bu bir eksiklik. Artımlı taban, hedefin neyi tuttuğunu bilmeyi
-          // gerektiriyor; zamanlanmış çoğaltma bugün her turda tam gönderiyor, ve bu
-          // `docs/bilinen-sinirlamalar.md` içinde yazılı.
-          base: null,
+          // ARTIMLI, en son başarıyla gönderilen görüntüden. İlk turda ve başarısız bir turdan
+          // sonra `null` — yani tam gönderim. Her tur tam gönderseydi, bir terabaytlık bir
+          // paylaşım her gece bir terabayt taşırdı.
+          base: schedule.last_replicated_snapshot,
+          // Hangi zamanlamaya ait olduğu: iş bitince tabanı GÜNCELLEYEN şey bu.
+          scheduleId: schedule.id,
           requestedBy: null,
         },
         { maxAttempts: 1 },
@@ -418,11 +447,12 @@ export class BackupSchedulesService {
         {
           source: schedule.dataset,
           snapshot,
-          base: null,
+          base: schedule.last_replicated_snapshot,
           host: schedule.offsite_host,
           port: schedule.offsite_port ?? 22,
           user: schedule.offsite_user,
           target: schedule.dataset,
+          scheduleId: schedule.id,
           requestedBy: null,
         },
         { maxAttempts: 1 },

@@ -6387,6 +6387,13 @@ export interface components {
              *     silindikten sonra da duran tek kayıt.
              */
             lastResult: string | null;
+            /**
+             * @description Artımlı gönderimin tabanı: en son BAŞARIYLA çoğaltılmış görüntü. `null` ise bir sonraki
+             *     çoğaltma TAM gönderim yapacak — ilk turda, ve başarısız bir turdan sonra. İkincisi
+             *     bilerek kaba: kopmuş bir gönderimden sonra hedefin ne tuttuğu bu taraftan bilinmiyor,
+             *     ve olmayan bir tabana dayanan artımlı bir akış reddedilir.
+             */
+            lastReplicatedSnapshot: string | null;
         };
         BackupSchedulePage: {
             items: components["schemas"]["BackupSchedule"][];
