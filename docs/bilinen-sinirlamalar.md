@@ -232,7 +232,30 @@ ama sınırın doğru sayı olduğu ölçülmedi.
    demek, ve tek kazancı telefonda on altı hane yazmamak. Controller geldiğinde onunla birlikte
    anlamlı olur.
 
-9. **Nextcloud ve Immich reçeteleri.** Katalog altyapısı (`/apps`) var.
+9. **Nextcloud ve Immich reçeteleri YAPILDI**, ve yapılırken katalogdaki bir yalan düzeltildi.
+
+   Immich zaten katalogdaydı — tek konteyner olarak, `immich-server` diye. O imaj tek başına
+   ÇALIŞMIYOR: açılışta bir PostgreSQL ve bir Redis arıyor, bulamayınca çıkıyor. Yani katalogda,
+   kullanıcıya "kur" düğmesi gösteren, bastığında birkaç yüz megabayt indiren ve sonra sessizce
+   ölen bir satır duruyordu.
+
+   Migration 0031 kataloğu gerçek uygulamaların şekline getirdi: bir katalog satırı artık sıralı
+   bir konteyner listesi tarif ediyor, ve bir kurulum bir podman POD'u — üyeler ağ ad alanını
+   paylaşıyor, yani birbirlerine 127.0.0.1 üzerinden ulaşıyorlar. Immich dört konteyner (sunucu,
+   makine öğrenmesi, `pgvecto.rs` uzantılı veritabanı, önbellek), Nextcloud iki (sunucu ve
+   PostgreSQL — SQLite ile değil, çünkü bir NAS'ta "deneme kurulumu" diye bir şey yok).
+
+   Sunucuyla veritabanının anlaşması gereken parola **saklanmıyor, türetiliyor**: cihazın kendi
+   anahtarından ve (kiracı, uygulama, ad) üçlüsünden HKDF ile. Veritabanı bir sunucu parolası
+   tutmadığı için bir `pg_dump` onu evden çıkaramıyor, ve türetme deterministik olduğu için
+   yükseltmeden sonra yeniden yaratılan konteyner kendi veri dizinini açmaya devam ediyor.
+   Anahtarı olmayan bir kutuda kurulum REDDEDİLİYOR — sabit bir parola her DEPSIS'te aynı olurdu,
+   rastgele bir parola ise saklanmak zorunda kalırdı.
+
+   **Yapılmayan:** birden fazla podu olan uygulamalar, konteynerler arası hazır-olma beklemesi
+   (bugün onu imajların kendi yeniden deneme döngüleri ve `restart_policy: on-failure` taşıyor),
+   ve uygulama başına kaynak sınırı.
+
 10. **Android** yerel bağlantı kabuğu.
 
 ### Faz 4

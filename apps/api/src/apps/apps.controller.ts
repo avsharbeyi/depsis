@@ -25,12 +25,15 @@ import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/ses
 import {
   AlreadyInstalledError,
   AppNotInCatalogueError,
+  CatalogueShapeError,
   MountTargetError,
   NoFreePortError,
   NotInstalledError,
   RootfulRuntimeError,
+  SecretKeyMissingError,
   ShareNotFoundError,
   SharesRootMissingError,
+  StaleInstallError,
   type AppView,
   type AppsOverview,
   AppsService,
@@ -209,10 +212,16 @@ function toApp(view: AppView): Schemas['App'] {
     name: view.catalogue.name,
     summary: view.catalogue.summary,
     icon: view.catalogue.icon,
-    image: view.catalogue.image,
-    tag: view.catalogue.tag,
     containerPort: view.catalogue.container_port,
-    mounts: toMounts(view.catalogue.mounts),
+    containers: view.containers.map((container) => ({
+      role: container.role,
+      image: container.image,
+      tag: container.tag,
+      primary: container.is_primary,
+    })),
+    // Every container's mount points in one list. The service refuses a catalogue in which two
+    // containers want the same target, so flattening cannot lose one.
+    mounts: view.containers.flatMap((container) => toMounts(container.mounts)),
   };
 
   if (view.instance === null) {
@@ -314,5 +323,19 @@ function translate(error: unknown): Error {
   // the value came from outside even when a table stored it on the way.
   if (error instanceof InvalidNameError) return new UnprocessableEntityException(error.message);
   if (error instanceof NoFreePortError) return new ConflictException(error.message);
+  // 503 and not 422: the request is fine, the APPLIANCE is missing a key file. Same slot as a
+  // missing share root and a missing container runtime, and the message names the setting.
+  if (error instanceof SecretKeyMissingError) {
+    return new ServiceUnavailableException(error.message);
+  }
+  // 409: the record and the catalogue describe different applications, and the way out is the
+  // uninstall the message asks for. A conflict rather than a fault, because nothing is broken —
+  // the two just no longer agree.
+  if (error instanceof StaleInstallError) return new ConflictException(error.message);
+  // A catalogue row only a migration could have written. 500 by falling through would be right
+  // about whose fault it is and useless to the person reading it, so it says what is wrong.
+  if (error instanceof CatalogueShapeError) {
+    return new ServiceUnavailableException(`the catalogue entry is unusable: ${error.message}`);
+  }
   return error instanceof Error ? error : new Error(String(error));
 }

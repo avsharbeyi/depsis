@@ -22,15 +22,25 @@ import {
  * stands between a request body and something being executed as `depsis-apps`.
  */
 
-// Two real-shaped organisation ids. The container name carries the first eight hex digits of
-// one, so the fixtures have to differ there and not merely somewhere.
+// Two real-shaped organisation ids. The container name carries the LAST eight hex digits of one.
 const ORG_A = '01a02904-caa5-754b-9006-3c27a9621647';
 const ORG_B = '01a0293a-b610-7627-84d9-fbac8ad6c69e';
 
+/**
+ * Two ids the way `uuidv7()` actually makes them: same millisecond, different randomness.
+ *
+ * These two share their first TWELVE hex digits, because that is what a uuidv7 is — a 48-bit
+ * millisecond timestamp followed by randomness. Any two organisations created in the same window
+ * look like this, and the pair above does not, which is why the pair above could not catch what
+ * these do.
+ */
+const TWIN_A = '01a02904-caa5-7000-8000-111111111111';
+const TWIN_B = '01a02904-caa5-7000-8000-222222222222';
+
 describe('container names', () => {
   it('builds the one name podman and both migrations accept', () => {
-    expect(containerNameFor('jellyfin', ORG_A)).toBe('depsis-app-jellyfin-01a02904');
-    expect(containerNameFor('qbittorrent', ORG_A)).toBe('depsis-app-qbittorrent-01a02904');
+    expect(containerNameFor('jellyfin', ORG_A)).toBe('depsis-app-jellyfin-a9621647');
+    expect(containerNameFor('qbittorrent', ORG_A)).toBe('depsis-app-qbittorrent-a9621647');
   });
 
   it('gives two tenants different names for the same application', () => {
@@ -39,6 +49,19 @@ describe('container names', () => {
     // Jellyfin and then let `podman create` fail with "name already in use" — a refusal arriving
     // from the privileged side after the row was already written.
     expect(containerNameFor('jellyfin', ORG_A)).not.toBe(containerNameFor('jellyfin', ORG_B));
+  });
+
+  it('gives two tenants created in the same second different names', () => {
+    // The suffix used to be the FIRST eight hex digits, and organisation ids are `uuidv7()`, whose
+    // leading bits are a millisecond timestamp. Its top 32 bits change about once a minute, so two
+    // organisations created in one window produced ONE container name. The device-wide unique
+    // index refused it — from inside the port-allocation loop, which read the refusal as "this
+    // port is taken", tried the next thousand, and reported "no free port is available".
+    //
+    // The old test passed throughout, because its two fixtures were hand-picked to differ in the
+    // first eight digits. Real ones do not.
+    expect(TWIN_A.slice(0, 13)).toBe(TWIN_B.slice(0, 13));
+    expect(containerNameFor('jellyfin', TWIN_A)).not.toBe(containerNameFor('jellyfin', TWIN_B));
   });
 
   it('refuses an organization id that is not a uuid', () => {

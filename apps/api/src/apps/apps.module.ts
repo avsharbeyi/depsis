@@ -1,6 +1,7 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module.js';
+import { loadSecretBox } from '../auth/secret-box.js';
 import { APP_CONFIG } from '../config.module.js';
 import { PODMAN_SOCKET_DEFAULT, type AppConfig } from '../config.js';
 import { DbService } from '../db/db.service.js';
@@ -39,7 +40,18 @@ import { PodmanClient } from './podman.client.js';
       useFactory: (db: DbService, podman: PodmanClient, config: AppConfig) =>
         // `?? false` and not `?? true`: the permission to run containers as root has to be
         // written down somewhere, and an absent setting is not somewhere.
-        new AppsService(db, podman, config.sharesRoot ?? null, config.podmanAllowRootful ?? false),
+        new AppsService(
+          db,
+          podman,
+          config.sharesRoot ?? null,
+          config.podmanAllowRootful ?? false,
+          // The same key TOTP secrets and SMB credentials are sealed with, used here to DERIVE
+          // rather than to seal: a multi-container application needs its server and its database
+          // to agree on a password, and deriving one is the only way to have it without storing
+          // it. Null on a box with no key file, and installing something that needs one then
+          // refuses with a sentence saying how to fix it.
+          loadSecretBox(config.secretKeyFile ?? null, new Logger('AppsModule')),
+        ),
     },
   ],
 })

@@ -551,6 +551,20 @@ BAD=$(db -c "
                            -- Postgres düzeyinde reddeder. Değeri dizi üretir, kiracı değil; API
                            -- bu tabloya yalnızca INSERT eder ve id'yi hiç okumaz.
                            'console_commands_pkey',
+                           -- Katalog satirinin PARCALARI, kiraci verisi degil (migration 0031).
+                           -- app_catalogue_slug_unique ile ayni gerekce, bir kat asagida: bu
+                           -- tablo da urun verisi, satirlarini yalnizca migration yaziyor, ve
+                           -- buradaki bir 23505 ayni uygulamaya iki kez ayni rolu ya da ayni
+                           -- baslatma sirasini vermeye calisan migration'a hata veriyor. Bir
+                           -- kiracinin provoke edebilecegi bir yol yok: katalogda INSERT yetkisi
+                           -- olan bir rol yok.
+                           'app_catalogue_containers_role_unique',
+                           'app_catalogue_containers_ordinal_unique',
+                           -- app_instances_container_unique ile ayni gerekce: podman'in isim
+                           -- alani cihaz genelinde tek, ve pod adlari da o alanda. Ad zaten
+                           -- kiraci ekini tasiyor; bu indeks onu veritabaninda da garanti ediyor,
+                           -- yani cakismayi podman degil veritabani reddediyor.
+                           'app_instances_pod_unique',
                            'depsis_migrations_pkey')
 ")
 [ -z "$BAD" ] && ok 'every unique/exclusion index carries organization_id or is allow-listed' \

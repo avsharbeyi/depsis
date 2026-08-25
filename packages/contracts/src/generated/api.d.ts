@@ -5950,14 +5950,41 @@ export interface components {
             name: string;
             summary: string;
             icon: string;
-            image: string;
             /**
-             * @description Sabitlenmiş sürüm. `latest` veritabanı kısıtıyla reddediliyor — bir gün çalışan bir
-             *     uygulamanın ertesi gün sessizce başka bir sürüme geçmesi, bir NAS'ta veri kaybının
-             *     ucuz yollarından biri.
+             * @description POD'un 127.0.0.1 üzerinde yayımladığı port. Uygulamanın kendisine ait bir olgu; çok
+             *     konteynerli bir uygulamada da tek bir tane var.
              */
-            tag: string;
             containerPort: number;
+            /**
+             * @description Uygulamanın kaç parçadan oluştuğu, BAŞLAMA SIRASINDA. Immich dört konteyner: sunucu,
+             *     makine öğrenmesi, veritabanı ve önbellek. Tek konteynerli bir uygulama tek elemanlı
+             *     bir liste — ayrı bir biçim değil, aynı biçimin kısa hâli.
+             */
+            containers: {
+                /** @description Uygulamanın içindeki adı — `server`, `database`, `cache`. */
+                role: string;
+                image: string;
+                /**
+                 * @description Sabitlenmiş sürüm. `latest` veritabanı kısıtıyla reddediliyor — bir gün çalışan
+                 *     bir uygulamanın ertesi gün sessizce başka bir sürüme geçmesi, bir NAS'ta veri
+                 *     kaybının ucuz yollarından biri.
+                 */
+                tag: string;
+                /**
+                 * @description Portu yayımlanan ve günlükleri gösterilen konteyner. Sırayla aynı şey değil:
+                 *     Immich'te sunucu en son başlıyor ama kullanıcının gördüğü şey o.
+                 */
+                primary: boolean;
+            }[];
+            /**
+             * @description Kullanıcının paylaşım seçmesi gereken bağlama noktaları — uygulamanın TAMAMI için, tek
+             *     bir düz liste. Hedefler uygulama çapında benzersiz, o yüzden kurulum isteğinin hangi
+             *     hedefin hangi konteynere ait olduğunu bilmesi gerekmiyor.
+             *
+             *     Uygulamanın kendi durumu (veritabanı dizini, model önbelleği) burada YOK: onlar
+             *     podman'ın yönettiği birimler, ve bir insanın "Immich'in PostgreSQL'i nereye yazsın"
+             *     sorusuna verebileceği iyi bir cevap yok.
+             */
             mounts: {
                 target: string;
                 /** @enum {string} */

@@ -92,10 +92,21 @@ export function containerNameFor(slug: string, organizationId: string): Containe
   // Eight hex digits, not the whole uuid: `podman ps` output has to stay readable, and the
   // organisation id is not a secret but there is no reason to paste all of it onto a device the
   // whole household can `podman ps`.
-  const suffix = organizationId.replace(/-/gu, '').slice(0, 8).toLowerCase();
-  if (!/^[0-9a-f]{8}$/u.test(suffix)) {
+  //
+  // THE LAST EIGHT, and the difference is the whole point. Organisation ids are `uuidv7()`, whose
+  // leading bits are a millisecond timestamp: the top 32 bits only change about once a minute, so
+  // the first eight hex digits are IDENTICAL for any two organisations created in the same window.
+  // Taking them made two tenants produce one container name — which the device-wide unique index
+  // then refused, from inside the port-allocation loop, as "no free port is available". The tail
+  // of a uuidv7 is random.
+  const digits = organizationId.replace(/-/gu, '').toLowerCase();
+  // The WHOLE id is checked, not the eight digits that survive into the name. Checking only the
+  // slice made `ZZZZZZZZ-0000-0000-0000-000000000000` acceptable, because its tail is eight
+  // perfectly good hex digits — the garbage was in the part that gets dropped.
+  if (!/^[0-9a-f]{32}$/u.test(digits)) {
     throw new InvalidNameError(`not a usable organization id: ${JSON.stringify(organizationId)}`);
   }
+  const suffix = digits.slice(-8);
 
   const name = `depsis-app-${slug}-${suffix}`;
   if (!CONTAINER_NAME_PATTERN.test(name)) {
@@ -157,6 +168,94 @@ export function hostPathUnder(root: string, component: string): HostPath {
   return `${root.replace(/\/+$/, '')}/${component}` as HostPath;
 }
 
+/**
+ * The pod that holds one application's containers.
+ *
+ * SAME STRING as the primary container used to be called, and that is deliberate: an operator who
+ * knew `depsis-app-jellyfin-1a2b3c4d` before this change finds the same name, now naming the pod.
+ * Podman keeps pod and container names in separate namespaces, so nothing collides.
+ */
+declare const podNameBrand: unique symbol;
+export type PodName = string & { readonly [podNameBrand]: true };
+
+export function podNameFor(slug: string, organizationId: string): PodName {
+  return containerNameFor(slug, organizationId) as string as PodName;
+}
+
+/**
+ * A pod name that has already been stored, checked on the way back in.
+ *
+ * The STORED name rather than a freshly derived one is what drives an installed application, and
+ * that is a deliberate reversal: derivation belongs to install, where the name is being chosen.
+ * Afterwards the truth is what was actually created — a record written under an older derivation
+ * still names a container that exists, and recomputing would quietly stop finding it.
+ */
+export function asPodName(stored: string): PodName {
+  if (!CONTAINER_NAME_PATTERN.test(stored)) {
+    throw new InvalidNameError(`not a usable pod name: ${JSON.stringify(stored)}`);
+  }
+  return stored as PodName;
+}
+
+/** The same, for a stored container name. See `asPodName`. */
+export function asContainerName(stored: string): ContainerName {
+  if (!CONTAINER_NAME_PATTERN.test(stored)) {
+    throw new InvalidNameError(`not a usable container name: ${JSON.stringify(stored)}`);
+  }
+  return stored as ContainerName;
+}
+
+/**
+ * One container inside a pod: the pod's name plus the role.
+ *
+ * `depsis-app-immich-1a2b3c4d-database`. The role is what makes `podman ps` readable when an
+ * application is four rows instead of one, and it is checked here rather than trusted from the
+ * catalogue for the same reason the slug is: a value that ends up in a URL path is checked where
+ * it is used.
+ */
+const ROLE_PATTERN = /^[a-z0-9][a-z0-9-]{0,30}$/;
+
+export function stackContainerName(pod: PodName, role: string): ContainerName {
+  if (!ROLE_PATTERN.test(role)) {
+    throw new InvalidNameError(`not a usable container role: ${JSON.stringify(role)}`);
+  }
+  const name = `${pod}-${role}`;
+  if (!CONTAINER_NAME_PATTERN.test(name)) {
+    throw new InvalidNameError(`not a usable container name: ${JSON.stringify(name)}`);
+  }
+  return name as ContainerName;
+}
+
+/**
+ * A podman-managed volume for an application's OWN state — its database directory, its model
+ * cache — as opposed to a bind mount onto a share the user picked.
+ *
+ * The name carries both an index and a slug of the destination. The slug alone would be ambiguous
+ * (`/a/b` and `/a-b` slugify the same); the index alone would be unreadable in `podman volume ls`,
+ * which is where somebody will be standing when they are trying to work out how much disk Immich's
+ * database is using.
+ */
+declare const volumeNameBrand: unique symbol;
+export type VolumeName = string & { readonly [volumeNameBrand]: true };
+
+export function volumeNameFor(container: ContainerName, index: number, target: string): VolumeName {
+  if (!Number.isInteger(index) || index < 0 || index > 15) {
+    throw new InvalidNameError(`not a usable volume index: ${JSON.stringify(index)}`);
+  }
+  const slug = target
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .slice(0, 40);
+  const name = `${container}-v${index}${slug === '' ? '' : `-${slug}`}`;
+  // Podman's own rule, applied here so a bad catalogue row fails with a sentence rather than a
+  // 500 from the daemon.
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/u.test(name)) {
+    throw new InvalidNameError(`not a usable volume name: ${JSON.stringify(name)}`);
+  }
+  return name as VolumeName;
+}
+
 export interface PodmanInfo {
   version: string;
   /** ADR-0019 wants this true. False is a deployment that kept the default socket. */
@@ -175,13 +274,30 @@ export interface BindMount {
   readOnly: boolean;
 }
 
+/** A podman-managed volume mounted at `destination`. Created on demand, never removed here. */
+export interface NamedVolume {
+  name: VolumeName;
+  destination: string;
+}
+
 export interface CreateContainerSpec {
   name: ContainerName;
   image: ImageReference;
   env: Readonly<Record<string, string>>;
-  containerPort: number;
-  hostPort: number;
   mounts: readonly BindMount[];
+  volumes?: readonly NamedVolume[];
+
+  /**
+   * Publish on 127.0.0.1, or do not publish at all.
+   *
+   * ABSENT for a container in a pod, and that is not an omission: the pod owns the mapping, and a
+   * container in a pod that also declares one is rejected by podman. Making it optional rather
+   * than passing zeros means the type says which of the two situations this is.
+   */
+  publish?: { containerPort: number; hostPort: number };
+
+  /** The pod to join. Its network namespace is shared, so siblings are reachable on 127.0.0.1. */
+  pod?: PodName;
 }
 
 /** The libpod API version this client is written against. */
@@ -307,6 +423,55 @@ export class PodmanClient {
       env: { ...spec.env },
       // ADR-0019: 127.0.0.1, never 0.0.0.0. A container that binds the LAN is the user installing
       // more than they think they are installing.
+      //
+      // EMPTY for a pod member — the pod's infra container carries the mapping, on the same
+      // 127.0.0.1, and podman refuses a pod member that declares its own.
+      portmappings:
+        spec.publish === undefined
+          ? []
+          : [
+              {
+                host_ip: '127.0.0.1',
+                host_port: spec.publish.hostPort,
+                container_port: spec.publish.containerPort,
+                protocol: 'tcp',
+              },
+            ],
+      ...(spec.pod === undefined ? {} : { pod: spec.pod }),
+      mounts: spec.mounts.map((mount) => ({
+        destination: mount.destination,
+        source: mount.source,
+        type: 'bind',
+        options: [mount.readOnly ? 'ro' : 'rw', 'rbind'],
+      })),
+      // Podman creates a missing volume rather than refusing, which is what makes a reinstall keep
+      // the application's database: the name is derived, so the second install finds the first
+      // install's volume already there.
+      volumes: (spec.volumes ?? []).map((volume) => ({
+        Name: volume.name,
+        Dest: volume.destination,
+      })),
+      // Restart on boot, but not in a crash loop that hides a broken app from its own logs.
+      restart_policy: 'on-failure',
+      restart_tries: 3,
+    };
+    await this.json('POST', `${API}/containers/create`, payload);
+  }
+
+  /**
+   * Create the pod that holds a multi-container application.
+   *
+   * The pod is what makes a stack possible without DEPSIS inventing a container network, a DNS
+   * name or a service discovery mechanism: members share one network namespace, so Immich's server
+   * reaches its database at 127.0.0.1:5432 the same way a single-process app reaches nothing.
+   *
+   * The published port lives HERE and only here. That is also why the same ADR-0019 rule is
+   * written on this line as on the container one: a pod that published on 0.0.0.0 would expose
+   * every member at once.
+   */
+  async createPod(spec: { name: PodName; containerPort: number; hostPort: number }): Promise<void> {
+    await this.json('POST', `${API}/pods/create`, {
+      name: spec.name,
       portmappings: [
         {
           host_ip: '127.0.0.1',
@@ -315,17 +480,20 @@ export class PodmanClient {
           protocol: 'tcp',
         },
       ],
-      mounts: spec.mounts.map((mount) => ({
-        destination: mount.destination,
-        source: mount.source,
-        type: 'bind',
-        options: [mount.readOnly ? 'ro' : 'rw', 'rbind'],
-      })),
-      // Restart on boot, but not in a crash loop that hides a broken app from its own logs.
-      restart_policy: 'on-failure',
-      restart_tries: 3,
-    };
-    await this.json('POST', `${API}/containers/create`, payload);
+    });
+  }
+
+  /**
+   * Remove the pod, and NOTHING the user would miss.
+   *
+   * `force=true` takes the member containers with it, which is what makes an uninstall finish even
+   * when a container is in a state that refuses a polite removal. It does NOT remove volumes —
+   * podman has no flag on this endpoint that would, and the service removes the containers with
+   * `v=false` first anyway. Immich's photographs and its database survive an uninstall; see
+   * `removeContainer`, which carries the same promise and the same reason.
+   */
+  async removePod(name: PodName): Promise<void> {
+    await this.text('DELETE', `${API}/pods/${name}?force=true`);
   }
 
   /** Start it. Already running is success, not a refusal — see `transition`. */

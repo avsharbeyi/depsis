@@ -4106,22 +4106,52 @@ components:
 
     AppCatalogueEntry:
       type: object
-      required: [slug, name, summary, icon, image, tag, containerPort, mounts]
+      required: [slug, name, summary, icon, containerPort, mounts, containers]
       properties:
         slug: { type: string }
         name: { type: string }
         summary: { type: string }
         icon: { type: string }
-        image: { type: string }
-        tag:
-          type: string
+        containerPort:
+          type: integer
           description: |
-            Sabitlenmiş sürüm. `latest` veritabanı kısıtıyla reddediliyor — bir gün çalışan bir
-            uygulamanın ertesi gün sessizce başka bir sürüme geçmesi, bir NAS'ta veri kaybının
-            ucuz yollarından biri.
-        containerPort: { type: integer }
+            POD'un 127.0.0.1 üzerinde yayımladığı port. Uygulamanın kendisine ait bir olgu; çok
+            konteynerli bir uygulamada da tek bir tane var.
+        containers:
+          type: array
+          description: |
+            Uygulamanın kaç parçadan oluştuğu, BAŞLAMA SIRASINDA. Immich dört konteyner: sunucu,
+            makine öğrenmesi, veritabanı ve önbellek. Tek konteynerli bir uygulama tek elemanlı
+            bir liste — ayrı bir biçim değil, aynı biçimin kısa hâli.
+          items:
+            type: object
+            required: [role, image, tag, primary]
+            properties:
+              role:
+                type: string
+                description: Uygulamanın içindeki adı — `server`, `database`, `cache`.
+              image: { type: string }
+              tag:
+                type: string
+                description: |
+                  Sabitlenmiş sürüm. `latest` veritabanı kısıtıyla reddediliyor — bir gün çalışan
+                  bir uygulamanın ertesi gün sessizce başka bir sürüme geçmesi, bir NAS'ta veri
+                  kaybının ucuz yollarından biri.
+              primary:
+                type: boolean
+                description: |
+                  Portu yayımlanan ve günlükleri gösterilen konteyner. Sırayla aynı şey değil:
+                  Immich'te sunucu en son başlıyor ama kullanıcının gördüğü şey o.
         mounts:
           type: array
+          description: |
+            Kullanıcının paylaşım seçmesi gereken bağlama noktaları — uygulamanın TAMAMI için, tek
+            bir düz liste. Hedefler uygulama çapında benzersiz, o yüzden kurulum isteğinin hangi
+            hedefin hangi konteynere ait olduğunu bilmesi gerekmiyor.
+
+            Uygulamanın kendi durumu (veritabanı dizini, model önbelleği) burada YOK: onlar
+            podman'ın yönettiği birimler, ve bir insanın "Immich'in PostgreSQL'i nereye yazsın"
+            sorusuna verebileceği iyi bir cevap yok.
           items:
             type: object
             required: [target, mode, purpose]

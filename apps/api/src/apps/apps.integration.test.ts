@@ -4,13 +4,16 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { AdminGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { DbService } from '../db/db.service.js';
+import { SecretBox } from '../auth/secret-box.js';
 import {
+  aggregate,
   AlreadyInstalledError,
   AppNotInCatalogueError,
   AppsService,
   MountTargetError,
   NotInstalledError,
   RootfulRuntimeError,
+  SecretKeyMissingError,
   ShareNotFoundError,
   SharesRootMissingError,
   mapState,
@@ -18,14 +21,26 @@ import {
 import {
   containerNameFor,
   imageReference,
+  podNameFor,
   PodmanClient,
   PodmanError,
   PodmanUnavailableError,
+  stackContainerName,
   type ContainerName,
   type CreateContainerSpec,
   type ContainerSummary,
   type PodmanInfo,
+  type PodName,
 } from './podman.client.js';
+
+/**
+ * A fixed key, so a derived password is the same on every run.
+ *
+ * The point of `SecretBox.derive` is that the SAME appliance produces the SAME password for the
+ * same application — that is what lets a recreated container still open its own data directory —
+ * and a random key here would hide a regression that broke exactly that.
+ */
+const TEST_KEY = new SecretBox(Buffer.alloc(32, 0x2a));
 
 /**
  * The application catalogue, in three layers.
@@ -72,6 +87,8 @@ class RecordingPodman {
   removed: ContainerName[] = [];
   started: ContainerName[] = [];
   stopped: ContainerName[] = [];
+  pods: { name: PodName; containerPort: number; hostPort: number }[] = [];
+  removedPods: PodName[] = [];
   containers: ContainerSummary[] = [];
   /** ADR-0019's privilege decision, as the client would report it. */
   rootless = true;
@@ -102,6 +119,14 @@ class RecordingPodman {
     this.removed.push(name);
     return Promise.resolve();
   }
+  createPod(spec: { name: PodName; containerPort: number; hostPort: number }): Promise<void> {
+    this.pods.push(spec);
+    return Promise.resolve();
+  }
+  removePod(name: PodName): Promise<void> {
+    this.removedPods.push(name);
+    return Promise.resolve();
+  }
   logs(): Promise<string[]> {
     return Promise.resolve([]);
   }
@@ -125,7 +150,7 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
     await db.onModuleInit();
     owner = new DbService(OWNER_URL as string);
     podman = new RecordingPodman();
-    apps = new AppsService(db, podman as unknown as PodmanClient, SHARES_ROOT);
+    apps = new AppsService(db, podman as unknown as PodmanClient, SHARES_ROOT, false, TEST_KEY);
 
     await owner.withoutTenant('migration-status', async (q) => {
       await q.query(
@@ -202,8 +227,18 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
     // future row added by a future migration should trip this test, not just the constraint.
     const overview = await apps.list(orgA);
     for (const app of overview.apps) {
-      expect(app.catalogue.tag, app.catalogue.slug).not.toBe('latest');
-      expect(() => imageReference(app.catalogue.image, app.catalogue.tag)).not.toThrow();
+      // EVERY container, not just the one the user thinks of as the application. Immich's
+      // database is three of the four images in that row, and an unpinned PostgreSQL is the one
+      // that would actually eat the data.
+      expect(app.containers.length, app.catalogue.slug).toBeGreaterThan(0);
+      expect(
+        app.containers.filter((c) => c.is_primary),
+        app.catalogue.slug,
+      ).toHaveLength(1);
+      for (const container of app.containers) {
+        expect(container.tag, `${app.catalogue.slug}/${container.role}`).not.toBe('latest');
+        expect(() => imageReference(container.image, container.tag)).not.toThrow();
+      }
     }
   });
 
@@ -270,7 +305,9 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
       { target: '/config', shareId: shareConfig },
     ]);
 
-    expect(view.instance?.container_name).toBe(containerNameFor('jellyfin', orgA));
+    expect(view.instance?.container_name).toBe(
+      stackContainerName(podNameFor('jellyfin', orgA), 'app'),
+    );
     expect(view.instance?.host_port).toBeGreaterThanOrEqual(1024);
     expect(view.instance?.host_port).toBeLessThanOrEqual(65535);
 
@@ -284,11 +321,16 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
     ]);
     // The catalogue's environment, and only the catalogue's.
     expect(spec?.env).toEqual({ TZ: 'Europe/Istanbul' });
-    expect(spec?.containerPort).toBe(8096);
+    // No port mapping on the CONTAINER: the pod carries it, on the same 127.0.0.1.
+    expect(spec?.publish).toBeUndefined();
+    expect(podman.pods.at(-1)?.containerPort).toBe(8096);
+    expect(podman.pods.at(-1)?.name).toBe(podNameFor('jellyfin', orgA));
   });
 
   it('reports it as installed, with state read from the runtime', async () => {
-    podman.containers = [{ names: [containerNameFor('jellyfin', orgA)], state: 'running' }];
+    podman.containers = [
+      { names: [stackContainerName(podNameFor('jellyfin', orgA), 'app')], state: 'running' },
+    ];
     const overview = await apps.list(orgA);
     const jellyfin = overview.apps.find((a) => a.catalogue.slug === 'jellyfin');
     expect(jellyfin?.instance).not.toBeNull();
@@ -330,11 +372,189 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
     const before = await countShares(owner, orgA);
     await apps.remove(orgA, 'syncthing');
 
-    expect(podman.removed).toContain(containerNameFor('syncthing', orgA));
+    expect(podman.removed).toContain(stackContainerName(podNameFor('syncthing', orgA), 'app'));
     expect(await countShares(owner, orgA)).toBe(before);
 
     const overview = await apps.list(orgA);
     expect(overview.apps.find((a) => a.catalogue.slug === 'syncthing')?.instance).toBeNull();
+  });
+
+  /**
+   * The four-container case, which is the whole reason migration 0031 exists.
+   *
+   * Until it, `immich` was one catalogue row naming `immich-server` and nothing else — a row that
+   * downloaded several hundred megabytes and then crash-looped, because that image exits when it
+   * cannot find a PostgreSQL and a Redis. The catalogue showed an Install button for something
+   * that could not run.
+   */
+  it('installs Immich as four containers in one pod', async () => {
+    const view = await apps.install(orgA, adminA, 'immich', [
+      { target: '/usr/src/app/upload', shareId: shareMedia },
+    ]);
+
+    const pod = podNameFor('immich', orgA);
+    expect(view.instance?.pod_name).toBe(pod);
+    // The PRIMARY container is the record's name, and it is not the first one started.
+    expect(view.instance?.container_name).toBe(stackContainerName(pod, 'server'));
+
+    const specs = podman.created.slice(-4);
+    expect(specs.map((spec) => spec.name)).toEqual([
+      stackContainerName(pod, 'database'),
+      stackContainerName(pod, 'cache'),
+      stackContainerName(pod, 'machine-learning'),
+      stackContainerName(pod, 'server'),
+    ]);
+    // Every one of them joined the pod, and NONE of them published a port of its own: the pod's
+    // infra container carries the single mapping, still on 127.0.0.1.
+    expect(specs.every((spec) => spec.pod === pod)).toBe(true);
+    expect(specs.every((spec) => spec.publish === undefined)).toBe(true);
+    expect(podman.pods.at(-1)).toEqual({
+      name: pod,
+      containerPort: 2283,
+      hostPort: expect.any(Number),
+    });
+
+    // The share was bound to the SERVER and to nothing else. A photograph library bound into the
+    // database container would be a second copy of the user's data with no reason to exist.
+    const server = specs.at(-1);
+    expect(server?.mounts.map((mount) => [mount.destination, mount.source])).toEqual([
+      ['/usr/src/app/upload', `${SHARES_ROOT}/Filmler`],
+    ]);
+    expect(specs[0]?.mounts).toEqual([]);
+
+    // The database's own directory is a managed volume, not a share the user had to choose.
+    expect(specs[0]?.volumes?.map((volume) => volume.destination)).toEqual([
+      '/var/lib/postgresql/data',
+    ]);
+    expect(specs[0]?.volumes?.[0]?.name).toContain('immich');
+  });
+
+  it('gives the server and its database the SAME derived password, and stores it nowhere', async () => {
+    const specs = podman.created.slice(-4);
+    const database = specs[0]?.env['POSTGRES_PASSWORD'];
+    const server = specs.at(-1)?.env['DB_PASSWORD'];
+
+    expect(database).toBeDefined();
+    expect(database).toBe(server);
+    // The placeholder was substituted, not passed through. A container started with a literal
+    // `${secret:db}` as its password would work — both sides would agree — and would ship the
+    // same password on every DEPSIS on earth.
+    expect(database).not.toContain('secret:');
+    expect((database ?? '').length).toBeGreaterThanOrEqual(32);
+
+    // And it is nowhere in the database. This is the property that makes derivation worth the
+    // extra concept: a `pg_dump` taken for disaster recovery does not carry it out of the house.
+    const rows = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ found: string }>(
+        `SELECT id::text AS found FROM public.app_instances
+          WHERE container_name LIKE '%immich%'`,
+      ),
+    );
+    expect(rows).toHaveLength(1);
+    const columns = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'app_instances'`,
+      ),
+    );
+    expect(columns.map((c) => c.column_name)).not.toContain('secrets');
+  });
+
+  it('derives a different password for a different tenant', async () => {
+    // Same appliance, same application, different organisation. If the tenant were not part of the
+    // label, one household's Immich database would open with the other's password — which matters
+    // the day two organisations share a box and one of them is a guest.
+    const before = podman.created.length;
+    await apps.install(orgB, adminA, 'immich', [
+      { target: '/usr/src/app/upload', shareId: shareOther },
+    ]);
+    const other = podman.created.slice(before);
+    expect(other.at(-1)?.env['DB_PASSWORD']).not.toBe(
+      podman.created.slice(before - 4, before).at(-1)?.env['DB_PASSWORD'],
+    );
+    await apps.remove(orgB, 'immich');
+  });
+
+  it('refuses to install a stack on an appliance with no key, rather than inventing one', async () => {
+    // The two fallbacks available here are both worse than the refusal: a constant in the
+    // catalogue is the same password on every DEPSIS, and a random one has to be stored, which
+    // puts a plaintext server password in every backup.
+    const keyless = new AppsService(
+      db,
+      podman as unknown as PodmanClient,
+      SHARES_ROOT,
+      false,
+      null,
+    );
+    await expect(
+      keyless.install(orgB, adminA, 'nextcloud', [
+        { target: '/var/www/html/data', shareId: shareOther },
+      ]),
+    ).rejects.toBeInstanceOf(SecretKeyMissingError);
+  });
+
+  it('starts in ordinal order and stops in reverse', async () => {
+    const pod = podNameFor('immich', orgA);
+    podman.started = [];
+    podman.stopped = [];
+
+    await apps.setState(orgA, 'immich', 'running');
+    expect(podman.started).toEqual([
+      stackContainerName(pod, 'database'),
+      stackContainerName(pod, 'cache'),
+      stackContainerName(pod, 'machine-learning'),
+      stackContainerName(pod, 'server'),
+    ]);
+
+    // Reverse on the way down, so the thing that talks to PostgreSQL stops before PostgreSQL does.
+    await apps.setState(orgA, 'immich', 'stopped');
+    expect(podman.stopped).toEqual([
+      stackContainerName(pod, 'server'),
+      stackContainerName(pod, 'machine-learning'),
+      stackContainerName(pod, 'cache'),
+      stackContainerName(pod, 'database'),
+    ]);
+  });
+
+  it('does not call a stack running when its database has exited', async () => {
+    const pod = podNameFor('immich', orgA);
+    podman.containers = [
+      { names: [stackContainerName(pod, 'server')], state: 'running' },
+      { names: [stackContainerName(pod, 'cache')], state: 'running' },
+      { names: [stackContainerName(pod, 'machine-learning')], state: 'running' },
+      { names: [stackContainerName(pod, 'database')], state: 'exited' },
+    ];
+    const overview = await apps.list(orgA);
+    // Not `running`, which is what reading the primary alone would have said, and not `stopped`
+    // either. Immich in this state serves a page that returns errors.
+    expect(overview.apps.find((a) => a.catalogue.slug === 'immich')?.state).toBe('error');
+
+    podman.containers = podman.containers.map((c) => ({ ...c, state: 'running' }));
+    const healthy = await apps.list(orgA);
+    expect(healthy.apps.find((a) => a.catalogue.slug === 'immich')?.state).toBe('running');
+    podman.containers = [];
+  });
+
+  it('removes every container AND the pod, and leaves the shares alone', async () => {
+    const pod = podNameFor('immich', orgA);
+    const before = await countShares(owner, orgA);
+    podman.removed = [];
+    podman.removedPods = [];
+
+    await apps.remove(orgA, 'immich');
+
+    expect(podman.removed).toEqual([
+      stackContainerName(pod, 'database'),
+      stackContainerName(pod, 'cache'),
+      stackContainerName(pod, 'machine-learning'),
+      stackContainerName(pod, 'server'),
+    ]);
+    expect(podman.removedPods).toEqual([pod]);
+    // The photographs, and every managed volume, are still there. An uninstall is not a delete —
+    // reinstalling Immich finds the same database volume, because the name is derived.
+    expect(await countShares(owner, orgA)).toBe(before);
+    const overview = await apps.list(orgA);
+    expect(overview.apps.find((a) => a.catalogue.slug === 'immich')?.instance).toBeNull();
   });
 
   it('refuses to act on an application that is not installed', async () => {
@@ -375,7 +595,7 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
     // Stopping and removing are not: an operator who ends up on a rootful box has to be able to
     // wind it down, and neither of those starts anything.
     await expect(strict.setState(orgA, 'jellyfin', 'stopped')).resolves.toBeDefined();
-    expect(rootful.stopped).toContain(containerNameFor('jellyfin', orgA));
+    expect(rootful.stopped).toContain(stackContainerName(podNameFor('jellyfin', orgA), 'app'));
   });
 
   it('installs through a root socket when the deployment says so in writing', async () => {
@@ -387,7 +607,9 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
       { target: '/music', shareId: shareMedia },
       { target: '/data', shareId: shareConfig },
     ]);
-    expect(view.instance?.container_name).toBe(containerNameFor('navidrome', orgA));
+    expect(view.instance?.container_name).toBe(
+      stackContainerName(podNameFor('navidrome', orgA), 'app'),
+    );
     await permissive.remove(orgA, 'navidrome');
   });
 
@@ -395,12 +617,16 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
     // The contract says `state` comes from the runtime. It matters most in the case that produced
     // the 304 bug: a start on a container that was already running is a success, and the value
     // reported afterwards should be a reading rather than an echo of the request.
-    podman.containers = [{ names: [containerNameFor('jellyfin', orgA)], state: 'running' }];
+    podman.containers = [
+      { names: [stackContainerName(podNameFor('jellyfin', orgA), 'app')], state: 'running' },
+    ];
     const started = await apps.setState(orgA, 'jellyfin', 'running');
     expect(started.state).toBe('running');
 
     // podman disagreeing with the request is reported, not overwritten.
-    podman.containers = [{ names: [containerNameFor('jellyfin', orgA)], state: 'running' }];
+    podman.containers = [
+      { names: [stackContainerName(podNameFor('jellyfin', orgA), 'app')], state: 'running' },
+    ];
     const stopped = await apps.setState(orgA, 'jellyfin', 'stopped');
     expect(stopped.state).toBe('running');
   });
@@ -442,6 +668,11 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
       listContainers: () => Promise.resolve([]),
       pullImage: () => Promise.resolve(),
       createContainer: () => Promise.reject(new PodmanError(500, 'no space left on device')),
+      createPod: () => Promise.resolve(),
+      // The rollback runs through these, and a cleanup that threw would replace the failure being
+      // cleaned up with one about the cleanup.
+      removeContainer: () => Promise.resolve(),
+      removePod: () => Promise.resolve(),
     };
     const brittle = new AppsService(db, failing as unknown as PodmanClient, SHARES_ROOT);
 
@@ -508,6 +739,23 @@ describe('podman state, translated', () => {
     expect(mapState('created')).toBe('stopped');
     expect(mapState('paused')).toBe('unknown');
   });
+
+  it('a stack is only as running as its least running container', () => {
+    // The ordering of the tests inside `aggregate` is the whole content of that function, so it is
+    // asserted rather than left to be re-derived from the code.
+    expect(aggregate(['running', 'running'])).toBe('running');
+    expect(aggregate(['stopped', 'stopped'])).toBe('stopped');
+    // Coming up is NOT an error: a stack takes a second, and reporting a fault for that second
+    // would teach the user to ignore the word.
+    expect(aggregate(['running', 'starting'])).toBe('starting');
+    // A member podman has never heard of outranks everything: that is a record and a runtime
+    // disagreeing, and no amount of the others being fine makes it not so.
+    expect(aggregate(['running', 'error'])).toBe('error');
+    // The one worth arguing about. Half up, half down, nothing starting: the database exited an
+    // hour ago while the web server kept serving errors. `running` would be a green light on it.
+    expect(aggregate(['running', 'stopped'])).toBe('error');
+    expect(aggregate([])).toBe('error');
+  });
 });
 
 describePodman('a real container, against the real podman socket', () => {
@@ -554,9 +802,8 @@ describePodman('a real container, against the real podman socket', () => {
       name,
       image,
       env: { DEPSIS_ITEST: 'yes' },
-      containerPort: 8080,
       // Deliberately in the same range the service allocates from, and freed at the end.
-      hostPort: 39_987,
+      publish: { containerPort: 8080, hostPort: 39_987 },
       mounts: [],
     });
 

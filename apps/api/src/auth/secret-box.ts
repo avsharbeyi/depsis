@@ -1,4 +1,10 @@
-import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  hkdfSync,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 /**
@@ -21,6 +27,16 @@ import { readFileSync } from 'node:fs';
 const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
 const KEY_BYTES = 32;
+
+/**
+ * A fixed salt for `derive`.
+ *
+ * Fixed rather than random because the derivation has to be REPRODUCIBLE — a random salt
+ * would have to be stored, which is the storage this whole approach exists to avoid. HKDF is
+ * specified to be safe with a constant salt when the input key is already uniformly random,
+ * which a 32-byte key from `openssl rand` is.
+ */
+const DERIVE_SALT = Buffer.from('depsis/hkdf/v1');
 
 /** Written into the envelope so a stored value always says what it is. */
 export const KEY_VERSION_PLAINTEXT = 0;
@@ -143,6 +159,32 @@ export class SecretBox {
     if (key.length !== KEY_BYTES) {
       throw new SecretKeyUnavailableError(`key must be ${KEY_BYTES} bytes, got ${key.length}`);
     }
+  }
+
+  /**
+   * Derive a value from the appliance key instead of storing one.
+   *
+   * The problem this solves is narrow and specific. A multi-container application needs its server
+   * and its database to agree on a password that no human will ever type. Three ways to get one:
+   * ship a constant in the catalogue (then every DEPSIS on earth has the same one), generate a
+   * random one and write it to a table (then the database holds a plaintext password, and a
+   * `pg_dump` for disaster recovery carries it out of the building), or derive it. Derivation is
+   * the only one where a database dump alone reveals nothing — the same split this class already
+   * relies on for TOTP secrets.
+   *
+   * DETERMINISTIC on purpose. A container recreated after an upgrade gets the same password, so
+   * the PostgreSQL data directory it inherits from its predecessor still opens. A random password
+   * would lock the application out of its own database on the first upgrade.
+   *
+   * HKDF and not a bare HMAC: the `info` argument is what keeps a derived value from ever
+   * colliding with a sealed one, and the prefix below keeps two callers with the same label from
+   * colliding with each other.
+   */
+  derive(label: string, bytes: number): Buffer {
+    if (!Number.isInteger(bytes) || bytes < 16 || bytes > 64) {
+      throw new SecretKeyUnavailableError(`refusing to derive ${String(bytes)} bytes`);
+    }
+    return Buffer.from(hkdfSync('sha256', this.key, DERIVE_SALT, `depsis:derive:${label}`, bytes));
   }
 
   seal(plaintext: Buffer, binding: SecretBinding): Buffer {

@@ -3,17 +3,24 @@ import { createServer } from 'node:net';
 import { z } from 'zod';
 
 import { DbService } from '../db/db.service.js';
+import { SecretBox } from '../auth/secret-box.js';
 import {
-  containerNameFor,
+  asContainerName,
+  asPodName,
   hostPathUnder,
   imageReference,
+  podNameFor,
   PodmanClient,
   PodmanError,
   PodmanUnavailableError,
+  stackContainerName,
+  volumeNameFor,
   type BindMount,
   type ContainerName,
   type ContainerSummary,
+  type NamedVolume,
   type PodmanInfo,
+  type PodName,
 } from './podman.client.js';
 
 /**
@@ -78,10 +85,66 @@ export class SharesRootMissingError extends Error {
   }
 }
 
+/**
+ * This application needs a derived secret and the appliance has no key to derive it from.
+ *
+ * A refusal rather than a fallback. The fallbacks available here are all worse than not starting:
+ * a constant password would be the same on every DEPSIS, and a random one written into the
+ * database would put a plaintext server password in every backup. See `SecretBox.derive`.
+ */
+export class SecretKeyMissingError extends Error {
+  constructor(slug: string) {
+    super(
+      `${slug} needs a generated password for its own database, and DEPSIS_SECRET_KEY_FILE is ` +
+        'not set. Generate a key with `openssl rand -base64 32`, point the setting at the file, ' +
+        'and install again (ADR-0016).',
+    );
+    this.name = 'SecretKeyMissingError';
+  }
+}
+
+/**
+ * The record describes a single-container install of an application that is now a stack.
+ *
+ * Only reachable for Immich, and only on a box that installed it before migration 0031: the old
+ * catalogue row claimed one container, which could never actually run. Reported as its own thing
+ * rather than driven anyway, because driving it would start one quarter of an application and
+ * report it running.
+ */
+export class StaleInstallError extends Error {
+  constructor(slug: string) {
+    super(
+      `${slug} was installed from an older catalogue entry that described one container, and it ` +
+        'now needs several. Remove it and install it again; your shares are not touched.',
+    );
+    this.name = 'StaleInstallError';
+  }
+}
+
+/** A catalogue row that cannot be turned into containers. Only a migration can cause this. */
+export class CatalogueShapeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CatalogueShapeError';
+  }
+}
+
 /** No free port could be found in the range applications are given. */
 export class NoFreePortError extends Error {
-  constructor() {
-    super('no free port is available for a new application');
+  /**
+   * `because` names the constraint that kept refusing, when one did.
+   *
+   * Without it this error is a thousand swallowed unique violations reported as "the port range is
+   * full" — which is what it looked like the first time a device-wide index that had nothing to do
+   * with ports started rejecting every candidate. The loop's whole design is to treat a collision
+   * as "try the next one", so the one thing it must not do is forget what it collided with.
+   */
+  constructor(because?: string) {
+    super(
+      because === undefined
+        ? 'no free port is available for a new application'
+        : `no free port is available for a new application; every candidate was refused by ${because}`,
+    );
     this.name = 'NoFreePortError';
   }
 }
@@ -121,17 +184,32 @@ const catalogueMountSchema = z.object({
 const catalogueMountsSchema = z.array(catalogueMountSchema);
 const catalogueEnvSchema = z.record(z.string(), z.string());
 
+/** A managed volume is a target and a sentence; the user never picks where it lives. */
+const catalogueVolumesSchema = z.array(
+  z.object({ target: z.string().min(1), purpose: z.string() }),
+);
+
 export interface CatalogueRow {
   id: string;
   slug: string;
   name: string;
   summary: string;
+  icon: string;
+  /** The port the POD publishes on 127.0.0.1 — a fact about the application, not a container. */
+  container_port: number;
+}
+
+/** One container of one application, in start order. Migration 0031. */
+export interface ContainerRow {
+  catalogue_id: string;
+  role: string;
+  ordinal: number;
+  is_primary: boolean;
   image: string;
   tag: string;
-  icon: string;
-  container_port: number;
-  mounts: unknown;
   env: unknown;
+  mounts: unknown;
+  volumes: unknown;
 }
 
 export interface InstanceRow {
@@ -140,6 +218,13 @@ export interface InstanceRow {
   container_name: string;
   host_port: number;
   created_at: Date;
+  /**
+   * The pod, or null for an install made before migration 0031.
+   *
+   * Null is not "no pod yet" — it is a complete, working, single-container install of the kind
+   * this module made for its whole life until now, and it goes on being driven that way.
+   */
+  pod_name: string | null;
 }
 
 export interface RequestedMount {
@@ -147,10 +232,31 @@ export interface RequestedMount {
   shareId: string;
 }
 
+/** One container, resolved down to exactly what podman will be asked to create. */
+interface ContainerPlan {
+  name: ContainerName;
+  ordinal: number;
+  isPrimary: boolean;
+  image: ReturnType<typeof imageReference>;
+  env: Record<string, string>;
+  mounts: BindMount[];
+  volumes: NamedVolume[];
+}
+
+/**
+ * `${secret:db}` — an environment value the appliance derives instead of the catalogue naming.
+ *
+ * Anchored at both ends. See `substitute` for why a placeholder inside a longer string is refused
+ * rather than supported.
+ */
+const SECRET_PLACEHOLDER = /^\$\{secret:([a-z][a-z0-9-]{0,30})\}$/u;
+
 export type AppState = 'running' | 'stopped' | 'starting' | 'error' | 'unknown';
 
 export interface AppView {
   catalogue: CatalogueRow;
+  /** Every container this application is made of, in start order. Never empty. */
+  containers: readonly ContainerRow[];
   instance: InstanceRow | null;
   state: AppState | null;
 }
@@ -192,6 +298,13 @@ export class AppsService {
      * says nothing gets — see `RootfulRuntimeError`.
      */
     private readonly allowRootful: boolean = false,
+    /**
+     * The appliance key, for applications that need a password of their own (`SecretBox.derive`).
+     *
+     * Null on a box with no key file. Installing something that needs one then REFUSES rather than
+     * falling back — see `SecretKeyMissingError` — and everything else installs as before.
+     */
+    private readonly secrets: SecretBox | null = null,
   ) {}
 
   /**
@@ -223,17 +336,39 @@ export class AppsService {
       for (const name of container.names) byName.set(name, container.state);
     }
 
-    const { catalogue, instances } = await this.readTenantView(organizationId);
+    const { catalogue, containers: parts, instances } = await this.readTenantView(organizationId);
     const instanceByCatalogue = new Map(instances.map((row) => [row.catalogue_id, row]));
+    const containersByCatalogue = new Map<string, ContainerRow[]>();
+    for (const row of parts) {
+      const list = containersByCatalogue.get(row.catalogue_id);
+      if (list === undefined) containersByCatalogue.set(row.catalogue_id, [row]);
+      else list.push(row);
+    }
 
     const apps = catalogue.map((entry): AppView => {
+      const own = containersByCatalogue.get(entry.id) ?? [];
       const instance = instanceByCatalogue.get(entry.id) ?? null;
-      if (instance === null) return { catalogue: entry, instance: null, state: null };
+      if (instance === null) {
+        return { catalogue: entry, containers: own, instance: null, state: null };
+      }
       // `unknown` and not `error` when there is no runtime to ask. `error` means the record and a
       // WORKING podman disagree, which sends the operator somewhere else entirely.
-      if (runtime === null) return { catalogue: entry, instance, state: 'unknown' };
-      const podmanState = byName.get(instance.container_name);
-      return { catalogue: entry, instance, state: mapState(podmanState) };
+      if (runtime === null) {
+        return { catalogue: entry, containers: own, instance, state: 'unknown' };
+      }
+
+      // A single-container record for an application that now needs several. Nothing to read a
+      // state from — the three containers it is missing were never created. See StaleInstallError.
+      if (instance.pod_name === null && own.length > 1) {
+        return { catalogue: entry, containers: own, instance, state: 'error' };
+      }
+
+      const names =
+        instance.pod_name === null
+          ? [instance.container_name]
+          : own.map((part) => `${instance.pod_name ?? ''}-${part.role}`);
+      const state = aggregate(names.map((name) => mapState(byName.get(name))));
+      return { catalogue: entry, containers: own, instance, state };
     });
 
     return { runtime, apps };
@@ -256,32 +391,79 @@ export class AppsService {
   ): Promise<AppView> {
     await this.refuseRootful();
 
-    const entry = await this.requireCatalogue(organizationId, slug);
-    const wanted = catalogueMountsSchema.parse(entry.mounts);
-    const env = catalogueEnvSchema.parse(entry.env);
+    const { entry, containers } = await this.requireCatalogue(organizationId, slug);
+    const resolved = await this.resolveMounts(organizationId, containers, requested);
 
-    const mounts = await this.resolveMounts(organizationId, wanted, requested);
-    const name = containerNameFor(entry.slug, organizationId);
-    const reference = imageReference(entry.image, entry.tag);
+    // EVERY new install is a pod, including a one-container one. The alternative — a bare
+    // container when there is only one, a pod when there are several — would be two shapes of
+    // installed application to drive, to reason about and to get wrong, in exchange for one
+    // infra container of about a megabyte.
+    const pod = podNameFor(entry.slug, organizationId);
+    const plan = this.plan(organizationId, entry, containers, resolved, pod);
 
-    const instance = await this.reserve(organizationId, userId, entry, name);
+    const primary = plan.find((container) => container.isPrimary);
+    if (primary === undefined) {
+      throw new CatalogueShapeError(`${entry.slug} has no primary container`);
+    }
+
+    const instance = await this.reserve(organizationId, userId, entry, primary.name, pod);
 
     try {
-      await this.podman.pullImage(reference);
-      await this.podman.createContainer({
-        name,
-        image: reference,
-        env,
+      await this.podman.createPod({
+        name: pod,
         containerPort: entry.container_port,
         hostPort: instance.host_port,
-        mounts,
       });
+      // In ORDINAL order, which is also pull order: the database image is small and comes first,
+      // so a stack whose last image fails to download has not already spent ten minutes.
+      for (const container of plan) {
+        await this.podman.pullImage(container.image);
+        await this.podman.createContainer({
+          name: container.name,
+          image: container.image,
+          env: container.env,
+          mounts: container.mounts,
+          volumes: container.volumes,
+          pod,
+        });
+      }
     } catch (error) {
-      await this.unreserve(organizationId, entry.id, name);
+      await this.rollback(organizationId, entry, pod, plan);
       throw error;
     }
 
-    return { catalogue: entry, instance, state: 'stopped' };
+    return { catalogue: entry, containers, instance, state: 'stopped' };
+  }
+
+  /**
+   * Undo a half-made install.
+   *
+   * Volumes are NOT removed, and that is not laziness. A failed install of an application that was
+   * installed before leaves the earlier install's database volume in place, and removing it here
+   * would turn "the download failed" into "your photo library is gone".
+   */
+  private async rollback(
+    organizationId: string,
+    entry: CatalogueRow,
+    pod: PodName,
+    plan: readonly ContainerPlan[],
+  ): Promise<void> {
+    for (const container of plan) {
+      await this.forget(() => this.podman.removeContainer(container.name));
+    }
+    await this.forget(() => this.podman.removePod(pod));
+    await this.unreserve(organizationId, entry.id);
+  }
+
+  /** Run a cleanup step, and let a failure inside it not replace the failure being cleaned up. */
+  private async forget(step: () => Promise<void>): Promise<void> {
+    try {
+      await step();
+    } catch (error) {
+      this.logger.warn(
+        `cleanup step failed: ${error instanceof Error ? error.message : 'unknown'}`,
+      );
+    }
   }
 
   /**
@@ -301,47 +483,84 @@ export class AppsService {
     // has to be able to turn things off.
     if (desired === 'running') await this.refuseRootful();
 
-    const { entry, instance } = await this.requireInstalled(organizationId, slug);
-    const name = containerNameFor(entry.slug, organizationId);
+    const { entry, containers, instance } = await this.requireInstalled(organizationId, slug);
+    const names = this.namesFor(entry, containers, instance);
 
     if (desired === 'running') {
-      await this.podman.startContainer(name);
+      // In ordinal order, and podman brings the pod's infra container up with the first one. The
+      // order reduces how long a server spends retrying its database; it does not remove the
+      // retrying, because a started PostgreSQL is not a ready PostgreSQL. Migration 0031 says the
+      // same thing on the `ordinal` column, deliberately, because a reader arriving at either one
+      // will draw the wrong conclusion without it.
+      for (const name of names) await this.podman.startContainer(name);
     } else {
-      await this.podman.stopContainer(name);
+      // In REVERSE, so the thing that talks to the database stops before the database does.
+      for (const name of [...names].reverse()) await this.podman.stopContainer(name);
     }
 
-    const containers = await this.podman.listContainers();
-    const found = containers.find((container) => container.names.includes(name));
-    return { catalogue: entry, instance, state: mapState(found?.state) };
+    const running = await this.podman.listContainers();
+    const byName = new Map<string, string>();
+    for (const container of running) {
+      for (const name of container.names) byName.set(name, container.state);
+    }
+    const state = aggregate(names.map((name) => mapState(byName.get(name))));
+    return { catalogue: entry, containers, instance, state };
   }
 
   /**
-   * Remove the container and the record, and NOTHING ELSE.
+   * Remove the containers, the pod, and NOTHING ELSE.
    *
-   * `removeContainer` passes `v=false`. The shares that were bound stay exactly as they were,
-   * because they are the user's data and an uninstall is not a delete. This is the single most
-   * destructive thing this module could get wrong, so it is stated twice — here and at the client
-   * method that carries the flag.
+   * `removeContainer` passes `v=false` and `removePod` cannot remove volumes at all. The shares
+   * that were bound stay exactly as they were, and so does every managed volume — which means
+   * Immich's database and Nextcloud's configuration survive an uninstall and are still there if
+   * the same application is installed again. This is the single most destructive thing this module
+   * could get wrong, so it is stated three times: here, at the client method that carries the
+   * flag, and on the volume column in migration 0031.
    */
   async remove(organizationId: string, slug: string): Promise<void> {
-    const { entry } = await this.requireInstalled(organizationId, slug);
-    const name = containerNameFor(entry.slug, organizationId);
+    const { entry, containers, instance } = await this.requireInstalled(organizationId, slug);
 
-    try {
-      await this.podman.removeContainer(name);
-    } catch (error) {
-      // A container that podman has already lost should not leave a row nobody can remove. Any
-      // other failure is reported, because the row still names something that exists.
-      if (!(error instanceof PodmanError) || error.status !== 404) throw error;
-      this.logger.warn(`${name} was already gone from podman; removing the record anyway`);
+    // Removal is the one operation a stale record must still be able to finish — it is the way
+    // out of that state — so it asks for names without the stale-install refusal.
+    const names =
+      instance.pod_name === null
+        ? [asContainerName(instance.container_name)]
+        : containers.map((container) =>
+            stackContainerName(asPodName(instance.pod_name ?? ''), container.role),
+          );
+
+    for (const name of names) {
+      try {
+        await this.podman.removeContainer(name);
+      } catch (error) {
+        // A container that podman has already lost should not leave a row nobody can remove. Any
+        // other failure is reported, because the row still names something that exists.
+        if (!(error instanceof PodmanError) || error.status !== 404) throw error;
+        this.logger.warn(`${name} was already gone from podman; removing the record anyway`);
+      }
     }
 
-    await this.unreserve(organizationId, entry.id, name);
+    if (instance.pod_name !== null) {
+      try {
+        await this.podman.removePod(asPodName(instance.pod_name));
+      } catch (error) {
+        if (!(error instanceof PodmanError) || error.status !== 404) throw error;
+      }
+    }
+
+    await this.unreserve(organizationId, entry.id);
   }
 
   async logs(organizationId: string, slug: string, lines: number): Promise<string[]> {
-    const { entry } = await this.requireInstalled(organizationId, slug);
-    return this.podman.logs(containerNameFor(entry.slug, organizationId), lines);
+    const { entry, containers, instance } = await this.requireInstalled(organizationId, slug);
+    const names = this.namesFor(entry, containers, instance);
+    // The PRIMARY container's logs. A stack has four log streams and only one of them answers the
+    // question a user opens this for; the database's log is where somebody goes next, and going
+    // there is a `podman logs` away for the operator who needs it.
+    const primary = containers.findIndex((container) => container.is_primary);
+    const name = names[primary === -1 ? 0 : primary] ?? names[0];
+    if (name === undefined) throw new CatalogueShapeError(`${entry.slug} has no containers`);
+    return this.podman.logs(name, lines);
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
@@ -361,46 +580,83 @@ export class AppsService {
 
   private async readTenantView(organizationId: string): Promise<{
     catalogue: CatalogueRow[];
+    containers: ContainerRow[];
     instances: InstanceRow[];
   }> {
     return this.db.withTenant(organizationId, async (db) => {
       const catalogue = await db.query<CatalogueRow>(
-        `SELECT id::text AS id, slug, name, summary, image, tag, icon, container_port, mounts, env
+        `SELECT id::text AS id, slug, name, summary, icon, container_port
            FROM public.app_catalogue
           ORDER BY name`,
       );
+      // The WHOLE catalogue's containers in one query rather than one query per application. Six
+      // applications is six round trips saved today and a page that does not get slower as the
+      // catalogue grows.
+      const containers = await db.query<ContainerRow>(
+        `SELECT catalogue_id::text AS catalogue_id, role, ordinal, is_primary, image, tag, env, mounts, volumes
+           FROM public.app_catalogue_containers
+          ORDER BY ordinal`,
+      );
       const instances = await db.query<InstanceRow>(
         `SELECT id::text AS id, catalogue_id::text AS catalogue_id, container_name, host_port,
-                created_at
+                created_at, pod_name
            FROM public.app_instances`,
       );
-      return { catalogue, instances };
+      return { catalogue, containers, instances };
     });
   }
 
-  private async requireCatalogue(organizationId: string, slug: string): Promise<CatalogueRow> {
-    const rows = await this.db.withTenant(organizationId, (db) =>
-      db.query<CatalogueRow>(
-        `SELECT id::text AS id, slug, name, summary, image, tag, icon, container_port, mounts, env
+  /**
+   * One catalogue row and the containers it is made of.
+   *
+   * The shape checks are here rather than at every caller: a row with no containers, or with no
+   * primary, is a broken migration, and every path that installs or drives an application would
+   * otherwise have to notice it separately.
+   */
+  private async requireCatalogue(
+    organizationId: string,
+    slug: string,
+  ): Promise<{ entry: CatalogueRow; containers: ContainerRow[] }> {
+    const { entry, containers } = await this.db.withTenant(organizationId, async (db) => {
+      const rows = await db.query<CatalogueRow>(
+        `SELECT id::text AS id, slug, name, summary, icon, container_port
            FROM public.app_catalogue
           WHERE slug = $1`,
         [slug],
-      ),
-    );
-    const entry = rows[0];
+      );
+      const found = rows[0];
+      if (found === undefined) return { entry: undefined, containers: [] };
+      return {
+        entry: found,
+        containers: await db.query<ContainerRow>(
+          `SELECT catalogue_id::text AS catalogue_id, role, ordinal, is_primary, image, tag, env, mounts, volumes
+             FROM public.app_catalogue_containers
+            WHERE catalogue_id = $1
+            ORDER BY ordinal`,
+          [found.id],
+        ),
+      };
+    });
+
     if (entry === undefined) throw new AppNotInCatalogueError(slug);
-    return entry;
+    if (containers.length === 0) {
+      throw new CatalogueShapeError(`${slug} has no containers in the catalogue`);
+    }
+    if (containers.filter((container) => container.is_primary).length !== 1) {
+      throw new CatalogueShapeError(`${slug} does not have exactly one primary container`);
+    }
+    return { entry, containers };
   }
 
   private async requireInstalled(
     organizationId: string,
     slug: string,
-  ): Promise<{ entry: CatalogueRow; instance: InstanceRow }> {
-    const entry = await this.requireCatalogue(organizationId, slug);
+  ): Promise<{ entry: CatalogueRow; containers: ContainerRow[]; instance: InstanceRow }> {
+    const { entry, containers } = await this.requireCatalogue(organizationId, slug);
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<InstanceRow>(
         `SELECT id::text AS id, catalogue_id::text AS catalogue_id, container_name, host_port,
-                created_at
+                created_at, pod_name
            FROM public.app_instances
           WHERE catalogue_id = $1`,
         [entry.id],
@@ -408,11 +664,96 @@ export class AppsService {
     );
     const instance = rows[0];
     if (instance === undefined) throw new NotInstalledError(slug);
-    return { entry, instance };
+    return { entry, containers, instance };
   }
 
   /**
-   * Turn `{target, shareId}` pairs into bind mounts.
+   * The containers of an installed application, in start order.
+   *
+   * REFUSES a single-container record for an application that now needs several — see
+   * `StaleInstallError`. Starting one container of a four-container application would leave a
+   * green light next to something that cannot work.
+   */
+  private namesFor(
+    entry: CatalogueRow,
+    containers: readonly ContainerRow[],
+    instance: InstanceRow,
+  ): ContainerName[] {
+    if (instance.pod_name === null) {
+      if (containers.length > 1) throw new StaleInstallError(entry.slug);
+      return [asContainerName(instance.container_name)];
+    }
+    const pod = asPodName(instance.pod_name);
+    return containers.map((container) => stackContainerName(pod, container.role));
+  }
+
+  /**
+   * Turn catalogue rows into the exact podman specs to create, in start order.
+   *
+   * Everything a container will be created with is decided here, from two sources and no others:
+   * the catalogue rows, and the mounts the caller's share ids resolved to. The one value that is
+   * neither is a derived password, and it is derived from this appliance's key rather than
+   * supplied or stored.
+   */
+  private plan(
+    organizationId: string,
+    entry: CatalogueRow,
+    containers: readonly ContainerRow[],
+    resolved: ReadonlyMap<string, BindMount>,
+    pod: PodName,
+  ): ContainerPlan[] {
+    return containers.map((container): ContainerPlan => {
+      const name = stackContainerName(pod, container.role);
+      const wanted = catalogueMountsSchema.parse(container.mounts);
+      const volumes = catalogueVolumesSchema.parse(container.volumes);
+      const env = catalogueEnvSchema.parse(container.env);
+
+      return {
+        name,
+        ordinal: container.ordinal,
+        isPrimary: container.is_primary,
+        image: imageReference(container.image, container.tag),
+        env: Object.fromEntries(
+          Object.entries(env).map(([key, value]) => [
+            key,
+            this.substitute(organizationId, entry.slug, value),
+          ]),
+        ),
+        mounts: wanted.map((mount) => {
+          const bind = resolved.get(mount.target);
+          // Unreachable: `resolveMounts` refused anything it could not fill. Kept because a
+          // non-null assertion here would be a promise nobody rechecks after the next edit.
+          if (bind === undefined) throw new MountTargetError(`missing share for ${mount.target}`);
+          return bind;
+        }),
+        volumes: volumes.map((volume, index): NamedVolume => ({
+          name: volumeNameFor(name, index, volume.target),
+          destination: volume.target,
+        })),
+      };
+    });
+  }
+
+  /**
+   * Replace a `${secret:name}` placeholder with a value derived from the appliance key.
+   *
+   * WHOLE VALUE ONLY. A placeholder embedded in a longer string — a connection URL, say — would
+   * mean a generated password being spliced into a syntax with quoting rules, which is how a
+   * password containing the wrong character silently breaks an application. Everything that needs
+   * one today wants the password on its own, in its own variable.
+   */
+  private substitute(organizationId: string, slug: string, value: string): string {
+    const match = SECRET_PLACEHOLDER.exec(value);
+    if (match === null) return value;
+    const label = match[1] ?? '';
+    if (this.secrets === null) throw new SecretKeyMissingError(slug);
+    // base64url, so the result can be pasted into an environment variable, a URL and a shell
+    // without any of them needing to quote it. 24 bytes is 32 characters.
+    return this.secrets.derive(`app:${organizationId}:${slug}:${label}`, 24).toString('base64url');
+  }
+
+  /**
+   * Turn `{target, shareId}` pairs into bind mounts, for the WHOLE application.
    *
    * Three refusals, and each one closes a different door. A target the catalogue does not describe
    * is refused, so a request cannot invent a mount point. A catalogue target left unfilled is
@@ -422,13 +763,29 @@ export class AppsService {
    *
    * The host path is built by `hostPathUnder`, which takes the configured root and the share's own
    * name. The request contributes an id and nothing else; it cannot contribute a path.
+   *
+   * TARGETS ARE UNIQUE ACROSS THE APPLICATION, not per container, which is what lets the install
+   * request stay a flat list and the interface stay unaware that an application has parts. Two
+   * containers declaring the same target would be a migration mistake, and it is refused here
+   * rather than silently resolved to whichever came last.
    */
   private async resolveMounts(
     organizationId: string,
-    wanted: readonly z.infer<typeof catalogueMountSchema>[],
+    containers: readonly ContainerRow[],
     requested: readonly RequestedMount[],
-  ): Promise<BindMount[]> {
-    if (wanted.length === 0) return [];
+  ): Promise<Map<string, BindMount>> {
+    const wanted: z.infer<typeof catalogueMountSchema>[] = [];
+    for (const container of containers) {
+      for (const mount of catalogueMountsSchema.parse(container.mounts)) {
+        if (wanted.some((seen) => seen.target === mount.target)) {
+          throw new CatalogueShapeError(`two containers both want ${JSON.stringify(mount.target)}`);
+        }
+        wanted.push(mount);
+      }
+    }
+
+    const out = new Map<string, BindMount>();
+    if (wanted.length === 0) return out;
 
     const root = this.sharesRoot;
     if (root === null) throw new SharesRootMissingError();
@@ -461,19 +818,20 @@ export class AppsService {
     );
     const nameById = new Map(shares.map((row) => [row.id, row.name]));
 
-    return wanted.map((mount): BindMount => {
+    for (const mount of wanted) {
       const shareId = chosen.get(mount.target);
       // Unreachable — every target was filled above — but `noUncheckedIndexedAccess` is right to
       // ask, and a throw here is cheaper than a non-null assertion nobody rechecks.
       if (shareId === undefined) throw new MountTargetError(`missing share for ${mount.target}`);
       const shareName = nameById.get(shareId);
       if (shareName === undefined) throw new ShareNotFoundError();
-      return {
+      out.set(mount.target, {
         destination: mount.target,
         source: hostPathUnder(root, shareName),
         readOnly: mount.mode === 'ro',
-      };
-    });
+      });
+    }
+    return out;
   }
 
   /**
@@ -489,12 +847,14 @@ export class AppsService {
     userId: string,
     entry: CatalogueRow,
     name: ContainerName,
+    pod: PodName,
   ): Promise<InstanceRow> {
     const taken = await this.db.withTenant(organizationId, (db) =>
       db.query<{ host_port: number }>(`SELECT host_port FROM public.app_instances`),
     );
     const used = new Set(taken.map((row) => row.host_port));
 
+    let refusedBy: string | undefined;
     for (let offset = 0; offset < PORT_SPAN; offset += 1) {
       const port = PORT_BASE + offset;
       if (used.has(port)) continue;
@@ -504,11 +864,12 @@ export class AppsService {
         const rows = await this.db.withTenant(organizationId, (db) =>
           db.query<InstanceRow>(
             `INSERT INTO public.app_instances
-                    (organization_id, catalogue_id, installed_by, container_name, host_port)
-             VALUES ($1, $2, $3, $4, $5)
+                    (organization_id, catalogue_id, installed_by, container_name, host_port,
+                     pod_name)
+             VALUES ($1, $2, $3, $4, $5, $6)
              RETURNING id::text AS id, catalogue_id::text AS catalogue_id, container_name,
-                       host_port, created_at`,
-            [organizationId, entry.id, userId, name, port],
+                       host_port, created_at, pod_name`,
+            [organizationId, entry.id, userId, name, port, pod],
           ),
         );
         const row = rows[0];
@@ -519,26 +880,54 @@ export class AppsService {
           throw new AlreadyInstalledError(entry.slug);
         }
         // Another install took this port between the read and the insert. Try the next one.
-        if (isUniqueViolation(error)) continue;
+        if (isUniqueViolation(error)) {
+          refusedBy = constraintOf(error) ?? 'a unique index';
+          continue;
+        }
         throw error;
       }
     }
 
-    throw new NoFreePortError();
+    throw new NoFreePortError(refusedBy);
   }
 
-  private async unreserve(
-    organizationId: string,
-    catalogueId: string,
-    name: ContainerName,
-  ): Promise<void> {
+  /**
+   * Drop the record, by application.
+   *
+   * By catalogue id alone: `app_instances_one_per_app` makes that exactly one row inside one
+   * tenant, and row level security makes "inside one tenant" the only scope this statement has.
+   * Naming the container as well used to be a second guard, and became a liability the moment an
+   * application had four containers and no single name to be identified by.
+   */
+  private async unreserve(organizationId: string, catalogueId: string): Promise<void> {
     await this.db.withTenant(organizationId, (db) =>
-      db.query(`DELETE FROM public.app_instances WHERE catalogue_id = $1 AND container_name = $2`, [
-        catalogueId,
-        name,
-      ]),
+      db.query(`DELETE FROM public.app_instances WHERE catalogue_id = $1`, [catalogueId]),
     );
   }
+}
+
+/**
+ * One state for an application made of several containers.
+ *
+ * The order of the tests is the whole content of this function. A member podman has never heard of
+ * is `error` before anything else, because that is a record and a runtime disagreeing and no
+ * amount of the others being fine makes it not so. A member still starting outranks the rest,
+ * because a stack coming up is normal and reporting `error` for the two seconds PostgreSQL takes
+ * to open its socket would train the user to ignore the word.
+ *
+ * The last line is the one worth arguing about: some running and some stopped, none of them
+ * starting, is `error`. It looks like a half-answer, and it is exactly the state a user needs to
+ * be told about — an application whose database exited an hour ago while its web server kept
+ * serving errors. `running` would be a green light on something broken.
+ */
+export function aggregate(states: readonly AppState[]): AppState {
+  if (states.length === 0) return 'error';
+  if (states.includes('error')) return 'error';
+  if (states.includes('unknown')) return 'unknown';
+  if (states.includes('starting')) return 'starting';
+  if (states.every((state) => state === 'running')) return 'running';
+  if (states.every((state) => state === 'stopped')) return 'stopped';
+  return 'error';
 }
 
 /**
@@ -579,6 +968,13 @@ function isPortFree(port: number): Promise<boolean> {
       });
     });
   });
+}
+
+/** The index or constraint a Postgres error names, when it names one. */
+function constraintOf(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const constraint = (error as { constraint?: unknown }).constraint;
+  return typeof constraint === 'string' ? constraint : undefined;
 }
 
 function isUniqueViolation(error: unknown, constraint?: string): boolean {

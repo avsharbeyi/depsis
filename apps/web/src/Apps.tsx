@@ -9,6 +9,22 @@ type AppPage = OpenApi.components['schemas']['AppPage'];
 type AppRow = OpenApi.components['schemas']['App'];
 type Share = OpenApi.components['schemas']['Share'];
 type Mount = OpenApi.components['schemas']['AppCatalogueEntry']['mounts'][number];
+
+/**
+ * `docker.io/nextcloud:31.0.5-apache` for a single container, `4 konteyner` for a stack.
+ *
+ * An application made of four images has no one image to print, and printing the primary's alone
+ * would say "Immich is immich-server" — which is exactly the wrong thing to believe about it, and
+ * the belief migration 0031 exists to correct. The count is the honest short answer; the list
+ * below it is the long one.
+ */
+function imageLabel(cat: OpenApi.components['schemas']['AppCatalogueEntry']): string {
+  const primary = cat.containers.find((container) => container.primary) ?? cat.containers[0];
+  if (primary === undefined) return '';
+  if (cat.containers.length === 1) return `${primary.image}:${primary.tag}`;
+  return `${cat.containers.length} konteyner · ${primary.image}:${primary.tag}`;
+}
+
 type Notify = (kind: 'ok' | 'error', text: string) => void;
 
 /** What each podman state is called on screen, and in which tone the pill is drawn. */
@@ -191,8 +207,15 @@ function InstallWin({
                   ⏳
                 </span>
                 <span className="tx">
-                  <b>İmaj indiriliyor, bu birkaç dakika sürebilir.</b>
-                  {cat.image}:{cat.tag} indirilip konteyner oluşturuluyor. Pencereyi kapatmayın.
+                  <b>
+                    {cat.containers.length > 1
+                      ? `${cat.containers.length} imaj indiriliyor, bu birkaç dakika sürebilir.`
+                      : 'İmaj indiriliyor, bu birkaç dakika sürebilir.'}
+                  </b>
+                  {cat.containers
+                    .map((container) => `${container.image}:${container.tag}`)
+                    .join(', ')}{' '}
+                  indirilip konteyner oluşturuluyor. Pencereyi kapatmayın.
                 </span>
               </div>
             )}
@@ -276,7 +299,15 @@ function InstallWin({
       {confirming && chosen !== null && (
         <ConfirmBox
           title={`${cat.name} kurulsun mu?`}
-          body={`${cat.image}:${cat.tag} indirilecek ve bir konteyner oluşturulacak. Bu uygulama, aşağıdaki paylaşımların içeriğini görecek:`}
+          body={
+            cat.containers.length > 1
+              ? `${cat.name} ${cat.containers.length} konteynerden oluşuyor (${cat.containers
+                  .map((container) => container.role)
+                  .join(
+                    ', ',
+                  )}); hepsi indirilecek. Bu uygulama, aşağıdaki paylaşımların içeriğini görecek:`
+              : `${imageLabel(cat)} indirilecek ve bir konteyner oluşturulacak. Bu uygulama, aşağıdaki paylaşımların içeriğini görecek:`
+          }
           list={chosen.map(
             ({ mount, share }) => `${share.name} → ${mount.target} (${modeLabel(mount.mode)})`,
           )}
@@ -532,9 +563,7 @@ export function Apps({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.E
                   </span>
                 </div>
                 <div className="m">{cat.summary}</div>
-                <div className="val">
-                  {cat.image}:{cat.tag}
-                </div>
+                <div className="val">{imageLabel(cat)}</div>
 
                 {!app.installed && (
                   <>
