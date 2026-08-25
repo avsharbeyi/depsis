@@ -14,6 +14,15 @@ export interface TaskRow {
    * — işi verdiği için sonucunu bekleyen kişi. Silinen hesapta NULL.
    */
   created_by: string | null;
+  /**
+   * Parçası olduğu iş, ya da null.
+   *
+   * TEK SEVİYE, ve onu bu alan değil VERİTABANI tutuyor: `tasks_one_level_deep` tetikleyicisi bir
+   * alt görevin kendi alt görevini, bir işin kendine ebeveynliğini ve parçası olan bir işin başka
+   * bir şeyin parçası olmasını reddediyor. Yalnız serviste tutulan bir kural, ikinci bir yazma
+   * yolu açıldığı gün sessizce kaybolurdu.
+   */
+  parent_id: string | null;
   status: TaskStatus;
   priority: TaskPriority;
   due_at: Date | null;
@@ -67,7 +76,16 @@ const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
 
 /** Bir alanın eski hâli, denetim izine yazmak için. */
 export interface TaskChange {
-  field: 'status' | 'priority' | 'due_at' | 'assignee_id' | 'body' | 'file_link' | 'comment';
+  field:
+    | 'status'
+    | 'priority'
+    | 'due_at'
+    | 'assignee_id'
+    | 'body'
+    | 'file_link'
+    | 'comment'
+    | 'parent_id'
+    | 'checklist';
   old: string | null;
   new: string | null;
 }
@@ -152,6 +170,7 @@ function diff(before: TaskRow, after: TaskRow): TaskChange[] {
   add('due_at', iso(before.due_at), iso(after.due_at));
   add('assignee_id', before.assignee_id, after.assignee_id);
   add('body', before.body, after.body);
+  add('parent_id', before.parent_id, after.parent_id);
   return changes;
 }
 
@@ -182,8 +201,8 @@ export class AssigneeNotFoundError extends Error {
 
 /** SQLSTATE 23514 from `tasks_body_present`: an empty body, or one past 2000 characters. */
 export class TaskRejectedError extends Error {
-  constructor() {
-    super('a task needs a body of between 1 and 2000 characters');
+  constructor(reason = 'a task needs a body of between 1 and 2000 characters') {
+    super(reason);
     this.name = 'TaskRejectedError';
   }
 }
@@ -197,6 +216,7 @@ export class TaskRejectedError extends Error {
  */
 const SELECT_COLUMNS = `t.id::text          AS id,
           t.body,
+          t.parent_id::text   AS parent_id,
           t.created_by::text  AS created_by,
           t.status,
           t.priority,
@@ -252,6 +272,7 @@ export class TasksService {
     createdBy: string,
     body: string,
     assigneeId: string | null,
+    parentId: string | null = null,
   ): Promise<TaskRow> {
     try {
       const rows = await this.db.withTenant(organizationId, async (db) => {
@@ -264,17 +285,19 @@ export class TasksService {
 
         const inserted = await db.query<TaskRow>(
           `WITH inserted AS (
-             INSERT INTO public.tasks (organization_id, created_by, body, assignee_id, status)
+             INSERT INTO public.tasks (organization_id, created_by, body, assignee_id, status,
+                                       parent_id)
              -- Atananı olan bir is 'assigned' doguyor, olmayan 'draft'. 0026'nin var olan
              -- satirlar icin yaptigi eslemenin aynisi: yeni satirlarin eskilerden farkli bir
              -- kurala gore dogmasi, panoyu iki kuralin karistigi bir yer yapardi.
-             VALUES ($1, $2, $3, $4, CASE WHEN $4::uuid IS NULL THEN 'draft' ELSE 'assigned' END)
+             VALUES ($1, $2, $3, $4, CASE WHEN $4::uuid IS NULL THEN 'draft' ELSE 'assigned' END,
+                     $5)
              RETURNING *
            )
            SELECT ${SELECT_COLUMNS}
              FROM inserted t
              LEFT JOIN public.users u ON u.id = t.assignee_id`,
-          [organizationId, createdBy, body, assigneeId],
+          [organizationId, createdBy, body, assigneeId, parentId],
         );
         const created = inserted[0];
         // AYNI İŞLEMDE, ve bu bir düzen tercihi değil: iş oluşup izleyicisi oluşmazsa, o iş
@@ -327,6 +350,9 @@ export class TasksService {
       priority?: TaskPriority | undefined;
       dueAt?: string | null | undefined;
       position?: number | undefined;
+      // `string | null` ve `undefined` yine farklı şeyler: null işi üst seviyeye çıkarıyor,
+      // yokluğu bağını olduğu gibi bırakıyor.
+      parentId?: string | null | undefined;
     },
     actorId: string | null = null,
   ): Promise<TaskRow> {
@@ -392,6 +418,14 @@ export class TasksService {
     if (changes.position !== undefined) {
       params.push(changes.position);
       sets.push(`position = $${params.length}`);
+    }
+    if (changes.parentId !== undefined) {
+      // Kendine ebeveynlik, iki seviye ve parçası olan bir işin parça olması — üçünü de
+      // `tasks_one_level_deep` tetikleyicisi reddediyor, burada değil. Kural veritabanında
+      // olduğu için ikinci bir yazma yolu onu atlayamıyor; buradaki iş yalnız hatayı okunabilir
+      // bir cevaba çevirmek (`translateDbError`).
+      params.push(changes.parentId);
+      sets.push(`parent_id = $${params.length}::uuid`);
     }
     if (sets.length === 0) return this.find(organizationId, id);
 
@@ -566,6 +600,36 @@ export class TasksService {
     await this.record(organizationId, taskId, actorId, [change]);
   }
 
+  /**
+   * "Bu işin kaç parçası var, kaçı bitti" — pano rozetleri için.
+   *
+   * PANO BAŞINA TEK SORGU, iş başına bir tane değil: otuz işlik bir panoda otuz sorgu, hiçbir
+   * ekranın açılmasını beklemeye değmeyecek iki sayı için. `task_checklist.progress` ile aynı
+   * kalıp ve aynı gerekçe.
+   */
+  async subtaskProgress(
+    organizationId: string,
+    parentIds: readonly string[],
+  ): Promise<Map<string, { done: number; total: number }>> {
+    if (parentIds.length === 0) return new Map();
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ parent_id: string; done: string; total: string }>(
+        `SELECT parent_id::text AS parent_id,
+                -- 'cancelled' de KAPALI sayılıyor: iptal edilmiş bir parça bekleyen iş değil, ve
+                -- "3/7" rozetinin sorduğu soru "kaç tanesi hâlâ bekliyor".
+                count(*) FILTER (WHERE status IN ('done', 'cancelled'))::text AS done,
+                count(*)::text AS total
+           FROM public.tasks
+          WHERE organization_id = $1 AND parent_id = ANY($2::uuid[])
+          GROUP BY parent_id`,
+        [organizationId, parentIds],
+      ),
+    );
+    return new Map(
+      rows.map((row) => [row.parent_id, { done: Number(row.done), total: Number(row.total) }]),
+    );
+  }
+
   /** Bir görevin denetim izi, en yeni önce. */
   async activity(organizationId: string, taskId: string): Promise<ActivityRow[]> {
     // Görevin varlığı önce doğrulanıyor: olmayan bir görev için boş bir liste, "hiç aktivite yok"
@@ -634,10 +698,37 @@ async function assertAssignee(
 }
 
 /** SQLSTATE, not message text — see the note on the same function in `notes.service.ts`. */
+/**
+ * `tasks_one_level_deep` tetikleyicisinin üç reddi, insan cümlesine çevrilmiş hâlleriyle.
+ *
+ * Eşleştirme İNGİLİZCE mesajın üstünden, çünkü göçte yazan cümle o — ve iki dilin birbirini takip
+ * etmesi gereken tek yer burası olsun diye, ikisi de tek bir listede duruyor.
+ */
+const DEPTH_REFUSALS: readonly (readonly [string, string])[] = [
+  ['cannot be its own parent', 'Bir iş kendisinin parçası olamaz.'],
+  ['subtask cannot have subtasks', 'Bir alt görevin kendi alt görevi olamaz: yalnız tek seviye.'],
+  [
+    'with subtasks cannot become a subtask',
+    'Parçaları olan bir iş başka bir şeyin parçası olamaz.',
+  ],
+];
+
 function translateDbError(error: unknown): Error {
   if (typeof error === 'object' && error !== null && 'code' in error) {
     const code = (error as { code?: string }).code;
-    if (code === '23514') return new TaskRejectedError();
+    if (code === '23514') {
+      // Tetikleyicinin kendi cümlesi geçiyor, `tasks_body_present` gibi bir kısıt adı geçmiyor.
+      //
+      // Fark kullanıcı açısından gerçek: "bir alt görevin kendi alt görevi olamaz" ne yapılması
+      // gerektiğini söylüyor, `violates check constraint "tasks_one_level_deep"` ise yalnız bir iç
+      // ad sızdırıyor. Bu üç mesaj BİZİM yazdıklarımız (0029'daki `RAISE EXCEPTION`), o yüzden
+      // gösterilebilir olduklarını biliyoruz; kalan her 23514 için genel cevap duruyor.
+      const said = (error as { message?: string }).message ?? '';
+      for (const [needle, turkish] of DEPTH_REFUSALS) {
+        if (said.includes(needle)) return new TaskRejectedError(turkish);
+      }
+      return new TaskRejectedError();
+    }
     // The assignee vanished between the check above and the write. Rare, but it is a stale picker
     // rather than a fault, so it gets the same answer as the check that normally catches it.
     if (code === '23503') return new AssigneeNotFoundError();

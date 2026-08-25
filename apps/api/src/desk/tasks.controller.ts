@@ -27,6 +27,12 @@ import {
   TaskFilesService,
 } from './task-files.service.js';
 import {
+  ChecklistItemNotFoundError,
+  ChecklistRejectedError,
+  TaskChecklistService,
+  type ChecklistRow,
+} from './task-checklist.service.js';
+import {
   CommentNotFoundError,
   CommentNotYoursError,
   CommentRejectedError,
@@ -61,6 +67,7 @@ const positionSchema = z.number().refine((v) => Number.isFinite(v), { message: '
 const createSchema = z.object({
   body: bodySchema,
   assigneeId: assigneeSchema.optional(),
+  parentId: z.string().uuid().nullable().optional(),
 });
 
 const statusSchema = z.enum(['draft', 'assigned', 'in_progress', 'in_review', 'done', 'cancelled']);
@@ -75,6 +82,7 @@ const linkSchema = z.object({ fileEntryId: z.string().uuid() });
 // dönüşmesini engelliyor — aynı sınırın iki yerde durması, iki farklı şeyi koruduğu için tekrar
 // değil.
 const commentSchema = z.object({ body: z.string().trim().min(1).max(4000) });
+const checklistSchema = z.object({ body: z.string().trim().min(1).max(500) });
 
 const updateSchema = z
   .object({
@@ -85,6 +93,7 @@ const updateSchema = z
     priority: prioritySchema.optional(),
     dueAt: dueSchema.optional(),
     position: positionSchema.optional(),
+    parentId: z.string().uuid().nullable().optional(),
   })
   .refine((v) => Object.keys(v).length > 0, { message: 'nothing to change' });
 
@@ -105,20 +114,33 @@ export class TasksController {
     private readonly links: TaskFilesService,
     private readonly thread: TaskCommentsService,
     private readonly watching: TaskWatchersService,
+    private readonly checks: TaskChecklistService,
   ) {}
 
   @Get()
   async list(@Req() request: AuthenticatedRequest): Promise<Schemas['TaskPage']> {
     const caller = requireCaller(request);
     const rows = await this.tasks.list(caller.organizationId);
-    // TEK ÇAĞRIDA, görev başına değil: elli görevlik bir pano, görev başına bir çözümle elli
-    // yetki yürüyüşü demek olurdu. Sayı çağıranın GÖREBİLDİKLERİ — toplamı göstermek,
-    // göremediği dosyaların varlığını söylerdi.
-    const counts = await this.links.visibleCounts(
-      caller,
-      rows.map((row) => row.id),
-    );
-    return { items: rows.map((row) => toTask(row, counts.get(row.id) ?? 0)) };
+    const ids = rows.map((row) => row.id);
+
+    // ÜÇÜ DE TEK ÇAĞRIDA, görev başına değil. Elli görevlik bir pano, görev başına bir sorguyla yüz
+    // elli sorgu demek olurdu — ve bunların hepsi, satırın kenarındaki iki küçük rozet için.
+    //
+    // Paralel, çünkü aralarında bağ yok: üçü de aynı `ids` listesini okuyor ve hiçbiri ötekinin
+    // cevabını beklemiyor.
+    const [files, subtasks, checklist] = await Promise.all([
+      // Dosya sayısı çağıranın GÖREBİLDİKLERİ — toplamı göstermek, göremediği dosyaların
+      // varlığını söylerdi.
+      this.links.visibleCounts(caller, ids),
+      this.tasks.subtaskProgress(caller.organizationId, ids),
+      this.checks.progress(caller.organizationId, ids),
+    ]);
+
+    return {
+      items: rows.map((row) =>
+        toTask(row, files.get(row.id) ?? 0, subtasks.get(row.id), checklist.get(row.id)),
+      ),
+    };
   }
 
   @Post()
@@ -140,6 +162,7 @@ export class TasksController {
         session.userId,
         parsed.data.body,
         parsed.data.assigneeId ?? null,
+        parsed.data.parentId ?? null,
       );
       return toTask(row);
     } catch (error) {
@@ -274,6 +297,86 @@ export class TasksController {
           at: row.created_at.toISOString(),
         })),
       };
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  /* ─── kontrol listesi ─────────────────────────────────────────────────────── */
+
+  @Get(':id/checklist')
+  async checklist(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+  ): Promise<Schemas['ChecklistPage']> {
+    const session = requireSession(request);
+    requireUuid(id);
+    try {
+      return { items: (await this.checks.list(session.organizationId, id)).map(toChecklistItem) };
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Post(':id/checklist')
+  @HttpCode(201)
+  async addChecklistItem(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ): Promise<Schemas['ChecklistPage']> {
+    const session = requireSession(request);
+    requireUuid(id);
+    const parsed = checklistSchema.safeParse(body);
+    if (!parsed.success) throw new UnprocessableEntityException('geçersiz madde');
+    try {
+      await this.checks.add(session.organizationId, id, session.userId, parsed.data.body);
+      // Tek maddeyi değil LİSTEYİ döndürüyor: sıra numarasını sunucu hesaplıyor, ve istemcinin
+      // yeni maddeyi nereye koyacağını kendi tahmin etmesi o hesabı ikinci kez yazmak olurdu.
+      return { items: (await this.checks.list(session.organizationId, id)).map(toChecklistItem) };
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Patch(':id/checklist/:itemId')
+  @HttpCode(204)
+  async setChecklistItem(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+    @Body() body: unknown,
+  ): Promise<void> {
+    const session = requireSession(request);
+    requireUuid(id);
+    requireUuid(itemId);
+    const parsed = z.object({ done: z.boolean() }).safeParse(body);
+    if (!parsed.success) throw new UnprocessableEntityException('geçersiz istek');
+    try {
+      await this.checks.setDone(
+        session.organizationId,
+        id,
+        itemId,
+        session.userId,
+        parsed.data.done,
+      );
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Delete(':id/checklist/:itemId')
+  @HttpCode(204)
+  async removeChecklistItem(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+  ): Promise<void> {
+    const session = requireSession(request);
+    requireUuid(id);
+    requireUuid(itemId);
+    try {
+      await this.checks.remove(session.organizationId, id, itemId, session.userId);
     } catch (error) {
       throw translate(error);
     }
@@ -442,11 +545,23 @@ export class TasksController {
   }
 }
 
-function toTask(row: TaskRow, linkedFileCount = 0): Schemas['Task'] {
+function toTask(
+  row: TaskRow,
+  linkedFileCount = 0,
+  subtasks?: { done: number; total: number },
+  checklist?: { done: number; total: number },
+): Schemas['Task'] {
   return {
     id: row.id,
     linkedFileCount,
     body: row.body,
+    parentId: row.parent_id,
+    // Parçası ya da maddesi olmayan bir iş için 0/0. Alanı hiç göndermemek, istemciye "yok" ile
+    // "sunucu söylemedi"yi ayırt ettirirdi — panonun sahip olmadığı bir durum.
+    subtaskDone: subtasks?.done ?? 0,
+    subtaskTotal: subtasks?.total ?? 0,
+    checklistDone: checklist?.done ?? 0,
+    checklistTotal: checklist?.total ?? 0,
     status: row.status,
     priority: row.priority,
     // `dueAt` sözleşmede isteğe bağlı ve `exactOptionalPropertyTypes` "yok" ile "var ama
@@ -522,6 +637,10 @@ function translate(error: unknown): Error {
   // düşürürdü. Dosya bağındaki 404'ün sebebi başkaydı: orada gizlenen şey dosyanın varlığıydı.
   if (error instanceof CommentNotYoursError) return new ForbiddenException(error.message);
   if (error instanceof CommentRejectedError) return new UnprocessableEntityException(error.message);
+  if (error instanceof ChecklistItemNotFoundError) return new NotFoundException();
+  if (error instanceof ChecklistRejectedError) {
+    return new UnprocessableEntityException(error.message);
+  }
   return error instanceof Error ? error : new Error(String(error));
 }
 
@@ -541,5 +660,14 @@ function toComment(row: CommentRow): Schemas['TaskComment'] {
     deleted: row.deleted_at !== null,
     editedAt: row.edited_at === null ? null : row.edited_at.toISOString(),
     createdAt: row.created_at.toISOString(),
+  };
+}
+
+function toChecklistItem(row: ChecklistRow): Schemas['ChecklistItem'] {
+  return {
+    id: row.id,
+    body: row.body,
+    doneAt: row.done_at === null ? null : row.done_at.toISOString(),
+    doneByUsername: row.done_by_username,
   };
 }

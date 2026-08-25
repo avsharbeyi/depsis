@@ -1558,6 +1558,98 @@ canvas.spark {
   outline: none;
 }
 
+/* Panelin içindeki bölüm başlıkları. `.pmh` güç menüsünden geliyor ve buraya biraz nefes
+   gerekiyor — üst üste üç bölüm, aralarında boşluk olmadan tek bir liste gibi okunurdu. */
+.thread .pmh {
+  padding: 8px 2px 2px;
+}
+
+.citem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--ink2);
+  cursor: pointer;
+}
+.citem:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.citem .tx {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* Tiklenmiş madde ÜSTÜ ÇİZİLİ ve soluk. Listeden kaldırmak "kaç maddesi vardı" sorusunu
+   cevaplanamaz yapardı, ve bir kontrol listesinin yarısı bitmiş hâli de bir bilgi. */
+.citem.on .tx {
+  text-decoration: line-through;
+  color: var(--dim);
+}
+.citem .s {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+}
+.citem .del {
+  opacity: 0;
+  transition: opacity 0.15s var(--e);
+}
+.citem:hover .del,
+.citem .del:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .citem .del {
+    opacity: 1;
+  }
+}
+
+/* Parça satırı OKUNUR, düzenlenmez: her parça panoda kendi satırı olarak duruyor, atananının
+   sütununda, bütün kontrolleriyle. Aynı işi iki yerde yapmak, iki yerde ayrışan iki davranış. */
+.sub {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--ink2);
+  box-shadow: inset 2px 0 0 var(--edge2);
+}
+.sub .tx {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sub .s {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+}
+.sub.done .tx {
+  text-decoration: line-through;
+  color: var(--dim);
+}
+
+.cadd input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  padding: 6px 9px;
+  border-radius: 9px;
+  border: 1px solid var(--edge);
+  background: rgba(8, 14, 22, 0.55);
+  color: var(--ink);
+}
+.cadd input:focus-visible {
+  border-color: var(--edge2);
+  outline: none;
+}
+
 /* ─── overlays ─────────────────────────────────────────────────────────────── */
 
 .ovl {

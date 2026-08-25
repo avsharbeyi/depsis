@@ -5,6 +5,8 @@ import { api, problemMessage } from './api.js';
 import { when } from './Notifications.js';
 
 type Comment = OpenApi.components['schemas']['TaskComment'];
+type ChecklistItem = OpenApi.components['schemas']['ChecklistItem'];
+type Task = OpenApi.components['schemas']['Task'];
 type Watcher = OpenApi.components['schemas']['TaskWatcher'];
 
 /**
@@ -20,27 +22,58 @@ export function TaskThread({
   taskId,
   me,
   isAdmin,
+  subtasks,
+  canHaveSubtasks,
+  onSubtask,
+  onCounts,
   onError,
 }: {
   taskId: string;
   /** Çağıranın kullanıcı adı. Silme düğmesinin kime çizileceğini bu belirliyor. */
   me: string;
   isAdmin: boolean;
+  /** Bu işin parçaları, panonun kendi listesinden süzülmüş — ikinci bir istek gerekmiyor. */
+  subtasks: Task[];
+  /**
+   * Bu işe parça eklenebilir mi.
+   *
+   * TEK SEVİYE kuralı veritabanındaki tetikleyicide duruyor ve reddi o veriyor; buradaki iş
+   * yalnız çalışmayacak bir kutuyu hiç göstermemek. Kuralı ikinci kez YAZMIYOR — bir alt görevde
+   * kutunun olmaması, sunucunun ne diyeceğinin tahmini değil, zaten bilinen tek gerçek.
+   */
+  canHaveSubtasks: boolean;
+  onSubtask: (body: string) => void;
+  /**
+   * Madde sayıları değişti.
+   *
+   * Panodaki "☑ 1/2" rozeti sunucudan `GET /tasks` ile geliyor, ve o çağrı panel açıkken bir daha
+   * yapılmıyor — yani bir madde eklendiğinde ya da tiklendiğinde rozet olduğu yerde kalıyordu.
+   * Bütün panoyu yeniden çekmek bir madde tiki için fazla; sayıyı bilen taraf zaten burası.
+   */
+  onCounts: (done: number, total: number) => void;
   onError: (text: string) => void;
 }): ReactElement {
   const [comments, setComments] = useState<Comment[] | null>(null);
   const [watchers, setWatchers] = useState<Watcher[]>([]);
   const [watching, setWatching] = useState(false);
+  const [items, setItems] = useState<ChecklistItem[]>([]);
+  const [itemDraft, setItemDraft] = useState('');
+  const [subDraft, setSubDraft] = useState('');
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   /** Okunamadı ile "henüz yorum yok" ayrı şeyler; ikisini aynı ekrana çevirmek bir yalan. */
   const [failed, setFailed] = useState(false);
 
   const load = useCallback(async (): Promise<void> => {
-    const [thread, who] = await Promise.all([
+    const [thread, who, list] = await Promise.all([
       api.GET('/tasks/{id}/comments', { params: { path: { id: taskId } } }),
       api.GET('/tasks/{id}/watchers', { params: { path: { id: taskId } } }),
+      api.GET('/tasks/{id}/checklist', { params: { path: { id: taskId } } }),
     ]);
+    if (list.data !== undefined) {
+      setItems(list.data.items);
+      onCounts(list.data.items.filter((i) => i.doneAt !== null).length, list.data.items.length);
+    }
     // Sessizce dönmek panelin sonsuza kadar "Yükleniyor…" göstermesi demekti: kullanıcı bekliyor,
     // hiçbir şey gelmiyor, ve ekranda bir şeyin bozulduğuna dair tek bir işaret yok.
     if (thread.data === undefined) {
@@ -53,7 +86,7 @@ export function TaskThread({
       setWatchers(who.data.items);
       setWatching(who.data.watching);
     }
-  }, [taskId]);
+  }, [onCounts, taskId]);
 
   useEffect(() => {
     void load();
@@ -85,6 +118,78 @@ export function TaskThread({
     setComments((current) => (current === null ? null : [...current, data]));
     if (comments === null || !watching) void load();
   }, [busy, comments, draft, load, onError, taskId, watching]);
+
+  const addItem = useCallback(async (): Promise<void> => {
+    const body = itemDraft.trim();
+    if (body === '') return;
+    // KUTU HEMEN TEMİZLENİYOR, cevaptan sonra değil — ve fark ölçüldü: maddeler arka arkaya
+    // yazılıyor, ve cevap geldiğinde yapılan bir `setItemDraft('')` o sırada yazılmış OLAN İKİNCİ
+    // MADDEYİ siliyordu. Kullanıcı iki madde yazıp bir tanesini bulan kişi oluyordu.
+    //
+    // Yorum kutusunun tersi, ve gerekçe de ters: bir yorum uzun ve kaybedilmesi pahalı, bir madde
+    // kısa ve arka arkaya yazılıyor. Reddedilirse geri konuyor.
+    setItemDraft('');
+    const { data, error } = await api.POST('/tasks/{id}/checklist', {
+      params: { path: { id: taskId } },
+      body: { body },
+    });
+    if (data === undefined) {
+      onError(problemMessage(error, 'Madde eklenemedi.'));
+      setItemDraft((current) => (current === '' ? body : current));
+      return;
+    }
+    // Sunucu LİSTEYİ döndürüyor, tek maddeyi değil: sıra numarasını o hesaplıyor, ve istemcinin
+    // yeni maddeyi nereye koyacağını tahmin etmesi o hesabı ikinci kez yazmak olurdu.
+    setItems(data.items);
+    onCounts(data.items.filter((i) => i.doneAt !== null).length, data.items.length);
+  }, [itemDraft, onCounts, onError, taskId]);
+
+  const tick = useCallback(
+    async (itemId: string, done: boolean): Promise<void> => {
+      // İYİMSER: bir onay kutusunun bir tur gecikmeyle dolması, kullanıcıya iki kez bastırıyor.
+      setItems((current) =>
+        current.map((item) =>
+          item.id === itemId
+            ? { ...item, doneAt: done ? new Date().toISOString() : null, doneByUsername: null }
+            : item,
+        ),
+      );
+      const { response, error } = await api.PATCH('/tasks/{id}/checklist/{itemId}', {
+        params: { path: { id: taskId, itemId } },
+        body: { done },
+      });
+      if (!response.ok) {
+        onError(problemMessage(error, 'Madde işaretlenemedi.'));
+        // Ve geri alınıyor: reddedilen bir değişikliği ekranda bırakmak, kullanıcıya olmamış bir
+        // şeyi olmuş göstermek.
+        void load();
+        return;
+      }
+      // Kim tiklediğini sunucu biliyor; iyimser satır onu boş bıraktı.
+      void load();
+    },
+    [load, onError, taskId],
+  );
+
+  const dropItem = useCallback(
+    async (itemId: string): Promise<void> => {
+      const { response, error } = await api.DELETE('/tasks/{id}/checklist/{itemId}', {
+        params: { path: { id: taskId, itemId } },
+      });
+      if (!response.ok) {
+        onError(problemMessage(error, 'Madde silinemedi.'));
+        return;
+      }
+      // Yorumların tersine GERÇEKTEN gidiyor: bir madde bir hatırlatma, ve yanlış yazılmış bir
+      // hatırlatmanın "silindi" diye listede durması yalnız gürültü.
+      setItems((current) => {
+        const left = current.filter((item) => item.id !== itemId);
+        onCounts(left.filter((i) => i.doneAt !== null).length, left.length);
+        return left;
+      });
+    },
+    [onCounts, onError, taskId],
+  );
 
   const remove = useCallback(
     async (id: string): Promise<void> => {
@@ -135,6 +240,85 @@ export function TaskThread({
         )}
       </div>
 
+      {/* ─── kontrol listesi ─────────────────────────────────────────────── */}
+
+      <div className="pmh">Kontrol listesi</div>
+      {items.map((item) => (
+        <label className={item.doneAt === null ? 'citem' : 'citem on'} key={item.id}>
+          <input
+            type="checkbox"
+            checked={item.doneAt !== null}
+            onChange={(event) => void tick(item.id, event.target.checked)}
+          />
+          <span className="tx">{item.body}</span>
+          {/* Kim tikledi. Yalnız tiklenmiş maddede, ve yalnız adı biliniyorsa. */}
+          {item.doneByUsername !== null && <span className="s">{item.doneByUsername}</span>}
+          <button
+            type="button"
+            className="del"
+            aria-label={`"${item.body}" maddesini sil`}
+            onClick={() => void dropItem(item.id)}
+          >
+            ✕
+          </button>
+        </label>
+      ))}
+      <div className="cadd">
+        <input
+          value={itemDraft}
+          maxLength={500}
+          aria-label="Kontrol listesine madde ekle"
+          placeholder="Madde ekle — Enter"
+          onChange={(event) => setItemDraft(event.target.value)}
+          onKeyDown={(event) => {
+            // Düz Enter, yorumdakinin tersine: bir madde tek satır, ve Ctrl istemek her maddeye
+            // fazladan bir tuş eklerdi.
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              void addItem();
+            }
+          }}
+        />
+      </div>
+
+      {/* ─── parçalar ────────────────────────────────────────────────────── */}
+
+      {canHaveSubtasks && (
+        <>
+          <div className="pmh">Parçalar</div>
+          {subtasks.length === 0 && <p className="note">Parçası yok.</p>}
+          {subtasks.map((sub) => (
+            <div className={closedTask(sub) ? 'sub done' : 'sub'} key={sub.id}>
+              <span className="tx">{sub.body}</span>
+              <span className="s">{sub.assigneeUsername ?? 'atanmamış'}</span>
+            </div>
+          ))}
+          {/* Parça satırları BURADAN düzenlenmiyor: her biri panoda kendi satırı olarak duruyor,
+              atananının sütununda, bütün kontrolleriyle. Aynı işi iki yerde yapmak, iki yerde
+              ayrışan iki davranış demek. */}
+          <div className="cadd">
+            <input
+              value={subDraft}
+              maxLength={2000}
+              aria-label="Parça ekle"
+              placeholder="Parça ekle — Enter"
+              onChange={(event) => setSubDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  if (subDraft.trim() === '') return;
+                  onSubtask(subDraft);
+                  setSubDraft('');
+                }
+              }}
+            />
+          </div>
+        </>
+      )}
+
+      {/* ─── tartışma ────────────────────────────────────────────────────── */}
+
+      <div className="pmh">Yorumlar</div>
       {failed && <p className="note">Yorumlar okunamadı.</p>}
       {!failed && comments === null && <p className="note">Yükleniyor…</p>}
       {comments !== null && comments.length === 0 && <p className="note">Henüz yorum yok.</p>}
@@ -245,4 +429,9 @@ function highlight(body: string): ReactNode[] {
   }
   if (at < body.length) out.push(body.slice(at));
   return out;
+}
+
+/** Kapanmış bir parça: bitmiş ya da iptal. İkisi de "artık beklemiyor" demek. */
+function closedTask(task: Task): boolean {
+  return task.status === 'done' || task.status === 'cancelled';
 }

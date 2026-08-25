@@ -255,7 +255,70 @@ export function Tasks({
     setDrafts((current) => ({ ...current, [key]: '' }));
   }
 
+  /**
+   * Bir işe parça ekle.
+   *
+   * `add`'den ayrı, çünkü o `drafts` sözlüğünden okuyor ve kişi sütunlarına ait. Bir parçanın
+   * kutusu tartışma panelinde ve kendi durumunu orada tutuyor; ikisini tek fonksiyona sıkıştırmak,
+   * hangi kutunun hangi metni sahiplendiğini okunmaz yapardı.
+   *
+   * ATANMAMIŞ doğuyor. Üst işin atananını devralmak makul görünüyor ama yanlış: bir işi parçalara
+   * ayırmanın sebebi çoğu zaman onları BAŞKALARINA dağıtmak, ve sessizce atanmış bir parça o
+   * kişinin panosunda istemediği bir satır olarak beliriyor.
+   */
+  async function addSubtask(parentId: string, body: string): Promise<void> {
+    const text = body.trim();
+    if (text === '') return;
+    const { data, error } = await api.POST('/tasks', {
+      body: { body: text, assigneeId: null, parentId },
+    });
+    if (error !== undefined || data === undefined) {
+      notify('error', problemMessage(error, 'Parça eklenemedi.'));
+      return;
+    }
+    const created = data;
+    setTasks((current) =>
+      current === null
+        ? [created]
+        : [
+            ...current.map((it) =>
+              // Üstün rozetini burada artırıyor: sayıyı sunucu `GET /tasks` ile veriyor ve o çağrı
+              // yapılmadan rozet olduğu yerde kalırdı. Kesin bir artış — yeni parça atanmamış ve
+              // açık doğuyor, yani toplam bir artıyor ve kapananlar değişmiyor.
+              it.id === parentId ? { ...it, subtaskTotal: (it.subtaskTotal ?? 0) + 1 } : it,
+            ),
+            created,
+          ],
+    );
+  }
+
+  /**
+   * Bir işin madde sayacını panoda güncelle.
+   *
+   * `useCallback` DEĞİL ve olmasına gerek yok: `TaskThread` onu bir efektin bağımlılığı olarak
+   * kullanmıyor, yalnız olay anında çağırıyor.
+   */
+  function setChecklistCount(taskId: string, done: number, total: number): void {
+    setTasks((current) =>
+      current === null
+        ? current
+        : current.map((it) =>
+            it.id === taskId ? { ...it, checklistDone: done, checklistTotal: total } : it,
+          ),
+    );
+  }
+
   async function remove(task: Task): Promise<void> {
+    // KASKAT ÖNCE SÖYLENİYOR. Bir üst işi silmek parçalarını da siliyor, ve bunu sessizce yapmak
+    // veri kaybının en sık biçimi: kullanıcı bir satır sildiğini sanıyor, dört satır gidiyor.
+    // Onay yalnız parçası olan işlerde soruluyor — her silmede bir kutu, okunmayan bir kutu.
+    if (
+      task.subtaskTotal !== undefined &&
+      task.subtaskTotal > 0 &&
+      !window.confirm(`Bu işin ${task.subtaskTotal} parçası da silinecek. Devam edilsin mi?`)
+    ) {
+      return;
+    }
     setBusy(true);
     const { error } = await api.DELETE('/tasks/{id}', { params: { path: { id: task.id } } });
     setBusy(false);
@@ -263,7 +326,13 @@ export function Tasks({
       notify('error', problemMessage(error, 'İş silinemedi.'));
       return;
     }
-    setTasks((current) => (current === null ? current : current.filter((it) => it.id !== task.id)));
+    // Parçaları da listeden düşüyor: sunucu onları sildi, ve ekranda bırakmak bir sonraki
+    // tıklamada 404 üretirdi.
+    setTasks((current) =>
+      current === null
+        ? current
+        : current.filter((it) => it.id !== task.id && it.parentId !== task.id),
+    );
   }
 
   if (failed) {
@@ -494,6 +563,27 @@ export function Tasks({
                       )}
                     </label>
 
+                    {/* Parça ve madde ilerlemesi. İkisi de yalnız VARSA çiziliyor: her satırda
+                      "0/0" duran bir rozet, göz için hiçbir şey söylemeyen bir şey. */}
+                    {task.subtaskTotal !== undefined && task.subtaskTotal > 0 && (
+                      <span className="pill dim" title="Parçalar">
+                        ⑂ {task.subtaskDone ?? 0}/{task.subtaskTotal}
+                      </span>
+                    )}
+                    {task.checklistTotal !== undefined && task.checklistTotal > 0 && (
+                      <span className="pill dim" title="Kontrol listesi">
+                        ☑ {task.checklistDone ?? 0}/{task.checklistTotal}
+                      </span>
+                    )}
+                    {/* Parçası olduğu iş. Pano KİŞİYE göre gruplanıyor, o yüzden bir alt görev
+                      atananının sütununda duruyor — orada gizlemek, o kişiye verilmiş işi
+                      panodan kaldırmak olurdu. Neyin parçası olduğu ise ancak burada okunabilir. */}
+                    {task.parentId !== null && task.parentId !== undefined && (
+                      <span className="pill dim" title="Şunun parçası">
+                        ⤷ {parentBody(tasks, task.parentId)}
+                      </span>
+                    )}
+
                     {task.linkedFileCount !== undefined && task.linkedFileCount > 0 && (
                       // Sayı ÇAĞIRANIN GÖREBİLDİKLERİ. Toplamı göstermek, göremediği dosyaların
                       // varlığını söylerdi — §7'nin yasakladığı şeyin sayı hâli.
@@ -529,6 +619,10 @@ export function Tasks({
                   </div>
                   {talking && (
                     <TaskThread
+                      subtasks={tasks.filter((it) => it.parentId === task.id)}
+                      canHaveSubtasks={task.parentId === null || task.parentId === undefined}
+                      onSubtask={(body) => void addSubtask(task.id, body)}
+                      onCounts={(done, total) => setChecklistCount(task.id, done, total)}
                       taskId={task.id}
                       me={me.username}
                       isAdmin={me.role === 'admin'}
@@ -569,4 +663,17 @@ export function Tasks({
       </div>
     </>
   );
+}
+
+/**
+ * Bir parçanın üst işinin metni, panodan.
+ *
+ * Sunucuya sorulmuyor: üst iş zaten aynı listede — pano bütün işleri tek çağrıda getiriyor — ve
+ * bunun için ikinci bir alan eklemek her satırda tekrar eden bir metin taşımak olurdu. Bulunamazsa
+ * boş dönmüyor: "bir şeyin parçası" bilgisi, neyin parçası olduğundan bağımsız olarak doğru.
+ */
+function parentBody(tasks: Task[], parentId: string): string {
+  const parent = tasks.find((task) => task.id === parentId);
+  if (parent === undefined) return 'üst iş';
+  return parent.body.length <= 24 ? parent.body : `${parent.body.slice(0, 23)}…`;
 }

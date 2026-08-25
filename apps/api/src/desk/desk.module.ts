@@ -4,6 +4,7 @@ import { AuthModule } from '../auth/auth.module.js';
 import { FilesModule } from '../files/files.module.js';
 import { NotificationsController } from './notifications.controller.js';
 import { NotificationsModule } from './notifications.module.js';
+import { TaskChecklistService } from './task-checklist.service.js';
 import { TaskCommentsService } from './task-comments.service.js';
 import { TaskFilesService } from './task-files.service.js';
 import { TaskWatchersService } from './task-watchers.service.js';
@@ -37,6 +38,7 @@ import { TasksService } from './tasks.service.js';
     TaskFilesService,
     TaskCommentsService,
     TaskWatchersService,
+    TaskChecklistService,
   ],
 })
 export class DeskModule {}

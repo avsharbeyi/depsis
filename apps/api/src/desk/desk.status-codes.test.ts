@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
 import { NotesController } from './notes.controller.js';
 import type { NotesService } from './notes.service.js';
+import type { TaskChecklistService } from './task-checklist.service.js';
 import type { TaskCommentsService } from './task-comments.service.js';
 import type { TaskWatchersService } from './task-watchers.service.js';
 import { TasksController } from './tasks.controller.js';
@@ -40,6 +41,7 @@ const tasks = new TasksController(
   NEVER_CALLED as unknown as TaskFilesService,
   NEVER_CALLED as unknown as TaskCommentsService,
   NEVER_CALLED as unknown as TaskWatchersService,
+  NEVER_CALLED as unknown as TaskChecklistService,
 );
 
 /** A resolved session, which the handlers require before they look at the body. */

@@ -108,9 +108,15 @@ ama sınırın doğru sayı olduğu ölçülmedi.
 
 ### Faz 2
 
-1. **Görev modülünün kalanı.** Durum, öncelik, son tarih, aktivite, dosya bağı, yorum, mention ve
-   izleyici yazıldı. Kalanlar: **alt görev**, **kontrol listesi** ve **etiket**. Üçü de kendi
-   tablolarını istiyor ve birbirinden bağımsız; hiçbiri bugünkü davranışı bozmuyor, yalnız eksik.
+1. **Görev modülünün kalanı: yalnız ETİKET.** Durum, öncelik, son tarih, aktivite, dosya bağı,
+   yorum, mention, izleyici, alt görev ve kontrol listesi yazıldı.
+
+   Alt görev **tek seviye** ve bu bilinçli: keyfi derinlikte bir ağaç, bir yapılacaklar panosunu
+   bir dosya yöneticisine çevirir. Parçalar panoda kendi satırları olarak, atananının sütununda
+   duruyor — bir parça da birine verilen iş, ve yalnız üstünün panelinde göstermek onu panodan
+   kaldırmak olurdu. Parçaların KENDİ SIRASI yok: pano sırası atanana göre, ve bir üst işin
+   parçalarını elle dizmek ancak parçalar tek bir listede gösterilseydi anlamlı olurdu.
+
 2. **Yorumda biçimlendirme yok.** Gövde düz metin: kalın, liste, kod bloğu ya da bağlantı yok.
    Markdown eklemek bir işaretleme çözümleyicisi ve onunla birlikte bir XSS yüzeyi getiriyor, ve
    bir NAS'ın iş panosunda düz metnin yetmediği ölçülmedi. `@ad` işaretleniyor ama TIKLANABİLİR

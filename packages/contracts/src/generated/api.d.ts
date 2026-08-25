@@ -2604,6 +2604,149 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/{id}/checklist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Görevin kontrol listesi */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Maddeler, kullanıcının dizdiği sırayla */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ChecklistPage"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        /**
+         * Kontrol listesine madde ekle
+         * @description Madde listenin SONUNA ekleniyor ve sırasını sunucu hesaplıyor. İstemciden bir `position`
+         *     almak, aynı anda madde ekleyen iki kişiyi aynı sırayı isteyen iki kişiye çevirirdi.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ChecklistItemRequest"];
+                };
+            };
+            responses: {
+                /** @description Eklendi */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ChecklistPage"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{id}/checklist/{itemId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Maddeyi sil
+         * @description GERÇEKTEN siliniyor, yorumların tersine. Fark bilinçli: bir yorum bir kişinin söylediği şey
+         *     ve kaydı korunmalı; bir kontrol listesi maddesi bir hatırlatma, ve yanlış yazılmış bir
+         *     hatırlatmanın "bu madde silindi" diye listede durması yalnız gürültü. Ne olduğu denetim
+         *     izinde kalıyor.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    itemId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Silindi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Maddeyi tikle ya da tiki kaldır */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    itemId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        done: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description İşaretlendi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        trace?: never;
+    };
     "/tasks/{id}/comments": {
         parameters: {
             query?: never;
@@ -4807,6 +4950,21 @@ export interface components {
              */
             dueAt?: string | null;
             /**
+             * Format: uuid
+             * @description Parçası olduğu iş. TEK SEVİYE: bir alt görevin kendi alt görevi olamıyor, ve bunu
+             *     veritabanındaki `tasks_one_level_deep` tetikleyicisi tutuyor — keyfi derinlikte bir
+             *     ağaç, bir yapılacaklar panosunu bir dosya yöneticisine çevirir.
+             *
+             *     Üst işi silmek parçalarını da siliyor. Arayüz silmeden önce kaç parçanın gideceğini
+             *     söylüyor; sessiz bir kaskat, veri kaybının en sık biçimi.
+             */
+            parentId?: string | null;
+            /** @description Kaç parçası kapandı (`done` ya da `cancelled`). Parçası yoksa 0. */
+            subtaskDone?: number;
+            subtaskTotal?: number;
+            checklistDone?: number;
+            checklistTotal?: number;
+            /**
              * @description Bu görevin ÇAĞIRANIN GÖREBİLDİĞİ kaç dosyaya bağlı olduğu. Toplam sayı değil, ve fark
              *     §7'nin kuralı: görev erişimi gizli dosya erişimi vermemeli. Göremediği bir dosyanın
              *     varlığını sayıdan çıkarmak da bir sızıntı olurdu.
@@ -4869,7 +5027,7 @@ export interface components {
              *     ilk 200 karakteri, `newValue` null.
              * @enum {string}
              */
-            field: "status" | "priority" | "due_at" | "assignee_id" | "body" | "file_link" | "comment";
+            field: "status" | "priority" | "due_at" | "assignee_id" | "body" | "file_link" | "comment" | "parent_id" | "checklist";
             oldValue?: string | null;
             newValue?: string | null;
             /** Format: date-time */
@@ -4882,6 +5040,11 @@ export interface components {
             body: string;
             /** Format: uuid */
             assigneeId?: string | null;
+            /**
+             * Format: uuid
+             * @description Verilirse iş bunun parçası olarak doğuyor. Tek seviye; bkz. `Task.parentId`.
+             */
+            parentId?: string | null;
         };
         UpdateTaskRequest: {
             body?: string;
@@ -4895,6 +5058,21 @@ export interface components {
             /** Format: date-time */
             dueAt?: string | null;
             position?: number;
+        };
+        ChecklistItem: {
+            /** Format: uuid */
+            id: string;
+            body: string;
+            /** Format: date-time */
+            doneAt: string | null;
+            /** @description Kim tikledi. Hesap kapandıysa null; madde kalıyor. */
+            doneByUsername: string | null;
+        };
+        ChecklistPage: {
+            items: components["schemas"]["ChecklistItem"][];
+        };
+        ChecklistItemRequest: {
+            body: string;
         };
         TaskComment: {
             /** Format: uuid */

@@ -1472,6 +1472,77 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/NotificationsRead' }
 
+  /tasks/{id}/checklist:
+    get:
+      tags: [tasks]
+      summary: Görevin kontrol listesi
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Maddeler, kullanıcının dizdiği sırayla
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChecklistPage' }
+        '404': { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [tasks]
+      summary: Kontrol listesine madde ekle
+      description: |
+        Madde listenin SONUNA ekleniyor ve sırasını sunucu hesaplıyor. İstemciden bir `position`
+        almak, aynı anda madde ekleyen iki kişiyi aynı sırayı isteyen iki kişiye çevirirdi.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChecklistItemRequest' }
+      responses:
+        '201':
+          description: Eklendi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChecklistPage' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /tasks/{id}/checklist/{itemId}:
+    patch:
+      tags: [tasks]
+      summary: Maddeyi tikle ya da tiki kaldır
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: itemId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [done]
+              properties:
+                done: { type: boolean }
+      responses:
+        '204':
+          description: İşaretlendi
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [tasks]
+      summary: Maddeyi sil
+      description: |
+        GERÇEKTEN siliniyor, yorumların tersine. Fark bilinçli: bir yorum bir kişinin söylediği şey
+        ve kaydı korunmalı; bir kontrol listesi maddesi bir hatırlatma, ve yanlış yazılmış bir
+        hatırlatmanın "bu madde silindi" diye listede durması yalnız gürültü. Ne olduğu denetim
+        izinde kalıyor.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: itemId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204':
+          description: Silindi
+        '404': { $ref: '#/components/responses/Problem' }
+
   /tasks/{id}/comments:
     get:
       tags: [tasks]
@@ -3038,6 +3109,22 @@ components:
             Tarih değil ZAMAN DAMGASI. "Yarın" bir zaman diliminde yarın, başkasında bugün; bir
             son tarihin hangi ana denk geldiği, gecikmiş olup olmadığını belirleyen şeyin ta
             kendisi.
+        parentId:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            Parçası olduğu iş. TEK SEVİYE: bir alt görevin kendi alt görevi olamıyor, ve bunu
+            veritabanındaki `tasks_one_level_deep` tetikleyicisi tutuyor — keyfi derinlikte bir
+            ağaç, bir yapılacaklar panosunu bir dosya yöneticisine çevirir.
+
+            Üst işi silmek parçalarını da siliyor. Arayüz silmeden önce kaç parçanın gideceğini
+            söylüyor; sessiz bir kaskat, veri kaybının en sık biçimi.
+        subtaskDone:
+          type: integer
+          description: Kaç parçası kapandı (`done` ya da `cancelled`). Parçası yoksa 0.
+        subtaskTotal: { type: integer }
+        checklistDone: { type: integer }
+        checklistTotal: { type: integer }
         linkedFileCount:
           type: integer
           description: |
@@ -3108,7 +3195,8 @@ components:
         actorUsername: { type: [string, 'null'] }
         field:
           type: string
-          enum: [status, priority, due_at, assignee_id, body, file_link, comment]
+          enum:
+            [status, priority, due_at, assignee_id, body, file_link, comment, parent_id, checklist]
           description: |
             `comment` yalnız bir yorumun SİLİNMESİ için düşüyor, eklenmesi için değil: yorum
             listesinin kendisi eklendiğinin kaydı, ve iki yere yazmak iki farklı doğruluk kaynağı
@@ -3132,6 +3220,10 @@ components:
       properties:
         body: { type: string, minLength: 1, maxLength: 2000 }
         assigneeId: { type: [string, 'null'], format: uuid }
+        parentId:
+          type: [string, 'null']
+          format: uuid
+          description: Verilirse iş bunun parçası olarak doğuyor. Tek seviye; bkz. `Task.parentId`.
 
     UpdateTaskRequest:
       type: object
@@ -3150,6 +3242,31 @@ components:
         priority: { type: string, enum: [low, normal, high, urgent] }
         dueAt: { type: [string, 'null'], format: date-time }
         position: { type: number }
+
+    ChecklistItem:
+      type: object
+      required: [id, body, doneAt, doneByUsername]
+      properties:
+        id: { type: string, format: uuid }
+        body: { type: string, maxLength: 500 }
+        doneAt: { type: [string, 'null'], format: date-time }
+        doneByUsername:
+          type: [string, 'null']
+          description: Kim tikledi. Hesap kapandıysa null; madde kalıyor.
+
+    ChecklistPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ChecklistItem' }
+
+    ChecklistItemRequest:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 500 }
 
     TaskComment:
       type: object

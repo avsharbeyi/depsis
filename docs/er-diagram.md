@@ -184,6 +184,8 @@ erDiagram
     tasks ||--o{ task_activity : "ne değişti, kim değiştirdi"
     tasks ||--o{ task_file_links : ""
     file_entries ||--o{ task_file_links : ""
+    tasks ||--o{ tasks : "parça (TEK seviye)"
+    tasks ||--o{ task_checklist_items : ""
     tasks ||--o{ task_comments : ""
     tasks ||--o{ task_watchers : ""
     users ||--o{ task_watchers : "abone"
@@ -197,6 +199,14 @@ erDiagram
         timestamptz due_at "NULL = son tarih yok"
         uuid assignee_id FK "NULL = kimseye atanmamış"
         uuid created_by FK
+        uuid parent_id FK "NULL = üst seviye; tetikleyici tek seviye tutuyor"
+    }
+    task_checklist_items {
+        uuid id PK
+        text body
+        timestamptz done_at "NULL = yapılmadı"
+        uuid done_by FK "silinen hesapta NULL"
+        float position "sürüklemek tek UPDATE"
     }
     task_activity {
         uuid id PK
@@ -230,6 +240,22 @@ erDiagram
         timestamptz read_at "NULL = okunmamış"
     }
 ```
+
+**Alt görev bir SÜTUN, yeni bir tablo değil.** Bir alt görev tam olarak bir görev: atanabiliyor,
+kendi durumu, önceliği, son tarihi, yorumu ve izleyicisi oluyor. Ayrı bir tablo bunların hepsinin
+ikinci bir kopyasını gerektirirdi, ve o kopyalar zamanla ayrışırdı.
+
+**TEK SEVİYE, ve onu `tasks_one_level_deep` TETİKLEYİCİSİ tutuyor.** Kural bir CHECK ile ifade
+edilemiyor çünkü başka bir satıra bakması gerekiyor; yalnız serviste tutulsaydı, ikinci bir yazma
+yolu açıldığı gün sessizce kaybolurdu. Üç şeyi birden reddediyor: bir alt görevin kendi alt görevi,
+bir işin kendine ebeveynliği, ve parçaları olan bir işin başka bir şeyin parçası olması. Keyfi
+derinlikte bir ağaç, bir yapılacaklar panosunu bir dosya yöneticisine çevirir.
+
+**Kontrol listesi maddesi bir alt görev DEĞİL, ve ikisi birden var.** Bir madde atanamıyor, son
+tarihi yok, bildirim üretmiyor. Bunlardan herhangi birini isteyen şey zaten bir alt görev; biri
+eksik olsaydı insanlar ötekini onun yerine kullanırdı, ve ikisi de kötü olurdu — her adım için ayrı
+bir iş açmak panoyu okunmaz yapıyor, tek bir gövdeye madde madde yazmak hiçbirini takip edilebilir
+yapmıyor.
 
 **`task_watchers` bir TAHMİNİN yerini aldı.** Bildirim bir zamanlar "atanan + oluşturan" diyordu,
 ve o çoğu zaman doğru cevaptı — ama yalnızca çoğu zaman, ve yanlış olduğunda hiçbir belirti
