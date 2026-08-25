@@ -55,9 +55,11 @@ interface AxeRunner {
   disableRules: (rules: string[]) => AxeRunner;
   analyze: () => Promise<AxeResults>;
 }
-const AxeBuilder = createRequire(import.meta.url)('@axe-core/playwright').default as new (options: {
-  page: Page;
-}) => AxeRunner;
+/** Modülün şekli, `any` üzerinden geçmeden: `require`'ın dönüşü tiplenmemiş. */
+interface AxeModule {
+  default: new (options: { page: Page }) => AxeRunner;
+}
+const AxeBuilder = (createRequire(import.meta.url)('@axe-core/playwright') as AxeModule).default;
 
 async function violations(page: Page): Promise<string[]> {
   const result = await new AxeBuilder({ page })
