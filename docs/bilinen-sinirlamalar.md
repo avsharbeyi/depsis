@@ -223,7 +223,18 @@ ama sınırın doğru sayı olduğu ölçülmedi.
 
 11. Off-site backup, PITR, otomatik restore testi.
 12. Güncelleme ve geri alma, HA controller, relay.
-13. Performans, chaos, erişilebilirlik ve penetrasyon testleri.
+13. Performans, chaos ve penetrasyon testleri. **Erişilebilirlik testleri yazıldı**
+    (`e2e/a11y.spec.ts`): giriş ekranı, masaüstü, beş panel ve iki açılır panel, WCAG 2 A/AA
+    kurallarıyla, iki projede.
+
+    Kontrast dahil, ve bu ölçülerek karar verildi: kural bir kez açılıp koşuldu ve hiçbir ekranda
+    ihlal çıkmadı, yani palet AA eşiğini karşılıyor. Süitte bir de kendini denetleyen bir test var
+    — sayfaya bilerek adsız bir düğme koyup axe'ın onu gördüğünü doğruluyor. Yalnız geçebilen bir
+    süit, bir süit değil.
+
+    **Kapsamadığı:** klavyeyle gezilebilirlik, odak sırası, ve ekran okuyucunun okuduğu cümlenin
+    anlamlı olması. axe bunları göremiyor ve göremediğini söylemek gerekiyor — makine tarafından
+    karara bağlanabilir olanlar bittiğinde geriye kalan, insan işi.
 
 ### §21'in kalan teslimatları
 
