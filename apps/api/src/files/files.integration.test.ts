@@ -12,6 +12,7 @@ import {
   type AgentService,
 } from '../agent/agent.service.js';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
+import { AuditService } from '../audit/audit.service.js';
 import { DbService } from '../db/db.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
@@ -1543,6 +1544,7 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
       stubData,
       new TrashRetentionService(pdb, pfiles),
       new ThumbnailsService(pfiles, stubData),
+      new AuditService(pdb),
     );
     search = new SearchController(pfiles);
     uploads = new UploadsController(
@@ -1564,6 +1566,7 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
   afterAll(async () => {
     if (powner !== undefined) {
       await powner.withoutTenant('migration-status', async (q) => {
+        await q.query(`DELETE FROM audit_events WHERE organization_id = $1`, [org]);
         await q.query(`DELETE FROM upload_sessions WHERE organization_id = $1`, [org]);
         await q.query(`DELETE FROM folder_grants WHERE organization_id = $1`, [org]);
         await q.query(`DELETE FROM team_members WHERE organization_id = $1`, [org]);

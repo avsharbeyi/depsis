@@ -18,6 +18,7 @@ import {
 import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
+import { AuditService } from '../audit/audit.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
 import { PasswordResetService } from '../auth/password-reset.service.js';
 import { PasswordService } from '../auth/password.service.js';
@@ -81,6 +82,7 @@ export class UsersController {
     private readonly passwords: PasswordService,
     private readonly sessions: SessionService,
     private readonly resets: PasswordResetService,
+    private readonly audit: AuditService,
   ) {}
 
   @Get()
@@ -115,6 +117,12 @@ export class UsersController {
         // one-way — and it is sealed inside the same transaction as the row.
         parsed.data.password,
       );
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: 'user.created',
+        target: { kind: 'user', id: row.id, label: row.username },
+        summary: `'${row.username}' hesabı ${parsed.data.role === 'admin' ? 'YÖNETİCİ' : 'üye'} rolüyle açıldı.`,
+      });
       return toUser(row);
     } catch (error) {
       throw translate(error);
@@ -170,6 +178,14 @@ export class UsersController {
     });
 
     const issued = await this.resets.open(session.organizationId, id, session.userId);
+    // Jetonun KENDİSİ değil, açıldığı gerçeği. §16: denetimde sır olmaz — ve bu satırın işi tam
+    // olarak "birinin hesabına giden bir kapı açıldı" demek, kapının anahtarını saklamak değil.
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'user.password-reset-issued',
+      target: { kind: 'user', id, label: target.username },
+      summary: `'${target.username}' için tek kullanımlık parola sıfırlama bileti açıldı.`,
+    });
     this.logger.warn(
       `password reset opened for '${target.username}' by '${session.userId}'; ` +
         `it expires at ${issued.expiresAt.toISOString()}`,
@@ -199,12 +215,35 @@ export class UsersController {
     try {
       const row = await this.users.update(session.organizationId, id, parsed.data);
 
+      if (parsed.data.role !== undefined) {
+        await this.audit.record(session.organizationId, {
+          actorId: session.userId,
+          action: 'user.role-changed',
+          target: { kind: 'user', id: row.id, label: row.username },
+          summary:
+            parsed.data.role === 'admin'
+              ? `'${row.username}' YÖNETİCİ yapıldı.`
+              : `'${row.username}' üye rolüne indirildi.`,
+        });
+      }
       // A disabled account's sessions have to stop working NOW. `resolve_session` already refuses
       // them — it joins `users` and checks `disabled_at` — so this is not what closes the hole; it
       // is what makes the rows say what happened, so an audit does not have to infer a revocation
       // from a column on another table.
       if (parsed.data.disabled === true) {
         await this.sessions.revokeAllForUser(session.organizationId, id);
+      }
+      // Kayıt iptalden SONRA: özet "oturumları sonlandırıldı" diyor, ve bunu ancak olduktan
+      // sonra diyebilir.
+      if (parsed.data.disabled !== undefined) {
+        await this.audit.record(session.organizationId, {
+          actorId: session.userId,
+          action: parsed.data.disabled ? 'user.disabled' : 'user.enabled',
+          target: { kind: 'user', id: row.id, label: row.username },
+          summary: parsed.data.disabled
+            ? `'${row.username}' hesabı kapatıldı; oturumları sonlandırıldı.`
+            : `'${row.username}' hesabı yeniden açıldı.`,
+        });
       }
       return toUser(row);
     } catch (error) {

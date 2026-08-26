@@ -17,6 +17,7 @@ import {
 import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
+import { AuditService } from '../audit/audit.service.js';
 import { AgentService } from '../agent/agent.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
 import { ReauthService } from '../auth/reauth.service.js';
@@ -76,6 +77,7 @@ export class PoolsController {
     private readonly jobs: JobsService,
     private readonly reauth: ReauthService,
     private readonly agent: AgentService,
+    private readonly audit: AuditService,
   ) {}
 
   @Post()
@@ -139,6 +141,15 @@ export class PoolsController {
       // asks for again, having looked.
       { maxAttempts: 1 },
     );
+
+    // Kuyruğa KONULDUĞU an, bittiği an değil — ve bu doğru an: diskleri silen kararı veren kişi
+    // burada, işin kendisi ise sahipsiz bir arka plan sürecinde. İş düşerse de karar verilmişti.
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'storage.pool-create-requested',
+      target: { kind: 'pool', id: plan.name, label: plan.name },
+      summary: `'${plan.name}' havuzunun ${plan.disks.length} diskle (${plan.topology}) kurulması istendi; anılan diskler SİLİNECEK.`,
+    });
 
     return { jobId };
   }

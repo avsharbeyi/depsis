@@ -21,6 +21,7 @@ import { map, type Observable } from 'rxjs';
 import { z } from 'zod';
 
 import { ReauthService } from '../auth/reauth.service.js';
+import { AuditService } from '../audit/audit.service.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import {
   ConsoleRefusedError,
@@ -73,6 +74,7 @@ export class ConsoleController {
   constructor(
     private readonly console: ConsoleService,
     private readonly reauth: ReauthService,
+    private readonly audit: AuditService,
   ) {}
 
   /**
@@ -109,12 +111,23 @@ export class ConsoleController {
     );
 
     try {
-      return await this.console.open(
+      const opened = await this.console.open(
         session.organizationId,
         session.userId,
         parsed.data.cols,
         parsed.data.rows,
       );
+      // Kabuk, cihazdaki en geniş yetkidir; açılışı en çok kaydedilmesi gereken olaydır. GİRİLEN
+      // KOMUTLAR BURADA YOK ve olmayacak: §16 denetimde dosya içeriği ve sırları yasaklıyor, ve
+      // bir komut satırı ikisini de taşıyabilir. Oturumun açıldığı gerçeği yeter — akış zaten
+      // konsol servisinin kendi kaydında.
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: 'console.opened',
+        target: { kind: 'console-session', id: opened.id },
+        summary: 'Yönetici konsolunda bir kabuk oturumu açıldı.',
+      });
+      return opened;
     } catch (error) {
       throw translate(error);
     }

@@ -9,6 +9,7 @@ type SetupStatusBody =
 type SetupClaimBody =
   Paths['/setup/claim']['post']['responses']['200']['content']['application/json'];
 
+import { AuditService } from '../audit/audit.service.js';
 import { SetupService } from './setup.service.js';
 
 const claimSchema = z.object({
@@ -27,7 +28,10 @@ const claimSchema = z.object({
  */
 @Controller('setup')
 export class SetupController {
-  constructor(private readonly setup: SetupService) {}
+  constructor(
+    private readonly setup: SetupService,
+    private readonly audit: AuditService,
+  ) {}
 
   /**
    * Unauthenticated on purpose — the web interface has to know which screen to show before anyone
@@ -54,6 +58,13 @@ export class SetupController {
 
     switch (result.outcome) {
       case 'ok':
+        // Kutunun İLK denetim satırı, ve tek seferlik: bu cihaz kimin tarafından, hangi kuruluş
+        // adıyla sahiplenildi. Jeton satırda yok — zaten tüketildi ve bir daha geçmez.
+        await this.audit.record(result.organizationId, {
+          actorId: result.userId,
+          action: 'setup.claimed',
+          summary: `Cihaz '${parsed.data.organizationName}' kuruluşu adına sahiplenildi; kurucu yönetici '${parsed.data.adminUsername}'.`,
+        });
         return { status: 'ok', organizationSlug: parsed.data.organizationSlug };
       case 'already-complete':
         throw new HttpException('setup has already been completed', HttpStatus.GONE);

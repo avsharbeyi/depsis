@@ -10,6 +10,7 @@ import {
 import { ServiceUnavailableException } from '@nestjs/common';
 
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
+import { AuditService } from '../audit/audit.service.js';
 import { DbService } from '../db/db.service.js';
 import { RemoteController } from './remote.controller.js';
 import {
@@ -327,7 +328,7 @@ describeDb('remote access, against a real PostgreSQL', () => {
         reason: 'zerotier-one is not installed here: /var/lib/zerotier-one/authtoken.secret ...',
       }),
     );
-    const controller = new RemoteController(new RemoteService(agent, db));
+    const controller = new RemoteController(new RemoteService(agent, db), new AuditService(db));
     // `headers` is not decoration: `join` is a state change and runs the same-origin check, which
     // reads `origin`, `referer` and `host`. Without the object the guard throws a TypeError and
     // the join half of this test would fail for a reason that has nothing to do with ZeroTier.

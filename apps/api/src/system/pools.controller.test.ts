@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 
+import type { AuditService } from '../audit/audit.service.js';
 import type { AgentService } from '../agent/agent.service.js';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
 import type { ReauthService } from '../auth/reauth.service.js';
@@ -74,7 +75,10 @@ function controller(options: {
   const agent = {
     call: () => Promise.reject(new Error('this suite does not drive the agent')),
   } as unknown as AgentService;
-  return { controller: new PoolsController(system, jobs, reauth, agent), enqueue };
+  // Denetim gerçek tabloya yazamaz — bu dosya veritabanısız çalışıyor. Kayıt çağrısının
+  // kendisi bu suite'in ölçtüğü şey değil; sessiz bir stub yeter.
+  const audit = { record: () => Promise.resolve() } as unknown as AuditService;
+  return { controller: new PoolsController(system, jobs, reauth, agent, audit), enqueue };
 }
 
 describe('POST /storage/pools', () => {

@@ -20,6 +20,7 @@ import { PasswordService } from '../auth/password.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { SessionService } from '../auth/session.service.js';
 import { IdentitySyncService } from '../identity/identity-sync.service.js';
+import { AuditService } from '../audit/audit.service.js';
 import { DbService } from '../db/db.service.js';
 
 type Schemas = OpenApi.components['schemas'];
@@ -71,6 +72,7 @@ export class MeController {
      * changed through its endpoints or not at all.
      */
     private readonly identity: IdentitySyncService,
+    private readonly audit: AuditService,
   ) {}
 
   /**
@@ -129,6 +131,13 @@ export class MeController {
     await this.db.withTenant(session.organizationId, (db) =>
       db.query(`UPDATE sessions SET revoked_at = NULL WHERE id = $1`, [session.sessionId]),
     );
+    // Kayıt İPTALDEN SONRA: özet "oturumları kapatıldı" diyor ve bunu ancak olduktan sonra
+    // diyebilir — araya giren bir hata, kapatılmamış oturumları "kapatıldı" diye yazdırmamalı.
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'auth.password-changed',
+      summary: 'Hesap sahibi kendi parolasını değiştirdi; diğer oturumları kapatıldı.',
+    });
     return { status: 'ok', otherSessionsRevoked: Math.max(0, revoked - 1) };
   }
 
@@ -196,6 +205,11 @@ export class MeController {
       parsed.data.code,
     );
     if (codes === null) throw new UnauthorizedException();
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'mfa.enabled',
+      summary: 'İki adımlı doğrulama (TOTP) açıldı.',
+    });
     return { codes };
   }
 
@@ -216,6 +230,14 @@ export class MeController {
     // a session would do first, so the owner's other devices should not silently keep working —
     // and §16 requires that a security event can end sessions.
     await this.sessions.revokeAllForUser(session.organizationId, session.userId);
+
+    // Denetime tam bu yüzden: ikinci adımı kaldırmak, çalınmış bir oturumun ilk hamlesidir.
+    // Satır, gerçek sahibin "ben yapmadım" diyebileceği tek yerdir.
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'mfa.disabled',
+      summary: 'İki adımlı doğrulama kaldırıldı; diğer oturumlar kapatıldı.',
+    });
   }
 
   @Post('mfa/recovery-codes')
@@ -231,6 +253,11 @@ export class MeController {
       throw new ConflictException('no second factor is enrolled');
     }
     const codes = await this.mfa.regenerateRecoveryCodes(session.organizationId, session.userId);
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'mfa.recovery-codes-regenerated',
+      summary: 'Kurtarma kodları yenilendi; eskileri artık geçersiz.',
+    });
     return { codes };
   }
 

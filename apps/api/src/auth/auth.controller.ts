@@ -26,6 +26,7 @@ import { headerString, isSecure, requireSameOrigin } from './origin.js';
  */
 type Schemas = OpenApi.components['schemas'];
 
+import { AuditService } from '../audit/audit.service.js';
 import { AuthService } from './auth.service.js';
 import {
   PENDING_COOKIE,
@@ -72,6 +73,7 @@ export class AuthController {
   constructor(
     private readonly auth: AuthService,
     private readonly sessions: SessionService,
+    private readonly audit: AuditService,
   ) {}
 
   @Post('login')
@@ -204,8 +206,18 @@ export class AuthController {
     }
 
     // Cleared whether or not the revoke found anything, so a client is never left holding a cookie
-    // the server has already forgotten.
+    // the server has already forgotten — and cleared BEFORE the audit write, so a failing audit
+    // insert cannot leave the browser holding a cookie for a session the line above just ended.
     response.setHeader('Set-Cookie', serializeClearedSessionCookie(isSecure(request)));
+
+    if (session !== undefined) {
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: 'auth.logout',
+        summary: 'Oturum kapatıldı.',
+        ip: clientIp(request),
+      });
+    }
     return { status: 'ok' };
   }
 }

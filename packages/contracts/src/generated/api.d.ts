@@ -540,6 +540,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Cihazın denetim kaydı
+         * @description Kim, neyi, ne zaman. Yalnız yönetici — 403 döner, 404 değil, çünkü ucun varlığı sır değil.
+         *     Satırlar üyelerin adlarını, kimlik doğrulama olaylarında IP'lerini ve hangi nesneye
+         *     dokunduklarını taşıyor; bu uç kiracının İÇİNDEKİ mahremiyetin de sınırıdır ve sıradan
+         *     üyeye açık değildir.
+         *
+         *     Kayıt EKLENİR, değişmez, silinmez: uygulamanın veritabanı rolünün bu tabloda UPDATE ve
+         *     DELETE yetkisi hiç yok (migration 0036). Yazan bir uç da yok — satırlar yalnız sunucunun
+         *     kendi kodunda, denetlenen işlemin akışı içinde doğar; dışarıdan satır yazdırmanın bir
+         *     yolu yoktur.
+         *
+         *     Sayfalama imleçli: `nextBefore` doluysa bir sonraki sayfa `before` olarak onu verir.
+         *     `action` bir önek de olabilir: `auth`, `auth.login` ve altındakilerin hepsini kapsar.
+         */
+        get: operations["listAuditEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users": {
         parameters: {
             query?: never;
@@ -5606,6 +5637,41 @@ export interface components {
          * @enum {string}
          */
         Permission: "list" | "read" | "download" | "create" | "modify" | "move" | "delete" | "share" | "manage_acl" | "view_versions" | "view_audit";
+        AuditEvent: {
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: uuid
+             * @description Hesap silinmişse null; `actorUsername` yine doludur. Denetim kaydı, artık var olmayan
+             *     hesaplar hakkında konuşabilmek için var.
+             */
+            actorId: string | null;
+            actorUsername: string;
+            /** @description Noktalı eylem adı — `auth.login`, `user.role-changed`, `permissions.changed`. */
+            action: string;
+            targetKind: string | null;
+            targetId: string | null;
+            /** @description Hedefin OLAY ANINDAKİ adı. Hedef silinse de satır okunur kalsın diye kopya. */
+            targetLabel: string | null;
+            summary: string;
+            /**
+             * Format: uuid
+             * @description Ajanla konuşan işlemlerde, ajanın kendi günlüğündeki satıra köprü (§9).
+             */
+            correlationId: string | null;
+            /** @description Yalnız kimlik doğrulama olaylarında dolu; başka olayda toplanmıyor (§16). */
+            ip: string | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        AuditPage: {
+            items: components["schemas"]["AuditEvent"][];
+            /**
+             * Format: uuid
+             * @description Bir sonraki sayfanın `before` değeri; null ise daha eski kayıt kalmamıştır.
+             */
+            nextBefore: string | null;
+        };
         DirectoryEntry: {
             /** Format: uuid */
             id: string;
@@ -7100,6 +7166,32 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    listAuditEvents: {
+        parameters: {
+            query?: {
+                before?: string;
+                action?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Olaylar, en yeni önce */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditPage"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+        };
+    };
     listShareSnapshots: {
         parameters: {
             query?: never;

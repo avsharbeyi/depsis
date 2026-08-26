@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 
+import { AuditService } from '../audit/audit.service.js';
 import { DbService } from '../db/db.service.js';
 import { OrganizationsService } from '../organizations/organizations.service.js';
 import { LoginThrottleService } from './login-throttle.service.js';
@@ -81,6 +82,7 @@ export class AuthService {
     private readonly throttle: LoginThrottleService,
     private readonly mfa: MfaService,
     private readonly pending: PendingLoginService,
+    private readonly audit: AuditService,
   ) {}
 
   async login(request: LoginRequest): Promise<LoginResult> {
@@ -119,6 +121,18 @@ export class AuthService {
           `account ${user === null ? 'not found' : 'ok'}, ` +
           `password ${user === null ? 'not checked' : ok ? 'ok' : 'wrong'}`,
       );
+      // Denetim kaydına YALNIZ hesap gerçekten varken. Bilinmeyen bir kullanıcı adı, kullanıcı
+      // adı kutusuna yazılmış bir PAROLA olabilir — §16 "audit'te parola yok" der, ve var olmayan
+      // adları kaydetmek o kuralı yazım hatası kadar ince bir yoldan deler. Bilinmeyen ad zaten
+      // journal'a düştü (üstte), oradan da bir hesaba bağlanmadan.
+      if (organizationId !== null && user !== null) {
+        await this.audit.record(organizationId, {
+          actorId: user.id,
+          action: 'auth.login-failed',
+          summary: 'Oturum açma denemesi yanlış parolayla reddedildi.',
+          ip: request.ip,
+        });
+      }
       return { outcome: 'rejected' };
     }
 
@@ -139,6 +153,12 @@ export class AuthService {
 
     await this.throttle.record(usernameFolded, request.ip, true);
     this.logger.log(`session issued for user ${user.id}`);
+    await this.audit.record(organizationId, {
+      actorId: user.id,
+      action: 'auth.login',
+      summary: 'Oturum açıldı.',
+      ip: request.ip,
+    });
 
     return { outcome: 'ok', session, userId: user.id, organizationId };
   }
@@ -160,7 +180,18 @@ export class AuthService {
       challenge.userId,
       request.code,
     );
-    if (verified.outcome !== 'ok') return { outcome: 'rejected' };
+    if (verified.outcome !== 'ok') {
+      // Yanlış parola kaydediliyorsa yanlış ikinci adım da kaydedilmeli: bu noktada parola zaten
+      // DOĞRU çıktı, yani kodu deneyen kişi ya kod kaybetmiş sahibin kendisi ya da elinde çalıntı
+      // bir parola olan biri. İkinci ihtimal, kaydın tam da var olma nedeni.
+      await this.audit.record(challenge.organizationId, {
+        actorId: challenge.userId,
+        action: 'auth.login-failed',
+        summary: 'İkinci adım (doğrulama kodu) reddedildi; parola doğruydu.',
+        ip: request.ip,
+      });
+      return { outcome: 'rejected' };
+    }
 
     // Consuming is what makes the challenge single-use, and it is checked: if another request
     // consumed it first, this one does not get a session out of the same challenge.
@@ -174,6 +205,17 @@ export class AuthService {
     });
 
     this.logger.log(`session issued for user ${challenge.userId} via ${verified.used}`);
+    await this.audit.record(challenge.organizationId, {
+      actorId: challenge.userId,
+      action: 'auth.login',
+      // Hangi ikinci adım: `totp` ya da `recovery`. Kurtarma koduyla girilen her oturum dikkate
+      // değer bir olaydır — kod tek kullanımlıktır ve bitiyorlardır.
+      summary:
+        verified.used === 'recovery-code'
+          ? 'Oturum ikinci adımda KURTARMA KODUYLA açıldı.'
+          : 'Oturum ikinci adımla (TOTP) açıldı.',
+      ip: request.ip,
+    });
     return {
       outcome: 'ok',
       session,

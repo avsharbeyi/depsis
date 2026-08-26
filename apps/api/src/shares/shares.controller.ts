@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 import { AgentRefusedError, AgentUnavailableError } from '../agent/agent.service.js';
+import { AuditService } from '../audit/audit.service.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { requireSession } from '../files/files.controller.js';
 import {
@@ -93,7 +94,10 @@ const createSchema = z.object({
 @Controller('shares')
 @UseGuards(SessionGuard)
 export class SharesController {
-  constructor(private readonly shares: SharesService) {}
+  constructor(
+    private readonly shares: SharesService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Get()
   async list(@Req() request: AuthenticatedRequest): Promise<Schemas['SharePage']> {
@@ -151,6 +155,13 @@ export class SharesController {
         },
         correlationId,
       );
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: 'share.created',
+        target: { kind: 'share', id: result.share.id, label: result.share.name },
+        summary: `'${result.share.name}' paylaşımı açıldı${parsed.data.readOnly === true ? ' (salt okunur)' : ''}.`,
+        correlationId,
+      });
       return {
         // The dataset goes out here where the listing hides it from members, and the asymmetry is
         // not an oversight: only an administrator can reach this route at all, and the dataset is

@@ -17,6 +17,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { PERMISSIONS, type Permission } from '@depsis/authz';
 import { z } from 'zod';
 
+import { AuditService } from '../audit/audit.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { requireUuid } from '../files/files.controller.js';
@@ -84,7 +85,10 @@ const writeSchema = z.object({ grants: z.array(grantSchema) });
 @Controller()
 @UseGuards(SessionGuard)
 export class PermissionsController {
-  constructor(private readonly permissions: PermissionsService) {}
+  constructor(
+    private readonly permissions: PermissionsService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Get('files/:id/permissions')
   async readFolder(
@@ -176,6 +180,24 @@ export class PermissionsController {
         grants,
         preview,
       );
+      // Yalnız GERÇEK yazma; önizleme hiçbir şeyi değiştirmez ve kaydı gürültüye çevirirdi.
+      // Özet, etkinin ta kendisi: kaç klasör, kim kazandı, kim kaybetti — §6.2'nin dry-run'ının
+      // gösterdiği sayılar, olan bitenin de doğru cümlesi.
+      if (!preview) {
+        // Adlar SINIRLI: bir paylaşım köküne verilen ekip izni kuruluşun herkesini etkileyebilir,
+        // ve hepsini saymak 500 karakterlik özet sınırına çarpardı. İlk birkaç ad + sayı, okuyana
+        // aynı şeyi söylüyor; tam liste zaten iznin kendisinden okunur.
+        await this.audit.record(actor.organizationId, {
+          actorId: actor.userId,
+          action: 'permissions.changed',
+          target: { kind: ref.kind === 'entry' ? 'folder' : 'share', id: ref.id },
+          summary:
+            `İzinler değişti: ${result.impact.foldersAffected} klasör etkilendi` +
+            phrase('; erişim kazanan', result.impact.usersGaining) +
+            phrase('; erişimi kalkan', result.impact.usersLosing) +
+            '.',
+        });
+      }
       return toWriteResult(result);
     } catch (error) {
       throw translate(error);
@@ -230,6 +252,14 @@ function toFolderPermissions(view: FolderPermissionsView): Schemas['FolderPermis
     })),
     canManage: view.canManage,
   };
+}
+
+/** En çok üç ad, kalanı sayı. Boş liste boş dize: özet cümlesi kendini kurar. */
+function phrase(label: string, users: ReadonlyArray<{ username: string }>): string {
+  if (users.length === 0) return '';
+  const named = users.slice(0, 3).map((u) => u.username);
+  const rest = users.length - named.length;
+  return `${label}: ${named.join(', ')}${rest > 0 ? ` ve ${rest} kişi daha` : ''}`;
 }
 
 function toWriteResult(view: WriteResultView): Schemas['PermissionWriteResult'] {

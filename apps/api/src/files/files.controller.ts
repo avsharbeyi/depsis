@@ -29,6 +29,7 @@ import { z } from 'zod';
 
 import { AgentDataService } from '../agent/agent-data.service.js';
 import { AgentRefusedError, AgentUnavailableError } from '../agent/agent.service.js';
+import { AuditService } from '../audit/audit.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { ThumbnailsService, ThumbnailUnreadableError } from './thumbnails.service.js';
 import { TrashRetentionService } from './trash-retention.service.js';
@@ -119,6 +120,7 @@ export class FilesController {
     private readonly data: AgentDataService,
     private readonly retention: TrashRetentionService,
     private readonly thumbs: ThumbnailsService,
+    private readonly audit: AuditService,
   ) {}
 
   /**
@@ -563,10 +565,8 @@ export class FilesController {
   async purge(@Req() request: AuthenticatedRequest, @Param('id') id: string): Promise<void> {
     const caller = requireSession(request);
     requireUuid(id);
-    const share = await this.shareOfEntry(
-      caller.organizationId,
-      await this.load(caller.organizationId, id),
-    );
+    const doomed = await this.load(caller.organizationId, id);
+    const share = await this.shareOfEntry(caller.organizationId, doomed);
     // The same permission the reversible delete asks for. A separate, stronger one would be a
     // fourth §6.2 permission the contract does not have — and the trash is already the gate
     // between a user and permanent loss, which is the protection this operation needs.
@@ -587,17 +587,28 @@ export class FilesController {
       );
     }
 
+    const correlationId = randomUUID();
     try {
       await this.files.purge(
         caller.organizationId,
         id,
         share,
-        randomUUID(),
+        correlationId,
         `DELETE /files/${id}/permanent`,
       );
     } catch (error) {
       throw translate(error);
     }
+
+    // Geri dönüşü olmayan tek dosya işlemi, ve kaydı İŞTEN SONRA: yarıda kesilen bir silme
+    // "silindi" satırı bırakmamalı. Adı denetimde var, içeriği yok (§16).
+    await this.audit.record(caller.organizationId, {
+      actorId: caller.userId,
+      action: 'files.permanently-deleted',
+      target: { kind: 'entry', id, label: doomed.name },
+      summary: `'${doomed.name}' çöp kutusundan KALICI olarak silindi.`,
+      correlationId,
+    });
   }
 
   /**

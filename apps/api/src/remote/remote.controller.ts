@@ -20,6 +20,7 @@ import { z } from 'zod';
 
 import { AgentRefusedError, AgentUnavailableError } from '../agent/agent.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
+import { AuditService } from '../audit/audit.service.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import {
   NETWORK_ID,
@@ -81,7 +82,10 @@ type Schemas = OpenApi.components['schemas'];
 @Controller('remote')
 @UseGuards(SessionGuard)
 export class RemoteController {
-  constructor(private readonly remote: RemoteService) {}
+  constructor(
+    private readonly remote: RemoteService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Get()
   async status(@Req() request: AuthenticatedRequest): Promise<RemoteStatus> {
@@ -201,14 +205,23 @@ export class RemoteController {
       );
     }
 
+    const correlationId = randomUUID();
     try {
-      return await this.remote.createNetwork(
+      const created = await this.remote.createNetwork(
         session.organizationId,
         session.userId,
         parsed.data.name,
         parsed.data.subnet,
-        randomUUID(),
+        correlationId,
       );
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: 'remote.network-created',
+        target: { kind: 'network', id: created.network.networkId, label: created.network.name },
+        summary: `Evin kendi ZeroTier ağı kuruldu (${parsed.data.subnet}).`,
+        correlationId,
+      });
+      return created;
     } catch (error) {
       throw translate(error);
     }
@@ -253,16 +266,30 @@ export class RemoteController {
       );
     }
 
+    const correlationId = randomUUID();
     try {
-      return await this.remote.setMemberAuthorized(
+      const member = await this.remote.setMemberAuthorized(
         session.organizationId,
         session.userId,
         networkId,
         parsed.data.memberId,
         parsed.data.authorized,
         parsed.data.label ?? null,
-        randomUUID(),
+        correlationId,
       );
+      // `remote_members` zaten "kim, ne zaman" tutuyor; buradaki satır o kaydın denetim
+      // görünümüne düşen kopyası değil, TEK listeye düşen hâli — "dün bu kutuda ne oldu"
+      // sorusunun cevabı iki ekrana bölünmesin diye.
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: parsed.data.authorized ? 'remote.member-authorized' : 'remote.member-deauthorized',
+        target: { kind: 'network-member', id: parsed.data.memberId, label: member.label },
+        summary: parsed.data.authorized
+          ? `'${member.label ?? parsed.data.memberId}' cihazı eve ağ seviyesinde ALINDI.`
+          : `'${member.label ?? parsed.data.memberId}' cihazının ağ erişimi kaldırıldı.`,
+        correlationId,
+      });
+      return member;
     } catch (error) {
       throw translate(error);
     }

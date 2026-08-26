@@ -3,6 +3,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
 import { requireSameOrigin } from '../auth/origin.js';
+import { AuditService } from '../audit/audit.service.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { ProblemException } from '../common/problem.filter.js';
 import { requireSession } from './files.controller.js';
@@ -30,7 +31,10 @@ const policySchema = z.object({
 @Controller('system/trash-policy')
 @UseGuards(SessionGuard, AdminGuard)
 export class TrashPolicyController {
-  constructor(private readonly retention: TrashRetentionService) {}
+  constructor(
+    private readonly retention: TrashRetentionService,
+    private readonly audit: AuditService,
+  ) {}
 
   /**
    * The policy, and what it would cost.
@@ -89,6 +93,16 @@ export class TrashPolicyController {
       caller.userId,
     );
     const impact = await this.retention.impact(caller.organizationId, policy.retentionDays);
+    // Saklama süresini KISALTMAK, süpürücünün bir sonraki turunda dosya silmektir — politika
+    // değişikliği görünümünde bir toplu silme. Etki sayıları o yüzden özetin içinde.
+    await this.audit.record(caller.organizationId, {
+      actorId: caller.userId,
+      action: 'storage.trash-policy-changed',
+      summary:
+        policy.retentionDays === null
+          ? 'Çöp kutusu saklama süresi kaldırıldı; hiçbir şey kendiliğinden silinmeyecek.'
+          : `Çöp kutusu saklama süresi ${policy.retentionDays} gün yapıldı; bu sürenin üstündeki ${impact.files} dosya süpürülecek.`,
+    });
     return {
       retentionDays: policy.retentionDays,
       updatedAt: policy.updatedAt,

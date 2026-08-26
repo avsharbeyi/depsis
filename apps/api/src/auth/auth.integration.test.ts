@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { AuditService } from '../audit/audit.service.js';
 import { DbService } from '../db/db.service.js';
 import { OrganizationsService } from '../organizations/organizations.service.js';
 import { AuthService } from './auth.service.js';
@@ -56,6 +57,7 @@ describeDb('login, against a real PostgreSQL', () => {
       new LoginThrottleService(db),
       new MfaService(db, testSecretBox()),
       new PendingLoginService(db),
+      new AuditService(db),
     );
 
     const stored = await passwords.hash(PASSWORD);

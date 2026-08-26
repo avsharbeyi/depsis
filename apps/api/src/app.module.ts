@@ -4,6 +4,7 @@ import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { AgentModule } from './agent/agent.module.js';
 import { AppsModule } from './apps/apps.module.js';
 import { ConfigModule } from './config.module.js';
+import { AuditModule } from './audit/audit.module.js';
 import { ConsoleModule } from './console/console.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { SameOriginGuard } from './auth/same-origin.guard.js';
@@ -28,6 +29,7 @@ import { UsersModule } from './users/users.module.js';
 
 @Module({
   imports: [
+    AuditModule,
     ConfigModule,
     ConsoleModule,
     DbModule,

@@ -25,6 +25,7 @@ import { Tasks } from './Tasks.js';
 import { Tiles } from './Tiles.js';
 import { Transfers } from './Transfers.js';
 import { toneRgb, Toasts, useToasts, Win, type Tone } from './ui.js';
+import { Audit } from './Audit.js';
 import { Jobs } from './Jobs.js';
 import { Teams } from './Teams.js';
 import { Users } from './Users.js';
@@ -61,6 +62,7 @@ export type PaneId =
   | 'users'
   | 'teams'
   | 'jobs'
+  | 'audit'
   | 'shares'
   | 'disks'
   | 'account'
@@ -106,6 +108,16 @@ const PANES: Record<PaneId, PaneMeta> = {
     slug: 'sistem-isleri',
     label: 'Sistem işleri',
     glyph: '⚙',
+    tone: 'warn',
+    wide: false,
+    adminOnly: true,
+  },
+  audit: {
+    // Yalnız yönetici, uçla aynı kapı. Satırlar üyelerin adlarını, oturum IP'lerini ve kimin
+    // neye dokunduğunu taşıyor — kiracının İÇİNDEKİ mahremiyetin sınırı da bu ekran.
+    slug: 'denetim',
+    label: 'Denetim kaydı',
+    glyph: '📜',
     tone: 'warn',
     wide: false,
     adminOnly: true,
@@ -237,6 +249,7 @@ const DOCK_ORDER: PaneId[] = [
   'users',
   'teams',
   'jobs',
+  'audit',
   'account',
   'background',
 ];
@@ -883,6 +896,8 @@ function PaneBody({
       return <Teams notify={notify} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />;
     case 'jobs':
       return <Jobs onUnauthenticated={onUnauthenticated} />;
+    case 'audit':
+      return <Audit onUnauthenticated={onUnauthenticated} />;
     case 'account':
       return <Account me={me} notify={notify} onChanged={onAccountChanged} />;
     case 'transfers':

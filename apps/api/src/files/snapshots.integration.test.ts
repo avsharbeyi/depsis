@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { AgentRequest, AgentResponse, AgentService } from '../agent/agent.service.js';
 import { ProblemException } from '../common/problem.filter.js';
+import { AuditService } from '../audit/audit.service.js';
 import { DbService } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
@@ -154,6 +155,7 @@ describeDb('browsing a snapshot and restoring out of it', () => {
       options.backups ?? stubBackups(SNAPSHOTS),
       agent,
       options.jobs ?? stubJobs().jobs,
+      new AuditService(db),
     );
   }
 
@@ -226,6 +228,7 @@ describeDb('browsing a snapshot and restoring out of it', () => {
         await q.query(`DELETE FROM shares WHERE organization_id = $1`, [org]);
         await q.query(`DELETE FROM team_members WHERE organization_id = $1`, [org]);
         await q.query(`DELETE FROM teams WHERE organization_id = $1`, [org]);
+        await q.query(`DELETE FROM audit_events WHERE organization_id = $1`, [org]);
         await q.query(`DELETE FROM users WHERE organization_id = $1`, [org]);
         await q.query(`DELETE FROM organizations WHERE id = $1`, [org]);
       });

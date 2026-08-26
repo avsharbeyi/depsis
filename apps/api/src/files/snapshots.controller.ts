@@ -13,6 +13,7 @@ import {
 import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
+import { AuditService } from '../audit/audit.service.js';
 import { AgentService } from '../agent/agent.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
@@ -73,6 +74,7 @@ export class SnapshotBrowseController {
     private readonly backups: BackupsService,
     private readonly agent: AgentService,
     private readonly jobs: JobsService,
+    private readonly audit: AuditService,
   ) {}
 
   @Get()
@@ -222,6 +224,14 @@ export class SnapshotBrowseController {
       // which is what `maxAttempts: 1` means for a job somebody is watching.
       { maxAttempts: 5 },
     );
+    // Dosyanın ADI denetimde var, İÇERİĞİ yok (§16). Ad, "hangi dosya geri geldi" sorusunun
+    // cevabı ve zaten dosya listesinde herkese görünür.
+    await this.audit.record(caller.organizationId, {
+      actorId: caller.userId,
+      action: 'storage.snapshot-restore-requested',
+      target: { kind: 'share', id: share.id, label: share.name },
+      summary: `'${name}' anlık görüntüsünden '${finalName}' adıyla geri yükleme istendi.`,
+    });
     return { jobId, name: finalName };
   }
 

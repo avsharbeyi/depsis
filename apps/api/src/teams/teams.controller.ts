@@ -23,6 +23,7 @@ import { z } from 'zod';
 
 import { requireSameOrigin } from '../auth/origin.js';
 import { isDryRun } from '../permissions/permissions.controller.js';
+import { AuditService } from '../audit/audit.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import type { UserRole } from '../auth/session.service.js';
 import {
@@ -62,7 +63,10 @@ const membershipSchema = z.object({
 @Controller('teams')
 @UseGuards(SessionGuard)
 export class TeamsController {
-  constructor(private readonly teams: TeamsService) {}
+  constructor(
+    private readonly teams: TeamsService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Get()
   async list(@Req() request: AuthenticatedRequest): Promise<Schemas['TeamPage']> {
@@ -82,7 +86,14 @@ export class TeamsController {
     if (!parsed.success) throw new BadRequestException('a name of 1 to 64 characters is required');
 
     try {
-      return toTeam(await this.teams.create(session.organizationId, parsed.data.name));
+      const team = await this.teams.create(session.organizationId, parsed.data.name);
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: 'team.created',
+        target: { kind: 'team', id: team.id, label: team.name },
+        summary: `'${team.name}' ekibi kuruldu.`,
+      });
+      return toTeam(team);
     } catch (error) {
       throw translate(error);
     }
@@ -132,6 +143,22 @@ export class TeamsController {
     try {
       const impact = await this.teams.remove(session.organizationId, id, { dryRun: preview });
       if (!preview) {
+        // Silinen ekibin adı artık okunamaz; kimlik ve ETKİ kalır. Bir ekip silmek, üyelerinin o
+        // ekip üzerinden aldığı her izni birden kaldırmaktır — kaydedilecek şey tam da bu.
+        await this.audit.record(session.organizationId, {
+          actorId: session.userId,
+          action: 'team.deleted',
+          target: { kind: 'team', id },
+          // Adlar sınırlı, izin özetiyle aynı gerekçeyle: büyük bir ekibi silmek herkesi
+          // etkileyebilir ve tam liste 500 karakterlik özet sınırına çarpardı.
+          summary:
+            impact.usersLosing.length > 0
+              ? `Ekip silindi; erişimi kalkan ${impact.usersLosing.length} kişi: ${impact.usersLosing
+                  .slice(0, 3)
+                  .map((u) => u.username)
+                  .join(', ')}${impact.usersLosing.length > 3 ? ' ve diğerleri' : ''}.`
+              : 'Ekip silindi; kimsenin erişimi değişmedi.',
+        });
         response.status(204);
         return undefined;
       }
@@ -176,6 +203,13 @@ export class TeamsController {
         parsed.data.userId,
         parsed.data.teamAdmin,
       );
+      // Bir ekibe üye eklemek erişim VEREN işlemdir: ekibin her klasör izni o kişiye de işler.
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: 'team.member-added',
+        target: { kind: 'user', id: parsed.data.userId, label: row.username },
+        summary: `'${row.username}' ekibe eklendi${parsed.data.teamAdmin ? ' (ekip yöneticisi olarak)' : ''}.`,
+      });
       return toMember(row);
     } catch (error) {
       throw translate(error);
@@ -202,6 +236,15 @@ export class TeamsController {
         dryRun: preview,
       });
       if (!preview) {
+        await this.audit.record(session.organizationId, {
+          actorId: session.userId,
+          action: 'team.member-removed',
+          target: { kind: 'user', id: userId },
+          summary:
+            impact.usersLosing.length > 0
+              ? `Üye ekipten çıkarıldı; ${impact.foldersAffected} klasöre erişimi değişti.`
+              : 'Üye ekipten çıkarıldı; erişimi değişmedi.',
+        });
         response.status(204);
         return undefined;
       }

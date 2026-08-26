@@ -8,6 +8,7 @@ import { generateKey, SecretBox } from '../auth/secret-box.js';
 import { PasswordService } from '../auth/password.service.js';
 import { PendingLoginService } from '../auth/pending-login.service.js';
 import { SessionService } from '../auth/session.service.js';
+import { AuditService } from '../audit/audit.service.js';
 import { DbService } from '../db/db.service.js';
 import { OrganizationsService } from '../organizations/organizations.service.js';
 import type { IdentitySyncService } from '../identity/identity-sync.service.js';
@@ -64,6 +65,9 @@ describeDb('system setup, against a real PostgreSQL', () => {
     // Wipe whatever a previous run left, so "works exactly once" is measured from a known state.
     await owner.withoutTenant('setup-status', async (q) => {
       await q.query('DELETE FROM system_setup');
+      // Denetim satırları kuruluşu RESTRICT ile tutuyor — bilerek: kaydın işi, kuruluş
+      // silinirken sessizce yok olmamak. Testin sıfırlaması bu yüzden önce onları kaldırıyor.
+      await q.query('DELETE FROM audit_events');
       await q.query('DELETE FROM users');
       await q.query('DELETE FROM organizations');
     });
@@ -170,6 +174,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
       new LoginThrottleService(db),
       new MfaService(db, testSecretBox()),
       new PendingLoginService(db),
+      new AuditService(db),
     );
 
     const login = await auth.login({

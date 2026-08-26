@@ -14,6 +14,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
 import { ReauthService } from '../auth/reauth.service.js';
+import { AuditService } from '../audit/audit.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { BackupsService } from './backups.service.js';
@@ -66,6 +67,7 @@ export class ReplicationController {
     private readonly jobs: JobsService,
     private readonly reauth: ReauthService,
     private readonly backups: BackupsService,
+    private readonly audit: AuditService,
   ) {}
 
   @Post()
@@ -127,6 +129,12 @@ export class ReplicationController {
       // onu bir daha yok etmek demek. Havuz oluşturmadaki karar, aynı gerekçeyle.
       { maxAttempts: 1 },
     );
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'storage.replicate-requested',
+      target: { kind: 'dataset', id: plan.target, label: plan.target },
+      summary: `'${plan.source}@${plan.snapshot}' anlık görüntüsünün '${plan.target}' hedefine gönderilmesi istendi; hedefteki veri YOK EDİLECEK.`,
+    });
     return { jobId };
   }
 }

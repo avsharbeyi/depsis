@@ -37,7 +37,22 @@ borç gibi okunduğu bir liste, kimsenin bakmadığı bir listedir.
 her birinin gerekçesi ucun kendi açıklamasında: `replace` ajana sahip olmadığı bir üzerine-yazma
 vermek olurdu, `version` var olmayan bir sürüm deposu istiyor, `skip` savunulabilir ve yazılmadı.
 
-### 1.4 İzleme
+### 1.4 Denetim kaydı
+
+**Hash zinciri yok.** §13 "önceki hash zinciri veya imzalı periyodik checkpoint ile kurcalama
+tespiti DEĞERLENDİR" diyor; değerlendirildi ve şimdilik yazılmadı. Bir zincir her eklemeyi son
+satıra bağlayarak üründeki her denetimli mutasyonu tek satırın kilidinden geçirir, ve doğrulayan
+araç yazılmadıkça yalnız yavaşlatır. Append-only bugün GRANT'la tutuluyor (`depsis_app`'in
+UPDATE/DELETE yetkisi yok ve bunu ölçen test var); migration rolünü ya da diski elinde tutan
+birine karşı kurcalama KANITI bu ürünün verebileceği bir söz değil. Zincir, imzalı yedek
+doğrulaması gibi dışarı taşınan bir bütünlük hedefiyle birlikte anlamlı olur; o gün checkpoint
+tablosu geriye dönük eklenebilir (migration 0036'daki not).
+
+**Saklama politikası yok.** Kayıt yalnız büyür. Bir NAS'ın olay hacminde bu yıllarca sorun değil;
+gün geldiğinde budama, migration rolüyle çalışan zamanlanmış bir işin konusu olacak — API'nin
+rolüne silme yetkisi vermeden.
+
+### 1.5 İzleme
 
 Yönetici panolarında keylogger, ekran izleme ya da mahrem davranış takibi **yok ve olmayacak**
 (§7). Ölçülen şey işin ilerlemesi.

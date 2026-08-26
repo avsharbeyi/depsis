@@ -34,6 +34,8 @@ tags:
     description: Türkçe-duyarlı ad araması (ADR-0010).
   - name: system
     description: Telemetri ve işler.
+  - name: audit
+    description: Cihazın denetim kaydı — kim, neyi, ne zaman. Eklenir; değişmez, silinmez.
 
 security:
   - sessionCookie: []
@@ -278,6 +280,43 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DirectoryPage' }
         '401': { $ref: '#/components/responses/Problem' }
+
+  /audit:
+    get:
+      operationId: listAuditEvents
+      tags: [audit]
+      summary: Cihazın denetim kaydı
+      description: |
+        Kim, neyi, ne zaman. Yalnız yönetici — 403 döner, 404 değil, çünkü ucun varlığı sır değil.
+        Satırlar üyelerin adlarını, kimlik doğrulama olaylarında IP'lerini ve hangi nesneye
+        dokunduklarını taşıyor; bu uç kiracının İÇİNDEKİ mahremiyetin de sınırıdır ve sıradan
+        üyeye açık değildir.
+
+        Kayıt EKLENİR, değişmez, silinmez: uygulamanın veritabanı rolünün bu tabloda UPDATE ve
+        DELETE yetkisi hiç yok (migration 0036). Yazan bir uç da yok — satırlar yalnız sunucunun
+        kendi kodunda, denetlenen işlemin akışı içinde doğar; dışarıdan satır yazdırmanın bir
+        yolu yoktur.
+
+        Sayfalama imleçli: `nextBefore` doluysa bir sonraki sayfa `before` olarak onu verir.
+        `action` bir önek de olabilir: `auth`, `auth.login` ve altındakilerin hepsini kapsar.
+      parameters:
+        - name: before
+          in: query
+          schema: { type: string, format: uuid }
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Olaylar, en yeni önce
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditPage' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
 
   /users:
     get:
@@ -3582,6 +3621,61 @@ components:
         - manage_acl
         - view_versions
         - view_audit
+
+    AuditEvent:
+      type: object
+      required:
+        [
+          id,
+          actorId,
+          actorUsername,
+          action,
+          targetKind,
+          targetId,
+          targetLabel,
+          summary,
+          correlationId,
+          ip,
+          createdAt,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        actorId:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            Hesap silinmişse null; `actorUsername` yine doludur. Denetim kaydı, artık var olmayan
+            hesaplar hakkında konuşabilmek için var.
+        actorUsername: { type: string }
+        action:
+          type: string
+          description: Noktalı eylem adı — `auth.login`, `user.role-changed`, `permissions.changed`.
+        targetKind: { type: [string, 'null'] }
+        targetId: { type: [string, 'null'] }
+        targetLabel:
+          type: [string, 'null']
+          description: Hedefin OLAY ANINDAKİ adı. Hedef silinse de satır okunur kalsın diye kopya.
+        summary: { type: string }
+        correlationId:
+          type: [string, 'null']
+          format: uuid
+          description: Ajanla konuşan işlemlerde, ajanın kendi günlüğündeki satıra köprü (§9).
+        ip:
+          type: [string, 'null']
+          description: Yalnız kimlik doğrulama olaylarında dolu; başka olayda toplanmıyor (§16).
+        createdAt: { type: string, format: date-time }
+
+    AuditPage:
+      type: object
+      required: [items, nextBefore]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AuditEvent' }
+        nextBefore:
+          type: [string, 'null']
+          format: uuid
+          description: Bir sonraki sayfanın `before` değeri; null ise daha eski kayıt kalmamıştır.
 
     DirectoryEntry:
       type: object

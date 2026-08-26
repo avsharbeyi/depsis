@@ -1,6 +1,6 @@
 # DEPSIS veri modeli — ER diyagramı
 
-§21'in 5. teslimatı. Şema `packages/db/migrations/` içindeki 25 göçten çıkıyor; bu belge onların
+§21'in 5. teslimatı. Şema `packages/db/migrations/` içindeki göçlerden çıkıyor (bugün 36); bu belge onların
 **okunabilir** hâli, kaynağı değil. İkisi ayrışırsa göçler haklıdır.
 
 Diyagramın taşımadığı iki şey var ve ikisi de bu şemanın en önemli özellikleri, o yüzden altta
@@ -39,6 +39,7 @@ erDiagram
     users ||--o{ user_recovery_codes : "tek kullanımlık"
     users ||--o{ pending_logins : "parola geçti, faktör bekliyor"
     users ||--o{ password_resets : "yönetici bileti"
+    users |o--o{ audit_events : "kim yaptı — hesap silinse satır kalır"
     users ||--o| user_preferences : ""
     organizations ||--o| organization_settings : ""
     organizations ||--o| system_setup : "ilk yönetici"

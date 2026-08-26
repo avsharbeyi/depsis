@@ -442,6 +442,29 @@ isterseniz gerekiyor (§2.4).
 Yalnız yönetici, ve her oturum parola onayı ister. Bir oturum, birinin açık bırakılmış dizüstünü
 ödünç alan kişinin sahip olduğu şeydir; kabuk erişimi için yetmez (ADR-0018).
 
+### 3.11 Denetim kaydı
+
+**Denetim kaydı** panelinde: kim, neyi, ne zaman. Oturum açma ve kapamalar (başarısız denemeler
+dahil), hesap ve rol değişiklikleri, izin yazmaları, paylaşım kurma, ekip üyelikleri, konsol
+oturumu açılışları, havuz/replikasyon/geri yükleme istekleri, kalıcı silmeler ve ZeroTier
+yetkilendirmeleri buraya düşer.
+
+Bilmeniz gereken üç şey:
+
+- **Silinemez.** Uygulamanın veritabanı rolünün bu tabloda `UPDATE` ve `DELETE` yetkisi hiç yok;
+  bir "temizle" düğmesi olmaması eksik değil, tasarım. Kayıt ancak veritabanı yedeğiyle birlikte
+  yaşar ve ölür.
+- **Hesap silinse de satır kalır.** Kimlik anonimleşir, kullanıcı adı satırın içinde kopya olarak
+  durur — kaydın en çok okunacağı gün, bir hesabın kapatıldığı gündür.
+- **İçinde sır yoktur.** Parola, jeton, dosya içeriği hiçbir satırda yer almaz; IP yalnız oturum
+  olaylarında tutulur. Bu yüzden kaydı bir yöneticiyle paylaşmak, kullanıcıların içeriğini
+  paylaşmak değildir — ama adlarını ve ne yaptıklarını paylaşmaktır, o yüzden uç yalnız
+  yöneticiye açıktır.
+
+Sayfalama "daha eski" düğmesiyle; filtre eylem sınıfına göre (`auth`, `permissions`, `storage`…).
+Bir satırdaki correlation kimliği, ajanın kendi günlüğündeki (`journalctl -u depsis-agent`)
+karşılığına köprüdür.
+
 ---
 
 ## 4. Bir şeyler ters gittiğinde

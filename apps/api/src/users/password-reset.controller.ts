@@ -11,6 +11,7 @@ import type { Request } from 'express';
 import { z } from 'zod';
 
 import { MfaService } from '../auth/mfa.service.js';
+import { AuditService } from '../audit/audit.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
 import { PasswordResetService } from '../auth/password-reset.service.js';
 import { PasswordService } from '../auth/password.service.js';
@@ -55,6 +56,7 @@ export class PasswordResetController {
     private readonly passwords: PasswordService,
     private readonly sessions: SessionService,
     private readonly mfa: MfaService,
+    private readonly audit: AuditService,
   ) {}
 
   /**
@@ -126,6 +128,14 @@ export class PasswordResetController {
       parsed.data.password,
     );
     await this.sessions.revokeAllForUser(reset.organizationId, reset.userId);
+    // Aktör hesabın KENDİSİ: bileti kullanan, hesabın yeni sahibi olduğunu kanıtlamış kişidir
+    // (bilet + varsa ikinci adım). Bileti kimin açtığı zaten ayrı bir satır.
+    await this.audit.record(reset.organizationId, {
+      actorId: reset.userId,
+      action: 'auth.password-reset-redeemed',
+      summary: 'Parola sıfırlama bileti kullanıldı; parola değişti, tüm oturumlar kapatıldı.',
+      ip: request.ip ?? null,
+    });
 
     this.logger.warn(`password reset redeemed for user ${reset.userId}`);
     return { status: 'ok' };
