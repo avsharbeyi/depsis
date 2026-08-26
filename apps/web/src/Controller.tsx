@@ -272,10 +272,20 @@ export function Controller({
 
           {adding && (
             <div>
+              {/* Kayıt akışının İKİ yarısı var ve ikisi de burada: cihaz ağa KATILIR (aşağıdaki
+                  kimlikle — kimlik bir sır değil, ağ özel olduğu için katılmak yetki vermez ve
+                  controller kimliği ilk temasta sabitler), sonra yönetici onu İÇERİ ALIR. Katılan
+                  cihaz kendini bekleyenler listesine kendisi yazar; adres elle de eklenebilir. */}
               <p className="note">
-                Ekleyeceğiniz cihazda ZeroTier&apos;i açın ve <b>kendi adresini</b> okuyun — mobilde
-                ana ekranda, masaüstünde <code>zerotier-cli info</code> çıktısının ikinci alanı. On
-                onaltılık hane.
+                <b>1.</b> Ekleyeceğiniz cihazda ZeroTier kurup bu ağa katılın — mobilde{' '}
+                <i>Add Network</i>, masaüstünde:
+              </p>
+              <p className="note m">zerotier-cli join {network.networkId}</p>
+              <p className="note">
+                Katılan cihaz aşağıdaki listeye <i>onay bekliyor</i> olarak kendiliğinden düşer;
+                &quot;içeri al&quot; demeniz yeter. <b>2.</b> İsterseniz beklemeden, cihazın{' '}
+                <b>kendi adresini</b> yazarak da ekleyebilirsiniz — mobilde ana ekranda, masaüstünde{' '}
+                <code>zerotier-cli info</code> çıktısının ikinci alanı. On onaltılık hane.
               </p>
               <label className="fld">
                 <span className="lbl">Cihazın adresi</span>

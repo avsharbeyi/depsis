@@ -46,11 +46,10 @@ yazıyor, ya da `hostname -I` verir.
 yüzden yükleme ve indirme 503 döner. Listeleme, klasör oluşturma, yeniden adlandırma, çöp kutusu,
 kullanıcı yönetimi ve telemetri çalışır.
 
-İki adımlı doğrulamanın **girişi var, KAYDI yok**. `SignIn.tsx` `mfa_required` cevabını işliyor,
-kod ekranını çiziyor ve kurtarma kodunu da kabul ediyor — yani ikinci faktörü olan biri giriş
-yapabiliyor. Ama `POST /me/mfa/enrolment` ve kardeşlerini çağıran hiçbir ekran yok, yani kimse onu
-AÇAMIYOR. Bu satır uzun süre "arayüzde iki adımlı doğrulama yok" diyordu; doğrulama koda karşı
-yapılınca yanlış olduğu görüldü.
+İki adımlı doğrulamanın hem girişi hem kaydı var: `SignIn.tsx` kod ekranını çiziyor (kurtarma
+kodu dahil), `Mfa.tsx` — Hesap panelinin altında — kaydı açıyor, kapatıyor ve kurtarma kodlarını
+bir kez gösteriyor. (Bu paragraf iki kez bayat çıktı; iki seferinde de koda karşı doğrulanarak
+düzeltildi.)
 
 Giriş kullanıcı adı ve parolayla yapılır — e-posta adresi ve ayrı bir "görünen ad" yoktur.
 
@@ -61,6 +60,21 @@ oku, indir, adını değiştir, çöpe at.
 ```bash
 sudo PGHOST=127.0.0.1 PGUSER=postgres PGPASSWORD=... bash tools/poc/p1-d-systemd-deployment.sh
 ```
+
+## Gerçek kurulum
+
+Temiz bir Debian kutusuna kurulum tek betik (§19'un "denetlenebilir bootstrap installer"ı):
+
+```bash
+sudo bash tools/install/install.sh --hostname depsis --shares-root /srv/depsis
+```
+
+Ön kontroller (donanım, portlar, PostgreSQL, Node), servis hesapları, sırlar, veritabanı +
+migration'lar, derleme ve yerleştirme, kendinden imzalı TLS sertifikası, güvenlik başlıklarıyla
+nginx ters vekili, systemd birimleri ve uçtan uca doğrulama — hepsi idempotent: yarıda kesilirse
+aynı komut kaldığı yerden sürer. `--check-only` yalnız ön kontrolleri koşar; `--renew-cert`
+sertifikayı yeniler. Betik bitince adresi, sertifikanın SHA-256 parmak izini ve — ilk kurulumda,
+yalnız bir kez — kurtarma anahtarını yazar. Ayrıntı: `docs/operations/01-yonetici-kilavuzu.md` §2.
 
 ## Cihazın dışındaki üç şey
 
