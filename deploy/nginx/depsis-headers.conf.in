@@ -1,0 +1,53 @@
+# Her yanıta giden başlıklar.
+#
+# AYRI BİR DOSYA OLMASININ NEDENİ NGINX'İN KENDİSİ. `add_header` kalıtımla değil, ÜZERİNE YAZMAYLA
+# çalışır: bir `location` bloğu kendi `add_header`'ını yazdığı anda üst bloktan gelenlerin hepsi
+# düşer. Sunucu bloğuna bir kez yazıp bitirmek mümkün değil, ve bunu bilmeden yazılmış bir
+# yapılandırma "başlıklar var" diye okunurken /api/ altında hiçbirini göndermez. Bu yüzden her
+# location bu dosyayı `include` ediyor.
+#
+# `always` da isteğe bağlı değil: onsuz nginx bu başlıkları yalnız 2xx/3xx yanıtlara ekliyor, yani
+# 401, 403, 404 ve 500 — tam da bir saldırganın göreceği yanıtlar — başlıksız gidiyor.
+
+# Tarayıcı içerik türünü tahmin etmesin. `nosniff` olmadan bir kullanıcının yüklediği metin
+# dosyası, tarayıcının HTML sanmasıyla aynı köken altında çalışan bir sayfaya dönüşebiliyor.
+add_header X-Content-Type-Options nosniff always;
+
+# Adres çubuğundaki hiçbir şey dışarı gitmesin. DEPSIS adresleri paylaşım ve dosya kimlikleri
+# taşıyor; `no-referrer` bunların üçüncü bir tarafa yönlendirmede sızmasını kesiyor.
+add_header Referrer-Policy no-referrer always;
+
+# Çerçeveye alınamaz. CSP'nin `frame-ancestors`'ı asıl kural; bu, onu anlamayan eski tarayıcılar
+# için ikinci bir kilit ve clickjacking'e karşı tek satır.
+add_header X-Frame-Options DENY always;
+
+# Cihazın donanımına dokunan hiçbir tarayıcı özelliği bu sayfaya açık değil. DEPSIS'in kamerayla,
+# mikrofonla ya da konumla işi yok, ve olmadığını söylemek onları kapatmanın tek yolu.
+add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=()" always;
+
+# Pencere yalıtımı: başka bir kökenin açtığı sekme bu belgeye `window.opener` üzerinden
+# ulaşamıyor, ve bu belgenin kaynaklarını başka bir köken gömemiyor.
+add_header Cross-Origin-Opener-Policy same-origin always;
+add_header Cross-Origin-Resource-Policy same-origin always;
+
+# ── içerik güvenliği ─────────────────────────────────────────────────────────
+#
+# `script-src 'self'`: satır içi betik YOK ve olamaz — Vite'ın ürettiği index.html yalnız harici
+# bir modül etiketi taşıyor, ölçüldü. Bu, XSS'e karşı buradaki en değerli tek kural.
+#
+# `style-src` içinde `'unsafe-inline'` VAR, ve bu bilerek verilmiş bir taviz. Arayüz baştan sona
+# React'in `style={{...}}` özniteliğini kullanıyor (ilerleme çubuklarının genişliği, tema renkleri,
+# döndürülmüş küçük resimler); bunlar satır içi STİL ÖZNİTELİĞİ, ve onları `'unsafe-inline'`
+# olmadan geçirmenin tek yolu `style-src-attr`. O direktifi anlamayan bir tarayıcı `style-src`'ye
+# düşüyor ve arayüz bozuk görünüyor — bir cihaz arayüzünün belirli tarayıcılarda bozulması,
+# CSS enjeksiyonu riskinden daha büyük bir zarar. Asıl kilitler (`script-src`, `object-src`,
+# `base-uri`, `frame-ancestors`) sıkı kalıyor.
+#
+# `img-src` içindeki `blob:`: küçük resimler `URL.createObjectURL` ile gösteriliyor (Files.tsx).
+# `data:` ise ikon ve gömülü SVG'ler için.
+#
+# `connect-src 'self'`: EventSource de dahil her istek kendi kökenine. Bu, sızdırma kanalını
+# kapatan kural — betik çalıştırılamasa bile veri gönderebilen bir sayfa hâlâ bir sızıntıdır.
+add_header Content-Security-Policy "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'" always;
+
+@HSTS@

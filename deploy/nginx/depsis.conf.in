@@ -1,0 +1,133 @@
+# DEPSIS — TLS sonlandıran ters vekil.
+#
+# §3'ün mimari şemasında istemciler doğrudan API'ye değil, bir "TLS Reverse Proxy"ye bağlanıyor, ve
+# §17 üretimde HTTPS'i zorunlu kılıyor. Bu dosya o kutu.
+#
+# NEDEN API'NİN KENDİSİ SUNMUYOR. API'nin systemd birimi `ReadWritePaths=` boş ve `ProtectSystem=
+# strict` ile çalışıyor; ona bir sertifika özel anahtarı okutmak, hiçbir şey yazmayan bir servise
+# bir sır daha vermek demek. Statik dosyaları da nginx `sendfile` ile diskten doğrudan gönderiyor,
+# Node'un olay döngüsünden geçirmeden — ve o döngü aynı anda yükleme akışlarını taşıyor.
+#
+# Bu dosya bir ŞABLON. `tools/install/install.sh` @...@ yer tutucularını doldurup
+# /etc/nginx/sites-available/depsis.conf'a yazıyor. Şablonun depoda durması, kurulumun gerçekte ne
+# yaptığının gözden geçirilebilir olması demek (§19: "denetlenebilir bootstrap installer").
+
+# ── düz metinden şifreliye ────────────────────────────────────────────────────
+server {
+    listen      80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    # 308, 301 değil: 301 bir POST'u GET'e çevirmeye izin veriyor ve tarayıcılar bunu yapıyor.
+    # Bir oturum açma isteğinin gövdesini sessizce düşürmek, "parolam çalışmıyor" diye okunur.
+    #
+    # `$host`, `$server_name` değil: kullanıcı hangi adı yazdıysa ona dönmek gerekiyor, yoksa IP
+    # ile gelen biri sertifikanın adına yönlendirilip çözemediği bir isme çarpıyor.
+    return 308 https://$host$request_uri;
+}
+
+server {
+    listen      443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name @SERVER_NAME@;
+
+    ssl_certificate     @CERT@;
+    ssl_certificate_key @KEY@;
+
+    # §17: TLS 1.2+. 1.0 ve 1.1 kapalı; 1.3 açık.
+    ssl_protocols TLSv1.2 TLSv1.3;
+    # 1.2 için yalnız AEAD ve ileri gizlilik taşıyan takımlar. 1.3'ün takımları zaten bu kümede ve
+    # OpenSSL onları bu listeden ayrı yönetiyor.
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:depsis:10m;
+    ssl_session_timeout 1d;
+    # Oturum biletleri KAPALI: anahtarları nginx yeniden başlatmadan döndürmüyor, yani bir biletle
+    # kaydedilmiş trafik anahtar sızarsa geriye dönük çözülebiliyor. İleri gizlilik, bir el
+    # sıkışmayı hızlandırmaktan önemli.
+    ssl_session_tickets off;
+
+    # Sunucunun kim olduğunu söylemesine gerek yok. Sürüm numarası, hangi CVE'lerin denenmeye
+    # değer olduğunu söyleyen tek satır.
+    server_tokens off;
+
+    # ── arayüz ────────────────────────────────────────────────────────────────
+    root @WEB_ROOT@;
+    index index.html;
+
+    # Derlenmiş varlıklar adlarında özet taşıyor: bir ad tek bir bayt dizisini adlandırıyor, yani
+    # bayatlayamaz. `immutable`, tarayıcının sürüm sorusunu bile sormamasını sağlıyor.
+    location /assets/ {
+        include @HEADERS@;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        try_files $uri =404;
+    }
+
+    # Bu üçü ASLA önbelleğe alınmıyor. index.html hangi varlıkların yükleneceğini söyleyen tek
+    # dosya, sw.js kendini güncelleyen tek dosya, ve manifest ikisini de tarif ediyor. Bayat bir
+    # index.html, cihaz güncellendikten sonra artık var olmayan bir paketi isteyen bir tarayıcı
+    # demek — beyaz ekran, ve sunucu tarafında hiçbir iz yok.
+    location = /index.html { include @HEADERS@; add_header Cache-Control "no-store" always; }
+    location = /sw.js      { include @HEADERS@; add_header Cache-Control "no-store" always; }
+    location = /manifest.webmanifest { include @HEADERS@; add_header Cache-Control "no-cache" always; }
+
+    location / {
+        include @HEADERS@;
+        # Tek sayfalık uygulama: bilinmeyen her yol index.html. Yönlendirme hash tabanlı olduğu
+        # için nadir, ama derin bir bağlantının yenilenmesi tarayıcının kendi hata sayfasını
+        # göstermemeli.
+        try_files $uri $uri/ /index.html;
+    }
+
+    # ── API ───────────────────────────────────────────────────────────────────
+    location @API_PREFIX@ {
+        include @HEADERS@;
+
+        proxy_pass http://127.0.0.1:@API_PORT@;
+        proxy_http_version 1.1;
+
+        # Host DEĞİŞMEDEN geçiyor, ve bu isteğe bağlı değil. API'nin CSRF kontrolü `Origin`
+        # başlığını `Host`'tan kurduğu adresle karşılaştırıyor; nginx varsayılan olarak Host'u
+        # `proxy_pass` hedefiyle (127.0.0.1) değiştiriyor, ve o hâlde her durum değiştiren istek
+        # 403 alıyor. Aynı hata bu depoda geliştirme vekilinde bir kez ölçüldü.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        # Çerezin `Secure` özniteliği ve yine CSRF kontrolü buna bakıyor. API'nin
+        # `DEPSIS_TRUST_PROXY` ayarı `loopback` olduğu için bu başlık YALNIZ döngü arayüzünden
+        # gelen bağlantılarda dikkate alınıyor — yani dışarıdan uydurulamaz.
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        # ── akış ──
+        #
+        # ARABELLEK KAPALI, ve bu bir performans ayarı değil. Arayüz iki yerde `EventSource`
+        # kullanıyor (bildirimler ve yönetici konsolu); arabellekli bir vekil olayları kendi
+        # tamponu dolana kadar tutuyor, yani konsolda yazılan komutun çıktısı ekranda hiç
+        # görünmüyor ya da dakikalar sonra topluca beliriyor.
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_set_header Connection "";
+
+        # Yükleme gövdesi sınırsız. tus parçaları 5 MiB, ama sınırı nginx'te tutmak, API'nin
+        # kendi 413'ünü hiç görülmeyen bir yanıta çevirirdi — ve gerçek sınır kotadır, bayt
+        # sayısı değil.
+        client_max_body_size 0;
+
+        # SSE bağlantısı saatlerce açık kalıyor. Varsayılan 60 saniye, akışı sessizce kesip
+        # tarayıcıyı sonsuz yeniden bağlanma döngüsüne sokuyor.
+        proxy_read_timeout  1h;
+        proxy_send_timeout  1h;
+    }
+
+    # Sağlık ucu, günlüğe yazılmadan. Dakikada bir sorulan bir şeyin erişim günlüğünde yeri yok:
+    # gerçek istekleri gömer ve diski o doldurur.
+    location = @API_PREFIX@health {
+        include @HEADERS@;
+        access_log off;
+        proxy_pass http://127.0.0.1:@API_PORT@;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

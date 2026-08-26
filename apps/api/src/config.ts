@@ -72,6 +72,39 @@ const schema = z.object({
   // way, through LoadCredential=, and neither is in the environment.
   DEPSIS_DATABASE_URL_FILE: z.string().trim().min(1).optional(),
   DEPSIS_API_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+
+  // WHICH INTERFACE THE API LISTENS ON, and the default depends on NODE_ENV — resolved in
+  // `loadConfig` below, because zod cannot make one field's default depend on another's.
+  //
+  // In production the default is `127.0.0.1`, and that is a security decision rather than a
+  // preference. §17 makes HTTPS mandatory in production and §3's architecture puts a TLS reverse
+  // proxy in front of the API; an API that also listened on every interface would serve the whole
+  // surface over plain http on the port next to it, session cookie included, and nothing in the
+  // deployment would say so. Binding to loopback makes the proxy the only way in — which is what
+  // the diagram already claimed.
+  //
+  // In development and test the default stays `0.0.0.0`, because the browser is often on another
+  // machine (a VM, a phone on the same network, WSL reached from Windows) and there is no proxy.
+  //
+  // An explicit value always wins: a deployment that terminates TLS on a different host sets it.
+  DEPSIS_API_BIND: z.string().trim().min(1).optional(),
+
+  // Whether X-Forwarded-Proto and X-Forwarded-For may be believed, and from whom.
+  //
+  // THIS IS LOAD-BEARING FOR TWO THINGS. `isSecure` decides whether the session cookie gets
+  // `Secure`, and `requireSameOrigin` builds the expected origin from the same answer — so behind
+  // a TLS proxy with this switched off, the browser sends `Origin: https://box` while the API
+  // expects `http://box` and EVERY state-changing request is refused with a 403. That is not a
+  // subtle degradation; it is an appliance where nothing can be saved.
+  //
+  // `loopback` rather than `true`, and that difference is the whole protection: Express then
+  // honours the headers only when the immediate peer is 127.0.0.1 or ::1. With `true`, any client
+  // could send `X-Forwarded-Proto: https` and claim a secure connection it does not have.
+  //
+  // Accepted values are Express's: `loopback`, `false`, a hop count, or a comma-separated list of
+  // addresses. `false` for a deployment where the API is reached directly.
+  DEPSIS_TRUST_PROXY: z.string().trim().min(1).default('loopback'),
+
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
   // Optional, unlike the database URL, and the asymmetry is deliberate. Without a database the API
@@ -257,6 +290,22 @@ const schema = z.object({
 export interface AppConfig {
   databaseUrl: string;
   port: number;
+  /**
+   * The interface to listen on. See `DEPSIS_API_BIND`.
+   *
+   * Optional in the interface for the reason the sockets below are: `loadConfig` always fills it,
+   * and a test building an `AppConfig` literal to exercise something else should not have to name
+   * every setting the appliance has grown. Absent reads as loopback in `main.ts`, which is the
+   * safe direction — a missing value must not open a port to the network.
+   */
+  bind?: string;
+  /**
+   * Express's `trust proxy` setting, verbatim. See `DEPSIS_TRUST_PROXY`.
+   *
+   * A string even when it means false, because that is what the environment carries and `main.ts`
+   * is the one place that turns it into what Express wants.
+   */
+  trustProxy?: string;
   nodeEnv: 'development' | 'test' | 'production';
   agentSocket: string | null;
   agentDataSocket: string | null;
@@ -297,6 +346,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     databaseUrl: resolveDatabaseUrl(parsed.data),
     port: parsed.data.DEPSIS_API_PORT,
+    bind:
+      parsed.data.DEPSIS_API_BIND ??
+      (parsed.data.NODE_ENV === 'production' ? '127.0.0.1' : '0.0.0.0'),
+    trustProxy: parsed.data.DEPSIS_TRUST_PROXY,
     nodeEnv: parsed.data.NODE_ENV,
     agentSocket: parsed.data.DEPSIS_AGENT_SOCKET,
     agentDataSocket: parsed.data.DEPSIS_AGENT_DATA_SOCKET,
