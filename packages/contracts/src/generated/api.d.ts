@@ -3742,6 +3742,99 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/remote/controller": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bu cihaz kendi ağını yönetebilir mi
+         * @description `zerotier-one`'ın kendisi controller — ayrı bir servis yok. Bu uç, daemon'un ayakta olup
+         *     olmadığını ve cihazın kendi 10 haneli adresini söylüyor.
+         *
+         *     ADRES SADECE GÖSTERİM İÇİN DEĞİL: üye listesinde cihazın kendi satırı, "yetkiyi kaldır"
+         *     düğmesi ASLA gösterilmemesi gereken tek satır. Kendi yetkisini kaldıran bir cihaz, kendi
+         *     sunduğu ağdan düşüyor ve geri almanın yolu tam da kopan bağlantının arkasında kalıyor.
+         *
+         *     Yalnız yönetici.
+         */
+        get: operations["getControllerStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/controller/networks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bu cihazın yönettiği ağlar
+         * @description Yalnız BU KİRACININ yarattığı ağlar. Controller'ın kuruluş diye bir kavramı yok ve
+         *     kutudaki her ağı döndürürdü; `remote_networks.controlled` ile daraltmak, iki kuruluşlu bir
+         *     cihazda birinin ev ağının ötekinin arayüzünde görünmesini — ve oradan yönetilmesini —
+         *     engelleyen şey.
+         */
+        get: operations["listControlledNetworks"];
+        put?: never;
+        /**
+         * Evin kendi ağını kur
+         * @description Ağı yaratıyor, yapılandırıyor, ve yapılandırmanın GERÇEKTEN UYGULANDIĞINI doğruluyor.
+         *
+         *     Yalnız yaratmak, hiçbir cihazın adres alamadığı bir ağ üretiyor: `v4AssignMode.zt`
+         *     varsayılan olarak kapalı, havuz boş, rota yok. Controller ise anlamadığı alanları sessizce
+         *     atıp yine de 200 dönüyor — yani doğrulama olmadan kurulum ekranı yeşil, ağ ölü olurdu.
+         *     `shortfall` boş değilse ağ VAR ama eksik kurulmuş demektir, ve arayüz bunu söylüyor.
+         *
+         *     AĞ KİMLİĞİ BU CİHAZA KAYNAKLI. Üst 40 biti düğümün kendi adresi, yani ağ başka bir makineye
+         *     taşınamıyor ve yeni bir `identity.secret` ile yaşayamıyor. Kimlik yedeği bu yüzden bu
+         *     özellikten ÖNCE yazıldı.
+         */
+        post: operations["createControlledNetwork"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/controller/networks/{networkId}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Bu ağdaki cihazlar */
+        get: operations["listControllerMembers"];
+        put?: never;
+        /**
+         * Bir cihazı içeri al ya da çıkar
+         * @description ERİŞİM VEREN İŞLEM BU. Bir üyeyi yetkilendirmek, o cihaza evin dosyalarını tutan NAS'a ağ
+         *     seviyesinde erişim vermek demek — yalnız yönetici, ve KİMİN bastığı kaydediliyor.
+         *
+         *     Ajan, cihazın KENDİ adresinin yetkisini kaldırmayı reddediyor. Bu reddi API tekrarlamıyor:
+         *     buradaki bir kopya, bu sürecin eline verilmiş bir değere karşı kontrol olurdu ve zamanla
+         *     ayrışırdı.
+         *
+         *     İLK YETKİLENDİRME ANINDA GEÇMİYOR. Controller yalnız daha önce hizmet ettiği üyelere
+         *     yapılandırma itebiliyor; hiç görülmemiş bir cihaz kendi yeniden deneme döngüsüyle (~5 sn)
+         *     öğreniyor. Arayüz "anında" demiyor.
+         */
+        post: operations["setControllerMemberAuthorized"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/remote/peers": {
         parameters: {
             query?: never;
@@ -6617,6 +6710,80 @@ export interface components {
             confirm: string;
             password: string;
         };
+        ControllerStatus: {
+            available: boolean;
+            /**
+             * @description Cihazın kendi 10 haneli ZeroTier adresi. Üye listesinde bu satır, "yetkiyi kaldır"
+             *     düğmesinin ASLA gösterilmemesi gereken tek satır.
+             */
+            nodeId: string;
+        };
+        ControlledNetwork: {
+            networkId: string;
+            name: string;
+            private: boolean;
+            /** @description IPv4 otomatik atama açık mı. `false` ise hiçbir cihaz adres ALMIYOR — ağ var, çalışmıyor. */
+            assignsAddresses: boolean;
+            subnet: string | null;
+        };
+        ControlledNetworkPage: {
+            items: components["schemas"]["ControlledNetwork"][];
+        };
+        CreateNetworkRequest: {
+            name: string;
+            /**
+             * @description `a.b.c.0/24`, RFC1918. Yalnız /24, çünkü havuz ve rota bundan türetiliyor ve 254 adres
+             *     bir evin cihaz sayısının çok üstünde.
+             *
+             *     EV AĞINIZLA ÇAKIŞMASIN: `192.168.1.0/24` en yaygın ev ağı, ve onu seçmek evde otururken
+             *     kendi yönlendiricinizle kavga eden bir rota demek. Arayüz varsayılan olarak
+             *     `10.147.x.0/24` öneriyor.
+             */
+            subnet: string;
+        };
+        CreatedNetwork: {
+            network: components["schemas"]["ControlledNetwork"];
+            /**
+             * @description Controller'ın SESSİZCE uygulamadığı şeyler, cümleleriyle. Boş değilse ağ var ama eksik
+             *     kurulmuş — hata DEĞİL, çünkü ağ o noktada zaten diskte, ve "başarısız" demek bir
+             *     sonraki denemede ikinci bir ağ yaratmak olurdu.
+             */
+            shortfall: string[];
+        };
+        ControllerMember: {
+            /**
+             * @description Cihazın 10 haneli düğüm adresi. KİMLİK BİLGİSİ DEĞİL — controller tam public identity
+             *     ile doğruluyor ve ilk temasta sabitliyor, sonra aynı adresi başka kimlikle sunan düğümü
+             *     reddediyor. Yani gösterilebilir, kopyalanabilir, QR'a konabilir.
+             */
+            memberId: string;
+            authorized: boolean;
+            label: string | null;
+            addresses: string[];
+            /**
+             * @description Cihaz controller'a HİÇ bağlandı mı. `false`, "bu adres yetkilendirildi ama sahibi hiç
+             *     görünmedi" demek — ve yanlış yazılmış bir hanenin tek görünür izi bu. Cihaz bir kez
+             *     göründükten sonra kimliği sabitlendiği için satır artık söylediği şeyi ifade ediyor.
+             */
+            seen: boolean;
+            /** @description Cihazın kendisi. Bu satırda "yetkiyi kaldır" gösterilmiyor. */
+            isThisAppliance: boolean;
+            /**
+             * @description Düğmeye kim bastı. `null`, DEPSIS dışında — `zerotier-cli` ile ya da bu kayıt var
+             *     olmadan önce — yetkilendirilmiş bir cihaz demek. Bir ad uydurmaktansa boş bırakılıyor.
+             */
+            authorizedBy: string | null;
+            /** Format: date-time */
+            authorizedAt: string | null;
+        };
+        ControllerMemberPage: {
+            items: components["schemas"]["ControllerMember"][];
+        };
+        SetMemberRequest: {
+            memberId: string;
+            authorized: boolean;
+            label?: string | null;
+        };
         RemoteStatus: {
             /** @description zerotier-one kurulu ve çalışıyor mu. DEPSIS onu paketlemiyor. */
             available: boolean;
@@ -7306,6 +7473,132 @@ export interface operations {
             400: components["responses"]["Problem"];
             403: components["responses"]["Problem"];
             409: components["responses"]["Problem"];
+        };
+    };
+    getControllerStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Controller durumu */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllerStatus"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    listControlledNetworks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Yönetilen ağlar */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControlledNetworkPage"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    createControlledNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateNetworkRequest"];
+            };
+        };
+        responses: {
+            /** @description Ağ kuruldu */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedNetwork"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    listControllerMembers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                networkId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Üyeler */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllerMemberPage"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    setControllerMemberAuthorized: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                networkId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetMemberRequest"];
+            };
+        };
+        responses: {
+            /** @description Üyenin yeni hâli, controller'dan geri okunmuş */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllerMember"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
         };
     };
 }

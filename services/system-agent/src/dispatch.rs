@@ -12,8 +12,9 @@ use crate::acl::{self, AclError};
 use crate::audit::{self, Outcome, Sink};
 use crate::authz::{Decision, Policy};
 use crate::op::{
-    AclEntry, AclType, DatabaseDump, DirEntry, OffsiteHostKey, PosixId, Request, Response,
-    SafeComponent, SnapshotEntry, SCHEMA_VERSION, SHARE_ROOT_MODE,
+    AclEntry, AclType, DatabaseDump, DirEntry, NodeAddress, OffsiteHostKey, PosixId, Request,
+    Response, SafeComponent, SnapshotEntry, ZeroTierControlledNetwork, ZeroTierMember,
+    SCHEMA_VERSION, SHARE_ROOT_MODE,
 };
 use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource};
 use crate::transfer::{
@@ -54,6 +55,41 @@ pub const STAGING_DIR: [&str; 2] = [".depsis", "staging"];
 
 fn depsis_agent_max_pending() -> usize {
     MAX_PENDING_TRANSFERS
+}
+
+/// En fazla kaç üye okunuyor.
+///
+/// Üye listesi N+1: liste çağrısı yalnız kimlikten sürüme bir eşleme veriyor — ad yok, yetki yok —
+/// yani her üye ayrı bir istek. 256, bir evin cihaz sayısının çok üstünde; aşıldığında liste
+/// KESİLMİYOR, sayıyı söyleyen bir hata dönüyor. Kesilmiş bir üye listesi, tam sanılan bir liste
+/// olurdu, ve o ekranın tek işi orada olmaması gereken satırı göstermek.
+const MAX_CONTROLLER_MEMBERS: usize = 256;
+
+/// Controller'ın ağ kaydını arayüzün okuduğu şekle indir.
+fn describe_network(record: &crate::ztcontroller::NetworkRecord) -> ZeroTierControlledNetwork {
+    ZeroTierControlledNetwork {
+        network_id: record.id.clone(),
+        name: record.name.clone(),
+        private: record.private,
+        assigns_addresses: record.v4_assign_mode.zt,
+        subnet: record.routes.first().map(|route| route.target.clone()),
+    }
+}
+
+/// Üye kaydını arayüzün okuduğu şekle indir.
+///
+/// `seen`, `identity` alanının DOLU olması. Controller o alanı ilk temasta öğrenip sabitliyor, yani
+/// boş olması "bu adres yetkilendirildi ama sahibi hiç görünmedi" demek — bir yanlış yazılmış
+/// hanenin tek görünür izi.
+fn describe_member(record: &crate::ztcontroller::MemberRecord, own: &str) -> ZeroTierMember {
+    ZeroTierMember {
+        member_id: record.id.clone(),
+        authorized: record.authorized,
+        label: record.name.clone(),
+        addresses: record.ip_assignments.clone(),
+        seen: !record.identity.is_empty(),
+        is_this_appliance: record.id == own,
+    }
 }
 
 /// Turn a ZeroTier client error into the answer the API needs.
@@ -965,6 +1001,23 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 .collect(),
             directory: dir.display().to_string(),
         })
+    }
+
+    /// The networks this appliance controls, each read in full.
+    ///
+    /// The list endpoint gives bare ids and nothing else, so each one is fetched — the interface
+    /// needs to say whether a network actually hands out addresses, and that is only in the
+    /// record. A network that fails to read ABORTS the listing rather than being skipped: a
+    /// silently short list on this screen is a network the household cannot see and cannot manage.
+    fn controlled_networks(
+        &self,
+    ) -> Result<Vec<ZeroTierControlledNetwork>, crate::zerotier::ZeroTierError> {
+        let ids = crate::ztcontroller::networks()?;
+        let mut found = Vec::with_capacity(ids.len());
+        for id in &ids {
+            found.push(describe_network(&crate::ztcontroller::network(id)?));
+        }
+        Ok(found)
     }
 
     /// `zpool status`, read for the two lines a person acts on.
@@ -2287,6 +2340,108 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 Ok(network) => Ok(Response::ZeroTierJoined { network }),
                 Err(e) => zerotier_error(e),
             },
+
+            Request::ZerotierControllerStatus {} => {
+                let node = match crate::zerotier::status() {
+                    Ok(node) => node,
+                    Err(e) => return zerotier_error(e),
+                };
+                match crate::ztcontroller::status() {
+                    Ok(found) => Ok(Response::ZeroTierController {
+                        controller: found.controller,
+                        api_version: found.api_version,
+                        database_ready: found.database_ready,
+                        node_id: node.node_id,
+                    }),
+                    Err(e) => zerotier_error(e),
+                }
+            }
+
+            Request::ZerotierControllerNetworks {} => match self.controlled_networks() {
+                Ok(networks) => Ok(Response::ZeroTierControllerNetworks { networks }),
+                Err(e) => zerotier_error(e),
+            },
+
+            Request::ZerotierCreateNetwork { name, subnet } => {
+                let node = match crate::zerotier::status() {
+                    Ok(node) => node,
+                    Err(e) => return zerotier_error(e),
+                };
+                // The node's own address is parsed rather than trusted: it is about to become the
+                // top 40 bits of a network id and part of a request path, and `/status` gives it
+                // as a plain string.
+                let Ok(address) = NodeAddress::parse(node.node_id.clone()) else {
+                    return Ok(Response::Failed {
+                        reason: format!(
+                            "zerotier-one kendi adresi olarak {:?} bildirdi; bu bir düğüm adresi değil",
+                            node.node_id
+                        ),
+                    });
+                };
+
+                match crate::ztcontroller::create_network(&address, name.as_str(), subnet) {
+                    Ok((record, shortfall)) => Ok(Response::ZeroTierNetworkCreated {
+                        network: describe_network(&record),
+                        shortfall,
+                    }),
+                    Err(e) => zerotier_error(e),
+                }
+            }
+
+            Request::ZerotierControllerMembers { network_id } => {
+                let node = match crate::zerotier::status() {
+                    Ok(node) => node,
+                    Err(e) => return zerotier_error(e),
+                };
+                match crate::ztcontroller::members(network_id, MAX_CONTROLLER_MEMBERS) {
+                    Ok(found) => Ok(Response::ZeroTierControllerMembers {
+                        members: found
+                            .iter()
+                            .map(|m| describe_member(m, &node.node_id))
+                            .collect(),
+                    }),
+                    Err(e) => zerotier_error(e),
+                }
+            }
+
+            Request::ZerotierSetMemberAuthorized {
+                network_id,
+                member,
+                authorized,
+                label,
+            } => {
+                let node = match crate::zerotier::status() {
+                    Ok(node) => node,
+                    Err(e) => return zerotier_error(e),
+                };
+
+                // THE SELF-LOCKOUT REFUSAL, and it lives here rather than only in the interface
+                // because the interface is the thing that gets rewritten. De-authorizing the
+                // appliance drops it off the network it is serving; the controller keeps running
+                // for every other device, so nothing looks broken from anywhere except the one
+                // place that could fix it — and the fix is on the far side of the link that just
+                // went away.
+                if !*authorized && member.as_str() == node.node_id {
+                    return Ok(Response::Refused {
+                        reason: "bu, cihazın kendisi. Kendi yetkisini kaldırmak, onu kendi \
+                                 sunduğu ağdan düşürür ve geri almanın yolu tam da kopan bağlantının \
+                                 arkasında kalır"
+                            .to_string(),
+                    });
+                }
+
+                match crate::ztcontroller::set_authorized(
+                    network_id,
+                    member,
+                    *authorized,
+                    label.as_ref().map(crate::op::SafeComponent::as_str),
+                ) {
+                    Ok(updated) => Ok(Response::ZeroTierMemberUpdated {
+                        member: describe_member(&updated, &node.node_id),
+                    }),
+                    Err(e) => zerotier_error(e),
+                }
+            }
 
             Request::ZeroTierPeers {} => match zerotier::peers() {
                 Ok(peers) => Ok(Response::ZeroTierPeers { peers }),

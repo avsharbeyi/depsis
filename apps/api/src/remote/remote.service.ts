@@ -42,6 +42,43 @@ export const NETWORK_ID = /^[0-9a-f]{16}$/u;
  * a socket address and nothing else — or a fixed sentence written here. The local API's own error
  * text never reaches it, because that text can quote a response body.
  */
+/** Can this appliance host its own network, and what is its address? */
+export interface ControllerStatus {
+  available: boolean;
+  nodeId: string;
+}
+
+/** A network this appliance controls. */
+export interface ControlledNetwork {
+  networkId: string;
+  name: string;
+  private: boolean;
+  /** False means no device will ever get an address on it. */
+  assignsAddresses: boolean;
+  subnet: string | null;
+}
+
+/** A device on a controlled network, with the provenance only DEPSIS holds. */
+export interface ControllerMember {
+  memberId: string;
+  authorized: boolean;
+  label: string | null;
+  addresses: string[];
+  /** Has the device ever actually contacted the controller? See `ZeroTierMember.seen`. */
+  seen: boolean;
+  isThisAppliance: boolean;
+  /** Who pressed Authorize. Null for a device authorized outside DEPSIS. */
+  authorizedBy: string | null;
+  authorizedAt: string | null;
+}
+
+interface MemberRow {
+  member_id: string;
+  label: string | null;
+  authorized_at: Date | null;
+  authorized_by_username: string | null;
+}
+
 export class RemoteUnavailableError extends Error {
   constructor(readonly detail: string) {
     super(`remote access is unavailable: ${detail}`);
@@ -259,6 +296,273 @@ export class RemoteService {
   }
 
   /** The active rows for this tenant, by network id. RLS makes the scoping structural. */
+  // ── the self-hosted controller ──
+  //
+  // `zerotier-one` IS the controller; there is no second daemon. What DEPSIS adds on this side is
+  // the two things the controller does not know and cannot: WHICH TENANT a network belongs to, and
+  // WHO authorized each device. Everything else is read from the controller, because a second copy
+  // of a list is a list that drifts — the same decision the backup inventory, the dump listing and
+  // the scrub status all made.
+
+  /**
+   * Can this appliance run its own network, and what is its address?
+   *
+   * The address matters to the interface beyond display: it is the one row in a member list that
+   * must never offer a de-authorize button.
+   */
+  async controllerStatus(correlationId: string): Promise<ControllerStatus> {
+    const answer = await this.ask(
+      { op: 'zerotier_controller_status' },
+      'remote access: can this appliance host its own network',
+      correlationId,
+    );
+    if (answer.status !== 'zerotier_controller') {
+      throw this.unexpected('zerotier_controller', answer);
+    }
+    return {
+      available: answer.controller && answer.database_ready,
+      nodeId: answer.node_id,
+    };
+  }
+
+  /**
+   * The networks this appliance controls — narrowed to the ones THIS TENANT created.
+   *
+   * The controller has no idea what an organisation is; it would hand back every network on the
+   * box. Filtering against `remote_networks.controlled` is what keeps one household's network from
+   * appearing in another's interface on a two-tenant appliance — and, more sharply, from being
+   * managed there.
+   */
+  async controlledNetworks(
+    organizationId: string,
+    correlationId: string,
+  ): Promise<ControlledNetwork[]> {
+    const answer = await this.ask(
+      { op: 'zerotier_controller_networks' },
+      'remote access: the networks this appliance controls',
+      correlationId,
+    );
+    if (answer.status !== 'zerotier_controller_networks') {
+      throw this.unexpected('zerotier_controller_networks', answer);
+    }
+
+    const ours = await this.controlledIds(organizationId);
+    return answer.networks
+      .filter((network) => ours.has(network.network_id))
+      .map((network) => ({
+        networkId: network.network_id,
+        name: network.name,
+        private: network.private,
+        assignsAddresses: network.assigns_addresses,
+        subnet: network.subnet ?? null,
+      }));
+  }
+
+  /**
+   * Create the household's own network, and record that it is ours.
+   *
+   * THE SHORTFALL IS CARRIED, not swallowed. The controller answers 200 to a configuration it did
+   * not understand, so the agent reads the applied record back; when something did not stick the
+   * network still EXISTS and still has to be recorded — reporting a failure would leave an
+   * unrecorded network on disk and make the next attempt create a second one.
+   */
+  async createNetwork(
+    organizationId: string,
+    userId: string,
+    name: string,
+    subnet: string,
+    correlationId: string,
+  ): Promise<{ network: ControlledNetwork; shortfall: string[] }> {
+    const answer = await this.ask(
+      { op: 'zerotier_create_network', name, subnet },
+      `remote access: creating the network '${name}'`,
+      correlationId,
+    );
+    if (answer.status !== 'zerotier_network_created') {
+      throw this.unexpected('zerotier_network_created', answer);
+    }
+
+    const created = answer.network;
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `INSERT INTO public.remote_networks (organization_id, joined_by, network_id, label,
+                                             controlled)
+         VALUES ($1, $2, $3, $4, true)
+         ON CONFLICT (organization_id, network_id) WHERE left_at IS NULL
+         DO UPDATE SET controlled = true, label = EXCLUDED.label`,
+        // The conflict target repeats `WHERE left_at IS NULL` because the index is PARTIAL:
+        // `remote_networks_active_unique` in migration 0013. Without the predicate PostgreSQL
+        // cannot match the index and raises "no unique or exclusion constraint matching".
+
+        [organizationId, userId, created.network_id, created.name],
+      ),
+    );
+
+    return {
+      network: {
+        networkId: created.network_id,
+        name: created.name,
+        private: created.private,
+        assignsAddresses: created.assigns_addresses,
+        subnet: created.subnet ?? null,
+      },
+      shortfall: answer.shortfall,
+    };
+  }
+
+  /**
+   * The devices on one of this tenant's networks, with who let each one in.
+   *
+   * The controller supplies the membership; DEPSIS supplies the provenance. A row with an
+   * `authorizedBy` of null is one the controller knows about and DEPSIS does not — a device
+   * authorized before this table existed, or through `zerotier-cli` — and saying so is better than
+   * inventing a name.
+   */
+  async members(
+    organizationId: string,
+    networkId: string,
+    correlationId: string,
+  ): Promise<ControllerMember[]> {
+    await this.requireControlled(organizationId, networkId);
+
+    const answer = await this.ask(
+      { op: 'zerotier_controller_members', network_id: networkId },
+      `remote access: the members of ${networkId}`,
+      correlationId,
+    );
+    if (answer.status !== 'zerotier_controller_members') {
+      throw this.unexpected('zerotier_controller_members', answer);
+    }
+
+    const provenance = await this.memberRecords(organizationId, networkId);
+    return answer.members.map((member) => {
+      const record = provenance.get(member.member_id);
+      return {
+        memberId: member.member_id,
+        authorized: member.authorized,
+        label: member.label === '' ? (record?.label ?? null) : member.label,
+        addresses: member.addresses,
+        seen: member.seen,
+        isThisAppliance: member.is_this_appliance,
+        authorizedBy: record?.authorized_by_username ?? null,
+        authorizedAt: record?.authorized_at?.toISOString() ?? null,
+      };
+    });
+  }
+
+  /**
+   * Let a device in, or put it out — and write down who did it.
+   *
+   * The agent refuses to de-authorize the appliance's own address; that refusal is not repeated
+   * here, for the reason every other agent refusal is not repeated: a copy in this process would
+   * be a check against a value this process was handed, and it would drift.
+   *
+   * The record is written AFTER the controller confirms, and only then. A row saying somebody
+   * authorized a device that was never authorized is worse than no row: it is the answer to "who
+   * let this in", and it would be wrong.
+   */
+  async setMemberAuthorized(
+    organizationId: string,
+    userId: string,
+    networkId: string,
+    memberId: string,
+    authorized: boolean,
+    label: string | null,
+    correlationId: string,
+  ): Promise<ControllerMember> {
+    await this.requireControlled(organizationId, networkId);
+
+    const answer = await this.ask(
+      {
+        op: 'zerotier_set_member_authorized',
+        network_id: networkId,
+        member: memberId,
+        authorized,
+        ...(label === null ? {} : { label }),
+      },
+      `remote access: ${authorized ? 'authorizing' : 'de-authorizing'} ${memberId} on ${networkId}`,
+      correlationId,
+    );
+    if (answer.status !== 'zerotier_member_updated') {
+      throw this.unexpected('zerotier_member_updated', answer);
+    }
+
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `INSERT INTO public.remote_members (organization_id, network_id, member_id, label,
+                                            authorized_by, authorized_at,
+                                            deauthorized_by, deauthorized_at)
+         VALUES ($1, $2, $3, $4,
+                 CASE WHEN $5 THEN $6::uuid END, CASE WHEN $5 THEN now() END,
+                 CASE WHEN $5 THEN NULL ELSE $6::uuid END, CASE WHEN $5 THEN NULL ELSE now() END)
+         ON CONFLICT (organization_id, network_id, member_id) DO UPDATE
+            SET label = coalesce(EXCLUDED.label, public.remote_members.label),
+                authorized_by = CASE WHEN $5 THEN $6::uuid ELSE public.remote_members.authorized_by END,
+                authorized_at = CASE WHEN $5 THEN now() ELSE public.remote_members.authorized_at END,
+                deauthorized_by = CASE WHEN $5 THEN public.remote_members.deauthorized_by ELSE $6::uuid END,
+                deauthorized_at = CASE WHEN $5 THEN public.remote_members.deauthorized_at ELSE now() END,
+                updated_at = now()`,
+        [organizationId, networkId, memberId, label, authorized, userId],
+      ),
+    );
+
+    const updated = answer.member;
+    const provenance = await this.memberRecords(organizationId, networkId);
+    const record = provenance.get(updated.member_id);
+    return {
+      memberId: updated.member_id,
+      authorized: updated.authorized,
+      label: updated.label === '' ? (record?.label ?? null) : updated.label,
+      addresses: updated.addresses,
+      seen: updated.seen,
+      isThisAppliance: updated.is_this_appliance,
+      authorizedBy: record?.authorized_by_username ?? null,
+      authorizedAt: record?.authorized_at?.toISOString() ?? null,
+    };
+  }
+
+  /** The network ids this tenant controls. */
+  private async controlledIds(organizationId: string): Promise<Set<string>> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ network_id: string }>(
+        `SELECT network_id FROM public.remote_networks
+          WHERE organization_id = $1 AND controlled AND left_at IS NULL`,
+        [organizationId],
+      ),
+    );
+    return new Set(rows.map((row) => row.network_id));
+  }
+
+  /**
+   * Refuse to touch a network this tenant does not control.
+   *
+   * `NetworkNotJoinedError` and not a distinct "not yours": on a two-tenant appliance the two must
+   * be the same answer, or the refusal itself tells one household that the other has a network.
+   */
+  private async requireControlled(organizationId: string, networkId: string): Promise<void> {
+    const ours = await this.controlledIds(organizationId);
+    if (!ours.has(networkId)) throw new NetworkNotJoinedError();
+  }
+
+  private async memberRecords(
+    organizationId: string,
+    networkId: string,
+  ): Promise<Map<string, MemberRow>> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<MemberRow>(
+        `SELECT m.member_id, m.label, m.authorized_at, u.username AS authorized_by_username
+           FROM public.remote_members m
+           -- LEFT: authorized_by is ON DELETE SET NULL, and the record outlives the account that
+           -- made it. An INNER JOIN would drop exactly the rows whose provenance is most awkward.
+           -- (No backticks in this comment: it lives inside a template literal.)
+           LEFT JOIN public.users u ON u.id = m.authorized_by
+          WHERE m.organization_id = $1 AND m.network_id = $2`,
+        [organizationId, networkId],
+      ),
+    );
+    return new Map(rows.map((row) => [row.member_id, row]));
+  }
+
   private async records(organizationId: string): Promise<Map<string, NetworkRow>> {
     const rows = await this.db.withTenant(organizationId, (q) =>
       q.query<NetworkRow>(

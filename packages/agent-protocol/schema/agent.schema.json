@@ -913,6 +913,113 @@
       ]
     },
     {
+      "description": "Is this node a ZeroTier controller, and is its store ready?\n\n`zerotier-one` IS the controller — there is no second daemon. Every build compiles the\nembedded controller in and instantiates it unconditionally, so this is a liveness probe\nrather than a feature check; what it really answers is whether the daemon is up.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "zerotier_controller_status"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "The networks this appliance controls.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "zerotier_controller_networks"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "Create the household's own network, configure it, and check the configuration STUCK.\n\nCreation alone yields a network no device can use: `v4AssignMode.zt` defaults false, the\naddress pool is empty and there is no route. So this configures in the same operation and\nreads the applied record back — the controller answers 200 whether or not it understood the\nbody, discarding fields it does not recognise in silence, and a green setup screen over a\ndead network is the exact failure this whole surface is written to avoid.\n\nTHE NETWORK ID IS WELDED TO THIS APPLIANCE. Its top 40 bits are the node's own address, so\nthe network cannot be moved to another machine and cannot survive a new `identity.secret`.\nThat is why `BackupNodeIdentity` was written before this operation existed.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Shown in the interface and in every member's ZeroTier client.",
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "op": {
+          "type": "string",
+          "const": "zerotier_create_network"
+        },
+        "subnet": {
+          "description": "The IPv4 range members are given. `/24`, RFC1918 — see `Ipv4Prefix`.",
+          "$ref": "#/$defs/Ipv4Prefix"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "name",
+        "subnet"
+      ]
+    },
+    {
+      "description": "Every member of one controlled network, each read in full.",
+      "type": "object",
+      "properties": {
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "op": {
+          "type": "string",
+          "const": "zerotier_controller_members"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "network_id"
+      ]
+    },
+    {
+      "description": "Authorize or de-authorize one device.\n\nTHE OPERATION THAT GRANTS ACCESS. Authorizing a member gives that device network-level\nreach to a NAS holding a household's files, so it is administrator-only above and audited\nbelow, and the API records who pressed it.\n\nREFUSES TO ACT ON THIS APPLIANCE'S OWN ADDRESS. De-authorizing the NAS drops it off the\nnetwork it is serving, and the control that would undo it is on the far side of the link\nthat just went away — the controller keeps running for every other device, so nothing looks\nbroken from anywhere except the one place that matters. The refusal is in the agent rather\nthan only in the interface, because the interface is the thing that gets rewritten.",
+      "type": "object",
+      "properties": {
+        "authorized": {
+          "type": "boolean"
+        },
+        "label": {
+          "description": "A name for the device. Absent leaves whatever name it already had — sending an empty\none would erase the household's own label on the action most likely to be repeated.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeComponent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "member": {
+          "$ref": "#/$defs/NodeAddress"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "op": {
+          "type": "string",
+          "const": "zerotier_set_member_authorized"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "network_id",
+        "member",
+        "authorized"
+      ]
+    },
+    {
       "description": "Delete exactly ONE entry inside a share. Never a tree.\n\n`directory` is a required operand rather than something the agent works out by stat-ing the\npath, and that is deliberate twice over. `unlinkat` needs `AT_REMOVEDIR` or not, so the\ndistinction has to be made somewhere; making the CALLER state it means a caller that\nbelieves it is deleting a file and finds a directory gets a refusal instead of a surprise.\nDeciding it from a stat would also be check-then-use on the one operation that cannot be\nundone.\n\nThere is no recursive variant and there will not be one. A non-empty directory comes back\nas an error (`ENOTEMPTY`) and the API walks the tree itself. The reason is §2.2 and\nADR-0006: the closed operation set exists so that no single call the agent accepts has a\nblast radius the caller chooses. \"Delete this subtree\" is `rm -rf` behind a typed name — one\nbug in the unprivileged side, or one confused-deputy request, and it is the whole share.\nThe API knows the tree because the API stores the tree; the agent only needs to be able to\nremove a leaf.",
       "type": "object",
       "properties": {
@@ -1181,12 +1288,20 @@
         "wwn"
       ]
     },
+    "Ipv4Prefix": {
+      "description": "The IPv4 range a controller-hosted network hands out: `a.b.c.0/24`, and nothing else.\n\nONLY /24, and only RFC1918. Both narrowings are deliberate.\n\nA /24 because the alternative is arithmetic: a pool and a route have to be derived from the\nprefix, and deriving them for an arbitrary length means computing broadcast addresses and\nusable ranges in a root daemon for no gain a household will ever notice. 254 addresses is more\ndevices than a house has.\n\nRFC1918 because the value becomes a ROUTE pushed to every member. A public range here would\nsilently blackhole part of the real internet on every device that joins — and the person who\ntyped it would experience that as \"the internet broke after I set up remote access\", with\nnothing connecting the two.\n\nWhat this type CANNOT check is the one collision that actually happens: the household's own\nLAN. `192.168.1.0/24` is a legal RFC1918 /24 and it is also the most common home network in\nthe world, and a member sitting at home would get a route that fights their own router. The\ninterface defaults away from the common ranges and says so; the type cannot know.",
+      "type": "string"
+    },
     "KnownHostsLine": {
       "description": "A `known_hosts` line, as `ssh-keyscan` printed it and as it will be stored.\n\nValidated as a WHOLE LINE rather than trusted, because it is written into a file `ssh` reads\nwith the authority to decide which machine a copy of every file on this appliance goes to. A\nnewline in it would let one confirmation write two entries — the second for a host nobody was\nshown.",
       "type": "string"
     },
     "NetworkId": {
       "description": "A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.\n\nIts own type, next to `SafeComponent`, for the same reason and one more. The value is\nCONCATENATED INTO A REQUEST PATH (`/network/<id>`) and into an HTTP request line, so a\n`String` here would have to be remembered at every call site — and the site that forgot\nwould be the one that let `../` reach the local API's router, or a `\\r\\n` split one request\ninto two. A type is a validation nobody can skip.\n\nUppercase is REFUSED rather than folded to lowercase. ZeroTier prints ids in lowercase and\nthe same value is a key in `public.remote_networks`, so accepting two spellings for one\nnetwork means the audit trail and the table can end up holding both, and \"is this the\nnetwork we joined?\" stops being a string comparison.",
+      "type": "string"
+    },
+    "NodeAddress": {
+      "description": "A ZeroTier node address: exactly ten lowercase hexadecimal digits.\n\nIts own type next to `NetworkId`, for the same reason and with one extra. It is CONCATENATED\nINTO A REQUEST PATH (`/controller/network/<nwid>/member/<address>`), so a `String` here would\nhave to be remembered at every call site. And it is the value an administrator TYPES from a\nfriend's screen — the one operand in this whole surface that arrives by human transcription —\nso the shape check is also the typo check.\n\nNOT A CREDENTIAL. The address is the low 40 bits of a node's public identity; the controller\nauthenticates with the full identity and pins it on first contact, refusing any later node that\npresents the same address with a different identity. So it is safe to display, copy and put in\na QR code. What it is NOT is safe to get wrong: authorizing one wrong digit admits a real\nstranger's node, and until that node first appears there is nothing on screen to say so.\n\nUppercase is REFUSED rather than folded, exactly as `NetworkId` refuses it: the controller\nemits lowercase everywhere, and accepting two spellings means the audit trail and the member\nlist can hold both and \"is this the device we authorized?\" stops being a string comparison.",
       "type": "string"
     },
     "NtHash": {
@@ -1455,6 +1570,119 @@
       "required": [
         "status",
         "lines"
+      ]
+    },
+    {
+      "description": "Whether this node can act as a controller.",
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "controller": {
+          "type": "boolean"
+        },
+        "database_ready": {
+          "type": "boolean"
+        },
+        "node_id": {
+          "description": "This node's own 10-hex address — the prefix of every network it can control, and the\naddress the interface must never offer to de-authorize.",
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "zerotier_controller"
+        }
+      },
+      "required": [
+        "status",
+        "controller",
+        "api_version",
+        "database_ready",
+        "node_id"
+      ]
+    },
+    {
+      "description": "The networks this appliance controls.",
+      "type": "object",
+      "properties": {
+        "networks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ZeroTierControlledNetwork"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "zerotier_controller_networks"
+        }
+      },
+      "required": [
+        "status",
+        "networks"
+      ]
+    },
+    {
+      "description": "A network was created. `shortfall` is EMPTY when the configuration fully applied.",
+      "type": "object",
+      "properties": {
+        "network": {
+          "$ref": "#/$defs/ZeroTierControlledNetwork"
+        },
+        "shortfall": {
+          "description": "What the controller silently did not apply, in sentences.\n\nNOT AN ERROR, because the network exists by then and calling it a failure would make\nthe next attempt create a second one. It is the difference between \"your network is\nready\" and \"your network exists but hands out no addresses\", and the interface has to\nbe able to say the second one.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "zerotier_network_created"
+        }
+      },
+      "required": [
+        "status",
+        "network",
+        "shortfall"
+      ]
+    },
+    {
+      "description": "The members of one controlled network.",
+      "type": "object",
+      "properties": {
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ZeroTierMember"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "zerotier_controller_members"
+        }
+      },
+      "required": [
+        "status",
+        "members"
+      ]
+    },
+    {
+      "description": "One member's authorization was changed, and the change was READ BACK.",
+      "type": "object",
+      "properties": {
+        "member": {
+          "$ref": "#/$defs/ZeroTierMember"
+        },
+        "status": {
+          "type": "string",
+          "const": "zerotier_member_updated"
+        }
+      },
+      "required": [
+        "status",
+        "member"
       ]
     },
     {
@@ -2492,6 +2720,80 @@
         "name",
         "used_bytes",
         "created_at"
+      ]
+    },
+    "ZeroTierControlledNetwork": {
+      "description": "A network this appliance controls, as the interface reads it.",
+      "type": "object",
+      "properties": {
+        "assigns_addresses": {
+          "description": "Is IPv4 auto-assignment actually on? False means no device will ever get an address.",
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "network_id": {
+          "type": "string"
+        },
+        "private": {
+          "description": "Always true for a network DEPSIS made; carried so a network made elsewhere and restored\ninto this controller cannot look private when it is not.",
+          "type": "boolean"
+        },
+        "subnet": {
+          "description": "The route pushed to members, when there is one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "network_id",
+        "name",
+        "private",
+        "assigns_addresses"
+      ]
+    },
+    "ZeroTierMember": {
+      "description": "One member of a controlled network.",
+      "type": "object",
+      "properties": {
+        "addresses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "authorized": {
+          "type": "boolean"
+        },
+        "is_this_appliance": {
+          "description": "Is this the appliance itself? The interface must not offer to de-authorize this row.",
+          "type": "boolean"
+        },
+        "label": {
+          "description": "The household's own name for the device. Empty when never named.",
+          "type": "string"
+        },
+        "member_id": {
+          "description": "The device's 10-hex node address. Not a credential — see `NodeAddress`.",
+          "type": "string"
+        },
+        "seen": {
+          "description": "Has this device ever actually contacted the controller?\n\nFALSE MEANS PRE-AUTHORIZED AND NOT YET SEEN, and the distinction is the one that catches a\nmistyped address: until a device turns up, an authorized row looks exactly the same whether\nit names a friend's laptop or a stranger's. The controller pins the full identity on first\ncontact and refuses any later node claiming the same address, so once this is true the row\nmeans what it says.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "member_id",
+        "authorized",
+        "label",
+        "addresses",
+        "seen",
+        "is_this_appliance"
       ]
     },
     "ZeroTierNetwork": {

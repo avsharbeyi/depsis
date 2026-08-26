@@ -449,6 +449,42 @@ export type AgentRequest =
       op: 'list_database_dumps';
     }
   | {
+      op: 'zerotier_controller_status';
+    }
+  | {
+      op: 'zerotier_controller_networks';
+    }
+  | {
+      /**
+       * A single path component under a share root — never a path, never absolute.
+       *
+       * ADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access
+       * to `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle
+       * `/` or `..` through, so this type refuses them rather than sanitising.
+       */
+      name: string;
+      op: 'zerotier_create_network';
+      /**
+       * The IPv4 range members are given. `/24`, RFC1918 — see `Ipv4Prefix`.
+       */
+      subnet: string;
+    }
+  | {
+      network_id: NetworkId;
+      op: 'zerotier_controller_members';
+    }
+  | {
+      authorized: boolean;
+      /**
+       * A name for the device. Absent leaves whatever name it already had — sending an empty
+       * one would erase the household's own label on the action most likely to be repeated.
+       */
+      label?: SafeComponent | null;
+      member: NodeAddress;
+      network_id: NetworkId;
+      op: 'zerotier_set_member_authorized';
+    }
+  | {
       /**
        * Is the entry a directory? The caller knows and has to say.
        */
@@ -648,20 +684,6 @@ export type KnownHostsLine = string;
  */
 export type SshUserName = string;
 /**
- * An NTLM password hash — `MD4(UTF-16LE(password))`, uppercase hex.
- *
- * A TYPE rather than a `String`, because the failure it prevents is silent. The smbpasswd import
- * format is fixed-width: a lowercase or short field produces a line `pdbedit` accepts and a user
- * who cannot log in, with no error anywhere. `tools/poc/p2-b-smb-password.sh` measured that shape
- * of failure from the other direction with the `LCT` field.
- *
- * The agent never computes this and never sees a password. The API computes it — see
- * `apps/api/src/auth/nt-hash.ts`, which carries its own MD4 because OpenSSL 3 moved MD4 to the
- * legacy provider and Node cannot reach it. What crosses the boundary is password-EQUIVALENT for
- * one protocol, which is worse than nothing and much better than the user's actual password.
- */
-export type NtHash = string;
-/**
  * A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.
  *
  * Its own type, next to `SafeComponent`, for the same reason and one more. The value is
@@ -676,6 +698,40 @@ export type NtHash = string;
  * network we joined?" stops being a string comparison.
  */
 export type NetworkId = string;
+/**
+ * A ZeroTier node address: exactly ten lowercase hexadecimal digits.
+ *
+ * Its own type next to `NetworkId`, for the same reason and with one extra. It is CONCATENATED
+ * INTO A REQUEST PATH (`/controller/network/<nwid>/member/<address>`), so a `String` here would
+ * have to be remembered at every call site. And it is the value an administrator TYPES from a
+ * friend's screen — the one operand in this whole surface that arrives by human transcription —
+ * so the shape check is also the typo check.
+ *
+ * NOT A CREDENTIAL. The address is the low 40 bits of a node's public identity; the controller
+ * authenticates with the full identity and pins it on first contact, refusing any later node that
+ * presents the same address with a different identity. So it is safe to display, copy and put in
+ * a QR code. What it is NOT is safe to get wrong: authorizing one wrong digit admits a real
+ * stranger's node, and until that node first appears there is nothing on screen to say so.
+ *
+ * Uppercase is REFUSED rather than folded, exactly as `NetworkId` refuses it: the controller
+ * emits lowercase everywhere, and accepting two spellings means the audit trail and the member
+ * list can hold both and "is this the device we authorized?" stops being a string comparison.
+ */
+export type NodeAddress = string;
+/**
+ * An NTLM password hash — `MD4(UTF-16LE(password))`, uppercase hex.
+ *
+ * A TYPE rather than a `String`, because the failure it prevents is silent. The smbpasswd import
+ * format is fixed-width: a lowercase or short field produces a line `pdbedit` accepts and a user
+ * who cannot log in, with no error anywhere. `tools/poc/p2-b-smb-password.sh` measured that shape
+ * of failure from the other direction with the `LCT` field.
+ *
+ * The agent never computes this and never sees a password. The API computes it — see
+ * `apps/api/src/auth/nt-hash.ts`, which carries its own MD4 because OpenSSL 3 moved MD4 to the
+ * legacy provider and Node cannot reach it. What crosses the boundary is password-EQUIVALENT for
+ * one protocol, which is worse than nothing and much better than the user's actual password.
+ */
+export type NtHash = string;
 
 /**
  * A disk named twice: the stable link to use, and the WWN it must still be.
@@ -811,6 +867,42 @@ export type AgentResponse =
   | {
       lines: string[];
       status: 'diff';
+    }
+  | {
+      api_version: number;
+      controller: boolean;
+      database_ready: boolean;
+      /**
+       * This node's own 10-hex address — the prefix of every network it can control, and the
+       * address the interface must never offer to de-authorize.
+       */
+      node_id: string;
+      status: 'zerotier_controller';
+    }
+  | {
+      networks: ZeroTierControlledNetwork[];
+      status: 'zerotier_controller_networks';
+    }
+  | {
+      network: ZeroTierControlledNetwork;
+      /**
+       * What the controller silently did not apply, in sentences.
+       *
+       * NOT AN ERROR, because the network exists by then and calling it a failure would make
+       * the next attempt create a second one. It is the difference between "your network is
+       * ready" and "your network exists but hands out no addresses", and the interface has to
+       * be able to say the second one.
+       */
+      shortfall: string[];
+      status: 'zerotier_network_created';
+    }
+  | {
+      members: ZeroTierMember[];
+      status: 'zerotier_controller_members';
+    }
+  | {
+      member: ZeroTierMember;
+      status: 'zerotier_member_updated';
     }
   | {
       /**
@@ -1092,6 +1184,55 @@ export type ZeroTierNetworkStatus =
   | 'ACCESS_DENIED'
   | 'UNKNOWN';
 
+/**
+ * A network this appliance controls, as the interface reads it.
+ */
+export interface ZeroTierControlledNetwork {
+  /**
+   * Is IPv4 auto-assignment actually on? False means no device will ever get an address.
+   */
+  assigns_addresses: boolean;
+  name: string;
+  network_id: string;
+  /**
+   * Always true for a network DEPSIS made; carried so a network made elsewhere and restored
+   * into this controller cannot look private when it is not.
+   */
+  private: boolean;
+  /**
+   * The route pushed to members, when there is one.
+   */
+  subnet?: string | null;
+}
+/**
+ * One member of a controlled network.
+ */
+export interface ZeroTierMember {
+  addresses: string[];
+  authorized: boolean;
+  /**
+   * Is this the appliance itself? The interface must not offer to de-authorize this row.
+   */
+  is_this_appliance: boolean;
+  /**
+   * The household's own name for the device. Empty when never named.
+   */
+  label: string;
+  /**
+   * The device's 10-hex node address. Not a credential — see `NodeAddress`.
+   */
+  member_id: string;
+  /**
+   * Has this device ever actually contacted the controller?
+   *
+   * FALSE MEANS PRE-AUTHORIZED AND NOT YET SEEN, and the distinction is the one that catches a
+   * mistyped address: until a device turns up, an authorized row looks exactly the same whether
+   * it names a friend's laptop or a stranger's. The controller pins the full identity on first
+   * contact and refuses any later node claiming the same address, so once this is true the row
+   * means what it says.
+   */
+  seen: boolean;
+}
 /**
  * One whole disk, as `ListDisks` found it.
  *

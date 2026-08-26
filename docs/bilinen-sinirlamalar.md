@@ -308,13 +308,45 @@ ama sınırın doğru sayı olduğu ölçülmedi.
    `direct` ZeroTier tarafından bildirilmiyor, ajanda türetiliyor (aktif yol var mı), ve türetme
    orada duruyor ki API ile tarayıcı kendi kopyalarını büyütmesin.
 
-   **Self-hosted controller yok.** Kendi ağ kimliklerini ÜRETEN ve üyeleri yetkilendiren bir
-   controller, ayrı bir servis (`ztncui` ya da `zerotier-one`'ın controller API'si) ve kendi kalıcı
-   durumu demek. Bugün DEPSIS başkasının ağına KATILIYOR; ağı kendisi kurmuyor.
+   **Self-hosted controller YAPILDI, enrollment QR yapılmadı.**
 
-   **Enrollment QR yok.** Ağ kimliğini bir QR'a çevirmek küçük bir iş ama bir QR kütüphanesi
-   demek, ve tek kazancı telefonda on altı hane yazmamak. Controller geldiğinde onunla birlikte
-   anlamlı olur.
+   Bu maddede uzun süre "ayrı bir servis gerekiyor" yazıyordu ve o gerekçe YANLIŞTI:
+   `zerotier-one`'ın kendisi controller. `/controller/*` uçları aynı `127.0.0.1:9993` üzerinde,
+   aynı token'la, ajanın zaten konuştuğu API'de. `ztncui` gibi araçlar yalnızca o API'nin web
+   arayüzü; DEPSIS'in kendi arayüzü var. Gerçek sebep başkaydı: planın bu özellik için koyduğu
+   çıkış kapısı — **P0-F** — hiç yazılmamıştı.
+
+   Şimdi: `Uzak erişim` panelinde ev kendi ağını kurabiliyor, üyeleri görebiliyor, cihaz
+   yetkilendirip çıkarabiliyor — my.zerotier.com'a bağlı olmadan.
+
+   **Tasarımı belirleyen dört bulgu**, ve dördü de ZeroTier kaynağından okunarak doğrulandı:
+
+   - **Ağ kimliği cihazın kimliğine KAYNAKLI.** Üst 40 bit düğümün adresi, yani ağ başka bir
+     makineye taşınamıyor ve `identity.secret` değişirse kalıcı olarak kurtarılamıyor. Kimlik
+     yedeği bu yüzden bu özellikten ÖNCE yazıldı (madde 11).
+   - **Controller anlamadığı alanı SESSİZCE atıyor** ve yine 200 dönüyor. Yalnız yaratılan bir ağ
+     hiçbir cihaza adres vermiyor. Her yazma, dönen nesne okunarak doğrulanıyor; uygulanmayan şey
+     `shortfall` olarak cümlesiyle ekrana çıkıyor — yoksa ekran yeşil, ağ ölü olurdu.
+   - **Cihazın kendi yetkisini kaldırmak kilitlenme.** Controller herkese hizmet vermeye devam
+     ettiği için dışarıdan hiçbir şey bozuk görünmüyor, ve geri almanın yolu kopan bağlantının
+     arkasında kalıyor. Ajan reddediyor, arayüz düğmeyi hiç göstermiyor.
+   - **Ön yetkilendirilmiş bir üye ile yanlış yazılmış bir hane ayırt edilemiyor**, cihaz ortaya
+     çıkana kadar. Controller ilk temasta kimliği sabitliyor; o ana kadar satır "hiç bağlanmadı"
+     diye işaretli.
+
+   Ayrıca DEPSIS'in kendi tuttuğu iki şey var, çünkü controller onları bilmiyor: ağın hangi
+   kiracıya ait olduğu, ve **kimin hangi cihazı ne zaman içeri aldığı**. İkincisi olmadan, altı ay
+   sonra ağda tanımadık bir cihaz görüldüğünde sorunun cevabı hiçbir yerde olmazdı.
+
+   **P0-F yazıldı, HENÜZ KOŞMADI.** `tools/poc/p0-f-zt-controller.sh` planın üç ölçütünü de
+   ölçüyor — ağ kuruluyor mu, enrollment akışı çalışıyor mu, ve CANLI token hiçbir yanıtta geçiyor
+   mu. Bu makinede ZeroTier yok; betik PoC VM'inde koşacak ve `docs/adr/evidence/p0-f.tsv` o zaman
+   oluşacak. **O dosya oluşana kadar bu özellik DOĞRULANMAMIŞ sayılır** — birim testleri argv'yi,
+   gövdeleri ve ayrıştırmayı ölçüyor, daemon'un onları kabul ettiğini ölçemiyor.
+
+   **Enrollment QR yok.** Planın R9 maddesi onu doğru tanımlamış: QR yalnız kısa ömürlü,
+   tek kullanımlık bir token ve bir parmak izi taşımalı — çıplak bir ağ kimliği değil. Bugünkü akış
+   elle: eklenecek cihazın 10 haneli adresi okunup arayüze yazılıyor.
 
 9. **Nextcloud ve Immich reçeteleri YAPILDI**, ve yapılırken katalogdaki bir yalan düzeltildi.
 

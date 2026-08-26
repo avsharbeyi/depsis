@@ -178,7 +178,7 @@ fn network_path(network_id: &NetworkId) -> String {
 // ── the client ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Method {
+pub(crate) enum Method {
     Get,
     Post,
     Delete,
@@ -199,7 +199,7 @@ impl Method {
 /// No connection reuse. The agent makes at most a handful of these per user action, and a pooled
 /// connection to a daemon that may restart underneath us would trade a measurable amount of
 /// nothing for a class of bug that only appears in production.
-fn call(method: Method, path: &str, body: &str) -> Result<Vec<u8>, ZeroTierError> {
+pub(crate) fn call(method: Method, path: &str, body: &str) -> Result<Vec<u8>, ZeroTierError> {
     // Read per call rather than cached. The daemon rewrites this file when it is reinstalled or
     // its state directory is recreated, and a cached token would then produce a 401 that looks
     // like a permissions problem until somebody restarts the agent.

@@ -193,10 +193,19 @@ describe('the emitted agent schema', () => {
       // the join takes a typed network id, the leave takes the same, and the two reads take
       // nothing. Adding a fifth means writing a fifth variant, which is the friction that keeps
       // the set closed.
+      // The self-hosted controller. `zerotier_set_member_authorized` is the one that grants a
+      // device network-level reach to the appliance, and the agent refuses it against the
+      // appliance's own address — de-authorizing the NAS drops it off the network it serves and
+      // the undo is on the far side of the link that just went away.
+      'zerotier_controller_members',
+      'zerotier_controller_networks',
+      'zerotier_controller_status',
+      'zerotier_create_network',
       'zerotier_join',
       'zerotier_leave',
       'zerotier_networks',
       'zerotier_peers',
+      'zerotier_set_member_authorized',
       'zerotier_status',
     ]);
 
@@ -256,7 +265,11 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 22 since
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 23 since the five
+    // self-hosted controller operations: `zerotier-one` IS the controller, so the household can
+    // run its own network without depending on my.zerotier.com. A stale agent that did not know
+    // them would leave the appliance unable to authorize a device onto the network it is itself
+    // serving. 22 since
     // `backup_node_identity` — ZeroTier's identity and controller state, the fourth thing the
     // backup document never named. Losing `identity.secret` is the one loss in this product
     // that cannot be undone: a network id's top 40 bits ARE the controlling node's address.
@@ -289,7 +302,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(22);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(23);
   });
 
   it('agrees with the number the agent actually reports', () => {

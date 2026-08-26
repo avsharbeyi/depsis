@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
+import { Controller } from './Controller.js';
 import { formatWhen } from './Dashboard.js';
 import { ConfirmBox, Empty } from './ui.js';
 
@@ -280,6 +281,13 @@ export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
       )}
 
       {/* Tanılama YÖNETİCİDE: uç zaten öyle, ve çalışmayacak bir bağlantıyı göstermemek. */}
+      {/* EVİN KENDİ AĞI. Yukarısı başkasının ağına KATILMAKLA ilgili; bu, ağı bu cihazın
+          yönetmesiyle — my.zerotier.com'a bağlı olmadan. `zerotier-one`'ın kendisi controller,
+          yani ayrı bir servis yok. */}
+      {isAdmin && status !== null && status.available && (
+        <Controller notify={notify} onChanged={reload} />
+      )}
+
       {isAdmin && status !== null && status.available && <Diagnostics notify={notify} />}
 
       {leaving !== null && (

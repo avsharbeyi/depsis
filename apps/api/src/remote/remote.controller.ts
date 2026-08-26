@@ -48,6 +48,22 @@ const joinSchema = z.object({
   label: z.string().trim().min(1).max(64).optional(),
 });
 
+/** Üye adresi: tam on küçük harfli onaltılık hane. Ajanda da kendi tipiyle doğrulanıyor. */
+const MEMBER_ID = /^[0-9a-f]{10}$/u;
+
+const createSchema = z.object({
+  // Ajanda `SafeComponent`: bölü yok, NUL yok, başta tire yok. Burada ayrıca uzunluk, çünkü bu
+  // değer her üyenin ZeroTier istemcisinde görünen ad.
+  name: z.string().trim().min(1).max(64),
+  subnet: z.string().regex(/^\d{1,3}\.\d{1,3}\.\d{1,3}\.0\/24$/u, 'a.b.c.0/24 bekleniyor'),
+});
+
+const memberSchema = z.object({
+  memberId: z.string().regex(MEMBER_ID, 'üye adresi on onaltılık hane olmalı'),
+  authorized: z.boolean(),
+  label: z.string().trim().min(1).max(64).nullable().optional(),
+});
+
 /**
  * Remote access over ZeroTier (ADR-0020).
  *
@@ -134,6 +150,120 @@ export class RemoteController {
       if (error instanceof RemoteUnavailableError || error instanceof AgentUnavailableError) {
         return { available: false, items: [] };
       }
+      throw translate(error);
+    }
+  }
+
+  // ── kendi ağını yönetmek ──
+  //
+  // Hepsi YÖNETİCİ. Sınıfın `SessionGuard`'ının üstüne rota bazında `AdminGuard`, komşu okuma
+  // uçlarıyla aynı kalıpta: bir cihazı ağa almak, ona evin dosyalarını tutan NAS'a ağ seviyesinde
+  // erişim vermek demek, ve sıradan bir üyenin basacağı bir düğme değil.
+
+  @Get('controller')
+  @UseGuards(AdminGuard)
+  async controller(@Req() request: AuthenticatedRequest): Promise<Schemas['ControllerStatus']> {
+    requireSession(request);
+    try {
+      return await this.remote.controllerStatus(randomUUID());
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Get('controller/networks')
+  @UseGuards(AdminGuard)
+  async controlledNetworks(
+    @Req() request: AuthenticatedRequest,
+  ): Promise<Schemas['ControlledNetworkPage']> {
+    const session = requireSession(request);
+    try {
+      return { items: await this.remote.controlledNetworks(session.organizationId, randomUUID()) };
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Post('controller/networks')
+  @HttpCode(201)
+  @UseGuards(AdminGuard)
+  async createNetwork(
+    @Req() request: AuthenticatedRequest,
+    @Body() body: unknown,
+  ): Promise<Schemas['CreatedNetwork']> {
+    requireSameOrigin(request);
+    const session = requireSession(request);
+
+    const parsed = createSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new UnprocessableEntityException(
+        parsed.error.issues[0]?.message ?? 'geçersiz ağ tanımı',
+      );
+    }
+
+    try {
+      return await this.remote.createNetwork(
+        session.organizationId,
+        session.userId,
+        parsed.data.name,
+        parsed.data.subnet,
+        randomUUID(),
+      );
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Get('controller/networks/:networkId/members')
+  @UseGuards(AdminGuard)
+  async members(
+    @Req() request: AuthenticatedRequest,
+    @Param('networkId') networkId: string,
+  ): Promise<Schemas['ControllerMemberPage']> {
+    const session = requireSession(request);
+    if (!NETWORK_ID.test(networkId)) {
+      throw new UnprocessableEntityException('ağ kimliği on altı onaltılık hane olmalı');
+    }
+    try {
+      return {
+        items: await this.remote.members(session.organizationId, networkId, randomUUID()),
+      };
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Post('controller/networks/:networkId/members')
+  @UseGuards(AdminGuard)
+  async setMember(
+    @Req() request: AuthenticatedRequest,
+    @Param('networkId') networkId: string,
+    @Body() body: unknown,
+  ): Promise<Schemas['ControllerMember']> {
+    requireSameOrigin(request);
+    const session = requireSession(request);
+    if (!NETWORK_ID.test(networkId)) {
+      throw new UnprocessableEntityException('ağ kimliği on altı onaltılık hane olmalı');
+    }
+
+    const parsed = memberSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new UnprocessableEntityException(
+        parsed.error.issues[0]?.message ?? 'geçersiz üye tanımı',
+      );
+    }
+
+    try {
+      return await this.remote.setMemberAuthorized(
+        session.organizationId,
+        session.userId,
+        networkId,
+        parsed.data.memberId,
+        parsed.data.authorized,
+        parsed.data.label ?? null,
+        randomUUID(),
+      );
+    } catch (error) {
       throw translate(error);
     }
   }

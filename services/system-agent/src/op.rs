@@ -574,6 +574,192 @@ impl From<KnownHostsLine> for String {
     }
 }
 
+/// A ZeroTier node address: exactly ten lowercase hexadecimal digits.
+///
+/// Its own type next to `NetworkId`, for the same reason and with one extra. It is CONCATENATED
+/// INTO A REQUEST PATH (`/controller/network/<nwid>/member/<address>`), so a `String` here would
+/// have to be remembered at every call site. And it is the value an administrator TYPES from a
+/// friend's screen — the one operand in this whole surface that arrives by human transcription —
+/// so the shape check is also the typo check.
+///
+/// NOT A CREDENTIAL. The address is the low 40 bits of a node's public identity; the controller
+/// authenticates with the full identity and pins it on first contact, refusing any later node that
+/// presents the same address with a different identity. So it is safe to display, copy and put in
+/// a QR code. What it is NOT is safe to get wrong: authorizing one wrong digit admits a real
+/// stranger's node, and until that node first appears there is nothing on screen to say so.
+///
+/// Uppercase is REFUSED rather than folded, exactly as `NetworkId` refuses it: the controller
+/// emits lowercase everywhere, and accepting two spellings means the audit trail and the member
+/// list can hold both and "is this the device we authorized?" stops being a string comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct NodeAddress(String);
+
+impl NodeAddress {
+    /// A node address is a 40-bit number written as 10 hex digits. Not a maximum — the exact
+    /// width, which is why the check is `!=` rather than `>`.
+    pub const LEN: usize = 10;
+
+    pub fn parse(raw: impl Into<String>) -> Result<Self, NetworkIdError> {
+        let s: String = raw.into();
+        if s.is_empty() {
+            return Err(NetworkIdError::Empty);
+        }
+        if s.len() != Self::LEN {
+            return Err(NetworkIdError::WrongLength {
+                len: s.len(),
+                expected: Self::LEN,
+            });
+        }
+        for (at, ch) in s.char_indices() {
+            if ch.is_ascii_uppercase() {
+                return Err(NetworkIdError::Uppercase { at, ch });
+            }
+            if !ch.is_ascii_hexdigit() {
+                return Err(NetworkIdError::NotHex { at, ch });
+            }
+        }
+        Ok(Self(s))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for NodeAddress {
+    type Error = NetworkIdError;
+    fn try_from(v: String) -> Result<Self, Self::Error> {
+        Self::parse(v)
+    }
+}
+
+impl From<NodeAddress> for String {
+    fn from(v: NodeAddress) -> Self {
+        v.0
+    }
+}
+
+/// The IPv4 range a controller-hosted network hands out: `a.b.c.0/24`, and nothing else.
+///
+/// ONLY /24, and only RFC1918. Both narrowings are deliberate.
+///
+/// A /24 because the alternative is arithmetic: a pool and a route have to be derived from the
+/// prefix, and deriving them for an arbitrary length means computing broadcast addresses and
+/// usable ranges in a root daemon for no gain a household will ever notice. 254 addresses is more
+/// devices than a house has.
+///
+/// RFC1918 because the value becomes a ROUTE pushed to every member. A public range here would
+/// silently blackhole part of the real internet on every device that joins — and the person who
+/// typed it would experience that as "the internet broke after I set up remote access", with
+/// nothing connecting the two.
+///
+/// What this type CANNOT check is the one collision that actually happens: the household's own
+/// LAN. `192.168.1.0/24` is a legal RFC1918 /24 and it is also the most common home network in
+/// the world, and a member sitting at home would get a route that fights their own router. The
+/// interface defaults away from the common ranges and says so; the type cannot know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct Ipv4Prefix(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Ipv4PrefixError {
+    #[error("empty value")]
+    Empty,
+    #[error("expected a.b.c.0/24")]
+    Malformed,
+    #[error("only /24 is supported; got /{got}")]
+    NotSlash24 { got: u32 },
+    #[error("{octet} is not an octet")]
+    BadOctet { octet: String },
+    #[error("the last octet of a /24 must be 0; got {got}")]
+    NonZeroHost { got: u8 },
+    #[error("{addr} is not a private range (RFC1918)")]
+    NotPrivate { addr: String },
+}
+
+impl Ipv4Prefix {
+    pub fn parse(raw: impl Into<String>) -> Result<Self, Ipv4PrefixError> {
+        let s: String = raw.into();
+        if s.is_empty() {
+            return Err(Ipv4PrefixError::Empty);
+        }
+        let (addr, len) = s.split_once('/').ok_or(Ipv4PrefixError::Malformed)?;
+        let len: u32 = len.parse().map_err(|_| Ipv4PrefixError::Malformed)?;
+        if len != 24 {
+            return Err(Ipv4PrefixError::NotSlash24 { got: len });
+        }
+
+        let parts: Vec<&str> = addr.split('.').collect();
+        if parts.len() != 4 {
+            return Err(Ipv4PrefixError::Malformed);
+        }
+        let mut octets = [0u8; 4];
+        for (slot, part) in octets.iter_mut().zip(parts.iter()) {
+            // Leading zeros REFUSED: `010` is decimal ten here and octal eight to some parsers,
+            // and a value that means two things is a value nobody can check by reading.
+            if part.is_empty() || (part.len() > 1 && part.starts_with('0')) {
+                return Err(Ipv4PrefixError::BadOctet {
+                    octet: (*part).to_string(),
+                });
+            }
+            *slot = part.parse().map_err(|_| Ipv4PrefixError::BadOctet {
+                octet: (*part).to_string(),
+            })?;
+        }
+        if octets[3] != 0 {
+            return Err(Ipv4PrefixError::NonZeroHost { got: octets[3] });
+        }
+
+        let private = octets[0] == 10
+            || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+            || (octets[0] == 192 && octets[1] == 168);
+        if !private {
+            return Err(Ipv4PrefixError::NotPrivate {
+                addr: addr.to_string(),
+            });
+        }
+
+        Ok(Self(format!(
+            "{}.{}.{}.0/24",
+            octets[0], octets[1], octets[2]
+        )))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// `a.b.c.` — the first three octets with the trailing dot, for building host addresses.
+    fn base(&self) -> String {
+        let dropped = self.0.trim_end_matches("0/24");
+        dropped.to_string()
+    }
+
+    /// The first usable host. `.1` is conventional and is what the appliance itself tends to get.
+    pub fn first_host(&self) -> String {
+        format!("{}1", self.base())
+    }
+
+    /// The last usable host. `.254`, leaving `.255` as broadcast.
+    pub fn last_host(&self) -> String {
+        format!("{}254", self.base())
+    }
+}
+
+impl TryFrom<String> for Ipv4Prefix {
+    type Error = Ipv4PrefixError;
+    fn try_from(v: String) -> Result<Self, Self::Error> {
+        Self::parse(v)
+    }
+}
+
+impl From<Ipv4Prefix> for String {
+    fn from(v: Ipv4Prefix) -> Self {
+        v.0
+    }
+}
+
 /// A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.
 ///
 /// Its own type, next to `SafeComponent`, for the same reason and one more. The value is
@@ -1276,6 +1462,62 @@ pub enum Request {
     #[serde(rename = "list_database_dumps")]
     ListDatabaseDumps {},
 
+    /// Is this node a ZeroTier controller, and is its store ready?
+    ///
+    /// `zerotier-one` IS the controller — there is no second daemon. Every build compiles the
+    /// embedded controller in and instantiates it unconditionally, so this is a liveness probe
+    /// rather than a feature check; what it really answers is whether the daemon is up.
+    #[serde(rename = "zerotier_controller_status")]
+    ZerotierControllerStatus {},
+
+    /// The networks this appliance controls.
+    #[serde(rename = "zerotier_controller_networks")]
+    ZerotierControllerNetworks {},
+
+    /// Create the household's own network, configure it, and check the configuration STUCK.
+    ///
+    /// Creation alone yields a network no device can use: `v4AssignMode.zt` defaults false, the
+    /// address pool is empty and there is no route. So this configures in the same operation and
+    /// reads the applied record back — the controller answers 200 whether or not it understood the
+    /// body, discarding fields it does not recognise in silence, and a green setup screen over a
+    /// dead network is the exact failure this whole surface is written to avoid.
+    ///
+    /// THE NETWORK ID IS WELDED TO THIS APPLIANCE. Its top 40 bits are the node's own address, so
+    /// the network cannot be moved to another machine and cannot survive a new `identity.secret`.
+    /// That is why `BackupNodeIdentity` was written before this operation existed.
+    #[serde(rename = "zerotier_create_network")]
+    ZerotierCreateNetwork {
+        /// Shown in the interface and in every member's ZeroTier client.
+        name: SafeComponent,
+        /// The IPv4 range members are given. `/24`, RFC1918 — see `Ipv4Prefix`.
+        subnet: Ipv4Prefix,
+    },
+
+    /// Every member of one controlled network, each read in full.
+    #[serde(rename = "zerotier_controller_members")]
+    ZerotierControllerMembers { network_id: NetworkId },
+
+    /// Authorize or de-authorize one device.
+    ///
+    /// THE OPERATION THAT GRANTS ACCESS. Authorizing a member gives that device network-level
+    /// reach to a NAS holding a household's files, so it is administrator-only above and audited
+    /// below, and the API records who pressed it.
+    ///
+    /// REFUSES TO ACT ON THIS APPLIANCE'S OWN ADDRESS. De-authorizing the NAS drops it off the
+    /// network it is serving, and the control that would undo it is on the far side of the link
+    /// that just went away — the controller keeps running for every other device, so nothing looks
+    /// broken from anywhere except the one place that matters. The refusal is in the agent rather
+    /// than only in the interface, because the interface is the thing that gets rewritten.
+    #[serde(rename = "zerotier_set_member_authorized")]
+    ZerotierSetMemberAuthorized {
+        network_id: NetworkId,
+        member: NodeAddress,
+        authorized: bool,
+        /// A name for the device. Absent leaves whatever name it already had — sending an empty
+        /// one would erase the household's own label on the action most likely to be repeated.
+        label: Option<SafeComponent>,
+    },
+
     /// Delete exactly ONE entry inside a share. Never a tree.
     ///
     /// `directory` is a required operand rather than something the agent works out by stat-ing the
@@ -1570,6 +1812,43 @@ pub struct OffsiteHostKey {
     pub fingerprint: String,
 }
 
+/// A network this appliance controls, as the interface reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ZeroTierControlledNetwork {
+    pub network_id: String,
+    pub name: String,
+    /// Always true for a network DEPSIS made; carried so a network made elsewhere and restored
+    /// into this controller cannot look private when it is not.
+    pub private: bool,
+    /// Is IPv4 auto-assignment actually on? False means no device will ever get an address.
+    pub assigns_addresses: bool,
+    /// The route pushed to members, when there is one.
+    pub subnet: Option<String>,
+}
+
+/// One member of a controlled network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ZeroTierMember {
+    /// The device's 10-hex node address. Not a credential — see `NodeAddress`.
+    pub member_id: String,
+    pub authorized: bool,
+    /// The household's own name for the device. Empty when never named.
+    pub label: String,
+    pub addresses: Vec<String>,
+    /// Has this device ever actually contacted the controller?
+    ///
+    /// FALSE MEANS PRE-AUTHORIZED AND NOT YET SEEN, and the distinction is the one that catches a
+    /// mistyped address: until a device turns up, an authorized row looks exactly the same whether
+    /// it names a friend's laptop or a stranger's. The controller pins the full identity on first
+    /// contact and refuses any later node claiming the same address, so once this is true the row
+    /// means what it says.
+    pub seen: bool,
+    /// Is this the appliance itself? The interface must not offer to de-authorize this row.
+    pub is_this_appliance: bool,
+}
+
 /// One ZeroTier peer, as the diagnostics screen reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1808,6 +2087,48 @@ pub enum Response {
     Diff {
         lines: Vec<String>,
     },
+    /// Whether this node can act as a controller.
+    #[serde(rename = "zerotier_controller")]
+    ZeroTierController {
+        controller: bool,
+        api_version: i64,
+        database_ready: bool,
+        /// This node's own 10-hex address — the prefix of every network it can control, and the
+        /// address the interface must never offer to de-authorize.
+        node_id: String,
+    },
+
+    /// The networks this appliance controls.
+    #[serde(rename = "zerotier_controller_networks")]
+    ZeroTierControllerNetworks {
+        networks: Vec<ZeroTierControlledNetwork>,
+    },
+
+    /// A network was created. `shortfall` is EMPTY when the configuration fully applied.
+    #[serde(rename = "zerotier_network_created")]
+    ZeroTierNetworkCreated {
+        network: ZeroTierControlledNetwork,
+        /// What the controller silently did not apply, in sentences.
+        ///
+        /// NOT AN ERROR, because the network exists by then and calling it a failure would make
+        /// the next attempt create a second one. It is the difference between "your network is
+        /// ready" and "your network exists but hands out no addresses", and the interface has to
+        /// be able to say the second one.
+        shortfall: Vec<String>,
+    },
+
+    /// The members of one controlled network.
+    #[serde(rename = "zerotier_controller_members")]
+    ZeroTierControllerMembers {
+        members: Vec<ZeroTierMember>,
+    },
+
+    /// One member's authorization was changed, and the change was READ BACK.
+    #[serde(rename = "zerotier_member_updated")]
+    ZeroTierMemberUpdated {
+        member: ZeroTierMember,
+    },
+
     /// The ZeroTier identity and controller state were archived.
     #[serde(rename = "node_identity_backed_up")]
     NodeIdentityBackedUp {
@@ -2194,7 +2515,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 22;
+pub const SCHEMA_VERSION: u32 = 23;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///
