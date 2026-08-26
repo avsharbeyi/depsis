@@ -45,6 +45,7 @@ import {
   AssigneeNotFoundError,
   TaskBothStatusFieldsError,
   TaskNotFoundError,
+  TaskNotYoursError,
   TaskRejectedError,
   TaskStatusTransitionRefused,
   TasksService,
@@ -586,7 +587,10 @@ export class TasksController {
     const session = requireSession(request);
     requireUuid(id);
     try {
-      await this.tasks.remove(session.organizationId, id);
+      await this.tasks.remove(session.organizationId, id, {
+        userId: session.userId,
+        isOrganizationAdmin: session.isOrganizationAdmin,
+      });
     } catch (error) {
       throw translate(error);
     }
@@ -656,10 +660,17 @@ function requireCaller(request: AuthenticatedRequest): Caller {
 function requireSession(request: AuthenticatedRequest): {
   organizationId: string;
   userId: string;
+  isOrganizationAdmin: boolean;
 } {
   const session = request.depsis;
   if (session === undefined) throw new UnauthorizedException();
-  return { organizationId: session.organizationId, userId: session.userId };
+  return {
+    organizationId: session.organizationId,
+    userId: session.userId,
+    // Read from the SESSION on every request rather than carried from anywhere earlier: an
+    // administrator demoted a minute ago must not still be able to delete a colleague's work.
+    isOrganizationAdmin: session.role === 'admin',
+  };
 }
 
 /** A malformed id is "no such task"; see the note on the same guard in `notes.controller.ts`. */
@@ -670,6 +681,10 @@ function requireUuid(id: string): void {
 
 function translate(error: unknown): Error {
   if (error instanceof TaskNotFoundError) return new NotFoundException();
+  // 403, ve 404 DEĞİL — bir alttaki yorum kuralının aynısı ve aynı gerekçeyle: işin VAR OLDUĞU
+  // zaten görünüyor, pano kuruluş içinde paylaşımlı. Ekranında duran bir işe "böyle bir iş yok"
+  // demek, gizlemediği bir şeyi gizlemeye çalışırken kullanıcıya yalan söylemek olurdu.
+  if (error instanceof TaskNotYoursError) return new ForbiddenException(error.message);
   // 404 as well, and it is the assignee that is missing rather than the job. The contract publishes
   // 404 on both write routes for exactly this: naming somebody outside the organisation must read
   // as "no such person here", never as a confirmation that the id belongs to an account elsewhere.

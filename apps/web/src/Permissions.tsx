@@ -92,25 +92,41 @@ export function Permissions({
   const [pricing, setPricing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [people, setPeople] = useState<Principal[]>([]);
+  const [peopleFailed, setPeopleFailed] = useState(false);
 
   const path = target.kind === 'entry' ? '/files/{id}/permissions' : '/shares/{id}/permissions';
 
   /* ── who can be named ──
      Users and teams together, because a grant names exactly one of the two and the person writing
-     it thinks in terms of "who", not "which table". */
+     it thinks in terms of "who", not "which table".
+
+     `/directory/users`, NOT `/users`. The account list is administrators-only, but this panel is
+     deliberately not: §6.2's `manage` delegates one folder to an ordinary member, and
+     `PermissionsController` says so in as many words. That member used to get a 403 here — which
+     the old `?? []` turned into an empty picker, so a working authority looked like an appliance
+     with no users on it. A failure now SAYS it failed; a silent empty list is the one outcome this
+     screen must never produce, because the reader cannot tell it apart from the truth. */
   useEffect(() => {
     let alive = true;
     void (async () => {
-      const [users, teams] = await Promise.all([api.GET('/users', {}), api.GET('/teams', {})]);
+      const [users, teams] = await Promise.all([
+        api.GET('/directory/users', {}),
+        api.GET('/teams', {}),
+      ]);
       if (!alive) return;
+      if (users.data === undefined || teams.data === undefined) {
+        setPeopleFailed(true);
+        return;
+      }
       const list: Principal[] = [];
-      for (const team of teams.data?.items ?? []) {
+      for (const team of teams.data.items) {
         list.push({ id: team.id, label: `${team.name} (ekip)`, kind: 'team' });
       }
-      for (const user of users.data?.items ?? []) {
+      for (const user of users.data.items) {
         list.push({ id: user.id, label: user.username, kind: 'user' });
       }
       setPeople(list);
+      setPeopleFailed(false);
     })();
     return () => {
       alive = false;
@@ -294,12 +310,15 @@ export function Permissions({
                   className="b"
                   value=""
                   aria-label="Kime izin verilecek"
+                  disabled={peopleFailed}
                   onChange={(event) => {
                     addPrincipal(event.target.value);
                     event.target.value = '';
                   }}
                 >
-                  <option value="">Kişi ya da ekip seç…</option>
+                  <option value="">
+                    {peopleFailed ? 'Liste alınamadı' : 'Kişi ya da ekip seç…'}
+                  </option>
                   {people
                     .filter((p) => !taken.has(p.id))
                     .map((p) => (
@@ -309,6 +328,18 @@ export function Permissions({
                     ))}
                 </select>
               </div>
+
+              {peopleFailed && (
+                <div className="notice error" role="alert">
+                  <span className="ic" aria-hidden>
+                    !
+                  </span>
+                  <span className="tx">
+                    Kişi ve ekip listesi alınamadı, bu yüzden yeni biri eklenemiyor. Var olan
+                    satırlar düzenlenebilir ve kaydedilebilir. Sayfayı yenilemeyi deneyin.
+                  </span>
+                </div>
+              )}
 
               {/* §6.2: "Her izin değişimi dry-run ile etkilenecek kullanıcı/klasör sayısını
                   göstermeli." The radius is impossible to guess — inheritance means a row removed

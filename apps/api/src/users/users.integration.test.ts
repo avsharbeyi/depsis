@@ -107,6 +107,27 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     expect(all.map((u) => u.username)).toContain('ikinci');
   });
 
+  it('hands every session a name and an id, and NOTHING else', async () => {
+    // `directory` var, çünkü `/users` yalnız yöneticilere açık ve §6.2'nin `manage` izni bir
+    // klasörün yönetimini sıradan bir üyeye devredebiliyor: o üye izin verebiliyor ama kime
+    // vereceğini seçemiyordu. Arayüz de 403'ü boş listeye çevirdiği için sonuç, hata mesajı
+    // olmayan bir çıkmazdı.
+    //
+    // BU TESTİN ASIL ÖLÇTÜĞÜ SÜTUN LİSTESİ. Uç, yöneticilere ayrılmış bir listenin daraltılmış
+    // hâli; genişleyen bir SELECT rolü, e-postayı ya da hesabın kapalı olup olmadığını her üyeye
+    // açardı ve tip sistemi bunu görmezdi — `db.query<T>` dönen satırı doğrulamıyor, adlandırıyor.
+    await users.create(orgA, 'rehber-uye', 'member', 'hash');
+
+    const rows = await users.directory(orgA);
+    const row = rows.find((r) => r.username === 'rehber-uye');
+    expect(row).toBeDefined();
+    expect(Object.keys(row as object).sort()).toEqual(['id', 'username']);
+
+    // Ve kiracı sınırı: rehber komşunun hesaplarını saymıyor.
+    await users.create(orgB, 'oteki-rehber', 'member', 'hash');
+    expect((await users.directory(orgA)).map((r) => r.username)).not.toContain('oteki-rehber');
+  });
+
   it('gives a new account its POSIX uid in the transaction that creates it', async () => {
     // An account that exists always has a filesystem identity, so there is no window in which a
     // person can be signed in and have nowhere for their files to belong. The agent refuses uid 0

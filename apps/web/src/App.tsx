@@ -535,7 +535,7 @@ function Desktop({
   }, [dockOpen, powerOpen]);
 
   const isAdmin = me?.role === 'admin';
-  const snapshot = useSnapshot({ isAdmin, onUnauthenticated });
+  const snapshot = useSnapshot({ onUnauthenticated });
 
   const openPane = useCallback((next: PaneId) => {
     sfx.open();

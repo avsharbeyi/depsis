@@ -58,7 +58,7 @@ function dueLabel(dueAt: string | null | undefined): { text: string; late: boole
   if (days <= 7) return { text: `${days} gün`, late: false };
   return { text: at.toLocaleDateString('tr-TR'), late: false };
 }
-type User = OpenApi.components['schemas']['User'];
+type Account = OpenApi.components['schemas']['DirectoryEntry'];
 type CurrentUser = OpenApi.components['schemas']['CurrentUser'];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
 
@@ -99,12 +99,19 @@ function toneFor(name: string): Tone {
  * Who gets a column.
  *
  * Everyone the client can name gets one even with nothing assigned, because an empty column is
- * where a task for that person is added. Someone who only appears as an assignee — which is what
- * a member sees, since `/users` is admin-only — gets a column without an input: the board can
- * show their work honestly, but this client cannot offer to create work for an account it cannot
- * enumerate.
+ * where a task for that person is added.
+ *
+ * `users` is `null` only until the first poll answers. It used to also be `null` for every
+ * ordinary member, because the names came from the administrators-only `/users`: a member saw a
+ * board with exactly one column they could add to — their own — and a colleague appeared only
+ * after somebody else had already assigned them something. `/directory/users` is open to any
+ * session and returns a name and an id, which is what a picker needs and all it needs.
+ *
+ * Someone who appears ONLY as an assignee still gets a column without an input: an account that
+ * has since been removed can still own rows on the board, and the board says so rather than
+ * hiding the work.
  */
-function people(tasks: Task[], me: CurrentUser, users: User[] | null): Person[] {
+function people(tasks: Task[], me: CurrentUser, users: Account[] | null): Person[] {
   const known = new Map<string, Person>();
   if (users === null) {
     known.set(me.id, { id: me.id, name: me.username, canAdd: true });
@@ -177,7 +184,7 @@ export function Tasks({
 }: {
   notify: Notify;
   me: CurrentUser;
-  users: User[] | null;
+  users: Account[] | null;
 }): React.JSX.Element {
   const [tasks, setTasks] = useState<Task[] | null>(null);
   /** Told apart from "no tasks": an empty board is a fact, a read that never answered is not. */

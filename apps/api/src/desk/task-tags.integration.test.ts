@@ -32,6 +32,12 @@ const runnable =
   APP_URL !== undefined && APP_URL !== '' && OWNER_URL !== undefined && OWNER_URL !== '';
 const describeDb = runnable ? describe : describe.skip;
 
+/**
+ * Teardown ve kural-dışı çağrılar için: bu satırlar başkasının işini BİLEREK siliyor.
+ * Kuralın kendisi `tasks.integration.test.ts` içinde ayrıca ölçülüyor.
+ */
+const AS_ADMIN = { userId: '00000000-0000-4000-8000-000000000000', isOrganizationAdmin: true };
+
 describeDb('task tags, against a real PostgreSQL', () => {
   let db: DbService;
   let owner: DbService;
@@ -246,7 +252,7 @@ describeDb('task tags, against a real PostgreSQL', () => {
     const task = await tasks.create(orgA, jale, 'Silinecek', null);
     await tags.attach(orgA, task.id, tag.id, jale);
 
-    await tasks.remove(orgA, task.id);
+    await tasks.remove(orgA, task.id, AS_ADMIN);
 
     // Bağ gitti ama ETİKET kaldı: sözlük kiracıya ait, tek bir işin ömrüne bağlı değil.
     expect(await tags.list(orgA)).toHaveLength(1);

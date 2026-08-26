@@ -257,6 +257,28 @@ paths:
         '401': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
 
+  /directory/users:
+    get:
+      tags: [users]
+      summary: Kime izin verilebileceğini bilmek için ad ve kimlik
+      description: |
+        HER OTURUM. `/users`'ın aksine burada `AdminGuard` yok, ve bunun nedeni §6.2'nin `manage`
+        iznidir: bir klasörün yönetimi sıradan bir üyeye devredilebilir, o üye izin verebilir, ama
+        `/users` ona 403 döner. Arayüz o 403'ü boş bir listeye çevirdiği sürece devredilmiş yetki
+        "kutuda hiç kullanıcı yok" gibi görünüyordu — çalışan bir yetki, çalışmayan bir ekran.
+
+        DÖNEN ŞEY BİR AD VE BİR KİMLİKTİR, BAŞKA HİÇBİR ŞEY DEĞİL. Rol, e-posta, kapatılma
+        durumu, oluşturulma zamanı — hiçbiri yok. Kullanıcı adları zaten her üyeye görünüyor: iş
+        panosunda atanan kişi, dosya listesinde sahip, yorumda yazar. Bu uç yeni bir şey
+        sızdırmıyor, var olanı seçilebilir hâle getiriyor.
+      responses:
+        '200':
+          description: Kuruluşun hesap adları
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DirectoryPage' }
+        '401': { $ref: '#/components/responses/Problem' }
+
   /users:
     get:
       tags: [users]
@@ -3560,6 +3582,21 @@ components:
         - manage_acl
         - view_versions
         - view_audit
+
+    DirectoryEntry:
+      type: object
+      required: [id, username]
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+
+    DirectoryPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/DirectoryEntry' }
 
     User:
       type: object

@@ -125,8 +125,9 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
                   <div className="l">
                     <span style={{ color: 'var(--warn)' }}>
                       Bir dakikadan uzun süredir ilerlemiyor — son yazma{' '}
-                      {formatWhen(item.updatedAt)}. Yükleyen sekme kapanmış olabilir; aynı dosya
-                      yeniden seçilirse kaldığı yerden devam eder.
+                      {formatWhen(item.updatedAt)}. Yükleyen sekme kapanmış olabilir. Yüklemeyi
+                      başlatan TARAYICIDA aynı dosya yeniden seçilirse kaldığı yerden devam eder;
+                      başka bir tarayıcıda ya da temizlenmiş bir profilde baştan başlar.
                     </span>
                   </div>
                 )}

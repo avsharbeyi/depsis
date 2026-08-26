@@ -8,10 +8,49 @@
  *
  * What this buys is what a PWA needs to be installable and to open without a network round trip:
  * the HTML, the bundle and the icon. What it deliberately does not buy is offline file browsing.
+ *
+ * ── why the bundle is cached at RUNTIME and not precached ──
+ *
+ * `SHELL_URLS` cannot name the bundle. Vite writes `/assets/index-<hash>.js`, the hash changes on
+ * every build, and this file is static — a literal path here would be stale the moment it was
+ * written, and `cache.addAll` rejects the whole install if ONE entry 404s. So the install list is
+ * the fixed paths, and anything under `/assets/` is cached as it is fetched.
+ *
+ * That is safe for the same reason it is useful: a hashed filename names one exact byte sequence,
+ * so a cached entry can never be stale, and nothing under `/assets/` is a tenant's data or a
+ * decision about who is asking. It also means the cache accumulates the assets of every build the
+ * appliance has ever served, which is why `ASSET_BUDGET` exists below.
  */
 
 const SHELL = 'depsis-shell-v1';
 const SHELL_URLS = ['/', '/index.html', '/icon.svg', '/manifest.webmanifest'];
+
+/**
+ * How many hashed assets to keep.
+ *
+ * This worker's own byte content does not change between builds, so the browser never sees a new
+ * version of it and `activate` — where a cache is normally emptied — never runs again. Without a
+ * bound, an appliance updated weekly for a year would carry a year of dead bundles.
+ *
+ * Eviction is oldest-first: `cache.keys()` resolves in insertion order, and the oldest entries are
+ * by construction the ones from the builds furthest in the past.
+ */
+const ASSET_BUDGET = 40;
+
+/** Hashed build output: immutable by name, and never anybody's data. */
+function isAsset(url) {
+  return url.pathname.startsWith('/assets/');
+}
+
+async function keepAsset(request, response) {
+  const cache = await caches.open(SHELL);
+  await cache.put(request, response);
+  const keys = await cache.keys();
+  const assets = keys.filter((k) => isAsset(new URL(k.url)));
+  for (const stale of assets.slice(0, Math.max(0, assets.length - ASSET_BUDGET))) {
+    await cache.delete(stale);
+  }
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(SHELL).then((cache) => cache.addAll(SHELL_URLS)));
@@ -47,6 +86,8 @@ self.addEventListener('fetch', (event) => {
         if (response.ok && SHELL_URLS.includes(url.pathname)) {
           const copy = response.clone();
           void caches.open(SHELL).then((cache) => cache.put(request, copy));
+        } else if (response.ok && isAsset(url)) {
+          void keepAsset(request, response.clone());
         }
         return response;
       })

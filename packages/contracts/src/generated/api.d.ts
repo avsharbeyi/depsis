@@ -492,6 +492,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/directory/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Kime izin verilebileceğini bilmek için ad ve kimlik
+         * @description HER OTURUM. `/users`'ın aksine burada `AdminGuard` yok, ve bunun nedeni §6.2'nin `manage`
+         *     iznidir: bir klasörün yönetimi sıradan bir üyeye devredilebilir, o üye izin verebilir, ama
+         *     `/users` ona 403 döner. Arayüz o 403'ü boş bir listeye çevirdiği sürece devredilmiş yetki
+         *     "kutuda hiç kullanıcı yok" gibi görünüyordu — çalışan bir yetki, çalışmayan bir ekran.
+         *
+         *     DÖNEN ŞEY BİR AD VE BİR KİMLİKTİR, BAŞKA HİÇBİR ŞEY DEĞİL. Rol, e-posta, kapatılma
+         *     durumu, oluşturulma zamanı — hiçbiri yok. Kullanıcı adları zaten her üyeye görünüyor: iş
+         *     panosunda atanan kişi, dosya listesinde sahip, yorumda yazar. Bu uç yeni bir şey
+         *     sızdırmıyor, var olanı seçilebilir hâle getiriyor.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Kuruluşun hesap adları */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DirectoryPage"];
+                    };
+                };
+                401: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users": {
         parameters: {
             query?: never;
@@ -5558,6 +5606,14 @@ export interface components {
          * @enum {string}
          */
         Permission: "list" | "read" | "download" | "create" | "modify" | "move" | "delete" | "share" | "manage_acl" | "view_versions" | "view_audit";
+        DirectoryEntry: {
+            /** Format: uuid */
+            id: string;
+            username: string;
+        };
+        DirectoryPage: {
+            items: components["schemas"]["DirectoryEntry"][];
+        };
         User: {
             /** Format: uuid */
             id: string;

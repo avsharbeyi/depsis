@@ -6,7 +6,7 @@ import { ConfirmBox, Empty, PromptBox, Win } from './ui.js';
 
 type Team = OpenApi.components['schemas']['Team'];
 type TeamMember = OpenApi.components['schemas']['TeamMember'];
-type User = OpenApi.components['schemas']['User'];
+type Account = OpenApi.components['schemas']['DirectoryEntry'];
 type Impact = OpenApi.components['schemas']['PermissionImpact'];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
 
@@ -277,16 +277,21 @@ function Members({
   onClose: () => void;
 }): React.JSX.Element {
   const [members, setMembers] = useState<TeamMember[] | null>(null);
-  const [users, setUsers] = useState<User[]>([]);
+  const [users, setUsers] = useState<Account[]>([]);
+  const [usersFailed, setUsersFailed] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     const [list, all] = await Promise.all([
       api.GET('/teams/{id}/members', { params: { path: { id: team.id } } }),
-      api.GET('/users', {}),
+      // `/directory/users`, not `/users`: `requireTeamAuthority` lets a TEAM administrator who
+      // is not an organisation administrator add members, and the account list refuses that
+      // person. The picker was empty for exactly the people the authority was invented for.
+      api.GET('/directory/users', {}),
     ]);
     setMembers(list.data?.items ?? []);
     setUsers(all.data?.items ?? []);
+    setUsersFailed(all.data === undefined);
   }, [team.id]);
 
   useEffect(() => {
@@ -360,7 +365,7 @@ function Members({
               if (id !== '') void add(id);
             }}
           >
-            <option value="">Kişi seç…</option>
+            <option value="">{usersFailed ? 'Liste alınamadı' : 'Kişi seç…'}</option>
             {users
               .filter((user) => !inTeam.has(user.id))
               .map((user) => (

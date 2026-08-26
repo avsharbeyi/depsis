@@ -187,6 +187,14 @@ export class TaskNotFoundError extends Error {
   }
 }
 
+/** The task exists and belongs to somebody else. See `TasksService.remove`. */
+export class TaskNotYoursError extends Error {
+  constructor() {
+    super('only the person who created a task, its assignee, or an administrator may delete it');
+    this.name = 'TaskNotYoursError';
+  }
+}
+
 /**
  * The person the job was to be assigned to is not in this organisation.
  *
@@ -665,16 +673,50 @@ export class TasksService {
     return row;
   }
 
-  async remove(organizationId: string, id: string): Promise<void> {
+  /**
+   * Delete one task — if it is yours to delete.
+   *
+   * THE PREDICATE IS IN THE STATEMENT, not in a check before it. This route had no ownership test
+   * at all: any member could erase any colleague's task, and `task_activity`'s ON DELETE CASCADE
+   * took the audit trail with it — the withheld DELETE grant on that table does not stop a
+   * referential cascade. A check-then-delete would have closed the hole and opened a smaller one,
+   * so the rule travels with the write.
+   *
+   * WHO: the person who created it, the person it is assigned to, or an administrator. The board
+   * is shared inside an organisation and editing is deliberately open — deletion is the one action
+   * with no undo, and "anyone may remove anyone's work" is not a default a household would choose.
+   *
+   * NOT FOUND AND NOT YOURS ARE DIFFERENT ANSWERS HERE, deliberately, and that is a departure from
+   * the file tree's concealment. There, the existence of an entry is itself a secret. Here every
+   * member can already SEE every task on the board, so answering 404 would hide nothing and would
+   * tell somebody looking at a task on their screen that it does not exist. The second query runs
+   * only on the failure path, after the delete has already not happened, so it races with nothing.
+   */
+  async remove(
+    organizationId: string,
+    id: string,
+    caller: { userId: string; isOrganizationAdmin: boolean },
+  ): Promise<void> {
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<{ id: string }>(
         `DELETE FROM public.tasks
           WHERE organization_id = $1 AND id = $2
+            AND ($4 OR created_by = $3 OR assignee_id = $3)
           RETURNING id::text AS id`,
+        [organizationId, id, caller.userId, caller.isOrganizationAdmin],
+      ),
+    );
+    if (rows.length > 0) return;
+
+    const exists = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ id: string }>(
+        `SELECT id::text AS id FROM public.tasks
+          WHERE organization_id = $1 AND id = $2`,
         [organizationId, id],
       ),
     );
-    if (rows.length === 0) throw new TaskNotFoundError();
+    if (exists.length === 0) throw new TaskNotFoundError();
+    throw new TaskNotYoursError();
   }
 }
 

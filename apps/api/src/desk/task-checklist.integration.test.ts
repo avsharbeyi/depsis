@@ -29,6 +29,12 @@ const runnable =
   APP_URL !== undefined && APP_URL !== '' && OWNER_URL !== undefined && OWNER_URL !== '';
 const describeDb = runnable ? describe : describe.skip;
 
+/**
+ * Teardown ve kural-dışı çağrılar için: bu satırlar başkasının işini BİLEREK siliyor.
+ * Kuralın kendisi `tasks.integration.test.ts` içinde ayrıca ölçülüyor.
+ */
+const AS_ADMIN = { userId: '00000000-0000-4000-8000-000000000000', isOrganizationAdmin: true };
+
 describeDb('subtasks and checklists, against a real PostgreSQL', () => {
   let db: DbService;
   let owner: DbService;
@@ -162,7 +168,7 @@ describeDb('subtasks and checklists, against a real PostgreSQL', () => {
     await tasks.create(org, hakan, 'Parça 2', null, parent.id);
     const bystander = await tasks.create(org, hakan, 'İlgisiz iş', null);
 
-    await tasks.remove(org, parent.id);
+    await tasks.remove(org, parent.id, AS_ADMIN);
 
     const left = await tasks.list(org);
     expect(left.map((t) => t.id)).toEqual([bystander.id]);
@@ -260,7 +266,7 @@ describeDb('subtasks and checklists, against a real PostgreSQL', () => {
   it('takes the checklist with the task it belongs to', async () => {
     const task = await tasks.create(org, hakan, 'Silinecek', null);
     await checks.add(org, task.id, hakan, 'madde');
-    await tasks.remove(org, task.id);
+    await tasks.remove(org, task.id, AS_ADMIN);
 
     const left = await owner.withTenant(org, (q) =>
       q.query<{ n: string }>(

@@ -78,6 +78,25 @@ export class UsersService {
     );
   }
 
+  /**
+   * Adlar ve kimlikler, izin verilecek kişiyi seçebilmek için.
+   *
+   * `list`'in daraltılmış hâli DEĞİL, ayrı bir sorgu: `list` yöneticinin gördüğü her sütunu
+   * seçiyor ve buradan çağrılsaydı rolü de e-postayı da okuyup sonra atmış olurduk. Bir sütun
+   * sorulmuyorsa yanlışlıkla da dönemez.
+   */
+  async directory(organizationId: string): Promise<Array<{ id: string; username: string }>> {
+    return this.db.withTenant(organizationId, (db) =>
+      db.query<{ id: string; username: string }>(
+        `SELECT id::text AS id, username
+           FROM public.users
+          WHERE organization_id = $1
+          ORDER BY username`,
+        [organizationId],
+      ),
+    );
+  }
+
   async find(organizationId: string, id: string): Promise<UserRow> {
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<UserRow>(

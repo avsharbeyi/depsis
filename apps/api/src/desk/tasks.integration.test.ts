@@ -6,6 +6,7 @@ import { TaskWatchersService } from './task-watchers.service.js';
 import {
   AssigneeNotFoundError,
   TaskNotFoundError,
+  TaskNotYoursError,
   TaskRejectedError,
   TasksService,
 } from './tasks.service.js';
@@ -33,6 +34,12 @@ const runnable =
   APP_URL !== undefined && APP_URL !== '' && OWNER_URL !== undefined && OWNER_URL !== '';
 const describeDb = runnable ? describe : describe.skip;
 
+/**
+ * Teardown ve kural-dışı çağrılar için: bu satırlar başkasının işini BİLEREK siliyor.
+ * Kuralın kendisi `tasks.integration.test.ts` içinde ayrıca ölçülüyor.
+ */
+const AS_ADMIN = { userId: '00000000-0000-4000-8000-000000000000', isOrganizationAdmin: true };
+
 describeDb('the job board, against a real PostgreSQL', () => {
   let db: DbService;
   let owner: DbService;
@@ -43,6 +50,7 @@ describeDb('the job board, against a real PostgreSQL', () => {
   let deniz = '';
   let emre = '';
   let figen = '';
+  let cem = '';
 
   beforeAll(async () => {
     db = new DbService(APP_URL as string);
@@ -66,6 +74,7 @@ describeDb('the job board, against a real PostgreSQL', () => {
         `INSERT INTO users (organization_id, username, role, password_hash)
          VALUES ($1, 'tasks-deniz', 'admin', 'x'),
                 ($1, 'tasks-emre', 'member', 'x'),
+                ($1, 'tasks-cem', 'member', 'x'),
                 ($2, 'tasks-figen', 'admin', 'x')
          RETURNING username, id::text AS id`,
         [orgA, orgB],
@@ -73,6 +82,7 @@ describeDb('the job board, against a real PostgreSQL', () => {
       deniz = seeded.find((r) => r.username === 'tasks-deniz')?.id ?? '';
       emre = seeded.find((r) => r.username === 'tasks-emre')?.id ?? '';
       figen = seeded.find((r) => r.username === 'tasks-figen')?.id ?? '';
+      cem = seeded.find((r) => r.username === 'tasks-cem')?.id ?? '';
     });
   });
 
@@ -86,6 +96,70 @@ describeDb('the job board, against a real PostgreSQL', () => {
       await owner.onModuleDestroy();
     }
     await db?.onModuleDestroy();
+  });
+
+  it('lets only the creator, the assignee or an administrator delete a job', async () => {
+    // KAPANAN DELIK. `DELETE /tasks/{id}` hicbir sahiplik sinamasi yapmiyordu: herhangi bir uye
+    // herhangi bir meslektasinin isini siliyordu, ve `task_activity`'nin ON DELETE CASCADE'i
+    // denetim izini de goturuyordu — o tabloda DELETE yetkisinin verilmemis olmasi bir referans
+    // silmesini durdurmuyor, yani olan bitenin kaydi olan bitenle birlikte gidiyordu.
+    const denizin = await tasks.create(orgA, deniz, 'Denizin isi', emre);
+
+    // Cem ne yaratici, ne atanan, ne yonetici. Ayni panoyu goruyor, ama silemiyor.
+    await expect(
+      tasks.remove(orgA, denizin.id, { userId: cem, isOrganizationAdmin: false }),
+    ).rejects.toBeInstanceOf(TaskNotYoursError);
+    // Ve ret gercekten reddetti: satir hala orada. Bu satir olmadan test yalnizca atilan hatayi
+    // olcerdi, silmenin olup olmadigini degil.
+    await expect(tasks.find(orgA, denizin.id)).resolves.toBeDefined();
+
+    // Atanan silebilir.
+    await tasks.remove(orgA, denizin.id, { userId: emre, isOrganizationAdmin: false });
+    await expect(tasks.find(orgA, denizin.id)).rejects.toBeInstanceOf(TaskNotFoundError);
+
+    // Yaratici da.
+    const ikinci = await tasks.create(orgA, deniz, 'Denizin ikinci isi', emre);
+    await tasks.remove(orgA, ikinci.id, { userId: deniz, isOrganizationAdmin: false });
+    await expect(tasks.find(orgA, ikinci.id)).rejects.toBeInstanceOf(TaskNotFoundError);
+
+    // Ikisi de olmayan bir yonetici de. Pano paylasimli oldugu icin bu bir kacis kapisi degil,
+    // birinin izne cikmasi halinde isin panoda takili kalmamasinin tek yolu.
+    const ucuncu = await tasks.create(orgA, deniz, 'Denizin ucuncu isi', emre);
+    await tasks.remove(orgA, ucuncu.id, { userId: cem, isOrganizationAdmin: true });
+    await expect(tasks.find(orgA, ucuncu.id)).rejects.toBeInstanceOf(TaskNotFoundError);
+  });
+
+  it('answers "not yours" and "no such job" differently, deliberately', async () => {
+    // DOSYA AGACINDAN BILEREK AYRILIYOR. Orada bir girdinin VARLIGI sirdir ve yetkisiz istek 404
+    // alir. Panoda ise her uye zaten her isi GORUYOR; burada 404 demek hicbir seyi gizlemez,
+    // yalnizca ekraninda duran isi goren kisiye "boyle bir is yok" demis olurdu.
+    const gorunen = await tasks.create(orgA, deniz, 'Gorunen ama benim olmayan is', null);
+
+    await expect(
+      tasks.remove(orgA, gorunen.id, { userId: cem, isOrganizationAdmin: false }),
+    ).rejects.toBeInstanceOf(TaskNotYoursError);
+    await expect(
+      tasks.remove(orgA, '00000000-0000-4000-8000-0000000000ff', {
+        userId: cem,
+        isOrganizationAdmin: false,
+      }),
+    ).rejects.toBeInstanceOf(TaskNotFoundError);
+
+    await tasks.remove(orgA, gorunen.id, AS_ADMIN);
+  });
+
+  it("still refuses another tenant's job, admin flag or not", async () => {
+    // Sahiplik yuklemi satir seviyesi guvenlige EK, asla onun yerine gecen bir sey degil. Bir
+    // kurulusun yoneticisi otekinde hic kimsedir, ve `isOrganizationAdmin` cagiranin KENDI
+    // kurulusu hakkinda bir iddia — burada bir kestirme, yerel bir rolu kuresel yapardi.
+    const otekinin = await tasks.create(orgB, figen, 'Oteki kiracinin isi', null);
+
+    await expect(
+      tasks.remove(orgA, otekinin.id, { userId: figen, isOrganizationAdmin: true }),
+    ).rejects.toBeInstanceOf(TaskNotFoundError);
+    // Kendi kiracisinda hala duruyor.
+    await expect(tasks.find(orgB, otekinin.id)).resolves.toBeDefined();
+    await tasks.remove(orgB, otekinin.id, AS_ADMIN);
   });
 
   it('creates an unassigned job, which is a real state rather than a missing value', async () => {
@@ -124,7 +198,7 @@ describeDb('the job board, against a real PostgreSQL', () => {
     await expect(tasks.update(orgA, theirs.id, { done: true })).rejects.toBeInstanceOf(
       TaskNotFoundError,
     );
-    await expect(tasks.remove(orgA, theirs.id)).rejects.toBeInstanceOf(TaskNotFoundError);
+    await expect(tasks.remove(orgA, theirs.id, AS_ADMIN)).rejects.toBeInstanceOf(TaskNotFoundError);
 
     expect((await tasks.find(orgB, theirs.id)).done_at).toBeNull();
   });
@@ -215,9 +289,9 @@ describeDb('the job board, against a real PostgreSQL', () => {
 
   it('deletes permanently and refuses the second delete', async () => {
     const task = await tasks.create(orgA, deniz, 'silinecek', null);
-    await tasks.remove(orgA, task.id);
+    await tasks.remove(orgA, task.id, AS_ADMIN);
     await expect(tasks.find(orgA, task.id)).rejects.toBeInstanceOf(TaskNotFoundError);
-    await expect(tasks.remove(orgA, task.id)).rejects.toBeInstanceOf(TaskNotFoundError);
+    await expect(tasks.remove(orgA, task.id, AS_ADMIN)).rejects.toBeInstanceOf(TaskNotFoundError);
   });
 
   it('turns the body CHECK constraint into a refusal rather than a fault', async () => {

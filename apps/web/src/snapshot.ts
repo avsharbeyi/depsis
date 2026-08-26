@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
 
 type Telemetry = OpenApi.components['schemas']['Telemetry'];
-type User = OpenApi.components['schemas']['User'];
+type Person = OpenApi.components['schemas']['DirectoryEntry'];
 
 /**
  * Everything the desktop knows about the appliance at one instant.
@@ -17,8 +17,15 @@ export interface Snapshot {
   telemetry: Telemetry | null;
   /** Why telemetry is absent, when it is. Distinct causes, not one undifferentiated "failed". */
   telemetryNote: string | null;
-  /** `null` for a member: the account list is an admin endpoint and a 403 is not a failure. */
-  users: User[] | null;
+  /**
+   * The tenant's account names — a name and an id, nothing else.
+   *
+   * `null` means NOT YET KNOWN, and now only that. It used to also mean "the caller is a member",
+   * because this polled the administrators-only `/users`; the board consequently offered a member
+   * no way to assign work to anybody, and the column for a colleague appeared only once that
+   * colleague already had a task on it.
+   */
+  users: Person[] | null;
   /** Load average, most recent last, capped at 40 samples — a little over six minutes. */
   cpuHistory: number[];
 }
@@ -27,16 +34,14 @@ const REFRESH_MS = 10_000;
 const HISTORY_LENGTH = 40;
 
 /**
- * Polls `/system/telemetry` and `/users` together and keeps a short load history.
+ * Polls `/system/telemetry` and `/directory/users` together and keeps a short load history.
  *
  * Returns `null` until the first answer arrives, so a caller can tell "nothing known yet" from
  * "known to be empty" — the two look identical once they are both rendered as zeroes.
  */
 export function useSnapshot({
-  isAdmin,
   onUnauthenticated,
 }: {
-  isAdmin: boolean;
   onUnauthenticated: () => void;
 }): Snapshot | null {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -62,11 +67,11 @@ export function useSnapshot({
       try {
         const [telemetry, users] = await Promise.all([
           api.GET('/system/telemetry', {}),
-          isAdmin ? api.GET('/users', {}) : Promise.resolve(null),
+          api.GET('/directory/users', {}),
         ]);
         if (!alive) return false;
 
-        if (telemetry.response.status === 401 || users?.response.status === 401) {
+        if (telemetry.response.status === 401 || users.response.status === 401) {
           signalUnauthenticated.current();
           return false;
         }
@@ -92,12 +97,15 @@ export function useSnapshot({
           history.current = [...history.current, load].slice(-HISTORY_LENGTH);
         }
 
-        setSnapshot({
+        setSnapshot((previous) => ({
           telemetry: telemetry.data ?? null,
           telemetryNote,
-          users: users?.data?.items ?? null,
+          // A failed name list keeps the PREVIOUS one rather than blanking to null: this poll runs
+          // every ten seconds, and one miss would otherwise take every column off the job board
+          // and put it back a moment later.
+          users: users.data?.items ?? previous?.users ?? null,
           cpuHistory: history.current,
-        });
+        }));
         return true;
       } catch {
         if (!alive) return false;
@@ -123,7 +131,7 @@ export function useSnapshot({
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [isAdmin]);
+  }, []);
 
   return snapshot;
 }

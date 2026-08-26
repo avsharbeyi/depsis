@@ -7,6 +7,7 @@ import { History } from './History.js';
 import type { Tone } from './ui.js';
 import { Bar, ConfirmBox, Empty, FolderPicker, PromptBox, TONES, toneRgb, Win } from './ui.js';
 import { Permissions, type PermissionTarget } from './Permissions.js';
+import { fingerprint, forgetUpload, recallUpload, rememberUpload, resumeOffset } from './resume.js';
 import { TrashPolicyBar } from './TrashPolicy.js';
 
 type FileEntry = OpenApi.components['schemas']['FileEntry'];
@@ -2026,21 +2027,48 @@ const CHUNK_BYTES = 5 * 1024 * 1024;
  * on a route the document does not describe.
  */
 async function* uploadFile(file: File, parentId: string | undefined): AsyncGenerator<number> {
-  const metadata = [
-    `filename ${base64(file.name)}`,
-    ...(parentId === undefined ? [] : [`parentId ${base64(parentId)}`]),
-  ].join(',');
+  const key = fingerprint(file, parentId);
 
-  const created = await fetch(`${API_BASE_URL}/uploads`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'upload-length': String(file.size), 'upload-metadata': metadata },
-  });
-  if (!created.ok) throw await failure(created, `"${file.name}" yüklenemedi.`);
-  const location = created.headers.get('location');
-  if (location === null) throw new Error('Sunucu yükleme adresi vermedi.');
-
+  // ── kaldığı yerden ──
+  //
+  // Önce bu tarayıcının kendi notuna bakılıyor. `POST /uploads` koşulsuz çağrıldığı sürece
+  // sekmesi kapanmış bir yükleme yeniden seçildiğinde SIFIRDAN başlıyordu ve yarım kalan oturum
+  // sunucuda öksüz kalıyordu — arayüz ise "kaldığı yerden devam eder" yazıyordu.
+  //
+  // HEAD sunucunun cevabı, notunki değil: not yalnız hangi oturumun sorulacağını söylüyor.
+  let location = recallUpload(key);
   let offset = 0;
+  if (location !== null) {
+    const resumed = await probe(location, file.size);
+    if (resumed === null) {
+      // 404, boyut uyuşmazlığı, ya da bayt sayısı dolmuş ama yayımlanmamış bir oturum. Hepsinde
+      // doğru davranış notu atıp sıfırdan başlamak.
+      forgetUpload(key);
+      location = null;
+    } else {
+      offset = resumed;
+      yield Math.round((offset / Math.max(1, file.size)) * 100);
+    }
+  }
+
+  if (location === null) {
+    const metadata = [
+      `filename ${base64(file.name)}`,
+      ...(parentId === undefined ? [] : [`parentId ${base64(parentId)}`]),
+    ].join(',');
+
+    const created = await fetch(`${API_BASE_URL}/uploads`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'upload-length': String(file.size), 'upload-metadata': metadata },
+    });
+    if (!created.ok) throw await failure(created, `"${file.name}" yüklenemedi.`);
+    const fresh = created.headers.get('location');
+    if (fresh === null) throw new Error('Sunucu yükleme adresi vermedi.');
+    location = fresh;
+    rememberUpload(key, fresh);
+  }
+
   while (offset < file.size) {
     const end = Math.min(offset + CHUNK_BYTES, file.size);
     const sent = await fetch(location, {
@@ -2068,6 +2096,29 @@ async function* uploadFile(file: File, parentId: string | undefined): AsyncGener
     offset = end;
     yield Math.round((offset / Math.max(1, file.size)) * 100);
   }
+
+  // Yayım bu noktada olmuş demektir; not artık yalnız yanlış cevap verebilir.
+  forgetUpload(key);
+}
+
+/** HEAD ile oturumun gerçek yerini sorar. Ağ hatası da "devam edilemez" demektir. */
+async function probe(location: string, size: number): Promise<number | null> {
+  let head: Response;
+  try {
+    head = await fetch(location, { method: 'HEAD', credentials: 'same-origin' });
+  } catch {
+    return null;
+  }
+  const number = (name: string): number | null => {
+    const raw = head.headers.get(name);
+    if (raw === null) return null;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) ? value : null;
+  };
+  return resumeOffset(
+    { status: head.status, offset: number('upload-offset'), length: number('upload-length') },
+    size,
+  );
 }
 
 /**
