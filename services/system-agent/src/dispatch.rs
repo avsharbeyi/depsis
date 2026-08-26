@@ -41,6 +41,8 @@ pub mod bin {
     pub const SSH_KEYSCAN: &str = "/usr/bin/ssh-keyscan";
     /// The appliance's own backup. Absolute, for the reason every path here is.
     pub const PG_DUMP: &str = "/usr/bin/pg_dump";
+    /// The ZeroTier identity archive. Absolute, for the reason every path here is.
+    pub const TAR: &str = "/usr/bin/tar";
 }
 
 /// Where staging files live inside a share.
@@ -1831,6 +1833,90 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 }
 
                 self.database_dumps()
+            }
+
+            Request::BackupNodeIdentity { name, keep } => {
+                let home = crate::ztstate::home();
+                let parts = crate::ztstate::present_parts(&home);
+                if parts.is_empty() {
+                    // NOT an error and not a silent success: a box with no ZeroTier has nothing to
+                    // archive, and writing an empty tar would put a file in the directory that
+                    // the next listing counts as a backup.
+                    return Ok(Response::NodeIdentityBackedUp {
+                        name: String::new(),
+                        size_bytes: 0,
+                        included: Vec::new(),
+                        unreadable: Vec::new(),
+                    });
+                }
+
+                let dir = crate::dbdump::dump_dir();
+                std::fs::create_dir_all(&dir)
+                    .map_err(|e| SeamError::Io(format!("{}: {e}", dir.display())))?;
+
+                let file = format!(
+                    "{}{}{}",
+                    crate::ztstate::BACKUP_PREFIX,
+                    name.as_str(),
+                    crate::ztstate::BACKUP_SUFFIX
+                );
+                let out = dir.join(&file);
+                let out_display = out.display().to_string();
+
+                // 0600 BEFORE any bytes, exactly as the database dump does and for a sharper
+                // reason: this archive contains `identity.secret`, which is the appliance's whole
+                // ZeroTier identity. `tar` would otherwise create it with the process umask.
+                (self.private_writer)(&out, "")
+                    .map_err(|e| SeamError::Io(format!("{out_display}: {e}")))?;
+
+                // Counted BEFORE the archive is written, so the answer describes what went in.
+                let unreadable = crate::ztstate::unreadable_records(&home);
+
+                let home_display = home.display().to_string();
+                let argv = crate::ztstate::tar_argv(&out_display, &home_display, &parts);
+                if let Err(error) = self.runner.run(bin::TAR, &argv) {
+                    // A failed archive leaves an empty 0600 file behind, and an empty
+                    // `zerotier-*.tar` is worse than none: the next listing shows it as a backup.
+                    let _ = std::fs::remove_file(&out);
+                    return Err(error);
+                }
+
+                let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+
+                // Prune AFTER, so the new archive counts — the same ordering as the snapshot and
+                // database prunings, and the same reason: pruning first keeps one too many.
+                let mut mine: Vec<(String, i64)> = std::fs::read_dir(&dir)
+                    .map_err(|e| SeamError::Io(format!("{}: {e}", dir.display())))?
+                    .flatten()
+                    .filter_map(|entry| {
+                        let file_name = entry.file_name().into_string().ok()?;
+                        if !crate::ztstate::is_backup(&file_name) {
+                            return None;
+                        }
+                        let when = entry
+                            .metadata()
+                            .ok()?
+                            .modified()
+                            .ok()?
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()?
+                            .as_secs() as i64;
+                        Some((file_name, when))
+                    })
+                    .collect();
+                mine.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+                for (doomed, _) in mine.into_iter().skip((*keep).max(1) as usize) {
+                    if let Err(error) = std::fs::remove_file(dir.join(&doomed)) {
+                        eprintln!("depsis-agent: could not prune {doomed}: {error}");
+                    }
+                }
+
+                Ok(Response::NodeIdentityBackedUp {
+                    name: file,
+                    size_bytes: size,
+                    included: parts,
+                    unreadable,
+                })
             }
 
             Request::ListDatabaseDumps {} => self.database_dumps(),

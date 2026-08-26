@@ -72,11 +72,15 @@ pub struct Dump {
     pub created_unix: i64,
 }
 
-/// Dizindeki dökümler, YENİSİ ÖNCE.
+/// Dizindeki yedekler, YENİSİ ÖNCE: veritabanı dökümleri VE ZeroTier arşivleri.
 ///
-/// YALNIZ `.dump` ile bitenler. Dizin ajanın kendi dizini ama bir operatör oraya bir not ya da bir
-/// kopya bırakabilir, ve budamanın onu silmesi veri kaybı olurdu — aynı kural anlık görüntü
-/// budamasında da geçerli ve aynı sebeple yazılıyor.
+/// İkisi de "cihazın kendi durumu" ve ikisi de aynı dizinde; ekranın ikisini birden göstermesi
+/// gerekiyor, çünkü birini gösterip ötekini gizlemek yarısı yedeklenmiş bir cihazı tam yedeklenmiş
+/// gibi göstermek olurdu.
+///
+/// Başka HİÇBİR ŞEY. Dizin ajanın kendi dizini ama bir operatör oraya bir not ya da bir kopya
+/// bırakabilir, ve budamanın onu silmesi veri kaybı olurdu — aynı kural anlık görüntü budamasında
+/// da geçerli ve aynı sebeple yazılıyor.
 pub fn read_dumps(dir: &std::path::Path) -> Result<Vec<Dump>, SeamError> {
     let reader = match std::fs::read_dir(dir) {
         Ok(reader) => reader,
@@ -92,7 +96,12 @@ pub fn read_dumps(dir: &std::path::Path) -> Result<Vec<Dump>, SeamError> {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if !name.ends_with(DUMP_SUFFIX) {
+        // Veritabanı dökümleri VE ZeroTier arşivleri: ikisi de "cihazın kendi durumu", ikisi de
+        // aynı dizinde, ve ekranın ikisini birden göstermesi gerekiyor — birini gösterip ötekini
+        // gizlemek, yarısı yedeklenmiş bir cihazı tam yedeklenmiş gibi göstermek olurdu.
+        //
+        // Operatörün oraya bıraktığı bir not ya da kopya hâlâ dışarıda kalıyor.
+        if !name.ends_with(DUMP_SUFFIX) && !crate::ztstate::is_backup(&name) {
             continue;
         }
         let Ok(meta) = entry.metadata() else {
@@ -126,12 +135,18 @@ pub fn read_dumps(dir: &std::path::Path) -> Result<Vec<Dump>, SeamError> {
 /// Saf, ve saf olması ölçülebilmesi için — silinen şey geri gelmiyor. Anlık görüntü budamasıyla
 /// aynı kural ve aynı sıra: yarıda kalan bir budama, elde en YENİLERİ bıraksın.
 pub fn prunable(dumps: &[Dump], keep: usize) -> Vec<String> {
-    dumps
+    // YALNIZ veritabanı dökümleri. ZeroTier arşivleri aynı dizinde duruyor ve kendi budamasına
+    // sahip; buradan sayılsalardı `keep: 14` yedi döküm ve yedi arşiv tutar, yani veritabanı
+    // geçmişi sessizce yarıya inerdi.
+    let mut doomed: Vec<String> = dumps
         .iter()
+        .filter(|dump| dump.name.ends_with(DUMP_SUFFIX))
         .skip(keep)
         .map(|dump| dump.name.clone())
-        .rev()
-        .collect()
+        .collect();
+    // En eskiden başlayarak silinsin: yarıda kalan bir budama, elde en YENİLERİ bıraksın.
+    doomed.reverse();
+    doomed
 }
 
 #[cfg(test)]
@@ -178,6 +193,34 @@ mod tests {
         let dumps = read_dumps(tmp.path()).expect("read");
         assert_eq!(dumps.len(), 2);
         assert!(dumps.iter().all(|d| d.name.ends_with(DUMP_SUFFIX)));
+    }
+
+    #[test]
+    fn both_kinds_are_listed_but_each_prunes_only_its_own() {
+        // The two backups of the appliance's own state share a directory. The SCREEN must show
+        // both — showing one and hiding the other would present a half-backed-up appliance as a
+        // fully backed-up one — but `keep` must count them separately, or `keep: 14` would hold
+        // seven dumps and seven archives and the database history would quietly halve.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for name in ["a.dump", "b.dump", "c.dump"] {
+            std::fs::write(tmp.path().join(name), b"x").expect("write");
+        }
+        for name in ["zerotier-1.tar", "zerotier-2.tar"] {
+            std::fs::write(tmp.path().join(name), b"x").expect("write");
+        }
+        std::fs::write(tmp.path().join("elle-aldigim.tar"), b"mine").expect("write");
+
+        let listed = read_dumps(tmp.path()).expect("read");
+        assert_eq!(listed.len(), 5, "{listed:?}");
+        // The operator's own file is in neither the listing nor the pruning.
+        assert!(listed.iter().all(|d| d.name != "elle-aldigim.tar"));
+
+        let doomed = prunable(&listed, 1);
+        assert_eq!(doomed.len(), 2);
+        assert!(
+            doomed.iter().all(|name| name.ends_with(DUMP_SUFFIX)),
+            "{doomed:?}"
+        );
     }
 
     #[test]

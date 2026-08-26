@@ -431,6 +431,21 @@ export type AgentRequest =
       op: 'dump_database';
     }
   | {
+      /**
+       * How many archives to keep. Pruning only touches `zerotier-*.tar`.
+       */
+      keep: number;
+      /**
+       * A single path component under a share root — never a path, never absolute.
+       *
+       * ADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access
+       * to `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle
+       * `/` or `..` through, so this type refuses them rather than sanitising.
+       */
+      name: string;
+      op: 'backup_node_identity';
+    }
+  | {
       op: 'list_database_dumps';
     }
   | {
@@ -796,6 +811,27 @@ export type AgentResponse =
   | {
       lines: string[];
       status: 'diff';
+    }
+  | {
+      /**
+       * What went in: some subset of identity.secret, identity.public, controller.d.
+       *
+       * EMPTY IS AN ANSWER, not a failure: a box with no ZeroTier installed has none of them.
+       * The caller reports it as "nothing to back up" rather than as a backup that happened.
+       */
+      included: string[];
+      name: string;
+      size_bytes: number;
+      status: 'node_identity_backed_up';
+      /**
+       * `controller.d` records that would not parse, by relative path.
+       *
+       * They are IN the archive — a half-written record carries more than a missing one — and
+       * they are named here because `FileDB` writes without a temp file or an fsync, and a NAS
+       * is exactly the device that loses power mid-write. A truncated record backed up in
+       * silence is a network or a member that is simply gone on the day the archive is opened.
+       */
+      unreadable: string[];
     }
   | {
       /**

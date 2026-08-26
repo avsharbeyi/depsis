@@ -68,7 +68,7 @@ export function DatabaseBackups({ notify }: { notify: Notify }): ReactElement {
   return (
     <div className="repl">
       <div className="thead">
-        <span className="lbl">Cihazın kendi veritabanı</span>
+        <span className="lbl">Cihazın kendi durumu</span>
         <button type="button" className="lnk" disabled={busy} onClick={() => void dump()}>
           {busy ? 'Alınıyor…' : 'Şimdi döküm al'}
         </button>
@@ -94,10 +94,11 @@ export function DatabaseBackups({ notify }: { notify: Notify }): ReactElement {
           {/* Bu ekranın var olma sebebi. Sessizce boş durması, yedeği olduğunu sanan birini o
               hâlde bırakmak olurdu — ve burada eksik olan şey, kaybedildiğinde en pahalı olan. */}
           <span className="tx">
-            <b>Hiç veritabanı dökümü yok.</b>
-            Anlık görüntüler dosyalarınızı koruyor; hesapları, paylaşımları ve izinleri koruyan
-            hiçbir şey yok. Sistem diski ölürse dosyalar durur ve onlara kimin erişebileceği
-            kaybolur.
+            <b>Hiç yedek yok.</b>
+            Anlık görüntüler dosyalarınızı koruyor; hesapları, paylaşımları, izinleri ve bu cihazın
+            ZeroTier kimliğini koruyan hiçbir şey yok. Sistem diski ölürse dosyalar durur, onlara
+            kimin erişebileceği kaybolur — ve ZeroTier kimliği kaybolursa uzaktan erişim KALICI
+            OLARAK geri gelmez.
           </span>
         </div>
       )}
@@ -114,9 +115,9 @@ export function DatabaseBackups({ notify }: { notify: Notify }): ReactElement {
           {page.directory}
           {' — '}
           <span>
-            bu dizin bir paylaşımda DEĞİL: döküm parola hash&apos;lerini ve mühürlenmiş sırları
-            taşıyor. Cihaz dışına çıkarmak için bu dizinin veri kümesine bir yedekleme zamanlaması
-            kurun.
+            bu dizin bir paylaşımda DEĞİL: dökümler parola hash&apos;lerini, mühürlenmiş sırları ve
+            cihazın ZeroTier kimliğini taşıyor. Cihaz dışına çıkarmak için bu dizinin veri kümesine
+            bir yedekleme zamanlaması kurun.
           </span>
         </p>
       )}

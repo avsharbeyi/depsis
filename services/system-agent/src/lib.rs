@@ -55,6 +55,7 @@ pub mod snapshots;
 pub mod sweep;
 pub mod transfer;
 pub mod zerotier;
+pub mod ztstate;
 
 /// Emit the JSON Schema for the request/response contract.
 ///

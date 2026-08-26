@@ -576,7 +576,26 @@ export class BackupSchedulesService {
       // ve o cümle yöneticinin yapacağı şeyi söylüyor.
       return `veritabanı dökümü alınamadı: ${'reason' in dumped ? dumped.reason : dumped.status}`;
     }
-    return `veritabanı dökümü alındı: ${name} (${String(dumped.dumps.length)} döküm saklanıyor)`;
+    // AYNI TURDA, ve aynı dizine: cihazın kendi durumunun ikinci yarısı. Veritabanı hesapları
+    // ve izinleri taşıyor; bu, o cihazın ZeroTier'de KİM OLDUĞUNU. İkincisi kaybedilirse geri
+    // gelmiyor — bir ağ kimliğinin üst 40 biti, onu yöneten düğümün adresinin ta kendisi.
+    const identity = await this.agent.call(
+      { op: 'backup_node_identity', name, keep: DUMP_KEEP },
+      'the daily archive of the ZeroTier identity and controller state',
+      correlationId,
+    );
+    const note =
+      identity.status !== 'node_identity_backed_up'
+        ? ' (ZeroTier durumu arşivlenemedi)'
+        : identity.included.length === 0
+          ? '' // ZeroTier kurulu değil: arşivlenecek bir şey yok, ve bu bir arıza değil.
+          : identity.unreadable.length > 0
+            ? ` (ZeroTier durumu arşivlendi; ${String(
+                identity.unreadable.length,
+              )} kayıt OKUNAMADI: ${identity.unreadable.join(', ')})`
+            : ' (ZeroTier durumu da arşivlendi)';
+
+    return `veritabanı dökümü alındı: ${name} (${String(dumped.dumps.length)} döküm saklanıyor)${note}`;
   }
 
   private async runOne(organizationId: string, schedule: ScheduleRow, now: Date): Promise<void> {

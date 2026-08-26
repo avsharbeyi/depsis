@@ -873,6 +873,32 @@
       ]
     },
     {
+      "description": "Back up ZeroTier's identity and controller state — the fourth thing nobody was backing up.\n\n`docs/operations/03-yedekleme.md` named three: the user's files, PostgreSQL, and the seal\nkey. This is the fourth, and losing it is worse than losing the other three in one specific\nway: `identity.secret` CANNOT BE RECREATED. The top 40 bits of a ZeroTier network id are\nthe controlling node's address, so a new identity means every member keeps asking a machine\nthat no longer exists for its configuration, the records in `controller.d` sit on disk and\nare never consulted, and there is no way to re-point the network. The household\npermanently loses remote access to its own NAS.\n\nLosing only `controller.d` is milder and quieter: with the identity intact the same network\nid can be recreated, but every member comes back `authorized: false` and has to be\nre-authorized one at a time.\n\nWritten into the same directory as the database dump, 0600, for the same reason: it is the\nappliance's own state rather than the user's files, and `identity.secret` is a credential.",
+      "type": "object",
+      "properties": {
+        "keep": {
+          "description": "How many archives to keep. Pruning only touches `zerotier-*.tar`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "description": "The file's own name, without a directory and without the `.tar` suffix.",
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "op": {
+          "type": "string",
+          "const": "backup_node_identity"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "name",
+        "keep"
+      ]
+    },
+    {
       "description": "What dumps are on disk, newest first. No operands.",
       "type": "object",
       "properties": {
@@ -1429,6 +1455,45 @@
       "required": [
         "status",
         "lines"
+      ]
+    },
+    {
+      "description": "The ZeroTier identity and controller state were archived.",
+      "type": "object",
+      "properties": {
+        "included": {
+          "description": "What went in: some subset of identity.secret, identity.public, controller.d.\n\nEMPTY IS AN ANSWER, not a failure: a box with no ZeroTier installed has none of them.\nThe caller reports it as \"nothing to back up\" rather than as a backup that happened.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "const": "node_identity_backed_up"
+        },
+        "unreadable": {
+          "description": "`controller.d` records that would not parse, by relative path.\n\nThey are IN the archive — a half-written record carries more than a missing one — and\nthey are named here because `FileDB` writes without a temp file or an fsync, and a NAS\nis exactly the device that loses power mid-write. A truncated record backed up in\nsilence is a network or a member that is simply gone on the day the archive is opened.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "status",
+        "name",
+        "size_bytes",
+        "included",
+        "unreadable"
       ]
     },
     {

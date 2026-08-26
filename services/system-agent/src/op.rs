@@ -1248,6 +1248,30 @@ pub enum Request {
         keep: u32,
     },
 
+    /// Back up ZeroTier's identity and controller state — the fourth thing nobody was backing up.
+    ///
+    /// `docs/operations/03-yedekleme.md` named three: the user's files, PostgreSQL, and the seal
+    /// key. This is the fourth, and losing it is worse than losing the other three in one specific
+    /// way: `identity.secret` CANNOT BE RECREATED. The top 40 bits of a ZeroTier network id are
+    /// the controlling node's address, so a new identity means every member keeps asking a machine
+    /// that no longer exists for its configuration, the records in `controller.d` sit on disk and
+    /// are never consulted, and there is no way to re-point the network. The household
+    /// permanently loses remote access to its own NAS.
+    ///
+    /// Losing only `controller.d` is milder and quieter: with the identity intact the same network
+    /// id can be recreated, but every member comes back `authorized: false` and has to be
+    /// re-authorized one at a time.
+    ///
+    /// Written into the same directory as the database dump, 0600, for the same reason: it is the
+    /// appliance's own state rather than the user's files, and `identity.secret` is a credential.
+    #[serde(rename = "backup_node_identity")]
+    BackupNodeIdentity {
+        /// The file's own name, without a directory and without the `.tar` suffix.
+        name: SafeComponent,
+        /// How many archives to keep. Pruning only touches `zerotier-*.tar`.
+        keep: u32,
+    },
+
     /// What dumps are on disk, newest first. No operands.
     #[serde(rename = "list_database_dumps")]
     ListDatabaseDumps {},
@@ -1784,6 +1808,25 @@ pub enum Response {
     Diff {
         lines: Vec<String>,
     },
+    /// The ZeroTier identity and controller state were archived.
+    #[serde(rename = "node_identity_backed_up")]
+    NodeIdentityBackedUp {
+        name: String,
+        size_bytes: u64,
+        /// What went in: some subset of identity.secret, identity.public, controller.d.
+        ///
+        /// EMPTY IS AN ANSWER, not a failure: a box with no ZeroTier installed has none of them.
+        /// The caller reports it as "nothing to back up" rather than as a backup that happened.
+        included: Vec<String>,
+        /// `controller.d` records that would not parse, by relative path.
+        ///
+        /// They are IN the archive — a half-written record carries more than a missing one — and
+        /// they are named here because `FileDB` writes without a temp file or an fsync, and a NAS
+        /// is exactly the device that loses power mid-write. A truncated record backed up in
+        /// silence is a network or a member that is simply gone on the day the archive is opened.
+        unreadable: Vec<String>,
+    },
+
     /// The dumps on disk, newest first.
     #[serde(rename = "database_dumps")]
     DatabaseDumps {
@@ -2151,7 +2194,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 21;
+pub const SCHEMA_VERSION: u32 = 22;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

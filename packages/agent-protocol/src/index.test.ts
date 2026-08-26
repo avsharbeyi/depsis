@@ -46,6 +46,10 @@ describe('the emitted agent schema', () => {
       // statement the caller can make correctly and "here is what changed" is one it would have to
       // reconstruct from a disk it cannot read.
       'apply_folder_acl',
+      // The fourth thing nobody was backing up. `identity.secret` cannot be recreated, and a
+      // network id is welded to it — a new identity means the household permanently loses
+      // remote access to its own appliance.
+      'backup_node_identity',
       // A copy the bytes never leave the agent for. The obvious shape — the API reading over the
       // data channel and writing back — holds TWO of the sixteen rendezvous-served data
       // connections at once, and that many concurrent copies deadlock the whole socket rather than
@@ -252,7 +256,11 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 21 since `dump_database`
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 22 since
+    // `backup_node_identity` — ZeroTier's identity and controller state, the fourth thing the
+    // backup document never named. Losing `identity.secret` is the one loss in this product
+    // that cannot be undone: a network id's top 40 bits ARE the controlling node's address.
+    // 21 since `dump_database`
     // and `list_database_dumps` — the appliance's OWN data. ZFS snapshots protect the user's
     // files; nothing protected the accounts, shares and grants that say whose they are. 20 since
     // `start_scrub`
@@ -281,7 +289,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(21);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(22);
   });
 
   it('agrees with the number the agent actually reports', () => {

@@ -49,6 +49,7 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::StartScrub { .. } => "start_scrub",
         Request::DumpDatabase { .. } => "dump_database",
         Request::ListDatabaseDumps {} => "list_database_dumps",
+        Request::BackupNodeIdentity { .. } => "backup_node_identity",
         Request::ScrubStatus { .. } => "scrub_status",
         Request::RestoreFromSnapshot { .. } => "restore_from_snapshot",
         Request::DiffSnapshots { .. } => "diff_snapshots",

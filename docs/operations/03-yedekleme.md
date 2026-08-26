@@ -5,16 +5,45 @@ Bu belge neyi, neden ve nasıl yedekleyeceğinizi anlatır. Yedeği **kullanmak*
 
 ---
 
-## 1. Üç ayrı şey, üç ayrı yöntem
+## 1. Dört ayrı şey, dört ayrı yöntem
 
-DEPSIS'in durumu tek bir yerde değil. Üçünden birini kaçırırsanız yedeğiniz eksiktir, ve
+DEPSIS'in durumu tek bir yerde değil. Dördünden birini kaçırırsanız yedeğiniz eksiktir, ve
 eksikliğini ancak geri yüklerken öğrenirsiniz.
 
 | Ne                      | Nerede                             | Nasıl                       |
 | ----------------------- | ---------------------------------- | --------------------------- |
 | **Kullanıcı dosyaları** | ZFS dataset'leri (`tank/depsis/*`) | `zfs snapshot` + `zfs send` |
-| **Üstveri ve hesaplar** | PostgreSQL                         | `pg_dump`                   |
+| **Üstveri ve hesaplar** | PostgreSQL                         | Günlük `pg_dump` — otomatik |
 | **Mühür anahtarı**      | `/etc/depsis/secret.key`           | Elle. Bir kez.              |
+| **ZeroTier kimliği**    | `/var/lib/zerotier-one`            | Günlük `tar` — otomatik     |
+
+Dördüncüsü bu belgede uzun süre YOKTU, ve eksikliği en pahalı olanıydı. `identity.secret`
+kaybedilirse **geri gelmez**: bir ZeroTier ağ kimliğinin üst 40 biti, o ağı yöneten düğümün
+adresinin ta kendisi. Kimlik değişince üyeler config isteğini artık bu makine olmayan bir adrese
+göndermeye devam eder, `controller.d` içindeki kayıtlar diskte durur ama daemon'a hiç sorulmaz, ve
+ağı yeniden yönlendirmenin bir yolu yoktur — ev, kendi NAS'ına uzaktan erişimini kalıcı olarak
+kaybeder.
+
+İkinci ve dördüncü satır artık Yedekleme panelinde günde bir kez kendiliğinden alınıyor ve on dört
+tanesi saklanıyor. İkisi de `/var/lib/depsis/db-backups` altında, 0600 — bir paylaşımda **değil**,
+çünkü ikisi de kimlik bilgisi taşıyor. **Cihazdan çıkarmak sizin adımınız:** o dizinin veri
+kümesine bir yedekleme zamanlaması kurun. Cihazı terk etmeyen bir yedek, cihazı atlatmaz.
+
+### ZeroTier durumunu geri yüklemenin SIRASI
+
+`zerotier-one` `controller.d`'yi yalnızca **açılışta** okur — inotify yok, periyodik tarama yok.
+Çalışan bir daemon'un altına dosya bırakmak hiçbir şey yapmaz, ve daha kötüsü bellekteki kopya bir
+sonraki kayıtta bıraktıklarınızın üzerine yazar. Doğru sıra:
+
+```bash
+systemctl stop zerotier-one
+tar -xf zerotier-<tarih>.tar -C /var/lib/zerotier-one
+systemctl start zerotier-one
+```
+
+> **Eski bir arşivi geri yüklemek bir güvenlik olayıdır.** İstemci tarafı gelen yapılandırmanın
+> sürümünü önbellektekiyle karşılaştırmaz, yani arşivden beri **yetkisini aldığınız** bir cihaz
+> sessizce yetkisini geri kazanır. Geri yükledikten sonra üye listesini gözden geçirin.
 
 Bunlara ek olarak **Samba parola veritabanı** (`tdbsam`) var; onu yedeklemeye gerek yok ve neden
 gerekmediği aşağıda.
