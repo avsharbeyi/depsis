@@ -1,14 +1,21 @@
 import { Injectable } from '@nestjs/common';
-import { hash, verify } from '@node-rs/argon2';
+// The C implementation, compiled on (or prebuilt portably for) the machine it runs on — NOT
+// @node-rs/argon2, whose Rust prebuilt targets x86-64-v2 and killed the API with SIGILL on the
+// first real consumer box (a 2009 Athlon II). An appliance assumes the owner's oldest PC.
+// Both produce and verify PHC-encoded strings, so hashes made by either verify under the other.
+import { hash, verify } from 'argon2';
 
 /**
- * Argon2id, with the library's defaults: 19 MiB, two passes, one lane.
+ * OWASP's recommended Argon2id parameters: 19 MiB, two passes, one lane.
  *
- * Those are OWASP's recommended Argon2id parameters, and they are left at the default deliberately
- * rather than raised: ADR-0009 says the parameters are calibrated to the hardware during setup, and
- * a number hard-coded here would be the one that survives that calibration. When the setup wizard
- * exists it will write them to config and this class will read them.
+ * SPELLED OUT rather than inherited, because the two libraries this class has lived on disagree
+ * about defaults: @node-rs/argon2 shipped exactly these, the C `argon2` ships 64 MiB and three
+ * passes — heavy enough that two hashes blew a five-second test budget, and heavier than a login
+ * on a 2009-era appliance CPU should be. The parameters travel inside each PHC string, so hashes
+ * written under either set keep verifying under this one.
  */
+const PARAMS = { memoryCost: 19_456, timeCost: 2, parallelism: 1 } as const;
+
 @Injectable()
 export class PasswordService {
   /**
@@ -19,10 +26,10 @@ export class PasswordService {
    * which is far more than enough to enumerate accounts over the network. Computed once at startup
    * so the cost is not paid twice on the failing path.
    */
-  private readonly decoyPromise = hash('depsis-decoy-never-a-real-password');
+  private readonly decoyPromise = hash('depsis-decoy-never-a-real-password', PARAMS);
 
   hash(password: string): Promise<string> {
-    return hash(password);
+    return hash(password, PARAMS);
   }
 
   /**

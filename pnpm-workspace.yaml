@@ -35,3 +35,10 @@ supportedArchitectures:
     - linux
   cpu:
     - x64
+
+allowBuilds:
+  # The C argon2 replaced @node-rs/argon2 after the first ISO install on real consumer hardware:
+  # the Rust prebuilt targets x86-64-v2 and dies with SIGILL on a 2009 Athlon II — an appliance
+  # has to assume the owner's oldest PC. The C package's install script compiles (or picks a
+  # baseline prebuild) ON the machine it will run on, which is the whole point.
+  argon2: true
