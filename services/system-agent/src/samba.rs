@@ -68,11 +68,13 @@ const RESERVED_SECTIONS: [&str; 4] = ["global", "homes", "printers", "print$"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum SambaError {
-    /// Samba is not installed on this box. NOT a fault.
+    /// Samba is not installed on this box. NOT a fault of the agent.
     ///
-    /// DEPSIS does not package Samba, exactly as it does not package ZeroTier (ADR-0020), so
-    /// "absent" is an ordinary state of a machine and the API turns it into 503. Reporting it as
-    /// a failure would send an operator looking for a broken agent instead of an apt install.
+    /// The device SHIPS with Samba — the installer and the ISO's firstboot both install it, the
+    /// same reversal ZeroTier went through when ADR-0020's "we don't package it" met the first
+    /// real owner. So "absent" is no longer an ordinary state; it is a broken installation. It is
+    /// still its own variant, because the API's 503 with "install the samba package" sends
+    /// whoever reads it to the actual repair instead of to a healthy agent's logs.
     #[error("samba is not installed: {0} is not present")]
     NotInstalled(String),
 

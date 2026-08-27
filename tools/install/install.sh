@@ -30,7 +30,8 @@
 #
 #   ZFS havuzu   — kurulum sihirbazının işi (§8.1'in sırası: analiz, plan, yazılı onay, yeniden
 #                  kimlik doğrulama). Bu betik diskleri LİSTELER ve planı sihirbaza bırakır.
-#   ZeroTier     — ADR-0020: DEPSIS onu paketlemiyor ve kurmuyor. Varsa bulur ve söyler.
+#   ZeroTier     — paket firstboot'un işi (cihazla gelir); bu betik varsa bulur ve söyler.
+#   Samba        — aynı ayrım: paketi firstboot kurar, bu betik yalnız BAĞLAR (samba_conf).
 #   PostgreSQL   — dağıtımın paketi. Erişilebilir olmasını ister, kurmaz.
 #   İlk yönetici — /setup/claim, tarayıcıdan. Betik adresi ve jetonun nerede olduğunu yazar.
 #
@@ -630,6 +631,38 @@ reverse_proxy() {
   ok 'nginx yeniden yüklendi'
 }
 
+# ─── 8b. samba ────────────────────────────────────────────────────────────────
+#
+# Paket firstboot'un işi (bkz. "kurmadığı şeyler" ayrımı); burası paketi bulur ve BAĞLAR.
+# Bağ, samba.rs'in modül notundaki tek satır: smb.conf, DEPSIS'in sahibi olduğu depsis.conf'u
+# içermeli. O satır olmadan ajan her yayını "smbd bu paylaşımları sunmuyor" diye geri çevirir —
+# ilk sahada tam bu yaşandı: arayüz \\depsis yazdı, 445 hiç dinlemiyordu.
+samba_conf() {
+  step 'Samba (Windows dosya paylaşımı)'
+  if ! command -v smbd >/dev/null 2>&1; then
+    printf '  %s!%s samba kurulu değil; paylaşımlar yayınlanamaz. Kurulum: apt install -y samba smbclient\n' "$Y" "$Z"
+    return 0
+  fi
+
+  # Ajanın yazacağı dosya, boş da olsa şimdi var olmalı: smb.conf'taki include, dosya yoksa
+  # testparm'da uyarıya dönüşür ve ilk yayına kadar smbd her başlangıçta onu okumaya çalışır.
+  [ -f /etc/samba/depsis.conf ] || { : > /etc/samba/depsis.conf; chmod 0644 /etc/samba/depsis.conf; }
+
+  # Dosyanın SONUNA, [global]'in içine değil: depsis.conf yalnız kendi bölüm başlıklarıyla
+  # başlar (samba.rs'in render'ı), bu yüzden konum bağımsız — ve smb.conf'un geri kalanına
+  # dokunmamak, o dosyanın işletmene ait olması kuralının kendisi.
+  if ! grep -q 'include = /etc/samba/depsis.conf' /etc/samba/smb.conf 2>/dev/null; then
+    printf '\n# DEPSIS paylaşımları — üretilen dosya; bu satır olmadan smbd hiçbirini sunmaz\ninclude = /etc/samba/depsis.conf\n' >> /etc/samba/smb.conf
+    ok 'smb.conf include satırı eklendi'
+  fi
+
+  systemctl enable --now smbd nmbd >/dev/null 2>&1 || true
+  # wsdd2 varsa: Gezgin'in "Ağ" görünümünde kendiliğinden görünmek. Yoksa sorun değil —
+  # \\depsis adresi nmbd (NetBIOS) ile zaten çözülür.
+  systemctl enable --now wsdd2 >/dev/null 2>&1 || true
+  ok 'smbd, nmbd açık'
+}
+
 # ─── 9. systemd ───────────────────────────────────────────────────────────────
 
 units() {
@@ -790,6 +823,7 @@ payload
 configuration
 tls
 reverse_proxy
+samba_conf
 units
 verify
 finish

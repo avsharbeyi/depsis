@@ -74,8 +74,9 @@ export class SmbController {
 function translate(error: unknown): Error {
   if (error instanceof SmbUnavailableError) {
     return new ServiceUnavailableException(
-      'Samba is not installed on this appliance, so there is nothing to publish to. DEPSIS does ' +
-        'not package it; install the samba package and try again.',
+      'Samba is not installed on this appliance, so there is nothing to publish to. The device ' +
+        'ships with it, so this is a broken installation: install the samba package (or re-run ' +
+        'the DEPSIS installer) and try again.',
     );
   }
 

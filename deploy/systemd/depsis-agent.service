@@ -77,7 +77,11 @@ NoNewPrivileges=yes
 # IPAddressDeny=any duruyor, yalnız localhost delik. Dışarıya sızdırma koruması aynen yerinde —
 # root bir daemon'a HTTP istemcisi ekleyen gelecekteki bir değişiklik, internete yine buradan
 # değil ancak bilinçli bir birim düzenlemesiyle çıkabilir.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK de sahada ödendi: pdbedit dahil her Samba aracı smb.conf'u yüklerken ağ
+# arayüzlerini NETLİNK ile sayar; soket açılamayınca "Could not determine network interfaces"
+# der ve kimlik eşitleme (SMB parolaları) hiç çalışmaz. Netlink internete çıkış değil, çekirdeğe
+# "hangi arayüzler var" sorusudur — IPAddressDeny bu yüzden onu zaten kapsamıyor.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 IPAddressDeny=any
 IPAddressAllow=localhost
 

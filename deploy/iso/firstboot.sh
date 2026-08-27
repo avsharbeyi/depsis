@@ -49,6 +49,17 @@ apt-get update -qq
 apt-get install -y -qq nginx openssl iproute2 build-essential pkg-config \
   postgresql-common linux-headers-amd64 smartmontools >/dev/null
 
+# Samba temel paketlerle birlikte ve pazarlıksız: bu cihaz bir NAS, ve NAS'ın var olma nedeni
+# Windows Gezgini'nde bir sürücü olarak görünmek. İlk sahada bu satır yoktu — arayüz \\depsis
+# yazdı, 445 kapalıydı, ve "ağ konumu ekle çalışmıyor" dendi. smbclient ajanın yayın kanıtı
+# (canlı bağlantı denemesi) için, wsdd2 cihazın Gezgin'in "Ağ" görünümünde kendiliğinden
+# belirmesi için (modern Windows keşfi NetBIOS değil WS-Discovery ile yapar).
+say 'Samba (Windows dosya paylaşımı)'
+apt-get install -y -qq samba smbclient >/dev/null || \
+  echo 'UYARI: samba kurulamadı; paylaşımlar yayınlanamaz ve arayüz nedenini söyler.'
+apt-get install -y -qq wsdd2 >/dev/null || \
+  echo 'UYARI: wsdd2 kurulamadı; cihaz Gezgin Ağ görünümünde kendiliğinden listelenmez.'
+
 say 'ZFS (contrib deposundan, dkms derlemesi birkaç dakika sürer)'
 apt-get install -y zfsutils-linux || {
   echo 'UYARI: zfsutils-linux kurulamadı; havuz kurulana kadar depolama uçları 503 döner.'

@@ -35,10 +35,16 @@ RestartSec=5s
 
 # ─── secrets, as credentials ──────────────────────────────────────────────────
 #
-# The same two the API gets, for the same reason (ADR-0016), and no others. The worker needs the
-# database; it does not need the TOTP key, and does not get it.
+# The same two the API gets, for the same reason (ADR-0016). The first draft of this unit gave the
+# worker only the database and argued it needed nothing else — and the field measured what that
+# argument missed: identity.sync runs HERE, and without the secret key it cannot unseal a single
+# NT hash. Every sync logged "no key is configured to open it", pdbedit stayed empty, and Windows
+# refused every password while the web UI accepted the same one. The worker holds the key for
+# exactly that unseal; the TOTP secrets stay in the database and never reach this process.
 LoadCredential=db-url:/etc/depsis/db-url
+LoadCredential=secret-key:/etc/depsis/secret.key
 Environment=DEPSIS_DATABASE_URL_FILE=%d/db-url
+Environment=DEPSIS_SECRET_KEY_FILE=%d/secret-key
 
 # ─── settings ─────────────────────────────────────────────────────────────────
 #
