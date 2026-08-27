@@ -67,6 +67,32 @@ Betiğin KURMADIĞI dört şey bilinçli: ZFS havuzu (kurulum sihirbazının iş
 (ADR-0020: DEPSIS onu paketlemez), PostgreSQL (dağıtımın paketi), ve ilk yönetici (tarayıcıdan,
 §2.7). Aşağıdaki adımlar hem betiğin ne yaptığını anlamak hem de elle kurmak isteyenler için.
 
+### 2.0b Kurulum ISO'su — işletim sistemi dahil
+
+Kutuda henüz Debian da yoksa, ikisini birden kuran bir ISO üretilebilir:
+
+```bash
+bash deploy/iso/build-iso.sh
+```
+
+Betik Debian'ın resmî netinst ISO'sunu indirir, SHA512 toplamına karşı doğrular ve içine dört
+şey ekler: ön-yanıt dosyası, ilk açılış betiği ve birimi, ve deponun o anki kaynağı
+(`git archive HEAD` — kaydedilmemiş değişiklik sızmaz). Debian'ın imzalı önyükleme zinciri
+(çekirdek, initrd, shim, grub) olduğu gibi kalır; eklenenler yalnız veri dosyaları, yani ISO
+hem BIOS hem UEFI ile açılır. Çıkan imaj USB'ye ham yazılır (Rufus'ta "dd kipi").
+
+Bu ISO'yla açılan kurulum **iki şey sorar** — hangi disk ve ilk hesap — gerisi ön-yanıtlıdır.
+İkisinin sorulması tasarım: diski silen kararı bir metin dosyası veremez, ve ISO'ya gömülü
+sabit bir parola seri üretilmiş bir arka kapıdır. Veri diskleri bu ekranda DEĞİL, kurulumdan
+sonra DEPSIS'in kendi havuz sihirbazında seçilir.
+
+Kutu ilk kez kendi diskinden açıldığında `depsis-firstboot.service` devreye girer: ağı bekler,
+PostgreSQL 18 / Node 24 / Rust / ZFS'i kurar (ağ gerekir; ilk açılışta ağ yoksa bir sonraki
+açılışta yeniden dener) ve sonra **§2.0'daki betiğin ta kendisini** `--unattended` ile
+çalıştırır. Gözetimsiz kipte kurtarma anahtarı ekrana basılmaz — çıktı journal'a gider ve
+journal kalıcıdır; anahtar `/etc/depsis/secret.key` dosyasındadır ve ilk iş cihaz dışına
+yedeklenmelidir. İlerleme monitörde ve `journalctl -u depsis-firstboot` içinde izlenir.
+
 ### 2.1 Gerekenler
 
 - Debian 13 (trixie) veya dengi, **Linux 5.6+** (`openat2` için — daha eskisinde ajan başlamaz)
