@@ -77,6 +77,23 @@ UNATTENDED=no
 if [ -t 1 ]; then B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; D=$'\033[2m'; Z=$'\033[0m'
 else B=''; G=''; Y=''; R=''; D=''; Z=''; fi
 
+# ── süperkullanıcı psql'i ─────────────────────────────────────────────────────
+#
+# Yerel bir kutuda süperkullanıcıya giden DOĞRU yol soket + peer kimlik doğrulamasıdır: taze bir
+# PostgreSQL kurulumunda `postgres` rolünün TCP parolası YOKTUR — ve olmaması doğrudur, o parola
+# kimsenin bilmediği bir sır olarak kalmalıdır. İlk saha kurulumu bunu öğretti: betik 127.0.0.1'e
+# parolayla bağlanmaya çalışıp durdu, oysa root'uz ve `runuser` ile postgres kullanıcısı olarak
+# doğrudan bağlanabiliriz. Uzak bir --db-host verilirse TCP + PGPASSWORD yolu duruyor.
+PSQL_LOCAL=no
+
+adminq() {
+  if [ "$PSQL_LOCAL" = yes ]; then
+    runuser -u postgres -- psql -qX -p "$DB_PORT" "$@"
+  else
+    psql -qX -h "$DB_HOST" -p "$DB_PORT" -U "$DB_SUPERUSER" "$@"
+  fi
+}
+
 STEP=''
 step()  { STEP="$1"; printf '%s→ %s%s\n' "$B" "$1" "$Z"; }
 ok()    { printf '  %s✓%s %s\n' "$G" "$Z" "$1"; }
@@ -126,6 +143,7 @@ done
 
 [ -n "$HOSTNAME_WANTED" ] || HOSTNAME_WANTED="$(hostname)"
 [ -n "$SERVER_NAME" ]     || SERVER_NAME="$HOSTNAME_WANTED"
+case "$DB_HOST" in 127.0.0.1|localhost|::1) PSQL_LOCAL=yes ;; esac
 
 # ─── 1. ön kontroller ─────────────────────────────────────────────────────────
 #
@@ -173,7 +191,7 @@ preflight() {
   else ok "/ üzerinde $free_mb MiB boş"; fi
 
   local missing=''
-  for cmd in node psql nginx openssl curl systemctl hostnamectl journalctl install useradd getent ss awk sed grep; do
+  for cmd in node psql runuser nginx openssl curl systemctl hostnamectl journalctl install useradd getent ss awk sed grep; do
     command -v "$cmd" >/dev/null 2>&1 || missing="$missing $cmd"
   done
   if [ -n "$missing" ]; then
@@ -221,18 +239,26 @@ preflight() {
   done
 
   # ── PostgreSQL ──
-  if PGCONNECT_TIMEOUT=5 psql -qtAX -h "$DB_HOST" -p "$DB_PORT" -U "$DB_SUPERUSER" -d postgres \
-       -c 'SELECT 1' >/dev/null 2>&1; then
-    local pgver
-    pgver=$(psql -qtAX -h "$DB_HOST" -p "$DB_PORT" -U "$DB_SUPERUSER" -d postgres \
-              -c 'SHOW server_version_num')
-    if [ "$pgver" -lt 160000 ]; then
-      printf '  %s✗%s PostgreSQL %s — en az 16 gerekiyor\n' "$R" "$Z" "$pgver"; fatal=1
-    else ok "PostgreSQL $((pgver/10000)) erişilebilir"; fi
-  else
-    printf '  %s✗%s PostgreSQL %s:%s adresinde %s olarak erişilemiyor\n' "$R" "$Z" "$DB_HOST" "$DB_PORT" "$DB_SUPERUSER"
-    printf '      Parola gerekiyorsa PGPASSWORD ile verin, ya da .pgpass kullanın.\n'
+  local pgver
+  pgver="$(PGCONNECT_TIMEOUT=5 adminq -tA -d postgres -c 'SHOW server_version_num' 2>/dev/null || true)"
+  if [ -z "$pgver" ]; then
+    if [ "$PSQL_LOCAL" = yes ]; then
+      printf '  %s✗%s PostgreSQL bu kutuda yanıt vermiyor (soket, port %s)
+' "$R" "$Z" "$DB_PORT"
+      printf '      Kurulu mu, çalışıyor mu: systemctl status postgresql
+'
+    else
+      printf '  %s✗%s PostgreSQL %s:%s adresinde %s olarak erişilemiyor
+' "$R" "$Z" "$DB_HOST" "$DB_PORT" "$DB_SUPERUSER"
+      printf '      Parola gerekiyorsa PGPASSWORD ile verin, ya da .pgpass kullanın.
+'
+    fi
     fatal=1
+  elif [ "$pgver" -lt 160000 ]; then
+    printf '  %s✗%s PostgreSQL %s — en az 16 gerekiyor
+' "$R" "$Z" "$pgver"; fatal=1
+  else
+    ok "PostgreSQL $((pgver/10000)) erişilebilir"
   fi
 
   # ── disk planı: LİSTELE, planlama ──
@@ -319,21 +345,20 @@ database() {
   app_pw="$(cat "$ETC/db-password-app")"
   owner_pw="$(cat "$ETC/db-password-owner")"
 
-  export PGHOST="$DB_HOST" PGPORT="$DB_PORT" PGUSER="$DB_SUPERUSER"
-
-  if psql -qtAX -d "$DB_NAME" -c 'SELECT 1' >/dev/null 2>&1; then
+  if adminq -tA -d "$DB_NAME" -c 'SELECT 1' >/dev/null 2>&1; then
     same "$DB_NAME veritabanı var"
   else
     # bootstrap.sql rolleri ve veritabanını yaratıyor; parola YAZMIYOR, çünkü
     # `log_statement = 'ddl'` altında sunucu günlüğüne düşerdi. Parolalar aşağıda ayrıca.
-    psql -qX -d postgres -v db_name="$DB_NAME" -f "$REPO/packages/db/bootstrap.sql" >/dev/null
+    # İçerik STDIN'den: postgres kullanıcısının /opt altını okuma izni olmayabilir, root'un var.
+    adminq -d postgres -v db_name="$DB_NAME" -f - < "$REPO/packages/db/bootstrap.sql" >/dev/null
     ok "$DB_NAME veritabanı ve roller oluşturuldu"
   fi
 
   # ALTER ROLE her çalıştırmada: parola dosyası burada tek doğru kaynak, ve kümedeki rol parolası
   # onunla eşleşmiyorsa API bağlanamıyor. Yeniden yazmak idempotent ve düzeltici.
-  psql -qX -d postgres -c "ALTER ROLE depsis_app   PASSWORD '$app_pw'"   >/dev/null
-  psql -qX -d postgres -c "ALTER ROLE depsis_owner PASSWORD '$owner_pw'" >/dev/null
+  adminq -d postgres -c "ALTER ROLE depsis_app   PASSWORD '$app_pw'"   >/dev/null
+  adminq -d postgres -c "ALTER ROLE depsis_owner PASSWORD '$owner_pw'" >/dev/null
   ok 'rol parolaları yazıldı'
 
   local app_url owner_url
