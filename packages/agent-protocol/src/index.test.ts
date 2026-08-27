@@ -143,6 +143,11 @@ describe('the emitted agent schema', () => {
       // Refused when a dataset is already mounted there, and refused when the directory is not
       // empty: `zfs create -o mountpoint=X` mounts over X without complaint, and everything
       // underneath vanishes from view while still occupying the disk.
+      // The data folder a catalogue application keeps inside a share, owned by the app engine's
+      // identity. The caller names the id INSIDE the container (a catalogue fact); the agent maps
+      // it onto the engine account or its subordinate range and can express nothing else — no
+      // host uid is an operand, so this cannot own a folder to root or to a person.
+      'prepare_app_data_dir',
       'prepare_share_root',
       'publish_samba_config',
       'publish_transfer',
@@ -272,7 +277,11 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 23 since the five
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 26 since
+    // `prepare_app_data_dir` — the folder a catalogue application keeps inside a share, owned by
+    // the app engine's mapped identity. A stale agent that did not know it would answer every
+    // install of a data-holding application (Nextcloud, Immich) with a parse failure instead of
+    // a folder. 23 since the five
     // self-hosted controller operations: `zerotier-one` IS the controller, so the household can
     // run its own network without depending on my.zerotier.com. A stale agent that did not know
     // them would leave the appliance unable to authorize a device onto the network it is itself
@@ -309,7 +318,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(25);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(26);
   });
 
   it('agrees with the number the agent actually reports', () => {

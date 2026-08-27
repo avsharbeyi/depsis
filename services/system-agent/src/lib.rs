@@ -36,6 +36,7 @@
 #![forbid(unsafe_code)]
 
 pub mod acl;
+pub mod apps_engine;
 pub mod audit;
 pub mod authz;
 pub mod data;

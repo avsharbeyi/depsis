@@ -37,6 +37,7 @@ import {
   type AppView,
   type AppsOverview,
   AppsService,
+  AppDataDirError,
 } from './apps.service.js';
 import { InvalidNameError, PodmanError, PodmanUnavailableError } from './podman.client.js';
 
@@ -235,9 +236,9 @@ function toApp(view: AppView): Schemas['App'] {
     catalogue,
     installed: true,
     state: view.state ?? 'unknown',
-    // 127.0.0.1 and never the LAN address. ADR-0019 routes anything that should be reachable from
-    // elsewhere through DEPSIS's own reverse proxy; printing a LAN URL here would advertise a door
-    // the container is deliberately not given.
+    // The on-device address. The interface does NOT use this for its open link — the right host
+    // name is whatever the viewer's browser reached this page by (LAN name, ZeroTier address),
+    // which the server cannot know; the web builds the link from `hostPort` and its own location.
     url: `http://127.0.0.1:${view.instance.host_port}`,
     hostPort: view.instance.host_port,
     installedAt: view.instance.created_at.toISOString(),
@@ -311,6 +312,11 @@ function translate(error: unknown): Error {
   }
   // The catalogue said no. 404 for a slug that is not a row — the same answer as "not installed",
   // because from outside there is no difference worth telling apart.
+  if (error instanceof AppDataDirError) {
+    // 409: the appliance is exactly as it was — the folder was not made and no container exists —
+    // and the agent's sentence names what to change before retrying.
+    return new ConflictException(error.message);
+  }
   if (error instanceof AppNotInCatalogueError) return new NotFoundException(error.message);
   if (error instanceof NotInstalledError) return new NotFoundException(error.message);
   if (error instanceof ShareNotFoundError) return new NotFoundException(error.message);

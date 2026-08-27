@@ -107,6 +107,13 @@ export type AgentRequest =
       pool: SafeComponent;
     }
   | {
+      container_gid: number;
+      container_uid: number;
+      directory: SafeComponent;
+      op: 'prepare_app_data_dir';
+      share: SafeComponent;
+    }
+  | {
       /**
        * The members, each named twice.
        */
@@ -1136,6 +1143,10 @@ export type AgentResponse =
     }
   | {
       status: 'directory_created';
+    }
+  | {
+      created: boolean;
+      status: 'app_data_dir_ready';
     }
   | {
       groups_created: number;

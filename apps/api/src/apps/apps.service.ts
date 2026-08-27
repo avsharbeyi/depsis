@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createServer } from 'node:net';
 import { z } from 'zod';
 
+import { AgentService } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
 import { SecretBox } from '../auth/secret-box.js';
 import {
@@ -175,10 +176,34 @@ export class RootfulRuntimeError extends Error {
   }
 }
 
+/** A data folder one catalogue mount asked for: `<share>/<directory>`, owned by the mapped id. */
+interface AppDataDir {
+  share: string;
+  directory: string;
+  containerUid: number;
+  containerGid: number;
+}
+
+/** The application's data folder inside the chosen share could not be prepared. */
+export class AppDataDirError extends Error {
+  constructor(detail: string) {
+    super(detail);
+    this.name = 'AppDataDirError';
+  }
+}
+
 const catalogueMountSchema = z.object({
   target: z.string().min(1),
   mode: z.enum(['ro', 'rw']),
   purpose: z.string(),
+  // Katalog bir paylasimin KOKUNU degil, icinde bir KLASORU bagliyorsa: klasorun adi (SMB'de
+  // gorunen adiyla), ve konteynerin o klasore hangi kimlikle dokundugu — imajin gercegi.
+  // Klasoru ajan `prepare_app_data_dir` ile, o kimligin motor esleniginin sahipliginde acar.
+  // 0037'nin gerekcesi: paylasim koku root'undur ve koksuz eslemede konteynere kapalidir;
+  // Nextcloud ayrica veri dizinini sahiplenir ve dolu bir koku kabul etmez.
+  subdir: z.string().min(1).optional(),
+  containerUid: z.number().int().min(0).max(65536).optional(),
+  containerGid: z.number().int().min(0).max(65536).optional(),
 });
 
 const catalogueMountsSchema = z.array(catalogueMountSchema);
@@ -305,6 +330,12 @@ export class AppsService {
      * falling back — see `SecretKeyMissingError` — and everything else installs as before.
      */
     private readonly secrets: SecretBox | null = null,
+    /**
+     * For `prepare_app_data_dir` — the one privileged step an install has. Null only in tests
+     * whose catalogue fixtures mount share roots; an install whose catalogue asks for a data
+     * folder refuses without it rather than starting a container that will die on permissions.
+     */
+    private readonly agent: AgentService | null = null,
   ) {}
 
   /**
@@ -392,7 +423,14 @@ export class AppsService {
     await this.refuseRootful();
 
     const { entry, containers } = await this.requireCatalogue(organizationId, slug);
-    const resolved = await this.resolveMounts(organizationId, containers, requested);
+    const { mounts: resolved, dataDirs } = await this.resolveMounts(
+      organizationId,
+      containers,
+      requested,
+    );
+    // Klasor konteynerlerden ONCE: yoksa konteyner ilk acilista izin hatasiyla olur ve neden
+    // konteynerin gunlugune gomulur. Ajanin reddi ise buradan bir cumleyle doner.
+    await this.prepareDataDirs(entry.slug, dataDirs);
 
     // EVERY new install is a pod, including a one-container one. The alternative — a bare
     // container when there is only one, a pod when there are several — would be two shapes of
@@ -753,6 +791,44 @@ export class AppsService {
   }
 
   /**
+   * Make every data folder the catalogue asked for real, before any container exists.
+   *
+   * The agent owns the mapping from "uid 33 in the image" to a host identity, and it can express
+   * only the app engine's own ids — see `prepare_app_data_dir` in the operation set. A refusal
+   * (folder exists but is somebody's, engine account missing) surfaces as the agent's own
+   * sentence: it names the repair, and burying it under a generic 503 was exactly the failure
+   * mode that made "uygulama kurulamıyor" a support call instead of a screen.
+   */
+  private async prepareDataDirs(slug: string, dataDirs: readonly AppDataDir[]): Promise<void> {
+    if (dataDirs.length === 0) return;
+    if (this.agent === null) {
+      throw new AppDataDirError(
+        `${slug} needs a data folder inside the share, and no system agent is available to make it`,
+      );
+    }
+    for (const dir of dataDirs) {
+      const answer = await this.agent.call(
+        {
+          op: 'prepare_app_data_dir',
+          share: dir.share,
+          directory: dir.directory,
+          container_uid: dir.containerUid,
+          container_gid: dir.containerGid,
+        },
+        `preparing the ${dir.directory} folder in share '${dir.share}' for ${slug}`,
+      );
+      if (answer.status === 'refused') {
+        throw new AppDataDirError((answer as { reason?: string }).reason ?? 'refused');
+      }
+      if (answer.status !== 'app_data_dir_ready') {
+        throw new AppDataDirError(
+          `unexpected agent answer '${answer.status}' while preparing ${dir.share}/${dir.directory}`,
+        );
+      }
+    }
+  }
+
+  /**
    * Turn `{target, shareId}` pairs into bind mounts, for the WHOLE application.
    *
    * Three refusals, and each one closes a different door. A target the catalogue does not describe
@@ -773,7 +849,7 @@ export class AppsService {
     organizationId: string,
     containers: readonly ContainerRow[],
     requested: readonly RequestedMount[],
-  ): Promise<Map<string, BindMount>> {
+  ): Promise<{ mounts: Map<string, BindMount>; dataDirs: AppDataDir[] }> {
     const wanted: z.infer<typeof catalogueMountSchema>[] = [];
     for (const container of containers) {
       for (const mount of catalogueMountsSchema.parse(container.mounts)) {
@@ -785,7 +861,8 @@ export class AppsService {
     }
 
     const out = new Map<string, BindMount>();
-    if (wanted.length === 0) return out;
+    const dataDirs: AppDataDir[] = [];
+    if (wanted.length === 0) return { mounts: out, dataDirs };
 
     const root = this.sharesRoot;
     if (root === null) throw new SharesRootMissingError();
@@ -825,13 +902,24 @@ export class AppsService {
       if (shareId === undefined) throw new MountTargetError(`missing share for ${mount.target}`);
       const shareName = nameById.get(shareId);
       if (shareName === undefined) throw new ShareNotFoundError();
+      const shareRoot = hostPathUnder(root, shareName);
+      // Alt klasorlu bir baglama, kaynagi paylasimin ICINDEKI klasore ceker; `hostPathUnder`
+      // ikinci kez cagrilarak klasor adi da paylasim adiyla ayni bicim kurallarindan gecirilir.
       out.set(mount.target, {
         destination: mount.target,
-        source: hostPathUnder(root, shareName),
+        source: mount.subdir === undefined ? shareRoot : hostPathUnder(shareRoot, mount.subdir),
         readOnly: mount.mode === 'ro',
       });
+      if (mount.subdir !== undefined) {
+        dataDirs.push({
+          share: shareName,
+          directory: mount.subdir,
+          containerUid: mount.containerUid ?? 0,
+          containerGid: mount.containerGid ?? 0,
+        });
+      }
     }
-    return out;
+    return { mounts: out, dataDirs };
   }
 
   /**

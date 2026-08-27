@@ -42,9 +42,6 @@ const STATES: Record<NonNullable<AppRow['state']>, { label: string; pill: string
  */
 const TONES: Tone[] = ['cool', 'iris', 'live', 'warn', 'rose'];
 
-/** The hosts from which a container's own 127.0.0.1 address is reachable. */
-const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
-
 function toneFor(slug: string): Tone {
   let sum = 0;
   for (const ch of slug) sum += ch.codePointAt(0) ?? 0;
@@ -487,14 +484,6 @@ export function Apps({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.E
    *  stop and remove allowed through a rootful socket, and a box whose containers can only be
    *  started is a box nobody can get back out of. */
   const manageable = runtime.available && isAdmin;
-  /**
-   * Whether the `Aç` links can possibly work from here.
-   *
-   * `App.url` is an address on 127.0.0.1 by design — containers are never published to the LAN —
-   * so opened from any machine other than the appliance itself the link resolves to the VIEWER's
-   * own loopback and fails. Which is the normal case: a NAS is administered from somewhere else.
-   */
-  const onDevice = LOOPBACK.has(window.location.hostname);
 
   return (
     <>
@@ -504,24 +493,11 @@ export function Apps({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.E
             ⚠
           </span>
           <span className="tx">
-            <b>Konteyner çalışma zamanı kurulu değil.</b>
-            Katalog burada duruyor ama hiçbir uygulama kurulamaz ya da başlatılamaz. DEPSIS
-            podman&apos;ı paketlemez; dağıtımın kendi paketinden, ADR-0019&apos;un istediği gibi
-            KÖKSÜZ ve kendi kullanıcısıyla kurulur — sistem soketi (systemctl enable podman.socket)
-            root podman&apos;ı açar, ki bu aşağıdaki uyarının reddettiği durumun ta kendisidir:
-            <span
-              className="val"
-              style={{ display: 'block', marginTop: 4, whiteSpace: 'pre-line' }}
-            >
-              {'sudo apt install podman\n' +
-                'sudo useradd -r -m depsis-apps\n' +
-                'sudo loginctl enable-linger depsis-apps\n' +
-                'sudo -u depsis-apps XDG_RUNTIME_DIR=/run/user/$(id -u depsis-apps) \\\n' +
-                '  systemctl --user enable --now podman.socket'}
-            </span>
-            Ardından DEPSIS&apos;e o soketi gösterin —{' '}
-            <b>DEPSIS_PODMAN_SOCKET=/run/user/&lt;uid&gt;/podman/podman.sock</b> — ve API servisini
-            yeniden başlatın.
+            <b>Konteyner çalışma zamanı yanıt vermiyor.</b>
+            Katalog burada duruyor ama hiçbir uygulama kurulamaz ya da başlatılamaz. Cihaz podman
+            ile birlikte gelir, yani bu olağan bir durum değil — kurulum eksik ya da motor servisi
+            düşmüş demektir. Cihazı yeniden başlatmak çoğu zaman yeter; düzelmezse satıcı desteğine
+            başvurun.
           </span>
         </div>
       )}
@@ -618,15 +594,15 @@ export function Apps({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.E
                         {running ? 'Durdur' : 'Başlat'}
                       </button>
                     )}
-                    {/* Only offered from the appliance itself. `app.url` is on 127.0.0.1, so
-                        from any other machine this button opens the VIEWER's loopback and fails —
-                        a link that cannot work is worse than none, and the footer says where the
-                        address points. */}
-                    {running && onDevice && app.url !== null && app.url !== undefined && (
+                    {/* Adres BURADA kurulur, sunucunun `url` alanından değil: uygulama artık
+                        yerel ağa yayınlanıyor, ve doğru ana makine adı bu sayfaya hangi adla
+                        gelindiyse odur — cihazın kendisinden 127.0.0.1, yerel ağdan depsis,
+                        uzaktan bağlıysa ZeroTier adresi. Sunucu bunu bilemez; tarayıcı bilir. */}
+                    {running && app.hostPort !== null && app.hostPort !== undefined && (
                       <a
                         className="b"
                         style={{ flex: 1, textAlign: 'center', textDecoration: 'none' }}
-                        href={app.url}
+                        href={`http://${window.location.hostname}:${app.hostPort}`}
                         target="_blank"
                         rel="noreferrer"
                       >
@@ -662,11 +638,8 @@ export function Apps({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.E
       )}
 
       <div className="note">
-        Uygulamalar yalnız 127.0.0.1 üzerinde açılır; konteynerler doğrudan yerel ağa açılmaz.
-        {!onDevice &&
-          ' Bu sayfayı başka bir makineden açtığınız için “Aç” bağlantıları gösterilmiyor:' +
-            ' o adres cihazın kendisinde çalışır. Uygulamaya cihaz üzerinden ya da uzak' +
-            ' erişimle bağlanın.'}
+        Her uygulama cihazın üzerinde kendi kapı numarasıyla açılır ve kendi giriş ekranını
+        gösterir; adresler yerel ağdan (ve uzak erişim açıksa oradan) çalışır.
         {runtime.version !== undefined && ` Çalışma zamanı: podman ${runtime.version}.`}
         {!isAdmin && ' Uygulamaları yönetmek için yönetici olmanız gerekiyor.'}
       </div>

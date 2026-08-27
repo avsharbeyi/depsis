@@ -1,5 +1,6 @@
 import { Logger, Module } from '@nestjs/common';
 
+import { AgentService } from '../agent/agent.service.js';
 import { AuthModule } from '../auth/auth.module.js';
 import { loadSecretBox } from '../auth/secret-box.js';
 import { APP_CONFIG } from '../config.module.js';
@@ -33,11 +34,11 @@ import { PodmanClient } from './podman.client.js';
     },
     {
       provide: AppsService,
-      inject: [DbService, PodmanClient, APP_CONFIG],
+      inject: [DbService, PodmanClient, APP_CONFIG, AgentService],
       // The share root comes from configuration and never from a request: it is the only thing
       // that turns a share id into a host path, and a request that could name it could name any
       // directory on the appliance.
-      useFactory: (db: DbService, podman: PodmanClient, config: AppConfig) =>
+      useFactory: (db: DbService, podman: PodmanClient, config: AppConfig, agent: AgentService) =>
         // `?? false` and not `?? true`: the permission to run containers as root has to be
         // written down somewhere, and an absent setting is not somewhere.
         new AppsService(
@@ -51,6 +52,7 @@ import { PodmanClient } from './podman.client.js';
           // it. Null on a box with no key file, and installing something that needs one then
           // refuses with a sentence saying how to fix it.
           loadSecretBox(config.secretKeyFile ?? null, new Logger('AppsModule')),
+          agent,
         ),
     },
   ],

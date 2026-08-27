@@ -277,6 +277,40 @@
       ]
     },
     {
+      "description": "Create (or verify) the folder a catalogue application keeps its data in, inside a share,\nowned by the APP ENGINE's identity rather than a tenant's.\n\nWhy `CreateDirectory` cannot do this: its owner operands are `PosixId`, and `PosixId`\nmakes every system account unrepresentable ON PURPOSE. The application engine\n(`depsis-apps`, a rootless podman user) is exactly such an account — so this operation\nexists, and the caller does not name a host uid at all. It names the uid INSIDE THE\nCONTAINER (from the catalogue row: 33 for an image whose service is `www-data`, 0 for one\nthat runs as container root), and the agent maps it the same way the kernel's user\nnamespace will: 0 becomes the engine account itself, anything else becomes the engine's\nsubuid range at the same offset. The worst a compromised API gets from this is a folder\nowned by some unprivileged app-engine id — never root, never a person.\n\nIdempotent: an existing folder with the right owner answers `ready` and touches nothing;\nan existing folder with the WRONG owner is refused with the repair in the sentence,\nbecause silently rechowning a folder that Samba users may have filled would move their\nfiles out from under their own permissions.",
+      "type": "object",
+      "properties": {
+        "container_gid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "container_uid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "directory": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "op": {
+          "type": "string",
+          "const": "prepare_app_data_dir"
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "directory",
+        "container_uid",
+        "container_gid"
+      ]
+    },
+    {
       "description": "Create a ZFS pool. THE ONE DESTRUCTIVE STORAGE OPERATION IN THE SET.\n\nADR-0007 does not forbid this — it keeps destructive operations out of a GENERIC storage\ninterface and requires them to be written explicitly per backend, which is what this is —\nand §8.1 prescribes the sequence around it: analysis, plan, the serial/WWN list of the\naffected disks, written confirmation, re-authentication, job. `ListDisks` is the analysis;\nthe API owns the middle; this is the end.\n\nTHREE REFUSALS LIVE HERE AND NOT IN A DIALOGUE, because a dialogue is a thing somebody\ngets past:\n\n1. A disk carrying `/`, `/boot` or `/boot/efi` is never a member. There is no confirmation\n   that makes overwriting the appliance's own disk a thing the operator meant.\n\n2. The WWN named for each disk must match what the box reports at the moment the pool is\n   created. This closes the gap that risk R1 is really about: between the screen that\n   listed the disks and the button that creates the pool, a disk can be pulled and another\n   put in its place, and `/dev/disk/by-id` names identify a DEVICE rather than a slot — so\n   the same name can be a different disk. Checking the name alone would confirm nothing.\n\n3. `-f` is never passed. `zpool create` refuses a device that already holds a filesystem\n   unless forced, and this operation does not force. Clearing a disk stays something an\n   operator does themselves, deliberately, with a shell — the product does not offer a\n   button for it, and an operation that could be talked into one would make the other two\n   refusals decorative.\n\nThe pool is created with ADR-0004's properties as POOL-LEVEL defaults, so every dataset\nmade in it inherits them. `CreateDataset` sets `acltype` per dataset; a pool whose default\nis `off` makes every dataset that forgets to say so a dataset with no ACLs, which is the\nfailure ADR-0004 was rewritten about.",
       "type": "object",
       "properties": {
@@ -2372,6 +2406,23 @@
       },
       "required": [
         "status"
+      ]
+    },
+    {
+      "description": "The application's data folder exists inside the share and is owned by the app engine\nidentity the container uid maps to.\n\n`created` says whether this call made it or found it — the API treats both as ready, and\nthe flag exists for the audit line, where \"found\" on an install that was expected to be\nfresh is worth a look.",
+      "type": "object",
+      "properties": {
+        "created": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "const": "app_data_dir_ready"
+        }
+      },
+      "required": [
+        "status",
+        "created"
       ]
     },
     {

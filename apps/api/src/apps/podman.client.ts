@@ -421,17 +421,20 @@ export class PodmanClient {
       name: spec.name,
       image: spec.image,
       env: { ...spec.env },
-      // ADR-0019: 127.0.0.1, never 0.0.0.0. A container that binds the LAN is the user installing
-      // more than they think they are installing.
+      // Yerel ağa yayınlanır — ADR-0019'un ilk hâli 127.0.0.1 diyordu ve ilk gerçek kutu bunun
+      // bedelini ölçtü: bir NAS BAŞKA makinelerden yönetilir, ve yalnız cihazın kendi loopback'ine
+      // bağlı bir Nextcloud, sahibinin tarayıcısından erişilemeyen bir Nextcloud'dur — "kur"
+      // düğmesi çalışıp "Aç" bağlantısı çalışmayınca ürün yine bozuk görünür. Yayın, Samba ve web
+      // arayüzüyle aynı güven sınırında: aynı yerel ağ, uygulamanın kendi girişi önünde.
       //
-      // EMPTY for a pod member — the pod's infra container carries the mapping, on the same
-      // 127.0.0.1, and podman refuses a pod member that declares its own.
+      // EMPTY for a pod member — the pod's infra container carries the mapping, and podman
+      // refuses a pod member that declares its own.
       portmappings:
         spec.publish === undefined
           ? []
           : [
               {
-                host_ip: '127.0.0.1',
+                host_ip: '0.0.0.0',
                 host_port: spec.publish.hostPort,
                 container_port: spec.publish.containerPort,
                 protocol: 'tcp',
@@ -465,16 +468,16 @@ export class PodmanClient {
    * name or a service discovery mechanism: members share one network namespace, so Immich's server
    * reaches its database at 127.0.0.1:5432 the same way a single-process app reaches nothing.
    *
-   * The published port lives HERE and only here. That is also why the same ADR-0019 rule is
-   * written on this line as on the container one: a pod that published on 0.0.0.0 would expose
-   * every member at once.
+   * The published port lives HERE and only here — one port per application, the container's own
+   * login in front of it, on the same trust boundary as Samba and the web interface (see the
+   * container-side note for why this stopped being loopback-only).
    */
   async createPod(spec: { name: PodName; containerPort: number; hostPort: number }): Promise<void> {
     await this.json('POST', `${API}/pods/create`, {
       name: spec.name,
       portmappings: [
         {
-          host_ip: '127.0.0.1',
+          host_ip: '0.0.0.0',
           host_port: spec.hostPort,
           container_port: spec.containerPort,
           protocol: 'tcp',

@@ -1002,6 +1002,30 @@ pub enum Request {
     /// view while still occupying the disk it is on.
     PrepareShareRoot { pool: SafeComponent },
 
+    /// Create (or verify) the folder a catalogue application keeps its data in, inside a share,
+    /// owned by the APP ENGINE's identity rather than a tenant's.
+    ///
+    /// Why `CreateDirectory` cannot do this: its owner operands are `PosixId`, and `PosixId`
+    /// makes every system account unrepresentable ON PURPOSE. The application engine
+    /// (`depsis-apps`, a rootless podman user) is exactly such an account — so this operation
+    /// exists, and the caller does not name a host uid at all. It names the uid INSIDE THE
+    /// CONTAINER (from the catalogue row: 33 for an image whose service is `www-data`, 0 for one
+    /// that runs as container root), and the agent maps it the same way the kernel's user
+    /// namespace will: 0 becomes the engine account itself, anything else becomes the engine's
+    /// subuid range at the same offset. The worst a compromised API gets from this is a folder
+    /// owned by some unprivileged app-engine id — never root, never a person.
+    ///
+    /// Idempotent: an existing folder with the right owner answers `ready` and touches nothing;
+    /// an existing folder with the WRONG owner is refused with the repair in the sentence,
+    /// because silently rechowning a folder that Samba users may have filled would move their
+    /// files out from under their own permissions.
+    PrepareAppDataDir {
+        share: SafeComponent,
+        directory: SafeComponent,
+        container_uid: u32,
+        container_gid: u32,
+    },
+
     /// Create a ZFS pool. THE ONE DESTRUCTIVE STORAGE OPERATION IN THE SET.
     ///
     /// ADR-0007 does not forbid this — it keeps destructive operations out of a GENERIC storage
@@ -2415,6 +2439,16 @@ pub enum Response {
     /// know is that the next call — the database row, or a publish into this directory — may now
     /// proceed, and the status alone says that.
     DirectoryCreated {},
+    /// The application's data folder exists inside the share and is owned by the app engine
+    /// identity the container uid maps to.
+    ///
+    /// `created` says whether this call made it or found it — the API treats both as ready, and
+    /// the flag exists for the audit line, where "found" on an install that was expected to be
+    /// fresh is worth a look.
+    #[serde(rename = "app_data_dir_ready")]
+    AppDataDirReady {
+        created: bool,
+    },
     /// The machine's accounts and groups now match what was asked for.
     ///
     /// Counts rather than a bare acknowledgement, and only the ones the agent CHANGED: a sync that
@@ -2576,7 +2610,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 25;
+pub const SCHEMA_VERSION: u32 = 26;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

@@ -67,6 +67,7 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::ListPools {} => "list_pools",
         Request::ShareRootStatus {} => "share_root_status",
         Request::PrepareShareRoot { .. } => "prepare_share_root",
+        Request::PrepareAppDataDir { .. } => "prepare_app_data_dir",
         Request::PublishSambaConfig { .. } => "publish_samba_config",
         Request::OpenTransfer { .. } => "open_transfer",
         Request::PublishTransfer { .. } => "publish_transfer",

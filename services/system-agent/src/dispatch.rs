@@ -1391,6 +1391,82 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
+    /// The folder a catalogue application keeps its data in: `<share>/<directory>`, owned by
+    /// whatever host identity the named in-container id maps to under the engine account's user
+    /// namespace. The mapping and its bounds live in `apps_engine`; the reasoning for why the
+    /// caller names a CONTAINER id and never a host id is on the operation itself.
+    fn prepare_app_data_dir(
+        &self,
+        share: &str,
+        directory: &str,
+        container_uid: u32,
+        container_gid: u32,
+    ) -> Result<Response, SeamError> {
+        let Some(paths) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+        // The same door `CreateDirectory` closes: `.depsis/` is the agent's own staging tree.
+        if directory == STAGING_DIR[0] {
+            return Ok(Response::Refused {
+                reason: format!("{}/ is the agent's own tree", STAGING_DIR[0]),
+            });
+        }
+        let engine = match crate::apps_engine::load() {
+            Ok(engine) => engine,
+            Err(why) => {
+                return Ok(Response::Refused {
+                    reason: format!("the application engine account is not usable: {why}"),
+                });
+            }
+        };
+        let uid = match engine.host_uid(container_uid) {
+            Ok(uid) => uid,
+            Err(why) => return Ok(Response::Refused { reason: why }),
+        };
+        let gid = match engine.host_gid(container_gid) {
+            Ok(gid) => gid,
+            Err(why) => return Ok(Response::Refused { reason: why }),
+        };
+
+        match paths.create_dir(&[share], directory, uid, gid) {
+            Ok(()) => Ok(Response::AppDataDirReady { created: true }),
+            Err(SeamError::AlreadyExists(_)) => {
+                // Idempotence with a look, not a shrug: "ready" may only be said about a folder
+                // the application can actually use. A folder that exists but belongs to someone
+                // else — created over SMB before the app was installed, say — would take a chown
+                // to fix, and chowning a folder a person may have filled moves their files out
+                // from under their own permissions. So it is refused, with the fact in the
+                // sentence.
+                use std::os::unix::fs::MetadataExt as _;
+                let dir = paths.open_dir(&[share, directory])?;
+                let meta = dir
+                    .metadata()
+                    .map_err(|e| SeamError::Io(format!("stat {share}/{directory}: {e}")))?;
+                if meta.uid() == uid {
+                    Ok(Response::AppDataDirReady { created: false })
+                } else {
+                    Ok(Response::Refused {
+                        reason: format!(
+                            "{share}/{directory} already exists and is not the application's: \
+                             it is owned by uid {}, not {uid}. Rename it in the file manager (the \
+                             application will make a fresh one), or pick another share",
+                            meta.uid()
+                        ),
+                    })
+                }
+            }
+            Err(SeamError::NotFound(_)) => Ok(Response::NotFound {
+                reason: format!("{share}: no such share on this box"),
+            }),
+            Err(SeamError::NotADirectory(what)) => Ok(Response::NotFound {
+                reason: format!("{what}: a file is in the way; this component is not a folder"),
+            }),
+            Err(other) => Err(other),
+        }
+    }
+
     /// Rewrite one folder's POSIX ACL — access ACL and default ACL both.
     ///
     /// Only the environment lookup lives here; the work is `acl::Applier`, for the same reason the
@@ -2127,6 +2203,18 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             Request::ShareRootStatus {} => self.share_root_status(),
 
             Request::PrepareShareRoot { pool } => self.prepare_share_root(pool.as_str()),
+
+            Request::PrepareAppDataDir {
+                share,
+                directory,
+                container_uid,
+                container_gid,
+            } => self.prepare_app_data_dir(
+                share.as_str(),
+                directory.as_str(),
+                *container_uid,
+                *container_gid,
+            ),
 
             Request::ReadSmartSummary { disk_by_id } => {
                 // Built from a validated single component, so the caller cannot reach outside
@@ -5038,8 +5126,9 @@ mod tests {
 
         let runner = MockCommandRunner::with_responses(acl_replies());
         let sink = MemorySink::default();
-        let applier =
-            acl::Applier::new(&runner, h.root.path().to_path_buf()).with_probe(acl_present);
+        let applier = acl::Applier::new(&runner, h.root.path().to_path_buf())
+            .with_probe(acl_present)
+            .with_engine_uid(None);
 
         let response = h
             .agent(&runner, &sink)
@@ -5101,8 +5190,9 @@ mod tests {
 
         let runner = MockCommandRunner::with_responses(acl_replies());
         let sink = MemorySink::default();
-        let applier =
-            acl::Applier::new(&runner, h.root.path().to_path_buf()).with_probe(acl_present);
+        let applier = acl::Applier::new(&runner, h.root.path().to_path_buf())
+            .with_probe(acl_present)
+            .with_engine_uid(None);
 
         h.agent(&runner, &sink)
             .apply_folder_acl_with(
@@ -5174,8 +5264,9 @@ mod tests {
         let h = Harness::with_share("alice");
         let runner = MockCommandRunner::with_responses(acl_replies());
         let sink = MemorySink::default();
-        let applier =
-            acl::Applier::new(&runner, h.root.path().to_path_buf()).with_probe(acl_present);
+        let applier = acl::Applier::new(&runner, h.root.path().to_path_buf())
+            .with_probe(acl_present)
+            .with_engine_uid(None);
 
         for path in [
             &[".depsis"][..],
@@ -5208,8 +5299,9 @@ mod tests {
         let h = Harness::with_share("alice");
         let runner = MockCommandRunner::with_responses(acl_replies());
         let sink = MemorySink::default();
-        let applier =
-            acl::Applier::new(&runner, h.root.path().to_path_buf()).with_probe(acl_present);
+        let applier = acl::Applier::new(&runner, h.root.path().to_path_buf())
+            .with_probe(acl_present)
+            .with_engine_uid(None);
 
         h.agent(&runner, &sink)
             .apply_folder_acl_with(&applier, "alice", &[], &[grant(301200, true, true, true)])
@@ -5320,8 +5412,9 @@ mod tests {
 
         let runner = Enotsup;
         let sink = MemorySink::default();
-        let applier =
-            acl::Applier::new(&runner, h.root.path().to_path_buf()).with_probe(acl_present);
+        let applier = acl::Applier::new(&runner, h.root.path().to_path_buf())
+            .with_probe(acl_present)
+            .with_engine_uid(None);
 
         let err = h
             .agent(&runner, &sink)

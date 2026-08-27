@@ -314,7 +314,11 @@ fn spec(entries: &[AclEntry]) -> String {
 /// excludes this one.
 ///
 /// `-R` is not here either and there is no operand that could put it here; see the module note.
-fn plan(target: &str, entries: &[AclEntry]) -> Vec<(&'static str, Vec<String>)> {
+fn plan(
+    target: &str,
+    entries: &[AclEntry],
+    engine_traverse: Option<u32>,
+) -> Vec<(&'static str, Vec<String>)> {
     let mut passes: Vec<(&'static str, Vec<String>)> = Vec::with_capacity(3);
 
     passes.push((
@@ -322,27 +326,40 @@ fn plan(target: &str, entries: &[AclEntry]) -> Vec<(&'static str, Vec<String>)> 
         vec!["-b".to_string(), "--".to_string(), target.to_string()],
     ));
 
-    if !entries.is_empty() {
+    // The engine's traverse-only entry, ACCESS PASS ONLY — see `Applier::engine_uid` for what it
+    // is and why it is never in the default pass. Written even when the grant list is empty: a
+    // share root that grants no person anything still has to let the engine walk to an
+    // application folder inside it.
+    let engine = engine_traverse.map(|uid| format!("u:{uid}:--x"));
+
+    if !entries.is_empty() || engine.is_some() {
         let rendered = spec(entries);
+        let access = match &engine {
+            Some(extra) if rendered.is_empty() => extra.clone(),
+            Some(extra) => format!("{rendered},{extra}"),
+            None => rendered.clone(),
+        };
         passes.push((
             "access",
             vec![
                 "-m".to_string(),
-                rendered.clone(),
+                access,
                 "--".to_string(),
                 target.to_string(),
             ],
         ));
-        passes.push((
-            "default",
-            vec![
-                "-d".to_string(),
-                "-m".to_string(),
-                rendered,
-                "--".to_string(),
-                target.to_string(),
-            ],
-        ));
+        if !entries.is_empty() {
+            passes.push((
+                "default",
+                vec![
+                    "-d".to_string(),
+                    "-m".to_string(),
+                    rendered,
+                    "--".to_string(),
+                    target.to_string(),
+                ],
+            ));
+        }
     }
 
     passes
@@ -386,6 +403,16 @@ fn installed(program: &str) -> bool {
 pub struct Applier<'a, R: CommandRunner> {
     runner: &'a R,
     shares_root: PathBuf,
+    /// The app engine's uid, when the account exists on this box — appended to every SHARE
+    /// ROOT's access ACL as `u:<uid>:--x`. Traverse only: podman (running as the engine) must
+    /// `statfs` a bind source INSIDE the share to mount an application's data folder, and the
+    /// share root's `other::---` — correct for people — stopped it at the doorstep. `--x` lets
+    /// it walk to a folder it knows by name and nothing more: no listing, no reading, and no
+    /// entry in the DEFAULT ACL, so nothing a person creates inherits engine access.
+    ///
+    /// Resolved here and never an operand: the API cannot name a host uid (see `PosixId`), and
+    /// this line keeps it that way.
+    engine_uid: Option<u32>,
     /// How presence of the `acl` tools is decided. A field rather than a direct
     /// `Path::exists` call so the portable tests can drive every branch below on a box that has
     /// no `setfacl` — which is every developer box on this project, and would otherwise mean the
@@ -399,9 +426,20 @@ impl<'a, R: CommandRunner> Applier<'a, R> {
         Self {
             runner,
             shares_root,
+            // A box without the podman engine account simply writes no engine entry; on a
+            // developer machine or in tests this is the ordinary state, not an error.
+            engine_uid: crate::apps_engine::load().ok().map(|engine| engine.uid),
             present: installed,
             timeout: TIMEOUT,
         }
+    }
+
+    /// Replace the engine-uid probe, for tests that need the share-root entry present (or
+    /// certainly absent) on a machine whose /etc says otherwise.
+    #[must_use]
+    pub fn with_engine_uid(mut self, engine_uid: Option<u32>) -> Self {
+        self.engine_uid = engine_uid;
+        self
     }
 
     /// Replace the "are the tools here?" probe.
@@ -608,8 +646,16 @@ impl<'a, R: CommandRunner> Applier<'a, R> {
         // before/after comparison of two DIFFERENT objects would be worse than no comparison.
         let before = self.base_triple(&aimed, &shown)?;
 
+        // Only the SHARE ROOT gets the engine's traverse entry: application folders are direct
+        // children, so the root is the one door the engine has to pass through.
+        let engine_traverse = if path.is_empty() {
+            self.engine_uid
+        } else {
+            None
+        };
+
         let started = Instant::now();
-        for (stage, args) in plan(&aimed, entries) {
+        for (stage, args) in plan(&aimed, entries, engine_traverse) {
             self.run_pass(stage, &args, &shown, started, self.timeout)?;
         }
 
@@ -735,7 +781,10 @@ mod tests {
         }
 
         fn applier<'a, R: CommandRunner>(&self, runner: &'a R) -> Applier<'a, R> {
-            let mut applier = Applier::new(runner, self.root.path().to_path_buf());
+            // Pinned to None so the pass count these tests assert does not depend on whether
+            // the machine running them happens to have a depsis-apps account.
+            let mut applier =
+                Applier::new(runner, self.root.path().to_path_buf()).with_engine_uid(None);
             applier.present = always_present;
             applier
         }
@@ -753,7 +802,11 @@ mod tests {
 
     #[test]
     fn the_plan_clears_then_writes_access_then_default() {
-        let passes = plan("/srv/depsis/belgeler", &[entry(301200, true, true, true)]);
+        let passes = plan(
+            "/srv/depsis/belgeler",
+            &[entry(301200, true, true, true)],
+            None,
+        );
         let stages: Vec<&str> = passes.iter().map(|(stage, _)| *stage).collect();
         assert_eq!(
             stages,
@@ -799,7 +852,11 @@ mod tests {
     /// left to the type change.
     #[test]
     fn no_pass_ever_recurses() {
-        let passes = plan("/srv/depsis/belgeler", &[entry(301200, true, false, true)]);
+        let passes = plan(
+            "/srv/depsis/belgeler",
+            &[entry(301200, true, false, true)],
+            None,
+        );
         assert_eq!(passes.len(), 3, "clear, access, default");
         for (stage, args) in &passes {
             assert!(
@@ -817,7 +874,7 @@ mod tests {
     /// the exit status would notice.
     #[test]
     fn no_pass_refuses_to_follow_symlinks() {
-        let passes = plan("/proc/self/fd/7", &[entry(301200, true, false, true)]);
+        let passes = plan("/proc/self/fd/7", &[entry(301200, true, false, true)], None);
         for (stage, args) in &passes {
             assert!(
                 !args.iter().any(|a| a == "-P" || a == "--physical"),
@@ -828,14 +885,14 @@ mod tests {
 
     #[test]
     fn an_empty_entry_list_clears_and_writes_nothing() {
-        let passes = plan("/srv/depsis/belgeler", &[]);
+        let passes = plan("/srv/depsis/belgeler", &[], None);
         assert_eq!(passes.len(), 1);
         assert_eq!(passes[0].0, "clear");
     }
 
     #[test]
     fn the_path_is_always_last_and_always_after_a_double_dash() {
-        for (_, args) in plan("/srv/depsis/x", &[entry(300009, true, true, true)]) {
+        for (_, args) in plan("/srv/depsis/x", &[entry(300009, true, true, true)], None) {
             let last = args.len() - 1;
             assert_eq!(args[last], "/srv/depsis/x");
             assert_eq!(
@@ -844,6 +901,45 @@ mod tests {
                 "without `--` a path could be read as an option"
             );
         }
+    }
+
+    /// The engine's traverse entry: access pass only, `--x` only, appended after the grants.
+    /// In the DEFAULT pass it must NOT appear — a person's new folder inheriting engine access
+    /// would widen what "traverse only" promised.
+    #[test]
+    fn the_engine_entry_is_traverse_only_and_never_inherited() {
+        let passes = plan(
+            "/srv/depsis/x",
+            &[entry(300009, true, false, true)],
+            Some(1001),
+        );
+        let access = passes
+            .iter()
+            .find(|(stage, _)| *stage == "access")
+            .map(|(_, args)| args.join(" "))
+            .unwrap_or_default();
+        assert!(access.contains("g:300009:r-x,u:1001:--x"), "{access}");
+        let default = passes
+            .iter()
+            .find(|(stage, _)| *stage == "default")
+            .map(|(_, args)| args.join(" "))
+            .unwrap_or_default();
+        assert!(!default.contains("u:1001"), "{default}");
+    }
+
+    /// A share root that grants no person anything still lets the engine through: the access
+    /// pass exists with the engine entry alone, and there is no default pass at all.
+    #[test]
+    fn an_empty_grant_list_still_writes_the_engine_entry() {
+        let passes = plan("/srv/depsis/x", &[], Some(1001));
+        let stages: Vec<&str> = passes.iter().map(|(stage, _)| *stage).collect();
+        assert_eq!(stages, vec!["clear", "access"]);
+        let access = passes
+            .iter()
+            .find(|(stage, _)| *stage == "access")
+            .map(|(_, args)| args.join(" "))
+            .unwrap_or_default();
+        assert!(access.contains("u:1001:--x"), "{access}");
     }
 
     // ── the dispatch-level behaviour ──
