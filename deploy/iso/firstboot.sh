@@ -90,6 +90,17 @@ if ! command -v cargo >/dev/null 2>&1 && [ ! -x /root/.cargo/bin/cargo ]; then
 fi
 export PATH="/root/.cargo/bin:$PATH"
 
+# ── 5b. ZeroTier ─────────────────────────────────────────────────────────────
+#
+# ADR-0020 "DEPSIS onu kurmaz" diyordu; sahibi ilk gerçek kurulumda uzaktan erişimi açmak
+# isteyince karşısına terminal çıktı, ve bu ürünün ilkesine aykırı: cihaz sahibi terminale
+# girmez. Karar değişti — cihaz uzaktan erişim YETENEĞİYLE gelir; bir ağa katılmak yine
+# arayüzden, yine sahibinin kararıyla olur. Kurulamazsa uyarı: uçlar 503 döner, cihaz çalışır.
+if ! command -v zerotier-cli >/dev/null 2>&1; then
+  say 'ZeroTier'
+  curl -fsSL https://install.zerotier.com | bash ||     echo 'UYARI: ZeroTier kurulamadı; uzaktan erişim uçları 503 döner.'
+fi
+
 # ── 6. kaynak ────────────────────────────────────────────────────────────────
 say 'DEPSIS kaynağı'
 if [ ! -f "$REPO/tools/install/install.sh" ]; then

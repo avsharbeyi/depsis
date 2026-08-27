@@ -505,7 +505,15 @@ ENV
 
   printf 'DEPSIS_API_UID=%s\nDEPSIS_SHARES_ROOT=%s\n' "$(id -u depsis-api)" "$SHARES_ROOT" > "$ETC/agent.env"
   chmod 0644 "$ETC/agent.env"
-  ok "$ETC/api.env ve $ETC/agent.env"
+  # console.env — birim dosyası bunu okumadan BAŞLAMIYOR ve ilk saha kurulumunda eksikti: konsol
+  # soketi "No such file or directory" ile beş kez düşüp kilitlendi. Ayrıcalıksız kabuk (ADR-0018);
+  # 1 yapmak bilinçli bir operatör kararıdır ve buradan değil o dosyadan verilir.
+  if [ ! -f "$ETC/console.env" ]; then
+    printf 'DEPSIS_CONSOLE_PRIVILEGED=0
+' > "$ETC/console.env"
+  fi
+  chmod 0644 "$ETC/console.env"
+  ok "$ETC/api.env, $ETC/agent.env ve $ETC/console.env"
 
   # Bir kurulum kaydı. Atlamak için DEĞİL — her adım zaten kendi başına bakıyor — hangi sürümün
   # ne zaman kurulduğunu söyleyebilmek için. Bir kutuya bakan kişinin ilk sorusu budur.
