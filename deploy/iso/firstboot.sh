@@ -47,7 +47,7 @@ export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 say 'temel paketler'
 apt-get update -qq
 apt-get install -y -qq nginx openssl iproute2 build-essential pkg-config \
-  postgresql-common linux-headers-amd64 >/dev/null
+  postgresql-common linux-headers-amd64 smartmontools >/dev/null
 
 say 'ZFS (contrib deposundan, dkms derlemesi birkaç dakika sürer)'
 apt-get install -y zfsutils-linux || {
