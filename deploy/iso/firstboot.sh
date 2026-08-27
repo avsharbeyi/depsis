@@ -46,8 +46,10 @@ export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 # ── 2. Debian'ın kendi paketleri ─────────────────────────────────────────────
 say 'temel paketler'
 apt-get update -qq
+# `acl` da temel: izin modeli POSIX ACL'yle yürür (ADR-0004) ve ajan /usr/bin/setfacl'ı exec
+# eder. İlk sahada paket yoktu — her izin uygulaması sessizce kuyruğa düşüp öldü.
 apt-get install -y -qq nginx openssl iproute2 build-essential pkg-config \
-  postgresql-common linux-headers-amd64 smartmontools >/dev/null
+  postgresql-common linux-headers-amd64 smartmontools acl >/dev/null
 
 # Samba temel paketlerle birlikte ve pazarlıksız: bu cihaz bir NAS, ve NAS'ın var olma nedeni
 # Windows Gezgini'nde bir sürücü olarak görünmek. İlk sahada bu satır yoktu — arayüz \\depsis

@@ -448,14 +448,26 @@ impl SafePath for Openat2SafePath {
         )
     }
 
-    /// `/proc/self/fd/N` — see the note on the trait for why this and not a joined path.
+    /// `/proc/<AJANIN PID'İ>/fd/N` — see the note on the trait for why a descriptor and not a
+    /// joined path.
+    ///
+    /// `self` DEĞİL, ve fark ilk gerçek kutuda ödendi: her tanıtıcı CLOEXEC ile açılır (doğru —
+    /// hiçbir çocuk ajanın tanıtıcı tablosunu miras almamalı), yani exec olan `setfacl` kendi
+    /// `/proc/self/fd`'sinde N'yi BULAMAZ ve "No such file or directory" der. Sayıyla yazılan
+    /// pid ise ajanın tablosunu adresler: sihirli bağ, ajanın hâlâ açık tuttuğu inode'a çözülür,
+    /// tanıtıcı çocuğa hiç geçmeden. Çocuk ajanla aynı kullanıcı (root) olduğu için /proc bu
+    /// okumaya izin verir.
     ///
     /// No existence check on `/proc`. If procfs is not mounted the `setfacl` that receives this
     /// fails with ENOENT and the operator reads a missing-path error, which is the truth; a probe
     /// here would only move the same failure earlier while adding a stat to every call.
     fn command_path(&self, dir: &std::fs::File) -> Result<String, SeamError> {
         use std::os::fd::AsRawFd;
-        Ok(format!("/proc/self/fd/{}", dir.as_raw_fd()))
+        Ok(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            dir.as_raw_fd()
+        ))
     }
 
     fn publish(
@@ -2093,6 +2105,37 @@ mod tests {
                 .expect("canonicalize")
                 .starts_with(&elsewhere),
             "the command path followed the attacker's symlink"
+        );
+    }
+
+    /// The command path must survive an EXEC — the entire point of it is to be handed to
+    /// `setfacl`/`getfacl`, which are child processes.
+    ///
+    /// The blind spot this closes: the test above resolves the path in the SAME process, where
+    /// `/proc/self/fd/N` works fine. Every descriptor is opened CLOEXEC, so in a child that same
+    /// spelling names a descriptor the exec just closed — the first real box answered
+    /// "getfacl /proc/self/fd/9: No such file or directory" for every ACL in every share, and no
+    /// test had ever put a real child process between `open_dir` and the resolution.
+    #[test]
+    fn the_command_path_resolves_in_a_child_process_after_exec() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("share");
+        std::fs::create_dir(&root).expect("mkdir");
+        std::fs::create_dir(root.join("faturalar")).expect("mkdir");
+
+        let sp = Openat2SafePath::open_root(&root).expect("open root");
+        let confined = sp.open_dir(&["faturalar"]).expect("open the folder");
+        let aimed = sp.command_path(&confined).expect("a command path");
+
+        let status = std::process::Command::new("/usr/bin/test")
+            .arg("-d")
+            .arg(&aimed)
+            .status()
+            .expect("spawn /usr/bin/test");
+        assert!(
+            status.success(),
+            "{aimed} did not resolve to a directory inside a child process; a CLOEXEC'd \
+             /proc/self spelling fails exactly here while passing every same-process test"
         );
     }
 

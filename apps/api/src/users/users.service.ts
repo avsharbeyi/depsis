@@ -179,6 +179,11 @@ export class UsersService {
         if (row !== undefined && password !== undefined) {
           await this.identity.rememberPassword(db, organizationId, row.id, password);
         }
+        // 'Herkes' taraması, hesabın doğduğu anda ve aynı işlemde. Fonksiyon bütün kullanıcıları
+        // üye yapar ama yalnız ÇAĞRILDIĞINDA — ve ilk saha bunun eksiğini ölçtü: paylaşım
+        // kurulduktan SONRA açılan hesap hiçbir çağrının kapsamına girmedi, takımsız kaldı, ve
+        // "herkes görür" diye açılmış paylaşımı ne SMB'den ne arayüzden görebildi.
+        await db.query(`SELECT public.everyone_team($1)`, [organizationId]);
         return created;
       });
       const row = rows[0];

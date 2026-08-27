@@ -32,7 +32,7 @@
 //! read as an option even if a component somehow began with one. Injection is impossible at the
 //! type level rather than filtered at the string level.
 //!
-//! ## Why `setfacl` is given `/proc/self/fd/N` and never a joined path
+//! ## Why `setfacl` is given `/proc/<agent pid>/fd/N` and never a joined path
 //!
 //! Because handing it a joined path re-resolves every component a second time, outside the
 //! confinement, and that is not a residual window — it is the whole attack. This module used to
@@ -45,13 +45,16 @@
 //! matching default ACL onto `/etc`. Both halves of that are attacker-chosen. It was a complete
 //! local privilege escalation and it is closed here rather than documented.
 //!
-//! `SafePath::command_path` answers `/proc/self/fd/N` for the descriptor `open_dir` returned. That
-//! names the inode the kernel already confined, so there is no second resolution to lose: whatever
-//! happens to the directory entries above it, the name still points at the object that passed
-//! `RESOLVE_BENEATH | NO_SYMLINKS`. The joined path survives only as a DISPLAY string in errors —
-//! `target()` builds it, nothing passes it to a program.
+//! `SafePath::command_path` answers `/proc/<agent pid>/fd/N` for the descriptor `open_dir`
+//! returned. That names the inode the kernel already confined, so there is no second resolution to
+//! lose: whatever happens to the directory entries above it, the name still points at the object
+//! that passed `RESOLVE_BENEATH | NO_SYMLINKS`. The pid is spelled as a NUMBER and not `self`,
+//! because the descriptor is CLOEXEC and therefore does not exist in the child's own table — the
+//! first real box measured `getfacl /proc/self/fd/9: No such file or directory` on every folder of
+//! every share. The joined path survives only as a DISPLAY string in errors — `target()` builds
+//! it, nothing passes it to a program.
 //!
-//! `-P` is deliberately absent and must stay absent: `/proc/self/fd/N` is itself a magic symlink,
+//! `-P` is deliberately absent and must stay absent: the command path is itself a magic symlink,
 //! and `setfacl -P` skips symlink arguments silently — exit 0, nothing applied. The two mitigations
 //! are mutually exclusive and this is the stronger one.
 //!

@@ -656,6 +656,16 @@ samba_conf() {
     ok 'smb.conf include satırı eklendi'
   fi
 
+  # Debian'ın `map to guest = bad user` varsayılanı bir tuzak, ve sahada ödendi: Windows
+  # bilinmeyen bir kullanıcı adıyla gelince Samba oturumu MİSAFİR olarak kabul eder, paylaşım
+  # misafiri reddeder — ve Windows, oturum "başarılı" olduğu için parola penceresini HİÇ açmaz,
+  # doğrudan "erişim engellendi" gösterir. Never, yanlış kimliği yanlış diye söyler ve Windows
+  # parola sorar. (Samba'nın kendi varsayılanı da zaten Never.)
+  if grep -qiE '^[[:space:]]*map to guest' /etc/samba/smb.conf; then
+    sed -i 's/^\([[:space:]]*\)[Mm]ap to guest = .*/\1map to guest = Never/' /etc/samba/smb.conf
+    ok 'misafire düşürme kapalı (map to guest = Never)'
+  fi
+
   systemctl enable --now smbd nmbd >/dev/null 2>&1 || true
   # wsdd2 varsa: Gezgin'in "Ağ" görünümünde kendiliğinden görünmek. Yoksa sorun değil —
   # \\depsis adresi nmbd (NetBIOS) ile zaten çözülür.
