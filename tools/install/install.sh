@@ -639,9 +639,14 @@ units() {
   systemctl enable --now depsis-agent.socket depsis-agent-data.socket depsis-console.socket >/dev/null 2>&1
   ok 'soketler açık'
 
+  # Soket etkinlemeli servislerin ESKİ SÜRECİ, ikili değişince kendiliğinden yenilenmez — saha
+  # bunu şema uyuşmazlığı olarak buldu: API 24 konuşuyor, aylık süreç 23'te. Durdurmak yeter;
+  # soket dinlemede kalır ve bir sonraki bağlantı YENİ ikiliyi başlatır.
+  systemctl stop depsis-agent.service depsis-console.service 2>/dev/null || true
+
   systemctl enable depsis-api.service depsis-worker.service >/dev/null 2>&1
   systemctl restart depsis-api.service depsis-worker.service
-  ok 'API ve worker başlatıldı'
+  ok 'API ve worker başlatıldı; ajan ve konsol yeni ikiliye çevrildi'
 }
 
 # ─── 10. sağlık ───────────────────────────────────────────────────────────────
