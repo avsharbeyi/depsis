@@ -165,6 +165,81 @@ body {
   background: var(--live);
   box-shadow: 0 0 7px var(--live);
 }
+/* Öncelik tonları — sahibin sözüyle: "yüksek turuncu, acil kırmızı". Sınıflar zaten yazılıyordu
+   ama karşılıkları hiç yoktu; iki rozet birbirinin aynısı görünüyordu. Select üstünde de aynı
+   sınıflar geziyor, o yüzden seçici ikisini birden tutuyor. */
+.pill.warn,
+select.pill.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.pill.warn i {
+  background: var(--warn);
+  box-shadow: 0 0 7px var(--warn);
+}
+.pill.bad,
+select.pill.bad {
+  color: var(--rose);
+  border-color: color-mix(in srgb, var(--rose) 50%, transparent);
+}
+.pill.bad i {
+  background: var(--rose);
+  box-shadow: 0 0 7px var(--rose);
+}
+.pill.dim {
+  color: var(--mut);
+}
+
+/* Pano görünüm sekmeleri (Pano / Arşiv / Günlük) ve günlük satırı. */
+.jviews {
+  display: flex;
+  gap: 7px;
+  margin-bottom: 10px;
+}
+.lgrow {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 7px 10px;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.lgrow .s {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--mut);
+  white-space: nowrap;
+}
+.lgrow .tx {
+  color: var(--ink2);
+  min-width: 0;
+}
+.jitem.arch {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+/* İşin yönergesi — tartışma panelindeki açıklama kutusu. Yorumdan BÜYÜK ve önde durur:
+   "sanki önemsizmiş gibi duruyor" şikâyetinin cevabı biçimin kendisi. */
+.jdesc {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.24);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.55;
+  resize: vertical;
+  min-height: 44px;
+}
+.jdesc:focus {
+  outline: none;
+  border-color: rgba(91, 200, 245, 0.4);
+}
 .tbtn {
   background: rgba(8, 14, 22, 0.55);
   border: 1px solid var(--edge);
@@ -2427,6 +2502,25 @@ label textarea,
    `button:hover:not(:disabled)` on specificity alone — only on source order. */
 
 /* notes — GET/POST /notes, PATCH/DELETE /notes/{id} */
+.nsplit {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+.nside {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-height: 0;
+}
+.nmain {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
 .nlist {
   display: flex;
   flex-direction: column;
@@ -3417,4 +3511,69 @@ select option {
 .sysrow .val {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* ── Mobil: işler panosu, notlar, üst rozetler, tartışma ──────────────────────
+   Ayrı bir blok, mevcut 680px bloğuna ek: bu ekranlar sahada telefonla kullanıldı ve hepsinin
+   derdi aynıydı — masaüstü için dizilmiş yatay satırlar dar ekranda üst üste binmek yerine
+   TAŞIYORDU. Kural hep aynı: sar, tam genişliğe düş, dokunulacak şeyi büyüt. */
+@media (max-width: 680px) {
+  /* Yük/bellek/sıcaklık rozetleri: sığmadıklarında DÜZGÜN sarsınlar — "taşacaksa bile düzgün
+     taşsın". .top zaten sarıyor; rozetler küçülüp esniyor ki tek satır şansı artsın, sığmazsa
+     hizalı ikinci satıra insinler. Esnek boşluk mobilde anlamsız, kaldırılıyor. */
+  .top .pill {
+    padding: 4px 8px;
+    font-size: 9.5px;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  .top .pill span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .top .sp {
+    display: none;
+  }
+
+  .jitem {
+    flex-wrap: wrap;
+    row-gap: 7px;
+    padding: 9px 10px;
+  }
+  .jitem .tx {
+    flex: 1 0 calc(100% - 60px);
+    font-size: 13px;
+  }
+  .jitem select,
+  .jitem input[type='date'] {
+    font-size: 12px !important;
+    padding: 5px 7px !important;
+  }
+  .jadd input {
+    font-size: 13px;
+  }
+  .thread {
+    padding: 10px;
+  }
+  .thread .cmt .cbody {
+    font-size: 12.5px;
+  }
+  .jviews .mk {
+    flex: 1;
+  }
+
+  .nsplit {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .nside {
+    max-height: 168px;
+  }
+  .nmain {
+    min-height: 46vh;
+  }
+  .nbig {
+    min-height: 38vh;
+    font-size: 13px;
+  }
 }

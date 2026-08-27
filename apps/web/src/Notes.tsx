@@ -256,16 +256,11 @@ export function Notes({ notify }: { notify: Notify }): React.JSX.Element {
 
   return (
     <>
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '200px 1fr',
-          gap: 12,
-          flex: 1,
-          minHeight: 0,
-        }}
-      >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 7, minHeight: 0 }}>
+      {/* Sınıf, satır içi stil değil: mobilde bu ızgara alt alta düşmeli ve LİSTE kısalmalı —
+          sahada tersiydi, 200px'lik liste ekranı yiyor, notun kendisi bir şerit kalıyordu.
+          Kural styles.css'te (.nsplit), mobil dalıyla birlikte. */}
+      <div className="nsplit">
+        <div className="nside">
           {newButton}
           <div className="nlist">
             {notes.map((note) => (
@@ -309,7 +304,7 @@ export function Notes({ notify }: { notify: Notify }): React.JSX.Element {
           </div>
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 }}>
+        <div className="nmain">
           {selectedId === null ? (
             <div className="note">Soldan bir not seçin ya da yeni not oluşturun.</div>
           ) : (

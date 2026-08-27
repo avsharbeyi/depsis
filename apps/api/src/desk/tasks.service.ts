@@ -7,6 +7,8 @@ import { TaskWatchersService } from './task-watchers.service.js';
 export interface TaskRow {
   id: string;
   body: string;
+  /** İşin yönergesi — 0038. Panoda görünmez; iş açıldığında gövdenin hemen altında durur. */
+  description: string | null;
   /**
    * İşi kim açtı.
    *
@@ -82,6 +84,7 @@ export interface TaskChange {
     | 'due_at'
     | 'assignee_id'
     | 'body'
+    | 'description'
     | 'file_link'
     | 'comment'
     | 'parent_id'
@@ -121,6 +124,18 @@ export interface ActivityRow {
   old_value: string | null;
   new_value: string | null;
   created_at: Date;
+}
+
+/** Bir günlük satırı: aktivite + hangi iş. */
+export interface LogRow {
+  id: string;
+  actor_username: string | null;
+  field: TaskChange['field'];
+  old_value: string | null;
+  new_value: string | null;
+  created_at: Date;
+  task_id: string;
+  task_body: string;
 }
 
 /**
@@ -171,6 +186,7 @@ function diff(before: TaskRow, after: TaskRow): TaskChange[] {
   add('due_at', iso(before.due_at), iso(after.due_at));
   add('assignee_id', before.assignee_id, after.assignee_id);
   add('body', before.body, after.body);
+  add('description', before.description, after.description);
   add('parent_id', before.parent_id, after.parent_id);
   return changes;
 }
@@ -225,6 +241,7 @@ export class TaskRejectedError extends Error {
  */
 const SELECT_COLUMNS = `t.id::text          AS id,
           t.body,
+          t.description,
           t.parent_id::text   AS parent_id,
           t.created_by::text  AS created_by,
           t.status,
@@ -350,6 +367,8 @@ export class TasksService {
     id: string,
     changes: {
       body?: string | undefined;
+      // `null` yönergeyi siler, yokluk olduğu gibi bırakır — atamayla aynı üçlü.
+      description?: string | null | undefined;
       // `string | null` and `undefined` mean different things and both are reachable: null clears
       // the assignment, absent leaves it alone. Collapsing them would make "unassign" impossible
       // to express.
@@ -399,6 +418,10 @@ export class TasksService {
     if (changes.body !== undefined) {
       params.push(changes.body);
       sets.push(`body = $${params.length}`);
+    }
+    if (changes.description !== undefined) {
+      params.push(changes.description);
+      sets.push(`description = $${params.length}`);
     }
     if (changes.assigneeId !== undefined) {
       params.push(changes.assigneeId);
@@ -654,6 +677,32 @@ export class TasksService {
           ORDER BY a.created_at DESC, a.id DESC
           LIMIT 200`,
         [organizationId, taskId],
+      ),
+    );
+  }
+
+  /**
+   * İŞ GÜNLÜĞÜ — bütün panonun izi, tek listede. Sahibin sorusu bire bir: "geçmişte kimler
+   * neler yapmış görebilmeliyiz." Görev başına iz zaten vardı (`activity`); bu, aynı tablonun
+   * kiracı genişliğinde okunuşu, işin metniyle birlikte — çünkü günlük satırı işten bağımsız
+   * okunur ve "hangi iş" cevabı bir tıklamanın arkasında kalmamalı.
+   *
+   * Silinmiş işlerin izi de SİLİNMİŞ olur: `task_activity.task_id` CASCADE. Bu bilinçli —
+   * silme onayı kaskatı zaten söylüyor, ve hayalet satırların günlüğü okunmaz yapması daha kötü.
+   */
+  async log(organizationId: string): Promise<LogRow[]> {
+    return this.db.withTenant(organizationId, (db) =>
+      db.query<LogRow>(
+        `SELECT a.id::text AS id, u.username AS actor_username, a.field,
+                a.old_value, a.new_value, a.created_at,
+                t.id::text AS task_id, t.body AS task_body
+           FROM public.task_activity a
+           JOIN public.tasks t ON t.id = a.task_id
+           LEFT JOIN public.users u ON u.id = a.actor_id
+          WHERE a.organization_id = $1
+          ORDER BY a.created_at DESC, a.id DESC
+          LIMIT 300`,
+        [organizationId],
       ),
     );
   }

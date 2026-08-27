@@ -2697,6 +2697,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * İş günlüğü — bütün panonun izi, zamana dizili
+         * @description "Geçmişte kimler neler yapmış." Görev başına iz `/tasks/{id}/activity`'de zaten var; bu,
+         *     aynı tablonun kiracı genişliğinde okunuşu, işin metniyle birlikte. Pano kime açıksa günlük
+         *     de ona açık. Son 300 satır.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Günlük */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TaskLogPage"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tasks/{id}/activity": {
         parameters: {
             query?: never;
@@ -5996,6 +6037,12 @@ export interface components {
             id: string;
             body: string;
             /**
+             * @description İşin yönergesi (0038). Gövde tek satırlık ad; bu, iş açıldığında altında duran uzun
+             *     açıklama — "nasıl yapılacak, nelere dikkat edilecek". Yorum bir konuşma, bu işin
+             *     kendisinin parçası.
+             */
+            description: string | null;
+            /**
              * @description §7'nin durum makinesi. `doneAt` KALDIRILMADI ve bu bir tereddüt değil: durum "ne
              *     olduğu", `doneAt` "ne zaman olduğu", ve ikincisinin cevabı birinciden türetilemez.
              *     Şema ikisinin ANLAŞMASINI zorluyor — `done` olmayan bir görevde `doneAt` dolu olamaz.
@@ -6095,7 +6142,7 @@ export interface components {
              *     ilk 200 karakteri, `newValue` null.
              * @enum {string}
              */
-            field: "status" | "priority" | "due_at" | "assignee_id" | "body" | "file_link" | "comment" | "parent_id" | "checklist" | "tag";
+            field: "status" | "priority" | "due_at" | "assignee_id" | "body" | "description" | "file_link" | "comment" | "parent_id" | "checklist" | "tag";
             oldValue?: string | null;
             newValue?: string | null;
             /** Format: date-time */
@@ -6103,6 +6150,14 @@ export interface components {
         };
         TaskActivityPage: {
             items: components["schemas"]["TaskActivity"][];
+        };
+        TaskLogEntry: components["schemas"]["TaskActivity"] & {
+            /** Format: uuid */
+            taskId: string;
+            taskBody: string;
+        };
+        TaskLogPage: {
+            items: components["schemas"]["TaskLogEntry"][];
         };
         CreateTaskRequest: {
             body: string;
@@ -6116,6 +6171,7 @@ export interface components {
         };
         UpdateTaskRequest: {
             body?: string;
+            description?: string | null;
             /** Format: uuid */
             assigneeId?: string | null;
             done?: boolean;

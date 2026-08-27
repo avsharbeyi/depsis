@@ -718,7 +718,8 @@ function Desktop({
         <button
           type="button"
           className="tbtn pw"
-          aria-label="Güç"
+          aria-label="Oturum ve güç"
+          title="Oturum"
           aria-expanded={powerOpen}
           ref={powerRef}
           onClick={() => {
@@ -726,7 +727,17 @@ function Desktop({
             setPowerOpen((open) => !open);
           }}
         >
-          ⏻
+          {/* SVG, ⏻ karakteri değil: U+23FB'nin yaygın Windows yazı tiplerinde karşılığı yok ve
+              düğme sahada BOŞ göründü — "oturum butonunun simgesi yok". Çizim fonta bakmaz. */}
+          <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M12 3v9M6.2 6.6a8 8 0 1 0 11.6 0"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.4"
+              strokeLinecap="round"
+            />
+          </svg>
         </button>
       </header>
 
@@ -830,7 +841,15 @@ function Desktop({
           }}
         >
           <span className="g" style={{ background: tint('rose', 0.24) }} aria-hidden>
-            ⏻
+            <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 3v9M6.2 6.6a8 8 0 1 0 11.6 0"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.6"
+                strokeLinecap="round"
+              />
+            </svg>
           </span>
           Çıkış yap
         </button>

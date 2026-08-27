@@ -1592,6 +1592,21 @@ paths:
         '204': { description: Kaldırıldı }
         '404': { $ref: '#/components/responses/Problem' }
 
+  /tasks/log:
+    get:
+      tags: [tasks]
+      summary: İş günlüğü — bütün panonun izi, zamana dizili
+      description: |
+        "Geçmişte kimler neler yapmış." Görev başına iz `/tasks/{id}/activity`'de zaten var; bu,
+        aynı tablonun kiracı genişliğinde okunuşu, işin metniyle birlikte. Pano kime açıksa günlük
+        de ona açık. Son 300 satır.
+      responses:
+        '200':
+          description: Günlük
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskLogPage' }
+
   /tasks/{id}/activity:
     get:
       tags: [tasks]
@@ -4092,10 +4107,29 @@ components:
 
     Task:
       type: object
-      required: [id, body, status, priority, assigneeId, doneAt, position, createdAt, updatedAt]
+      required:
+        [
+          id,
+          body,
+          description,
+          status,
+          priority,
+          assigneeId,
+          doneAt,
+          position,
+          createdAt,
+          updatedAt,
+        ]
       properties:
         id: { type: string, format: uuid }
         body: { type: string, maxLength: 2000 }
+        description:
+          type: [string, 'null']
+          maxLength: 10000
+          description: |
+            İşin yönergesi (0038). Gövde tek satırlık ad; bu, iş açıldığında altında duran uzun
+            açıklama — "nasıl yapılacak, nelere dikkat edilecek". Yorum bir konuşma, bu işin
+            kendisinin parçası.
         status:
           type: string
           enum: [draft, assigned, in_progress, in_review, done, cancelled]
@@ -4214,6 +4248,7 @@ components:
               due_at,
               assignee_id,
               body,
+              description,
               file_link,
               comment,
               parent_id,
@@ -4237,6 +4272,23 @@ components:
           type: array
           items: { $ref: '#/components/schemas/TaskActivity' }
 
+    TaskLogEntry:
+      allOf:
+        - { $ref: '#/components/schemas/TaskActivity' }
+        - type: object
+          required: [taskId, taskBody]
+          properties:
+            taskId: { type: string, format: uuid }
+            taskBody: { type: string, maxLength: 2000 }
+
+    TaskLogPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TaskLogEntry' }
+
     CreateTaskRequest:
       type: object
       required: [body]
@@ -4253,6 +4305,7 @@ components:
       minProperties: 1
       properties:
         body: { type: string, minLength: 1, maxLength: 2000 }
+        description: { type: [string, 'null'], minLength: 1, maxLength: 10000 }
         assigneeId: { type: [string, 'null'], format: uuid }
         # `done` KALDI ve `status` ile birlikte gönderilemez. Eski istemciler onu kullanıyor ve
         # ikisini aynı istekte kabul etmek "hangisi kazanır" sorusunu doğurur — cevabı olan ama

@@ -21,6 +21,8 @@ type Watcher = OpenApi.components['schemas']['TaskWatcher'];
  */
 export function TaskThread({
   taskId,
+  description,
+  onDescription,
   me,
   isAdmin,
   subtasks,
@@ -33,6 +35,10 @@ export function TaskThread({
   onError,
 }: {
   taskId: string;
+  /** İşin yönergesi — null, hiç yazılmamış demek. */
+  description: string | null | undefined;
+  /** Yönerge değişti; null silmek. Kaydetmeyi ve hatasını pano üstleniyor. */
+  onDescription: (text: string | null) => void;
   /** Çağıranın kullanıcı adı. Silme düğmesinin kime çizileceğini bu belirliyor. */
   me: string;
   isAdmin: boolean;
@@ -71,6 +77,7 @@ export function TaskThread({
   const [subDraft, setSubDraft] = useState('');
   const [tagDraft, setTagDraft] = useState('');
   const [draft, setDraft] = useState('');
+  const [describing, setDescribing] = useState(description ?? '');
   const [busy, setBusy] = useState(false);
   /** Okunamadı ile "henüz yorum yok" ayrı şeyler; ikisini aynı ekrana çevirmek bir yalan. */
   const [failed, setFailed] = useState(false);
@@ -345,6 +352,29 @@ export function TaskThread({
         )}
       </div>
 
+      {/* ─── açıklama / yönerge ──────────────────────────────────────────── */}
+
+      {/* İLK BÖLÜM, ve bu bir sıralama kararı: sahibi "her işin altında açıklaması da olmalı,
+          yorum önemsizmiş gibi durmasın" dedi. İşi açan kişi önce ne yapılacağını okur; etiket,
+          madde ve konuşma ondan sonra gelir. Kaydetme odak çıkınca — bir yönerge cümle cümle
+          yazılır ve her tuşta PATCH atmak taslağı sunucuyla yarıştırmak olurdu. */}
+      <div className="pmh">Açıklama</div>
+      <textarea
+        className="jdesc"
+        value={describing}
+        rows={describing === '' ? 2 : Math.min(10, describing.split('\n').length + 1)}
+        maxLength={10_000}
+        aria-label="İşin açıklaması"
+        placeholder="Bu işin yönergesi: ne yapılacak, nasıl yapılacak, nelere dikkat edilecek…"
+        onChange={(event) => setDescribing(event.target.value)}
+        onBlur={() => {
+          const next = describing.trim();
+          const current = description ?? '';
+          if (next === current.trim()) return;
+          onDescription(next === '' ? null : next);
+        }}
+      />
+
       {/* ─── etiketler ───────────────────────────────────────────────────── */}
 
       <div className="pmh">Etiketler</div>
@@ -379,7 +409,7 @@ export function TaskThread({
           value={tagDraft}
           maxLength={40}
           aria-label="Yeni etiket"
-          placeholder="Yeni etiket — Enter"
+          placeholder="Yeni etiket"
           onChange={(event) => setTagDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
@@ -388,6 +418,13 @@ export function TaskThread({
             }
           }}
         />
+        {/* Mobil klavyeler Enter'ı her zaman vermiyor — panodaki "Ekle" düğmesiyle aynı ders.
+            Yalnız yazı varken görünür: boşken her satırda ölü bir düğme olurdu. */}
+        {tagDraft.trim() !== '' && (
+          <button type="button" className="b" onClick={() => void makeTag()}>
+            Ekle
+          </button>
+        )}
       </div>
 
       {/* ─── kontrol listesi ─────────────────────────────────────────────── */}
@@ -427,7 +464,7 @@ export function TaskThread({
           value={itemDraft}
           maxLength={500}
           aria-label="Kontrol listesine madde ekle"
-          placeholder="Madde ekle — Enter"
+          placeholder="Madde ekle"
           onChange={(event) => setItemDraft(event.target.value)}
           onKeyDown={(event) => {
             // Düz Enter, yorumdakinin tersine: bir madde tek satır, ve Ctrl istemek her maddeye
@@ -438,6 +475,11 @@ export function TaskThread({
             }
           }}
         />
+        {itemDraft.trim() !== '' && (
+          <button type="button" className="b" onClick={() => void addItem()}>
+            Ekle
+          </button>
+        )}
       </div>
 
       {/* ─── parçalar ────────────────────────────────────────────────────── */}
@@ -460,7 +502,7 @@ export function TaskThread({
               value={subDraft}
               maxLength={2000}
               aria-label="Parça ekle"
-              placeholder="Parça ekle — Enter"
+              placeholder="Parça ekle"
               onChange={(event) => setSubDraft(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') {
@@ -471,6 +513,18 @@ export function TaskThread({
                 }
               }}
             />
+            {subDraft.trim() !== '' && (
+              <button
+                type="button"
+                className="b"
+                onClick={() => {
+                  onSubtask(subDraft);
+                  setSubDraft('');
+                }}
+              >
+                Ekle
+              </button>
+            )}
           </div>
         </>
       )}

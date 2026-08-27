@@ -86,9 +86,13 @@ const linkSchema = z.object({ fileEntryId: z.string().uuid() });
 const commentSchema = z.object({ body: z.string().trim().min(1).max(4000) });
 const checklistSchema = z.object({ body: z.string().trim().min(1).max(500) });
 
+// Yönerge: bosluk kirpilir; null silmek demek. 10000, semadaki `tasks_description_sane` ile ayni.
+const descriptionSchema = z.string().trim().min(1).max(10_000).nullable();
+
 const updateSchema = z
   .object({
     body: bodySchema.optional(),
+    description: descriptionSchema.optional(),
     assigneeId: assigneeSchema.optional(),
     done: z.boolean().optional(),
     status: statusSchema.optional(),
@@ -310,6 +314,29 @@ export class TasksController {
     } catch (error) {
       throw translate(error);
     }
+  }
+
+  /**
+   * İŞ GÜNLÜĞÜ — panonun bütün izi. Pano kime açıksa günlük de ona açık: aynı bilgiler zaten
+   * satırların üstünde tek tek duruyor, burada yalnız zamana dizilmiş hâli var. Silinmiş yorum
+   * gövdesi, görev-başı akıştaki kuralın AYNISIYLA yalnız yöneticiye dönüyor.
+   */
+  @Get('log')
+  async log(@Req() request: AuthenticatedRequest): Promise<Schemas['TaskLogPage']> {
+    const caller = requireCaller(request);
+    const rows = await this.tasks.log(caller.organizationId);
+    return {
+      items: rows.map((row) => ({
+        id: row.id,
+        taskId: row.task_id,
+        taskBody: row.task_body,
+        actorUsername: row.actor_username,
+        field: row.field,
+        oldValue: row.field === 'comment' && !caller.isOrganizationAdmin ? null : row.old_value,
+        newValue: row.new_value,
+        at: row.created_at.toISOString(),
+      })),
+    };
   }
 
   /* ─── etiket bağları ──────────────────────────────────────────────────────── */
@@ -608,6 +635,7 @@ function toTask(
     id: row.id,
     linkedFileCount,
     body: row.body,
+    description: row.description,
     parentId: row.parent_id,
     // Parçası ya da maddesi olmayan bir iş için 0/0. Alanı hiç göndermemek, istemciye "yok" ile
     // "sunucu söylemedi"yi ayırt ettirirdi — panonun sahip olmadığı bir durum.

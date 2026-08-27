@@ -10,6 +10,7 @@ import { Empty, Glyph } from './ui.js';
 type Task = OpenApi.components['schemas']['Task'];
 type Status = Task['status'];
 type Priority = Task['priority'];
+type LogEntry = OpenApi.components['schemas']['TaskLogEntry'];
 
 /**
  * Durumların insan tarafı.
@@ -78,6 +79,73 @@ interface Group extends Person {
   tone: Tone;
   items: Task[];
   done: number;
+}
+
+/** Günlük satırındaki alan adlarının insan tarafı. */
+const FIELD_LABEL: Record<string, string> = {
+  status: 'durumu',
+  priority: 'önceliği',
+  due_at: 'son tarihi',
+  assignee_id: 'atananı',
+  body: 'metni',
+  description: 'açıklaması',
+  file_link: 'dosya bağı',
+  comment: 'yorumu (silindi)',
+  parent_id: 'üst işi',
+  checklist: 'kontrol listesi',
+  tag: 'etiketi',
+};
+
+/** Günlükteki ham değerin okunur hâli: durum/öncelik sözlüklerinden geçir, tarihi kısalt. */
+function logValue(field: string, value: string | null): string {
+  if (value === null || value === '') return '—';
+  if (field === 'status') return STATUS_LABEL[value as Status] ?? value;
+  if (field === 'priority') return PRIORITY_LABEL[value as Priority] ?? value;
+  if (field === 'due_at') {
+    const at = new Date(value);
+    if (!Number.isNaN(at.getTime())) return at.toLocaleDateString('tr-TR');
+  }
+  return value.length <= 48 ? value : `${value.slice(0, 47)}…`;
+}
+
+/**
+ * Arşivi Excel'in doğrudan açtığı bir dosyaya çevir.
+ *
+ * CSV, ama Excel'in beklediği biçimde: başta BOM (Türkçe karakterler için şart — BOM'suz UTF-8'i
+ * Excel hâlâ yerel kod sayfasıyla açıyor) ve ayraç NOKTALI VİRGÜL, çünkü Türkçe yerel ayarda
+ * Excel virgülü ondalık işareti sayar ve virgüllü CSV'yi tek sütuna yığar.
+ */
+function excelExport(rows: Task[]): void {
+  const cell = (value: string | null | undefined): string =>
+    `"${String(value ?? '').replaceAll('"', '""')}"`;
+  const lines = [
+    ['İş', 'Açıklama', 'Durum', 'Öncelik', 'Atanan', 'Bitirilme', 'Son tarih', 'Etiketler'].join(
+      ';',
+    ),
+    ...rows.map((task) =>
+      [
+        cell(task.body),
+        cell(task.description),
+        cell(STATUS_LABEL[task.status]),
+        cell(PRIORITY_LABEL[task.priority]),
+        cell(task.assigneeUsername ?? 'Atanmamış'),
+        cell(task.doneAt === null ? '' : new Date(task.doneAt).toLocaleString('tr-TR')),
+        cell(
+          task.dueAt === null || task.dueAt === undefined
+            ? ''
+            : new Date(task.dueAt).toLocaleDateString('tr-TR'),
+        ),
+        cell((task.tags ?? []).map((tag) => tag.name).join(', ')),
+      ].join(';'),
+    ),
+  ];
+  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `is-arsivi-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 const AVATAR_TONES: readonly Tone[] = ['cool', 'iris', 'warn', 'live', 'rose'];
@@ -196,6 +264,9 @@ export function Tasks({
   // ve zaten okunan şey her seferinde tek bir işin konuşması.
   const [open, setOpen] = useState<string | null>(null);
   const [tags, setTags] = useState<Tag[]>([]);
+  /** Pano, arşiv ya da günlük. Arşiv: kapanmış işler panodan buraya taşınır — pano canlı kalır. */
+  const [view, setView] = useState<'board' | 'archive' | 'log'>('board');
+  const [log, setLog] = useState<LogEntry[] | null>(null);
   /** Seçili etiketler. Boşsa süzme yok — panonun varsayılanı her şeyi göstermek. */
   const [filter, setFilter] = useState<string[]>([]);
 
@@ -228,6 +299,7 @@ export function Tasks({
       status?: Status;
       priority?: Priority;
       dueAt?: string | null;
+      description?: string | null;
     },
     failure: string,
   ): Promise<void> {
@@ -260,6 +332,25 @@ export function Tasks({
       alive = false;
     };
   }, [reloadKey]);
+
+  // Günlük yalnız açıldığında okunuyor: 300 satırlık bir listeyi panoya her girişte çekmek,
+  // kimsenin bakmadığı bir sekme için istek demek.
+  useEffect(() => {
+    if (view !== 'log') return;
+    let alive = true;
+    void (async () => {
+      const { data } = await api.GET('/tasks/log', {});
+      if (!alive) return;
+      if (data === undefined) {
+        notify('error', 'Günlük okunamadı.');
+        return;
+      }
+      setLog(data.items);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [view, reloadKey, notify]);
 
   async function add(person: Person): Promise<void> {
     const key = person.id ?? NOBODY;
@@ -396,19 +487,25 @@ export function Tasks({
       : tasks.filter((task) =>
           filter.every((id) => (task.tags ?? []).some((tag) => tag.id === id)),
         );
+  // KAPANMIŞ İŞLER PANODA DEĞİL, ARŞİVDE. Eskiden sütunun dibinde duruyorlardı; sahibi arşiv
+  // istedi ve haklıydı: biten iş panonun konusu değil, geçmişin konusu. Sayı yine başlıkta —
+  // "bugün neyi bitirdik" sorusunun cevabı bir sekme ötede ve kaç olduğu buradan okunuyor.
+  const archived = order(shown.filter(closed)).sort((a, b) =>
+    (b.doneAt ?? b.updatedAt).localeCompare(a.doneAt ?? a.updatedAt),
+  );
   const groups: Group[] = [
     ...persons,
     // Always last, and always present: "birinin yapması lazım" is a state the board has to be
     // able to express, and the endpoint accepts a null assignee for exactly that.
     { id: null, name: 'Atanmamış', canAdd: true },
   ].map((person) => {
-    const items = order(shown.filter((task) => task.assigneeId === person.id));
+    const items = order(shown.filter((task) => task.assigneeId === person.id && !closed(task)));
     return {
       ...person,
       key: person.id ?? NOBODY,
       tone: person.id === null ? 'dim' : toneFor(person.name),
       items,
-      done: items.filter((task) => task.doneAt !== null).length,
+      done: shown.filter((task) => task.assigneeId === person.id && closed(task)).length,
     };
   });
 
@@ -422,322 +519,440 @@ export function Tasks({
 
   return (
     <>
-      <div className="note">
-        Bu pano herkese açıktır: bir iş birine atanır ve göremediği bir iş atanmış sayılmaz.
-        Tamamlananlar listenin sonunda durur.
+      <div className="jviews" role="tablist" aria-label="Pano görünümü">
+        <button
+          type="button"
+          className={view === 'board' ? 'mk on' : 'mk'}
+          role="tab"
+          aria-selected={view === 'board'}
+          onClick={() => setView('board')}
+        >
+          Pano
+        </button>
+        <button
+          type="button"
+          className={view === 'archive' ? 'mk on' : 'mk'}
+          role="tab"
+          aria-selected={view === 'archive'}
+          onClick={() => setView('archive')}
+        >
+          Arşiv{archived.length > 0 ? ` (${archived.length})` : ''}
+        </button>
+        <button
+          type="button"
+          className={view === 'log' ? 'mk on' : 'mk'}
+          role="tab"
+          aria-selected={view === 'log'}
+          onClick={() => setView('log')}
+        >
+          Günlük
+        </button>
       </div>
 
-      <TagBar
-        tags={tags}
-        selected={filter}
-        isAdmin={me.role === 'admin'}
-        onToggle={(id) =>
-          setFilter((current) =>
-            current.includes(id) ? current.filter((it) => it !== id) : [...current, id],
-          )
-        }
-        // Sözlük değişti: hem şeridi hem PANOYU yeniden okuyor. Bir etiketin adı değiştiğinde
-        // satırlardaki çipler de değişiyor, ve yalnız şeridi tazelemek onları eski adla bırakırdı.
-        onChanged={() => setReloadKey((key) => key + 1)}
-        onError={(text) => notify('error', text)}
-      />
-
-      <div className="jobs">
-        {groups.map((group) => (
-          <div className="jper" key={group.key}>
-            <div className="jhead">
-              <Glyph tone={group.tone} size={26}>
-                {group.name.slice(0, 1).toUpperCase()}
-              </Glyph>
-              <b>{group.name}</b>
-              <span className="cnt">
-                {group.done}/{group.items.length} tamam
+      {view === 'log' && (
+        <>
+          <div className="note">
+            Panonun bütün izi: kim, neyi, ne zaman değiştirdi. Son 300 kayıt.
+          </div>
+          {log === null && <p className="note">Günlük okunuyor…</p>}
+          {log !== null && log.length === 0 && <Empty glyph="📜" text="Henüz kayıt yok." />}
+          {(log ?? []).map((entry) => (
+            <div className="lgrow" key={entry.id}>
+              <span className="s">{new Date(entry.at).toLocaleString('tr-TR')}</span>
+              <b>{entry.actorUsername ?? 'Silinmiş hesap'}</b>
+              <span className="tx">
+                “{entry.taskBody.length <= 60 ? entry.taskBody : `${entry.taskBody.slice(0, 59)}…`}”
+                işinin {FIELD_LABEL[entry.field] ?? entry.field}
+                {entry.field === 'tag' || entry.field === 'checklist' || entry.field === 'file_link'
+                  ? ` değişti: ${logValue(entry.field, entry.newValue ?? entry.oldValue ?? null)}`
+                  : `: ${logValue(entry.field, entry.oldValue ?? null)} → ${logValue(entry.field, entry.newValue ?? null)}`}
               </span>
             </div>
+          ))}
+        </>
+      )}
 
-            {group.items.map((task) => {
-              const done = task.doneAt !== null;
-              const due = dueLabel(task.dueAt);
-              const shut = closed(task);
-              const talking = open === task.id;
-              return (
-                <div className={talking ? 'jwrap on' : 'jwrap'} key={task.id}>
-                  <div className={shut ? 'jitem done' : 'jitem'}>
-                    <button
-                      type="button"
-                      className={done ? 'jck on' : 'jck'}
-                      disabled={busy}
-                      aria-pressed={done}
-                      aria-label={
-                        done ? 'Tamamlanmadı olarak işaretle' : 'Tamamlandı olarak işaretle'
-                      }
-                      onClick={() => void update(task, { done: !done }, 'İş güncellenemedi.')}
-                    >
-                      ✓
-                    </button>
+      {view === 'archive' && (
+        <>
+          <div className="jviews" style={{ justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              className="b"
+              disabled={archived.length === 0}
+              onClick={() => excelExport(archived)}
+            >
+              Excel&apos;e aktar
+            </button>
+          </div>
+          {archived.length === 0 && <Empty glyph="🗄" text="Arşiv boş — henüz bitmiş iş yok." />}
+          {archived.map((task) => (
+            <div className="jitem done arch" key={task.id}>
+              <span className="tx">{task.body}</span>
+              <span className="pill dim">{STATUS_LABEL[task.status]}</span>
+              <span className="pill dim">{task.assigneeUsername ?? 'Atanmamış'}</span>
+              {task.doneAt !== null && (
+                <span className="pill dim">
+                  {new Date(task.doneAt).toLocaleDateString('tr-TR')}
+                </span>
+              )}
+              <button
+                type="button"
+                className="b"
+                disabled={busy}
+                title="İşi panoya geri al"
+                onClick={() => void update(task, { done: false }, 'İş geri alınamadı.')}
+              >
+                Geri al
+              </button>
+              <button
+                type="button"
+                className="del"
+                disabled={busy}
+                aria-label={`"${task.body}" işini sil`}
+                onClick={() => void remove(task)}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </>
+      )}
 
-                    {/* Keyed by the server's own timestamp so a value the API normalised replaces
+      {view === 'board' && (
+        <>
+          <div className="note">
+            Bu pano herkese açıktır: bir iş birine atanır ve göremediği bir iş atanmış sayılmaz.
+            Bitenler Arşiv sekmesine taşınır.
+          </div>
+
+          <TagBar
+            tags={tags}
+            selected={filter}
+            isAdmin={me.role === 'admin'}
+            onToggle={(id) =>
+              setFilter((current) =>
+                current.includes(id) ? current.filter((it) => it !== id) : [...current, id],
+              )
+            }
+            // Sözlük değişti: hem şeridi hem PANOYU yeniden okuyor. Bir etiketin adı değiştiğinde
+            // satırlardaki çipler de değişiyor, ve yalnız şeridi tazelemek onları eski adla bırakırdı.
+            onChanged={() => setReloadKey((key) => key + 1)}
+            onError={(text) => notify('error', text)}
+          />
+
+          <div className="jobs">
+            {groups.map((group) => (
+              <div className="jper" key={group.key}>
+                <div className="jhead">
+                  <Glyph tone={group.tone} size={26}>
+                    {group.name.slice(0, 1).toUpperCase()}
+                  </Glyph>
+                  <b>{group.name}</b>
+                  <span className="cnt">
+                    {group.items.length} açık{group.done > 0 ? ` · ${group.done} arşivde` : ''}
+                  </span>
+                </div>
+
+                {group.items.map((task) => {
+                  const done = task.doneAt !== null;
+                  const due = dueLabel(task.dueAt);
+                  const shut = closed(task);
+                  const talking = open === task.id;
+                  return (
+                    <div className={talking ? 'jwrap on' : 'jwrap'} key={task.id}>
+                      <div className={shut ? 'jitem done' : 'jitem'}>
+                        <button
+                          type="button"
+                          className={done ? 'jck on' : 'jck'}
+                          disabled={busy}
+                          aria-pressed={done}
+                          aria-label={
+                            done ? 'Tamamlanmadı olarak işaretle' : 'Tamamlandı olarak işaretle'
+                          }
+                          onClick={() => void update(task, { done: !done }, 'İş güncellenemedi.')}
+                        >
+                          ✓
+                        </button>
+
+                        {/* Keyed by the server's own timestamp so a value the API normalised replaces
                       what is in the DOM. A contenteditable node React never re-renders keeps
                       whatever the browser left in it, which is how a rejected edit stays on
                       screen looking accepted. */}
-                    <span
-                      key={task.updatedAt}
-                      className="tx"
-                      contentEditable
-                      suppressContentEditableWarning
-                      role="textbox"
-                      tabIndex={0}
-                      aria-label="İş metni"
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') {
-                          // A task is one line. Enter commits it instead of growing the row.
-                          event.preventDefault();
-                          event.currentTarget.blur();
-                          return;
-                        }
-                        if (event.key !== 'Escape') return;
-                        event.currentTarget.textContent = task.body;
-                        event.currentTarget.blur();
-                      }}
-                      onBlur={(event) => {
-                        const next = (event.currentTarget.textContent ?? '').trim();
-                        if (next === task.body) return;
-                        if (next === '') {
-                          // Emptying the text is not how a task is deleted; the ✕ is.
-                          event.currentTarget.textContent = task.body;
-                          return;
-                        }
-                        void update(task, { body: next }, 'İş metni kaydedilemedi.');
-                      }}
-                    >
-                      {task.body}
-                    </span>
+                        <span
+                          key={task.updatedAt}
+                          className="tx"
+                          contentEditable
+                          suppressContentEditableWarning
+                          role="textbox"
+                          tabIndex={0}
+                          aria-label="İş metni"
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              // A task is one line. Enter commits it instead of growing the row.
+                              event.preventDefault();
+                              event.currentTarget.blur();
+                              return;
+                            }
+                            if (event.key !== 'Escape') return;
+                            event.currentTarget.textContent = task.body;
+                            event.currentTarget.blur();
+                          }}
+                          onBlur={(event) => {
+                            const next = (event.currentTarget.textContent ?? '').trim();
+                            if (next === task.body) return;
+                            if (next === '') {
+                              // Emptying the text is not how a task is deleted; the ✕ is.
+                              event.currentTarget.textContent = task.body;
+                              return;
+                            }
+                            void update(task, { body: next }, 'İş metni kaydedilemedi.');
+                          }}
+                        >
+                          {task.body}
+                        </span>
 
-                    <select
-                      value={task.assigneeId ?? ''}
-                      disabled={busy}
-                      aria-label="Atanan kişi"
-                      style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7, maxWidth: 130 }}
-                      onChange={(event) => {
-                        const chosen = event.target.value;
-                        void update(
-                          task,
-                          { assigneeId: chosen === '' ? null : chosen },
-                          'Atama değiştirilemedi.',
-                        );
-                      }}
-                    >
-                      <option value="">Atanmamış</option>
-                      {assignable.map((person) => (
-                        <option key={person.id ?? NOBODY} value={person.id ?? ''}>
-                          {person.name}
-                        </option>
-                      ))}
-                      {/* The current assignee may be someone this client cannot enumerate. Without
+                        <select
+                          value={task.assigneeId ?? ''}
+                          disabled={busy}
+                          aria-label="Atanan kişi"
+                          style={{
+                            fontSize: 11,
+                            padding: '3px 6px',
+                            borderRadius: 7,
+                            maxWidth: 130,
+                          }}
+                          onChange={(event) => {
+                            const chosen = event.target.value;
+                            void update(
+                              task,
+                              { assigneeId: chosen === '' ? null : chosen },
+                              'Atama değiştirilemedi.',
+                            );
+                          }}
+                        >
+                          <option value="">Atanmamış</option>
+                          {assignable.map((person) => (
+                            <option key={person.id ?? NOBODY} value={person.id ?? ''}>
+                              {person.name}
+                            </option>
+                          ))}
+                          {/* The current assignee may be someone this client cannot enumerate. Without
                         this the select would silently show the wrong name. */}
-                      {task.assigneeId !== null &&
-                        !assignable.some((person) => person.id === task.assigneeId) && (
-                          <option value={task.assigneeId}>
-                            {task.assigneeUsername ?? 'Bilinmeyen hesap'}
-                          </option>
-                        )}
-                    </select>
+                          {task.assigneeId !== null &&
+                            !assignable.some((person) => person.id === task.assigneeId) && (
+                              <option value={task.assigneeId}>
+                                {task.assigneeUsername ?? 'Bilinmeyen hesap'}
+                              </option>
+                            )}
+                        </select>
 
-                    <select
-                      value={task.status}
-                      disabled={busy}
-                      aria-label="Durum"
-                      style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7 }}
-                      onChange={(event) => {
-                        // Seçenekler FİLTRELENMİYOR. Sunucudaki makine yalnız iki geçişi yasaklıyor
-                        // ve reddi 422 ile iki durumu da adlandırarak geliyor; burada ikinci bir
-                        // kopya tutmak, zamanla ayrışacak iki kural demek olurdu.
-                        void update(
-                          task,
-                          { status: event.target.value as Status },
-                          'Durum değiştirilemedi.',
-                        );
-                      }}
-                    >
-                      {(Object.keys(STATUS_LABEL) as Status[]).map((value) => (
-                        <option key={value} value={value}>
-                          {STATUS_LABEL[value]}
-                        </option>
-                      ))}
-                    </select>
+                        <select
+                          value={task.status}
+                          disabled={busy}
+                          aria-label="Durum"
+                          style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7 }}
+                          onChange={(event) => {
+                            // Seçenekler FİLTRELENMİYOR. Sunucudaki makine yalnız iki geçişi yasaklıyor
+                            // ve reddi 422 ile iki durumu da adlandırarak geliyor; burada ikinci bir
+                            // kopya tutmak, zamanla ayrışacak iki kural demek olurdu.
+                            void update(
+                              task,
+                              { status: event.target.value as Status },
+                              'Durum değiştirilemedi.',
+                            );
+                          }}
+                        >
+                          {(Object.keys(STATUS_LABEL) as Status[]).map((value) => (
+                            <option key={value} value={value}>
+                              {STATUS_LABEL[value]}
+                            </option>
+                          ))}
+                        </select>
 
-                    <select
-                      value={task.priority}
-                      disabled={busy}
-                      aria-label="Öncelik"
-                      className={PRIORITY_TONE[task.priority]}
-                      style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7 }}
-                      onChange={(event) => {
-                        void update(
-                          task,
-                          { priority: event.target.value as Priority },
-                          'Öncelik değiştirilemedi.',
-                        );
-                      }}
-                    >
-                      {(Object.keys(PRIORITY_LABEL) as Priority[]).map((value) => (
-                        <option key={value} value={value}>
-                          {PRIORITY_LABEL[value]}
-                        </option>
-                      ))}
-                    </select>
+                        <select
+                          value={task.priority}
+                          disabled={busy}
+                          aria-label="Öncelik"
+                          className={PRIORITY_TONE[task.priority]}
+                          style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7 }}
+                          onChange={(event) => {
+                            void update(
+                              task,
+                              { priority: event.target.value as Priority },
+                              'Öncelik değiştirilemedi.',
+                            );
+                          }}
+                        >
+                          {(Object.keys(PRIORITY_LABEL) as Priority[]).map((value) => (
+                            <option key={value} value={value}>
+                              {PRIORITY_LABEL[value]}
+                            </option>
+                          ))}
+                        </select>
 
-                    <label
-                      className="m"
-                      style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}
-                    >
-                      <input
-                        type="date"
-                        disabled={busy}
-                        aria-label="Son tarih"
-                        // `<input type=date>` yerel bir GÜN veriyor, sunucu ise bir AN istiyor —
-                        // "yarın" bir zaman diliminde yarın, başkasında bugün. Günün sonuna
-                        // sabitleniyor: bir son tarih, o günün bitmesiyle geçiyor.
-                        value={
-                          task.dueAt === null || task.dueAt === undefined
-                            ? ''
-                            : task.dueAt.slice(0, 10)
-                        }
-                        onChange={(event) => {
-                          const day = event.target.value;
-                          void update(
-                            task,
-                            {
-                              dueAt: day === '' ? null : new Date(`${day}T23:59:59`).toISOString(),
-                            },
-                            'Son tarih değiştirilemedi.',
-                          );
-                        }}
-                        style={{ fontSize: 11, padding: '2px 4px', borderRadius: 6, width: 122 }}
-                      />
-                      {due !== null && (
-                        <span className={due.late ? 'pill bad' : 'pill dim'}>{due.text}</span>
-                      )}
-                    </label>
+                        <label
+                          className="m"
+                          style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}
+                        >
+                          <input
+                            type="date"
+                            disabled={busy}
+                            aria-label="Son tarih"
+                            // `<input type=date>` yerel bir GÜN veriyor, sunucu ise bir AN istiyor —
+                            // "yarın" bir zaman diliminde yarın, başkasında bugün. Günün sonuna
+                            // sabitleniyor: bir son tarih, o günün bitmesiyle geçiyor.
+                            value={
+                              task.dueAt === null || task.dueAt === undefined
+                                ? ''
+                                : task.dueAt.slice(0, 10)
+                            }
+                            onChange={(event) => {
+                              const day = event.target.value;
+                              void update(
+                                task,
+                                {
+                                  dueAt:
+                                    day === '' ? null : new Date(`${day}T23:59:59`).toISOString(),
+                                },
+                                'Son tarih değiştirilemedi.',
+                              );
+                            }}
+                            style={{
+                              fontSize: 11,
+                              padding: '2px 4px',
+                              borderRadius: 6,
+                              width: 122,
+                            }}
+                          />
+                          {due !== null && (
+                            <span className={due.late ? 'pill bad' : 'pill dim'}>{due.text}</span>
+                          )}
+                        </label>
 
-                    {/* Parça ve madde ilerlemesi. İkisi de yalnız VARSA çiziliyor: her satırda
+                        {/* Parça ve madde ilerlemesi. İkisi de yalnız VARSA çiziliyor: her satırda
                       "0/0" duran bir rozet, göz için hiçbir şey söylemeyen bir şey. */}
-                    {task.subtaskTotal !== undefined && task.subtaskTotal > 0 && (
-                      <span className="pill dim" title="Parçalar">
-                        ⑂ {task.subtaskDone ?? 0}/{task.subtaskTotal}
-                      </span>
-                    )}
-                    {task.checklistTotal !== undefined && task.checklistTotal > 0 && (
-                      <span className="pill dim" title="Kontrol listesi">
-                        ☑ {task.checklistDone ?? 0}/{task.checklistTotal}
-                      </span>
-                    )}
-                    {/* Parçası olduğu iş. Pano KİŞİYE göre gruplanıyor, o yüzden bir alt görev
+                        {task.subtaskTotal !== undefined && task.subtaskTotal > 0 && (
+                          <span className="pill dim" title="Parçalar">
+                            ⑂ {task.subtaskDone ?? 0}/{task.subtaskTotal}
+                          </span>
+                        )}
+                        {task.checklistTotal !== undefined && task.checklistTotal > 0 && (
+                          <span className="pill dim" title="Kontrol listesi">
+                            ☑ {task.checklistDone ?? 0}/{task.checklistTotal}
+                          </span>
+                        )}
+                        {/* Parçası olduğu iş. Pano KİŞİYE göre gruplanıyor, o yüzden bir alt görev
                       atananının sütununda duruyor — orada gizlemek, o kişiye verilmiş işi
                       panodan kaldırmak olurdu. Neyin parçası olduğu ise ancak burada okunabilir. */}
-                    {task.parentId !== null && task.parentId !== undefined && (
-                      <span className="pill dim" title="Şunun parçası">
-                        ⤷ {parentBody(tasks, task.parentId)}
-                      </span>
-                    )}
+                        {task.parentId !== null && task.parentId !== undefined && (
+                          <span className="pill dim" title="Şunun parçası">
+                            ⤷ {parentBody(tasks, task.parentId)}
+                          </span>
+                        )}
 
-                    {(task.tags ?? []).map((tag) => (
-                      <span className={`tg c-${tag.color} sm`} key={tag.id}>
-                        {tag.name}
-                      </span>
-                    ))}
+                        {(task.tags ?? []).map((tag) => (
+                          <span className={`tg c-${tag.color} sm`} key={tag.id}>
+                            {tag.name}
+                          </span>
+                        ))}
 
-                    {task.linkedFileCount !== undefined && task.linkedFileCount > 0 && (
-                      // Sayı ÇAĞIRANIN GÖREBİLDİKLERİ. Toplamı göstermek, göremediği dosyaların
-                      // varlığını söylerdi — §7'nin yasakladığı şeyin sayı hâli.
-                      <span className="pill dim" title="Bağlı dosya">
-                        🗂 {task.linkedFileCount}
-                      </span>
-                    )}
+                        {task.linkedFileCount !== undefined && task.linkedFileCount > 0 && (
+                          // Sayı ÇAĞIRANIN GÖREBİLDİKLERİ. Toplamı göstermek, göremediği dosyaların
+                          // varlığını söylerdi — §7'nin yasakladığı şeyin sayı hâli.
+                          <span className="pill dim" title="Bağlı dosya">
+                            🗂 {task.linkedFileCount}
+                          </span>
+                        )}
 
-                    {/* Tartışmayı açan düğme. Yorum SAYISI YOK, ve bu bir eksiklik değil: sayıyı
+                        {/* Tartışmayı açan düğme. Yorum SAYISI YOK, ve bu bir eksiklik değil: sayıyı
                       göstermek, pano her yüklendiğinde her iş için bir sorgu demek — otuz işlik
                       bir panoda otuz sorgu, kimsenin bakmadığı bir sayı için. Açan görüyor. */}
-                    <button
-                      type="button"
-                      className={talking ? 'jtalk on' : 'jtalk'}
-                      aria-expanded={talking}
-                      aria-label={`"${task.body}" işinin yorumları`}
-                      title="Yorumlar ve izleyiciler"
-                      onClick={() => setOpen(talking ? null : task.id)}
-                    >
-                      💬
-                    </button>
+                        <button
+                          type="button"
+                          className={talking ? 'jtalk on' : 'jtalk'}
+                          aria-expanded={talking}
+                          aria-label={`"${task.body}" işinin yorumları`}
+                          title="Yorumlar ve izleyiciler"
+                          onClick={() => setOpen(talking ? null : task.id)}
+                        >
+                          💬
+                        </button>
 
-                    <button
-                      type="button"
-                      className="del"
-                      disabled={busy}
-                      aria-label={`"${task.body}" işini sil`}
-                      title="İşi sil"
-                      onClick={() => void remove(task)}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                  {talking && (
-                    <TaskThread
-                      subtasks={tasks.filter((it) => it.parentId === task.id)}
-                      canHaveSubtasks={task.parentId === null || task.parentId === undefined}
-                      onSubtask={(body) => void addSubtask(task.id, body)}
-                      onCounts={(done, total) => setChecklistCount(task.id, done, total)}
-                      tags={tags}
-                      taskTags={task.tags ?? []}
-                      onTags={() => setReloadKey((key) => key + 1)}
-                      taskId={task.id}
-                      me={me.username}
-                      isAdmin={me.role === 'admin'}
-                      onError={(text) => notify('error', text)}
-                    />
-                  )}
-                </div>
-              );
-            })}
+                        <button
+                          type="button"
+                          className="del"
+                          disabled={busy}
+                          aria-label={`"${task.body}" işini sil`}
+                          title="İşi sil"
+                          onClick={() => void remove(task)}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      {talking && (
+                        <TaskThread
+                          subtasks={tasks.filter((it) => it.parentId === task.id)}
+                          canHaveSubtasks={task.parentId === null || task.parentId === undefined}
+                          onSubtask={(body) => void addSubtask(task.id, body)}
+                          onCounts={(done, total) => setChecklistCount(task.id, done, total)}
+                          tags={tags}
+                          taskTags={task.tags ?? []}
+                          onTags={() => setReloadKey((key) => key + 1)}
+                          taskId={task.id}
+                          description={task.description}
+                          onDescription={(text) =>
+                            void update(task, { description: text }, 'Açıklama kaydedilemedi.')
+                          }
+                          me={me.username}
+                          isAdmin={me.role === 'admin'}
+                          onError={(text) => notify('error', text)}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
 
-            {group.canAdd && (
-              <div className="jadd">
-                <input
-                  value={drafts[group.key] ?? ''}
-                  /* Deliberately never disabled: adding several tasks in a row means typing the
+                {group.canAdd && (
+                  <div className="jadd">
+                    <input
+                      value={drafts[group.key] ?? ''}
+                      /* Deliberately never disabled: adding several tasks in a row means typing the
                      next one while the previous request is still open, and a field that greys out
                      mid-sentence drops both the keystrokes and the focus. */
-                  aria-label={`${group.name} için iş ekle`}
-                  placeholder={
-                    group.id === null
-                      ? 'Kimseye atanmamış iş ekle — Enter'
-                      : `${group.name} için iş ekle — Enter`
-                  }
-                  onChange={(event) => {
-                    const text = event.target.value;
-                    setDrafts((current) => ({ ...current, [group.key]: text }));
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter') return;
-                    event.preventDefault();
-                    void add(group);
-                  }}
-                />
-                {/* Mobil klavyelerin çoğu Enter'ı form gönderimi olarak vermiyor; sahada işler
+                      aria-label={`${group.name} için iş ekle`}
+                      placeholder={
+                        group.id === null
+                          ? 'Kimseye atanmamış iş ekle — Enter'
+                          : `${group.name} için iş ekle — Enter`
+                      }
+                      onChange={(event) => {
+                        const text = event.target.value;
+                        setDrafts((current) => ({ ...current, [group.key]: text }));
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter') return;
+                        event.preventDefault();
+                        void add(group);
+                      }}
+                    />
+                    {/* Mobil klavyelerin çoğu Enter'ı form gönderimi olarak vermiyor; sahada işler
                     telefondan hiç eklenemedi. Düğme her zaman var, Enter da çalışmaya devam
                     ediyor. */}
-                <button
-                  type="button"
-                  className="b"
-                  aria-label="İşi ekle"
-                  onClick={() => void add(group)}
-                >
-                  Ekle
-                </button>
+                    <button
+                      type="button"
+                      className="b"
+                      aria-label="İşi ekle"
+                      onClick={() => void add(group)}
+                    >
+                      Ekle
+                    </button>
+                  </div>
+                )}
               </div>
-            )}
+            ))}
           </div>
-        ))}
-      </div>
+        </>
+      )}
     </>
   );
 }
