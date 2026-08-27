@@ -41,6 +41,7 @@ getent hosts deb.debian.org >/dev/null 2>&1 || {
 }
 
 export DEBIAN_FRONTEND=noninteractive
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 # ── 2. Debian'ın kendi paketleri ─────────────────────────────────────────────
 say 'temel paketler'
@@ -75,6 +76,8 @@ if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 24 ]; then
   apt-get install -y -qq nodejs >/dev/null
 fi
 command -v pnpm >/dev/null 2>&1 || { corepack enable >/dev/null 2>&1 || npm install -g pnpm >/dev/null; }
+# pnpm'in kendisi ilk çağrıda iner; burada, sorusuz ortam değişkeni altında bir kez ısıtılıyor.
+pnpm --version >/dev/null 2>&1 || true
 
 # ── 5. Rust (ajan ve konsol ikilileri bu kutuda derlenir) ────────────────────
 if ! command -v cargo >/dev/null 2>&1 && [ ! -x /root/.cargo/bin/cargo ]; then

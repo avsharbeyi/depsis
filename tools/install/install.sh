@@ -42,6 +42,10 @@
 
 set -Eeuo pipefail
 
+# corepack, pnpm'i İLK kullanımda indirir ve varsayılan olarak SORAR; stdin'i olmayan bir
+# kurulumda o soru EOF ile ölür. Soru kapalı: indirme zaten corepack'in işi.
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # ─── ayarlar ──────────────────────────────────────────────────────────────────
@@ -373,6 +377,13 @@ database() {
   chown root:root "$ETC/db-url" "$ETC/db-url-owner"; chmod 0400 "$ETC/db-url" "$ETC/db-url-owner"
 
   step 'migration'
+  # BAĞIMLILIKLAR MİGRATION'DAN ÖNCE — üçüncü saha dersi: bakir bir kutuda node_modules yok ve
+  # node-pg-migrate oradan geliyor; adım sırası (veritabanı → yerleştirme) bunu görünmez kılmıştı,
+  # çünkü her test kutusunda bağımlılıklar zaten kuruluydu.
+  if [ ! -d "$REPO/node_modules" ]; then
+    ( cd "$REPO" && pnpm install --frozen-lockfile >/dev/null )
+    ok 'bağımlılıklar kuruldu'
+  fi
   # HER ZAMAN, --skip-build verilse bile. Bir migration bir derleme çıktısı değil, veritabanının
   # şemasıdır; ikisini tek bayrağın arkasına koymak, "yalnız ikilileri yeniden kopyala" demek
   # isteyen operatöre şemayı da atlatırdı — ve şemasız bir yükseltme, ilk isteğinde düşen bir API.
