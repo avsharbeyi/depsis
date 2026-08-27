@@ -355,9 +355,12 @@ export function Controller({
                     </td>
                     <td className="m">{member.authorizedBy ?? 'DEPSIS dışında'}</td>
                     <td>
-                      {/* Cihazın kendi satırında YOK. Ajan da reddediyor; bu, düğmenin hiç
-                          görünmemesi. */}
-                      {!member.isThisAppliance &&
+                      {/* Cihazın kendi satırında yalnız ÇIKAR yok — kendi yetkisini kaldıran
+                          cihaz, kendi sunduğu ağdan düşer ve geri yolu kopan bağlantının
+                          arkasında kalır; ajan da reddediyor. İLK ONAY ise görünür: sahada bir
+                          kutu tam bu satırda "bekliyor"a kilitlendi, çünkü bu koşul iki düğmeyi
+                          birden gizliyordu. */}
+                      {(!member.isThisAppliance || !member.authorized) &&
                         (member.authorized ? (
                           <button
                             type="button"

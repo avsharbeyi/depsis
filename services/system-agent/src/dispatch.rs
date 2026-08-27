@@ -2410,10 +2410,37 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 };
 
                 match crate::ztcontroller::create_network(&address, name.as_str(), subnet) {
-                    Ok((record, shortfall)) => Ok(Response::ZeroTierNetworkCreated {
-                        network: describe_network(&record),
-                        shortfall,
-                    }),
+                    Ok((record, shortfall)) => {
+                        // KENDİNİ KAT VE İÇERİ AL. İlk saha kurulumunda eksikti ve sonucu tam bir
+                        // kilitlenmeydi: kutu kendi ağına katıldı, kendi bekleyenler listesine
+                        // "onay bekliyor" diye düştü, ve arayüz cihazın kendi satırında düğme
+                        // göstermediği için sahibi onu İÇERİ ALAMADI — ağa ulaşılabilen tek
+                        // cihaz, ağın kurulma sebebi olan NAS'ın kendisi değildi. Bir ağ kurmanın
+                        // anlamı bu cihaza uzaktan erişmek; kurulan ağda kurucunun yetkili olması
+                        // işlemin parçası, ayrı bir onayın konusu değil.
+                        //
+                        // İkisi de EN İYİ ÇABA: ağ bu noktada var ve kayıt onu söylüyor; katılım
+                        // ya da öz-yetki düşerse eksik `shortfall` listesine yazılır ve arayüz
+                        // gösterir — yarım hâli sessizce "kuruldu" saymak yerine.
+                        let mut shortfall = shortfall;
+                        if let Ok(network_id) = crate::op::NetworkId::parse(record.id.clone()) {
+                            if let Err(e) = crate::zerotier::join(&network_id) {
+                                shortfall.push(format!("cihaz ağa katılamadı: {e}"));
+                            }
+                            if let Err(e) = crate::ztcontroller::set_authorized(
+                                &network_id,
+                                &address,
+                                true,
+                                Some("DEPSIS"),
+                            ) {
+                                shortfall.push(format!("cihaz kendini yetkilendiremedi: {e}"));
+                            }
+                        }
+                        Ok(Response::ZeroTierNetworkCreated {
+                            network: describe_network(&record),
+                            shortfall,
+                        })
+                    }
                     Err(e) => zerotier_error(e),
                 }
             }
