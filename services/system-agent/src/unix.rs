@@ -23,9 +23,14 @@ use depsis_agent::seams::{
 
 /// Path resolution confined by the kernel, not by string inspection.
 ///
-/// `root_fd` is opened once at startup and held for the process lifetime. The root is never
-/// re-resolved from a string: doing so would reintroduce exactly the race the fd exists to
-/// close.
+/// The root is RE-OPENED FROM ITS PATH ON EVERY CALL, and that is a field-taught reversal of the
+/// first design. The fd-for-life version argued that re-resolving a string reintroduces a race --
+/// but the string here is the agent's OWN configuration (`DEPSIS_SHARES_ROOT`), not caller input,
+/// and only root can change what it names. What the long-lived fd actually did in the field was
+/// go stale: `PrepareShareRoot` mounts a dataset OVER the shares root, and an agent holding the
+/// pre-mount descriptor kept serving the shadowed, empty directory underneath -- every share
+/// "missing" while `ls` showed them plainly. A per-call open lands on whatever is mounted NOW,
+/// which is the only correct answer on a box whose root is, by design, mounted over once.
 // Not constructed outside tests yet, and that is the honest state rather than an oversight: no
 // operation in `Request` takes a caller-supplied path inside a share. Phase 1 introduces the
 // first ones (upload publish, move), and this is deliberately in place and kernel-tested before
@@ -35,7 +40,6 @@ use depsis_agent::seams::{
     reason = "wired into dispatch in Phase 1; kernel-tested now so the confinement is not               designed in a hurry next to the first operation that depends on it"
 )]
 pub struct Openat2SafePath {
-    root: rustix::fd::OwnedFd,
     root_display: PathBuf,
 }
 
@@ -45,18 +49,26 @@ pub struct Openat2SafePath {
 )]
 impl Openat2SafePath {
     pub fn open_root(path: impl Into<PathBuf>) -> Result<Self, SeamError> {
-        let root_display = path.into();
-        let root = rustix::fs::open(
-            &root_display,
+        let confined = Self {
+            root_display: path.into(),
+        };
+        // Acilabildigini ve openat2'nin calistigini BASLANGICTA bir kez kanitla; sonrasi her
+        // cagrida taze bir acilis.
+        confined.root_fd()?;
+        confined.prove_openat2_works()?;
+        Ok(confined)
+    }
+
+    /// The shares root, opened fresh. See the struct comment for why this is per-call.
+    fn root_fd(&self) -> Result<rustix::fd::OwnedFd, SeamError> {
+        rustix::fs::open(
+            &self.root_display,
             rustix::fs::OFlags::RDONLY
                 | rustix::fs::OFlags::DIRECTORY
                 | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::empty(),
         )
-        .map_err(|e| SeamError::Io(format!("open root {}: {e}", root_display.display())))?;
-        let confined = Self { root, root_display };
-        confined.prove_openat2_works()?;
-        Ok(confined)
+        .map_err(|e| SeamError::Io(format!("open root {}: {e}", self.root_display.display())))
     }
 
     /// Resolve `.` under the root, once, at startup.
@@ -78,7 +90,7 @@ impl Openat2SafePath {
     /// come up pretending it can confine anything.
     fn prove_openat2_works(&self) -> Result<(), SeamError> {
         rustix::fs::openat2(
-            &self.root,
+            &self.root_fd()?,
             OsStr::new(".").as_bytes(),
             rustix::fs::OFlags::RDONLY
                 | rustix::fs::OFlags::DIRECTORY
@@ -104,7 +116,13 @@ impl Openat2SafePath {
     /// refuses, and a refusal is an audit event.
     ///
     /// NO_XDEV matters specifically on a ZFS box: every dataset is its own mount, so without it a
-    /// nested dataset mountpoint is a way out of the share the caller was confined to.
+    /// nested mountpoint INSIDE a share is a way out of the tree the caller was confined to.
+    ///
+    /// It applies to the walk INSIDE a share. The one hop it cannot apply to is root -> share,
+    /// because the product's own design puts every share on its own dataset -- its own mount --
+    /// and the first real ZFS box refused every operation on every share with EXDEV before this
+    /// was split. That hop uses `crossing_flags()`; everything after it is back under the full
+    /// set.
     fn resolve_flags() -> rustix::fs::ResolveFlags {
         rustix::fs::ResolveFlags::BENEATH
             | rustix::fs::ResolveFlags::NO_SYMLINKS
@@ -118,7 +136,7 @@ impl Openat2SafePath {
     /// climb out, `NO_SYMLINKS` still refuses to follow a link, `NO_MAGICLINKS` still refuses
     /// `/proc/*/fd`. Written as a subtraction from the real set rather than as its own list so
     /// that a flag added to the main set is inherited here instead of being silently omitted.
-    fn snapshot_crossing_flags() -> rustix::fs::ResolveFlags {
+    fn crossing_flags() -> rustix::fs::ResolveFlags {
         Self::resolve_flags() - rustix::fs::ResolveFlags::NO_XDEV
     }
 
@@ -142,7 +160,7 @@ impl Openat2SafePath {
                 | rustix::fs::OFlags::DIRECTORY
                 | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::empty(),
-            Self::snapshot_crossing_flags(),
+            Self::crossing_flags(),
         )
         .map_err(|e| classify_openat2(snapshot, e))?;
         Ok(std::fs::File::from(fd))
@@ -234,9 +252,43 @@ impl Openat2SafePath {
         oflags: rustix::fs::OFlags,
         mode: rustix::fs::Mode,
     ) -> Result<std::fs::File, SeamError> {
-        let joined = relative.join("/");
+        let root = self.root_fd()?;
+
+        // IKI ASAMA, ve ayrimin kendisi tasarim: ilk bilesen PAYLASIMIN ADI, ve her paylasim
+        // kendi veri kumesi -- yani kendi baglama noktasi. O tek sekmede sinir gecisi serbest
+        // (`crossing_flags`: BENEATH hala disari cikarmaz, NO_SYMLINKS hala bag izlemez);
+        // paylasimin ICINDEKI her adim tam kumeyle, NO_XDEV dahil, yurur. Ilk gercek ZFS kutusu
+        // bu ayrim yokken her paylasim islemini EXDEV ile reddetti -- test ortamlarinin
+        // hicbirinde paylasimlar gercek dataset degildi.
+        let Some((share, rest)) = relative.split_first() else {
+            return Err(SeamError::Io("empty path".to_string()));
+        };
+        if rest.is_empty() {
+            let fd = rustix::fs::openat2(
+                &root,
+                OsStr::new(share).as_bytes(),
+                oflags | rustix::fs::OFlags::CLOEXEC,
+                mode,
+                Self::crossing_flags(),
+            )
+            .map_err(|e| classify_openat2(share, e))?;
+            return Ok(std::fs::File::from(fd));
+        }
+
+        let share_fd = rustix::fs::openat2(
+            &root,
+            OsStr::new(share).as_bytes(),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+            Self::crossing_flags(),
+        )
+        .map_err(|e| classify_openat2(share, e))?;
+
+        let joined = rest.join("/");
         let fd = rustix::fs::openat2(
-            &self.root,
+            &share_fd,
             OsStr::new(&joined).as_bytes(),
             oflags | rustix::fs::OFlags::CLOEXEC,
             mode,
