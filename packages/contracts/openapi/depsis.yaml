@@ -1170,6 +1170,53 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /system/processes:
+    get:
+      operationId: listProcesses
+      tags: [system]
+      summary: Arka planda ne koşuyor — görev yöneticisi
+      description: |
+        Kutudaki kullanıcı süreçleri, bellek kullanımıyla. Sistem süreçleri `protected: true`
+        ile gelir: arayüz onlara kapatma düğmesi çizmez, ve çizseydi de ajan aynı kuraldan
+        reddederdi — sınırın iki yüzü tek kaynaktan konuşur. Yalnız kurucu yönetici.
+      responses:
+        '200':
+          description: Süreçler
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProcessPage' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
+  /system/processes/kill:
+    post:
+      operationId: killProcess
+      tags: [system]
+      summary: Sistemden olmayan bir süreci kapat
+      description: |
+        SIGTERM — süreç kendini toplar; ısrar eden kullanıcı yeniden basar. `comm` süs değil:
+        pid yeniden kullanılabilir, ve ajan sinyalden hemen önce `/proc/<pid>/comm`'u okuyup
+        bu adla karşılaştırır — bayat bir listeden gelen kapatma yanlış şeyi vuramaz. Sistem
+        süreçleri hiçbir istekle kapanmaz.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KillProcessRequest' }
+      responses:
+        '200':
+          description: Sinyal gönderildi
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
   /system/disks/wipe:
     post:
       operationId: wipeDisk
@@ -4646,6 +4693,35 @@ components:
             Dizinde hiç girdi var mı. Bildiriliyor, çünkü `zfs create -o mountpoint=X` X'in
             üstüne şikâyet etmeden bağlanıyor: altındaki her şey görünmez oluyor, silinmeden,
             diski işgal etmeye devam ederek.
+
+    ProcessRow:
+      type: object
+      required: [pid, user, comm, args, rssBytes, protected]
+      properties:
+        pid: { type: integer }
+        user: { type: string }
+        comm: { type: string }
+        args: { type: string }
+        rssBytes: { type: integer, format: int64 }
+        protected:
+          type: boolean
+          description: Sistem süreci — kapatılamaz, arayüz düğme çizmez.
+
+    ProcessPage:
+      type: object
+      required: [items, truncated]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ProcessRow' }
+        truncated: { type: boolean }
+
+    KillProcessRequest:
+      type: object
+      required: [pid, comm]
+      properties:
+        pid: { type: integer }
+        comm: { type: string, description: Sinyalden önce /proc'tan yeniden doğrulanan ad. }
 
     DiskWipeRequest:
       type: object

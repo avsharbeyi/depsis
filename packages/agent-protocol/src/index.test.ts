@@ -96,6 +96,8 @@ describe('the emitted agent schema', () => {
       // a directory read under RESOLVE_BENEATH plus an fstatat per entry. Without it a file
       // written over SMB — which is what a NAS is for — was invisible to the web interface, to
       // search and to the permission walk.
+      // Görev yöneticisi: sistem süreci hiçbir onayla kapatılamaz, kural ajanda tek yerde.
+      'kill_process',
       'list_database_dumps',
       'list_directory',
       // What disks the box has. NO OPERANDS, which is the whole of its security argument: nothing
@@ -111,6 +113,7 @@ describe('the emitted agent schema', () => {
       // being so the moment the product could create one: the wizard finished and the pool
       // appeared nowhere until somebody edited a file and restarted the API.
       'list_pools',
+      'list_processes',
       'list_snapshots',
       'move_entry',
       // ADR-0006's closed set, five entries wider. `offsite_scan_host` and `offsite_trust_host`
@@ -306,7 +309,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(24);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(25);
   });
 
   it('agrees with the number the agent actually reports', () => {

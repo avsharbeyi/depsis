@@ -217,6 +217,20 @@
       ]
     },
     {
+      "description": "Arka planda ne koşuyor — görev yöneticisinin okuma yarısı.\n\nSALT OKUR ve yapısal olarak öyle: /proc'tan okur, hiçbir argv yok. Her satır `protected`\ntaşır — o bayrak, `KillProcess`'in aynı kuraldan reddedeceğinin önceden söylenmesi, ki\narayüz kapatılamayacak bir sürece düğme çizmesin.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "list_processes"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
       "description": "What pools this machine has.\n\nNO OPERANDS, for the same reason `ListDisks` has none. It exists because\n`DEPSIS_ZFS_POOLS` was a comma-separated list an operator typed into `api.env` — defensible\nwhile the pool was made at install time from a shell, and indefensible the moment the\nproduct could create one: the wizard finished and the pool it had just built appeared\nnowhere until somebody edited a file and restarted the API.",
       "type": "object",
       "properties": {
@@ -847,6 +861,30 @@
       ]
     },
     {
+      "description": "Tek bir arka plan sürecini kapat. Sistem süreçleri hiçbir şekilde değil.\n\n`pid` YALNIZ BAŞINA YETMEZ ve `comm` süs değil: bir pid, süreç öldükten sonra başka bir\nsürece verilebilir, ve bayat bir listeden gelen kapatma yanlış şeyi vurur. Ajan sinyalden\nhemen önce `/proc/<pid>/comm`'u yeniden okur, bu adla karşılaştırır ve tutmuyorsa reddeder\n— havuz sihirbazının WWN yeniden doğrulamasıyla aynı kalıp. `SIGTERM`, `SIGKILL` değil:\nsüreç kendini toplasın; ısrar eden kullanıcı yeniden basar.",
+      "type": "object",
+      "properties": {
+        "comm": {
+          "type": "string"
+        },
+        "op": {
+          "type": "string",
+          "const": "kill_process"
+        },
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "pid",
+        "comm"
+      ]
+    },
+    {
       "description": "What `zpool status` says about scrubbing this pool.\n\nThe visibility half, and the half that was missing. Debian's `zfsutils-linux` already puts\na monthly scrub in `/etc/cron.d`, so on an ordinary appliance scrubs ARE happening — and\nnothing in DEPSIS said whether they had run, what they found, or whether one is running\nnow. A scrub whose findings nobody sees is only more expensive than no scrub at all.",
       "type": "object",
       "properties": {
@@ -1288,7 +1326,6 @@
       "type": "string"
     },
     "DiskRef": {
-      "description": "A disk named twice: the stable link to use, and the WWN it must still be.",
       "type": "object",
       "properties": {
         "by_id": {
@@ -1300,7 +1337,6 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "by_id",
         "wwn"
@@ -2074,6 +2110,41 @@
     {
       "type": "object",
       "properties": {
+        "processes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProcessSummary"
+          }
+        },
+        "status": {
+          "type": "string",
+          "const": "processes"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status",
+        "processes",
+        "truncated"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "process_killed"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
         "disks": {
           "type": "array",
           "items": {
@@ -2725,6 +2796,50 @@
         "kind",
         "line",
         "fingerprint"
+      ]
+    },
+    "ProcessSummary": {
+      "description": "A disk named twice: the stable link to use, and the WWN it must still be.",
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "string"
+        },
+        "comm": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "protected": {
+          "description": "Sistem süreci mi — `KillProcess` bunu reddeder. Kural `procs::is_protected`'ta tek yerde.",
+          "type": "boolean"
+        },
+        "rss_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "uid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "uid",
+        "user",
+        "comm",
+        "args",
+        "rss_bytes",
+        "protected"
       ]
     },
     "SafeComponent": {

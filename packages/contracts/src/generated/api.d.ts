@@ -1969,6 +1969,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/processes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Arka planda ne koşuyor — görev yöneticisi
+         * @description Kutudaki kullanıcı süreçleri, bellek kullanımıyla. Sistem süreçleri `protected: true`
+         *     ile gelir: arayüz onlara kapatma düğmesi çizmez, ve çizseydi de ajan aynı kuraldan
+         *     reddederdi — sınırın iki yüzü tek kaynaktan konuşur. Yalnız kurucu yönetici.
+         */
+        get: operations["listProcesses"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/processes/kill": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sistemden olmayan bir süreci kapat
+         * @description SIGTERM — süreç kendini toplar; ısrar eden kullanıcı yeniden basar. `comm` süs değil:
+         *     pid yeniden kullanılabilir, ve ajan sinyalden hemen önce `/proc/<pid>/comm`'u okuyup
+         *     bu adla karşılaştırır — bayat bir listeden gelen kapatma yanlış şeyi vuramaz. Sistem
+         *     süreçleri hiçbir istekle kapanmaz.
+         */
+        post: operations["killProcess"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/system/disks/wipe": {
         parameters: {
             query?: never;
@@ -6392,6 +6437,25 @@ export interface components {
              */
             empty: boolean;
         };
+        ProcessRow: {
+            pid: number;
+            user: string;
+            comm: string;
+            args: string;
+            /** Format: int64 */
+            rssBytes: number;
+            /** @description Sistem süreci — kapatılamaz, arayüz düğme çizmez. */
+            protected: boolean;
+        };
+        ProcessPage: {
+            items: components["schemas"]["ProcessRow"][];
+            truncated: boolean;
+        };
+        KillProcessRequest: {
+            pid: number;
+            /** @description Sinyalden önce /proc'tan yeniden doğrulanan ad. */
+            comm: string;
+        };
         DiskWipeRequest: {
             /** @description `/dev/disk/by-id` adı, envanterden. */
             byId: string;
@@ -7235,6 +7299,58 @@ export interface operations {
             };
             403: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+        };
+    };
+    listProcesses: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Süreçler */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProcessPage"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    killProcess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["KillProcessRequest"];
+            };
+        };
+        responses: {
+            /** @description Sinyal gönderildi */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        status: "ok";
+                    };
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
         };
     };
     wipeDisk: {

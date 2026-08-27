@@ -695,6 +695,52 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         Ok(Response::DiskWiped { detail: out })
     }
 
+    /// Arka planda ne koşuyor. Kural ve gerekçeler `procs` modülünde, tek yerde.
+    fn list_processes(&self) -> Result<Response, SeamError> {
+        let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+        let (found, truncated) = crate::procs::snapshot(std::path::Path::new("/proc"), &passwd);
+        Ok(Response::Processes {
+            processes: found
+                .into_iter()
+                .map(|p| crate::op::ProcessSummary {
+                    pid: p.pid,
+                    uid: p.uid,
+                    user: p.user,
+                    comm: p.comm,
+                    args: p.args,
+                    rss_bytes: p.rss_bytes,
+                    protected: p.protected,
+                })
+                .collect(),
+            truncated,
+        })
+    }
+
+    /// Tek süreci, adını sinyalden hemen önce yeniden doğrulayarak, SIGTERM ile kapat.
+    fn kill_process(&self, pid: u32, comm: &str) -> Result<Response, SeamError> {
+        if let Err(reason) = crate::procs::check_kill(std::path::Path::new("/proc"), pid, comm) {
+            return Ok(Response::Refused { reason });
+        }
+        // check_kill ile kill arasında da pid el değiştirebilir; pencere artık milisaniyeler ve
+        // rustix'in pidfd'siz kill'i bundan iyisini veremez. SIGTERM: süreç kendini toplasın.
+        let Ok(raw) = i32::try_from(pid) else {
+            return Ok(Response::Refused {
+                reason: format!("pid {pid} bir işletim sistemi pid'i değil"),
+            });
+        };
+        match rustix::process::kill_process(
+            rustix::process::Pid::from_raw(raw)
+                .ok_or_else(|| SeamError::Io(format!("pid {pid} sıfır ya da negatif olamaz")))?,
+            rustix::process::Signal::TERM,
+        ) {
+            Ok(()) => Ok(Response::ProcessKilled {}),
+            Err(rustix::io::Errno::SRCH) => Ok(Response::Refused {
+                reason: format!("pid {pid} yok — süreç zaten bitmiş"),
+            }),
+            Err(e) => Err(SeamError::Io(format!("kill {pid}: {e}"))),
+        }
+    }
+
     /// Move one entry to another name inside a share, durably, without ever overwriting.
     fn move_entry(&self, share: &str, from: &[&str], to: &[&str]) -> Result<Response, SeamError> {
         let Some(paths) = self.paths else {
@@ -2066,6 +2112,8 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 disks,
             } => self.create_pool(pool.as_str(), *topology, disks),
             crate::op::Request::WipeDisk { disk } => self.wipe_disk(disk),
+            crate::op::Request::ListProcesses {} => self.list_processes(),
+            crate::op::Request::KillProcess { pid, comm } => self.kill_process(*pid, comm),
 
             Request::ListPools {} => {
                 let out = self

@@ -62,6 +62,8 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::ListDisks {} => "list_disks",
         Request::CreatePool { .. } => "create_pool",
         Request::WipeDisk { .. } => "wipe_disk",
+        Request::ListProcesses {} => "list_processes",
+        Request::KillProcess { .. } => "kill_process",
         Request::ListPools {} => "list_pools",
         Request::ShareRootStatus {} => "share_root_status",
         Request::PrepareShareRoot { .. } => "prepare_share_root",

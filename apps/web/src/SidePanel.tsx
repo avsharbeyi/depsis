@@ -10,7 +10,6 @@ import type { Snapshot } from './snapshot.js';
 import { Card, Empty } from './ui.js';
 
 type RemoteStatus = OpenApi.components['schemas']['RemoteStatus'];
-type RemoteNetwork = OpenApi.components['schemas']['RemoteNetwork'];
 
 /**
  * The right-hand column: storage, load, and the way in from outside.
@@ -200,7 +199,7 @@ function SystemCard({
       glyph="📊"
       tone="rose"
       title="Sistem"
-      {...(onOpen === undefined ? {} : { onClick: () => onOpen('jobs') })}
+      {...(onOpen === undefined ? {} : { onClick: () => onOpen('system') })}
       meta=""
     >
       <div className="cb">
@@ -251,33 +250,6 @@ function SystemCard({
 }
 
 /* ─── remote access ─────────────────────────────────────────────────────────── */
-
-/**
- * What a network's two flags mean together, in words a person can act on.
- *
- * `authorized: false` must never read as "connecting". The device has joined and nothing is
- * flowing, and it will stay that way until somebody ticks a box in ZeroTier Central — a wait that
- * looks like a broken product if the interface pretends it is making progress.
- */
-function networkState(network: RemoteNetwork): { text: string; colour: string } {
-  if (!network.authorized) return { text: 'onay bekliyor', colour: 'var(--warn)' };
-  switch (network.status) {
-    case 'OK':
-      return { text: 'bağlı', colour: 'var(--live)' };
-    case 'REQUESTING_CONFIGURATION':
-      return { text: 'yapılandırma isteniyor', colour: 'var(--warn)' };
-    case 'ACCESS_DENIED':
-      return { text: 'erişim reddedildi', colour: 'var(--rose)' };
-    case 'NOT_FOUND':
-      return { text: 'ağ bulunamadı', colour: 'var(--rose)' };
-    case 'PORT_ERROR':
-      return { text: 'port hatası', colour: 'var(--rose)' };
-    case 'AUTHENTICATION_REQUIRED':
-      return { text: 'kimlik doğrulama gerekli', colour: 'var(--rose)' };
-    default:
-      return { text: 'bilinmiyor', colour: 'var(--dim)' };
-  }
-}
 
 function RemoteCard({
   remote,
@@ -356,12 +328,4 @@ function RemoteCard({
       </div>
     </Card>
   );
-}
-
-/** The contract lets these be null; a daemon that has not settled yet also returns "". Both mean
- *  "no answer", and both must fall through to the next candidate rather than render as a blank. */
-function nonEmpty(value: string | null | undefined): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  return trimmed === '' ? undefined : trimmed;
 }

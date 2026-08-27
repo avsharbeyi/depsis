@@ -26,6 +26,8 @@ import { Tiles } from './Tiles.js';
 import { Transfers } from './Transfers.js';
 import { toneRgb, Toasts, useToasts, Win, type Tone } from './ui.js';
 import { Audit } from './Audit.js';
+import { Processes } from './Processes.js';
+import { System } from './System.js';
 import { Jobs } from './Jobs.js';
 import { Teams } from './Teams.js';
 import { Users } from './Users.js';
@@ -63,6 +65,8 @@ export type PaneId =
   | 'teams'
   | 'jobs'
   | 'audit'
+  | 'processes'
+  | 'system'
   | 'shares'
   | 'disks'
   | 'account'
@@ -119,6 +123,24 @@ const PANES: Record<PaneId, PaneMeta> = {
     label: 'Denetim kaydı',
     glyph: '📜',
     tone: 'warn',
+    wide: false,
+    adminOnly: true,
+  },
+  processes: {
+    // Görev yöneticisi. Yalnız kurucu yönetici — süreç listesi ve kapatma, telemetriyle aynı kapı.
+    slug: 'gorev-yoneticisi',
+    label: 'Görev yöneticisi',
+    glyph: '⚙',
+    tone: 'warn',
+    wide: false,
+    adminOnly: true,
+  },
+  system: {
+    // Sistem ayrıntısı: işlemci, bellek, disk grafikleri. Kenardaki Sistem kutusu buna açılır.
+    slug: 'sistem',
+    label: 'Sistem',
+    glyph: '📈',
+    tone: 'cool',
     wide: false,
     adminOnly: true,
   },
@@ -250,6 +272,8 @@ const DOCK_ORDER: PaneId[] = [
   'teams',
   'jobs',
   'audit',
+  'processes',
+  'system',
   'account',
   'background',
 ];
@@ -898,6 +922,10 @@ function PaneBody({
       return <Jobs onUnauthenticated={onUnauthenticated} />;
     case 'audit':
       return <Audit onUnauthenticated={onUnauthenticated} />;
+    case 'processes':
+      return <Processes notify={notify} />;
+    case 'system':
+      return <System snapshot={snapshot} />;
     case 'account':
       return <Account me={me} notify={notify} onChanged={onAccountChanged} />;
     case 'transfers':

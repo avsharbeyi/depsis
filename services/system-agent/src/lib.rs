@@ -46,6 +46,7 @@ pub mod identity;
 pub mod offsite;
 pub mod op;
 pub mod pools;
+pub mod procs;
 pub mod replicate;
 pub mod samba;
 pub mod scrub;

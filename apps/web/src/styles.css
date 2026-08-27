@@ -3360,3 +3360,61 @@ select option {
     min-height: 46vh;
   }
 }
+
+/* ─── Sistem ayrıntı penceresi (System.tsx) ─────────────────────────────────── */
+.syshead {
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink2);
+  margin: 16px 0 8px;
+}
+.syshead:first-child {
+  margin-top: 2px;
+}
+.sysgrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.sysstat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  background: var(--glass);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+}
+.sysstat b {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+}
+.sysspark {
+  margin: 10px 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sysspark .spark {
+  height: 60px;
+  width: 100%;
+}
+.sysrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--edge);
+}
+.sysrow .i {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sysrow .val {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

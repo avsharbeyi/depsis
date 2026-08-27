@@ -16,6 +16,7 @@ import { OffsiteController } from './offsite.controller.js';
 import { PoolsController } from './pools.controller.js';
 import { ReplicationController } from './replication.controller.js';
 import { DiskWipeController } from './disk-wipe.controller.js';
+import { ProcessesController } from './processes.controller.js';
 import { SystemController } from './system.controller.js';
 import { SystemService } from './system.service.js';
 
@@ -30,6 +31,7 @@ import { SystemService } from './system.service.js';
     BackupSchedulesController,
     DatabaseBackupsController,
     DiskWipeController,
+    ProcessesController,
   ],
   providers: [
     {

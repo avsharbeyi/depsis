@@ -959,6 +959,14 @@ pub enum Request {
     /// and the argv is a constant in this crate.
     ListDisks {},
 
+    /// Arka planda ne koşuyor — görev yöneticisinin okuma yarısı.
+    ///
+    /// SALT OKUR ve yapısal olarak öyle: /proc'tan okur, hiçbir argv yok. Her satır `protected`
+    /// taşır — o bayrak, `KillProcess`'in aynı kuraldan reddedeceğinin önceden söylenmesi, ki
+    /// arayüz kapatılamayacak bir sürece düğme çizmesin.
+    #[serde(rename = "list_processes")]
+    ListProcesses {},
+
     /// What pools this machine has.
     ///
     /// NO OPERANDS, for the same reason `ListDisks` has none. It exists because
@@ -1423,6 +1431,16 @@ pub enum Request {
     /// them, nothing enumerates or mounts them, and `zpool create` labels over them.
     #[serde(rename = "wipe_disk")]
     WipeDisk { disk: DiskRef },
+
+    /// Tek bir arka plan sürecini kapat. Sistem süreçleri hiçbir şekilde değil.
+    ///
+    /// `pid` YALNIZ BAŞINA YETMEZ ve `comm` süs değil: bir pid, süreç öldükten sonra başka bir
+    /// sürece verilebilir, ve bayat bir listeden gelen kapatma yanlış şeyi vurur. Ajan sinyalden
+    /// hemen önce `/proc/<pid>/comm`'u yeniden okur, bu adla karşılaştırır ve tutmuyorsa reddeder
+    /// — havuz sihirbazının WWN yeniden doğrulamasıyla aynı kalıp. `SIGTERM`, `SIGKILL` değil:
+    /// süreç kendini toplasın; ısrar eden kullanıcı yeniden basar.
+    #[serde(rename = "kill_process")]
+    KillProcess { pid: u32, comm: String },
 
     /// What `zpool status` says about scrubbing this pool.
     ///
@@ -2028,6 +2046,18 @@ impl PoolTopology {
 /// A disk named twice: the stable link to use, and the WWN it must still be.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ProcessSummary {
+    pub pid: u32,
+    pub uid: u32,
+    pub user: String,
+    pub comm: String,
+    pub args: String,
+    pub rss_bytes: u64,
+    /// Sistem süreci mi — `KillProcess` bunu reddeder. Kural `procs::is_protected`'ta tek yerde.
+    pub protected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DiskRef {
     /// The `/dev/disk/by-id` name. A `SafeComponent`, so a path or a flag cannot be smuggled in —
     /// the same construction `ReadSmartSummary` uses, and for the same reason.
@@ -2281,6 +2311,11 @@ pub enum Response {
         /// What `zpool` printed, kept so an operator can see the real words on a bad day.
         detail: String,
     },
+    Processes {
+        processes: Vec<ProcessSummary>,
+        truncated: bool,
+    },
+    ProcessKilled {},
     Disks {
         disks: Vec<DiskInfo>,
         /// More devices than `MAX_DISKS`, so the list is a prefix.
@@ -2541,7 +2576,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 24;
+pub const SCHEMA_VERSION: u32 = 25;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

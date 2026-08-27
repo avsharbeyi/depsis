@@ -94,6 +94,9 @@ export type AgentRequest =
       op: 'list_disks';
     }
   | {
+      op: 'list_processes';
+    }
+  | {
       op: 'list_pools';
     }
   | {
@@ -414,6 +417,11 @@ export type AgentRequest =
   | {
       disk: DiskRef;
       op: 'wipe_disk';
+    }
+  | {
+      comm: string;
+      op: 'kill_process';
+      pid: number;
     }
   | {
       op: 'scrub_status';
@@ -737,9 +745,6 @@ export type NodeAddress = string;
  */
 export type NtHash = string;
 
-/**
- * A disk named twice: the stable link to use, and the WWN it must still be.
- */
 export interface DiskRef {
   /**
    * A single path component under a share root — never a path, never absolute.
@@ -1067,6 +1072,14 @@ export type AgentResponse =
       status: 'pool_created';
     }
   | {
+      processes: ProcessSummary[];
+      status: 'processes';
+      truncated: boolean;
+    }
+  | {
+      status: 'process_killed';
+    }
+  | {
       disks: DiskInfo[];
       status: 'disks';
       /**
@@ -1322,6 +1335,21 @@ export interface SnapshotEntry {
    * What destroying it would free — not what it "contains". See `snapshots::SnapshotInfo`.
    */
   used_bytes: number;
+}
+/**
+ * A disk named twice: the stable link to use, and the WWN it must still be.
+ */
+export interface ProcessSummary {
+  args: string;
+  comm: string;
+  pid: number;
+  /**
+   * Sistem süreci mi — `KillProcess` bunu reddeder. Kural `procs::is_protected`'ta tek yerde.
+   */
+  protected: boolean;
+  rss_bytes: number;
+  uid: number;
+  user: string;
 }
 export interface DiskInfo {
   /**
