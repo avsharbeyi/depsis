@@ -49,10 +49,17 @@ function controller(options: {
   passwordOk?: boolean;
   poolExists?: boolean | (() => Promise<boolean>);
   enqueue?: ReturnType<typeof vi.fn>;
+  /** What `storageSetup` reports about the share root — bare-and-empty unless a test says else. */
+  shareRoot?: { path?: string; dataset?: string; empty?: boolean };
 }): { controller: PoolsController; enqueue: ReturnType<typeof vi.fn> } {
   const enqueue = options.enqueue ?? vi.fn().mockResolvedValue('job-1');
   const system = {
     isSystemAdministrator: () => Promise.resolve(options.admin ?? true),
+    storageSetup: () =>
+      Promise.resolve({
+        pools: [],
+        shareRoot: options.shareRoot ?? { path: '/srv/depsis', empty: true },
+      }),
     poolExists:
       typeof options.poolExists === 'function'
         ? options.poolExists
@@ -111,6 +118,33 @@ describe('POST /storage/pools', () => {
     expect(payload).not.toHaveProperty('confirm');
     expect(payload['disks']).toEqual(VALID.disks);
     expect(payload['requestedBy']).toBe('u-1');
+  });
+
+  it('decides the share tree itself when the field is absent: a bare box gets one', async () => {
+    // The silent-degrade the first field install paid for: an interface that could not read the
+    // storage state sent `false`, and the owner got a pool no share could ever open on. Absence
+    // now means "the server looks" — and a bare, empty share root NEEDS the tree.
+    const { controller: c, enqueue } = controller({});
+    await c.create(request(), VALID);
+    const [, , payload] = enqueue.mock.calls[0] as [string, string, Record<string, unknown>];
+    expect(payload['prepareShareRoot']).toBe(true);
+  });
+
+  it('and a box that already has a share tree does not get a second', async () => {
+    const { controller: c, enqueue } = controller({
+      shareRoot: { path: '/srv/depsis', dataset: 'eski/depsis', empty: false },
+    });
+    await c.create(request(), VALID);
+    const [, , payload] = enqueue.mock.calls[0] as [string, string, Record<string, unknown>];
+    expect(payload['prepareShareRoot']).toBe(false);
+  });
+
+  it('an explicit false is honoured even on a bare box', async () => {
+    // The one legitimate "no": an operator building a second pool that must not carry the tree.
+    const { controller: c, enqueue } = controller({});
+    await c.create(request(), { ...VALID, prepareShareRoot: false });
+    const [, , payload] = enqueue.mock.calls[0] as [string, string, Record<string, unknown>];
+    expect(payload['prepareShareRoot']).toBe(false);
   });
 
   it('asks for the confirmation BEFORE the password', async () => {

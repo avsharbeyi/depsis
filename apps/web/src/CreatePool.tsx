@@ -118,9 +118,11 @@ export function CreatePool({
         disks: selected.map((disk) => ({ byId: disk.byId as string, wwn: disk.wwn as string })),
         confirm,
         password,
-        // Only when there is something to prepare. Sending it on a box that already has a share
-        // tree would make the job fail on a step the operator did not ask for.
-        prepareShareRoot: offerPrepare && prepare,
+        // Yalniz onay kutusu GOSTERILDIYSE gonderilir; gosterilemediyse (depolama durumu
+        // okunamadi, storage null kaldi) alan HIC gonderilmez ve karari sunucu kutunun o anki
+        // gerceginden verir. Ilk saha bunun eksigini odedi: kor arayuz false gonderdi, havuz
+        // paylasim agacsiz kuruldu.
+        ...(offerPrepare ? { prepareShareRoot: prepare } : {}),
       },
     });
     setBusy(false);

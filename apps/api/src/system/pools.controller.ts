@@ -50,7 +50,12 @@ const bodySchema = z.object({
     .array(z.object({ byId: z.string().min(1).max(255), wwn: z.string().min(1).max(255) }))
     .min(1)
     .max(24),
-  prepareShareRoot: z.boolean().default(false),
+  // Uc degerli, ve ucuncusu asil guvenlik agi: true/false careyi ACIKCA soyleyen bir arayuzden
+  // gelir; alan HIC YOKSA karari sunucu, kutunun o anki gerceginden verir. Ilk sahada arayuz
+  // depolama durumunu okuyamadigi bir anda sessizce false gonderdi — havuz kuruldu, paylasim
+  // agaci kurulmadi, ve sahibi "paylasim olusturamiyorum" ile bas basa kaldi. Varsayilan false
+  // olan bir alan, o korlugu karara cevirir; yokluk ise soruyu bilene birakir.
+  prepareShareRoot: z.boolean().optional(),
   confirm: z.string(),
   password: z.string().min(1).max(1024),
 });
@@ -114,6 +119,17 @@ export class PoolsController {
     // guess it here at full speed and leave nothing in `login_attempts`.
     await this.reauth.require(session.organizationId, session.userId, plan.password, request);
 
+    // The share-tree decision, when the caller did not make one: a box whose share root has no
+    // dataset and stands empty NEEDS the tree (a pool without it cannot open a single share), and
+    // a box that already has one must not get a second. Asked live, from the same agent the job
+    // will talk to.
+    let prepareShareRoot = plan.prepareShareRoot;
+    if (prepareShareRoot === undefined) {
+      const root = (await this.system.storageSetup(randomUUID())).shareRoot;
+      prepareShareRoot =
+        root.path !== undefined && root.dataset === undefined && root.empty === true;
+    }
+
     // A pool this box already has. Checked here because the answer is a 409 the operator can act
     // on, and because the alternative is a job that fails with `zpool`'s own words two seconds
     // later on a screen that is no longer open. The agent refuses it too — this is the courteous
@@ -132,7 +148,7 @@ export class PoolsController {
         name: plan.name,
         topology: plan.topology,
         disks: plan.disks,
-        prepareShareRoot: plan.prepareShareRoot,
+        prepareShareRoot,
         requestedBy: session.userId,
       },
       // ONE attempt. Every other job kind in this product is safe to retry; this one runs `zpool

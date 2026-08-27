@@ -6492,13 +6492,16 @@ export interface components {
             /**
              * @description Havuz kurulduktan sonra `<havuz>/depsis` veri kümesini açıp paylaşım köküne bağla.
              *
+             *     İSTEĞE BAĞLI, ve yokluğu bir karar değil: alan hiç gönderilmezse sunucu, paylaşım
+             *     kökünün o anki durumuna bakar — veri kümesi yoksa ve dizin boşsa ağaç kurulur.
+             *     Açık `false` yalnız "bu havuz paylaşım ağacını taşımasın" diyen bir arayüzden gelmeli.
+             *
              *     Bu, sihirbazdan sonra kalan son kabuk adımını kaldırıyor: onsuz havuz var ama
              *     `POST /shares` hâlâ 503 veriyor. Bağlanacak yer ÇAĞIRANIN SEÇTİĞİ BİR ŞEY DEĞİL —
              *     ajanın kendi `DEPSIS_SHARES_ROOT`'u — ve ajan, oraya zaten bir veri kümesi bağlıysa ya
              *     da dizin boş değilse reddediyor.
-             * @default false
              */
-            prepareShareRoot: boolean;
+            prepareShareRoot?: boolean;
             /**
              * @description Havuz adının aynısı. İşi niyeti kanıtlamak DEĞİL — onu parola yapıyor — tek tıkla
              *     geçilmesini engellemek.
