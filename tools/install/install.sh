@@ -70,6 +70,7 @@ WANT_HSTS=no
 CHECK_ONLY=no
 RENEW_CERT=no
 SKIP_BUILD=no
+UNATTENDED=no
 
 # ─── çıktı ────────────────────────────────────────────────────────────────────
 
@@ -115,6 +116,9 @@ while [ $# -gt 0 ]; do
     --check-only)           CHECK_ONLY=yes; shift ;;
     --renew-cert)           RENEW_CERT=yes; shift ;;
     --skip-build)           SKIP_BUILD=yes; shift ;;
+    # Gözetimsiz kip (kurulum ISO'sunun ilk açılışı): çıktı journal'a gider ve journal KALICIDIR,
+    # o yüzden kurtarma anahtarı ekrana basılmaz — yalnız dosyasının yolu söylenir.
+    --unattended)           UNATTENDED=yes; shift ;;
     -h|--help)              sed -n '2,45p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *)                      die "bilinmeyen seçenek: $1" ;;
   esac
@@ -666,12 +670,31 @@ finish() {
   fi
 
   if [ -n "$RECOVERY_PRINTED" ]; then
-    printf '\n%s  KURTARMA ANAHTARI — BİR KEZ GÖSTERİLİYOR%s\n' "$Y" "$Z"
-    printf '  %s\n' "$RECOVERY_PRINTED"
-    printf '  %sBu, at-rest şifreleme anahtarının (%s) kendisi. Kaybederseniz mühürlü%s\n' "$D" "$ETC/secret.key" "$Z"
-    printf '  %sTOTP sırları geri gelmez ve iki adımlı doğrulama kullanan hesaplar kurtarma%s\n' "$D" "$Z"
-    printf '  %skodlarıyla girmek zorunda kalır. Cihazın dışında, kâğıtta ya da bir parola%s\n' "$D" "$Z"
-    printf '  %skasasında saklayın. Bu satır hiçbir yere yazılmadı; yalnız bu ekranda.%s\n' "$D" "$Z"
+    if [ "$UNATTENDED" = yes ]; then
+      printf '
+%s  KURTARMA ANAHTARI ÜRETİLDİ — EKRANA BASILMADI%s
+' "$Y" "$Z"
+      printf '  %sGözetimsiz kurulumda bu çıktı kalıcı bir günlüğe gider ve bir sır orada%s
+' "$D" "$Z"
+      printf '  %sdurmamalı. Anahtar: %s (yalnız root okur). İlk fırsatta cihazın DIŞINA%s
+' "$D" "$ETC/secret.key" "$Z"
+      printf '  %syedekleyin — kaybolursa mühürlü TOTP sırları ve SMB parolaları geri gelmez.%s
+' "$D" "$Z"
+    else
+      printf '
+%s  KURTARMA ANAHTARI — BİR KEZ GÖSTERİLİYOR%s
+' "$Y" "$Z"
+      printf '  %s
+' "$RECOVERY_PRINTED"
+      printf '  %sBu, at-rest şifreleme anahtarının (%s) kendisi. Kaybederseniz mühürlü%s
+' "$D" "$ETC/secret.key" "$Z"
+      printf '  %sTOTP sırları geri gelmez ve iki adımlı doğrulama kullanan hesaplar kurtarma%s
+' "$D" "$Z"
+      printf '  %skodlarıyla girmek zorunda kalır. Cihazın dışında, kâğıtta ya da bir parola%s
+' "$D" "$Z"
+      printf '  %skasasında saklayın. Bu satır hiçbir yere yazılmadı; yalnız bu ekranda.%s
+' "$D" "$Z"
+    fi
   fi
 
   printf '\n  Günlükler    %ssudo journalctl -u depsis-api -u depsis-worker -u depsis-agent -f%s\n' "$D" "$Z"

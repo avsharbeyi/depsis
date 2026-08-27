@@ -1,0 +1,24 @@
+# DEPSIS kurulum ISO'sunun ilk açılış birimi.
+#
+# Kurulumun late_command'i bunu etkinleştirir; firstboot.sh başarıyla bitince kendini kapatır.
+# Başarısızlıkta ETKİN KALIR: ilk açılışta ağ yoksa bir sonraki açılış yeniden dener — yarım
+# kalmış bir kurulumun en yaygın sebebi, henüz takılmamış bir ethernet kablosudur.
+
+[Unit]
+Description=DEPSIS ilk açılış kurulumu
+After=network-online.target
+Wants=network-online.target
+# Bittiğinde bıraktığı iz; varsa betik zaten kendisi de hemen çıkar.
+ConditionPathExists=!/var/lib/depsis/firstboot.done
+
+[Service]
+Type=oneshot
+ExecStart=/opt/depsis-install/firstboot.sh
+# Derleme ve dkms dahil; yavaş bir kutuda yarım saat meşru.
+TimeoutStartSec=3600
+# Hem journal hem konsol: monitör bağlı bir kutuda ilerleme ekranda okunur.
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
