@@ -698,6 +698,20 @@ units() {
   fi
   ok 'soketler açık'
 
+  # pasta'nın AppArmor profili yalnız /run/user/<uid> yolunu tanır; motorumuz oturumsuz hesapla
+  # /run/depsis-apps altında koşar. Kural olmadan her konteyner "Couldn't open network namespace
+  # ... Permission denied" ile ölür — ilk sahada tam bu yaşandı. Yerel kural + profile include:
+  # paket güncellemesi profili tazelese de local/ dosyası kalır.
+  if [ -f /etc/apparmor.d/usr.bin.pasta ]; then
+    install -d -m 0755 /etc/apparmor.d/local
+    printf '# DEPSIS: uygulama kataloğu köksüz podman ile /run/depsis-apps altında çalışır\n/run/depsis-apps/** rw,\n' \
+      > /etc/apparmor.d/local/usr.bin.pasta
+    grep -q 'local/usr.bin.pasta' /etc/apparmor.d/usr.bin.pasta || \
+      sed -i 's|^}$|  include if exists <local/usr.bin.pasta>\n}|' /etc/apparmor.d/usr.bin.pasta
+    apparmor_parser -r /etc/apparmor.d/usr.bin.pasta 2>/dev/null || true
+    ok 'pasta AppArmor kuralı yerinde'
+  fi
+
   # Soket etkinlemeli servislerin ESKİ SÜRECİ, ikili değişince kendiliğinden yenilenmez — saha
   # bunu şema uyuşmazlığı olarak buldu: API 24 konuşuyor, aylık süreç 23'te. Durdurmak yeter;
   # soket dinlemede kalır ve bir sonraki bağlantı YENİ ikiliyi başlatır.
