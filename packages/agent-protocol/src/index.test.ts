@@ -197,6 +197,10 @@ describe('the emitted agent schema', () => {
       // device network-level reach to the appliance, and the agent refuses it against the
       // appliance's own address — de-authorizing the NAS drops it off the network it serves and
       // the undo is on the far side of the link that just went away.
+      // Diski havuza kabul edilir hâle getiren tek yol. İçerik ret sebebi DEĞİL — silmenin var
+      // olma nedeni içerik — ama sistem diski ve bağlı bir disk hiçbir onayla geçemez, ve WWN
+      // yeniden doğrulaması havuz sihirbazındakiyle birebir aynı.
+      'wipe_disk',
       'zerotier_controller_members',
       'zerotier_controller_networks',
       'zerotier_controller_status',
@@ -302,7 +306,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(23);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(24);
   });
 
   it('agrees with the number the agent actually reports', () => {

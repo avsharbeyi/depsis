@@ -202,13 +202,14 @@ export function CreatePool({
                 <div className="netrow" key={disk.byId ?? disk.kname}>
                   <span className="lbl">{disk.model ?? disk.kname}</span>
                   <span className="val m">{why(disk)}</span>
+                  <WipeDisk disk={disk} notify={notify} onWiped={onCreated} />
                 </div>
               ))}
             </div>
             <p>
-              Üstünde bir şey olan bir diski DEPSIS kullanamıyor: <code>zpool</code>&apos;a hiçbir
-              zaman <code>-f</code> geçmiyor, ve bir diski temizlemek kabuktan bilerek yapılan bir
-              iş.
+              Üstünde bir şey olan bir diski DEPSIS havuza almıyor: <code>zpool</code>&apos;a hiçbir
+              zaman <code>-f</code> geçmiyor. İşine yaramayan bir diski buradan, yazılı onay ve
+              parolayla <b>sıfırlayabilirsiniz</b> — sistem diski ve bağlı diskler hariç.
             </p>
           </>
         )}
@@ -384,4 +385,97 @@ function why(disk: Disk): string {
   if (disk.byId === undefined) return 'kararlı bir adı yok';
   if (disk.wwn === undefined) return 'WWN bildirmiyor, doğrulanamaz';
   return 'kullanılamıyor';
+}
+
+/**
+ * Bir diski arayüzden sıfırlamak — cihaz sahibinin ilkesi: temizlik için terminal yok.
+ *
+ * Tören havuz kurmanınkiyle aynı sınıftan (§8.1): ne silineceği ekranda (diskteki içerik
+ * listesi), yazılı onay, parola. Asıl reddeden taraf ajan — sistem diski ve bağlı disk hiçbir
+ * onayla geçmez, ve WWN silme ANINDA yeniden doğrulanır: bu ekran açıkken yuvası değiştirilen
+ * disk silinmez.
+ */
+function WipeDisk({
+  disk,
+  notify,
+  onWiped,
+}: {
+  disk: Disk;
+  notify: Notify;
+  onWiped: () => void;
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false);
+  const [confirm, setConfirm] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  // Sıfırlanabilirlik ajanın kurallarının aynası: sistem diski ve bağlı disk asla; kararlı adı
+  // ya da WWN'i olmayan disk doğrulanamayacağı için teklif bile edilmez.
+  if (disk.holdsSystem || disk.mounted || disk.byId === undefined || disk.wwn === undefined) {
+    return <></>;
+  }
+
+  async function wipe(): Promise<void> {
+    if (disk.byId === undefined || disk.wwn === undefined) return;
+    setBusy(true);
+    const { data, error, response } = await api.POST('/system/disks/wipe', {
+      body: { byId: disk.byId, wwn: disk.wwn, confirm: 'SİL', password },
+    });
+    setBusy(false);
+    if (data !== undefined) {
+      notify('ok', `${disk.model ?? disk.kname} sıfırlandı; artık havuza katılabilir.`);
+      setOpen(false);
+      onWiped();
+      return;
+    }
+    if (response.status === 429) {
+      notify('error', 'Çok fazla parola denemesi; biraz bekleyip yeniden deneyin.');
+      return;
+    }
+    notify('error', problemMessage(error, 'Disk sıfırlanamadı.'));
+  }
+
+  if (!open) {
+    return (
+      <button type="button" className="lnk" onClick={() => setOpen(true)}>
+        Sıfırla
+      </button>
+    );
+  }
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+      <span className="val" style={{ color: 'var(--warn)' }}>
+        Üstündeki her şey ({disk.holds.join(', ') || 'bölüm tablosu'}) GERİ DÖNÜŞSÜZ silinecek. Onay
+        için <b>SİL</b> yazın:
+      </span>
+      <input
+        className="b"
+        style={{ width: 64 }}
+        value={confirm}
+        onChange={(event) => setConfirm(event.target.value)}
+        aria-label="Onay sözcüğü"
+        placeholder="SİL"
+      />
+      <input
+        className="b"
+        type="password"
+        style={{ width: 130 }}
+        value={password}
+        onChange={(event) => setPassword(event.target.value)}
+        aria-label="Parolanız"
+        placeholder="parolanız"
+      />
+      <button
+        type="button"
+        className="b"
+        disabled={busy || confirm !== 'SİL' || password === ''}
+        onClick={() => void wipe()}
+      >
+        {busy ? 'Siliniyor…' : 'Diski sıfırla'}
+      </button>
+      <button type="button" className="lnk" onClick={() => setOpen(false)}>
+        Vazgeç
+      </button>
+    </span>
+  );
 }

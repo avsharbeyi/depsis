@@ -261,6 +261,41 @@ pub enum PoolPlanError {
     Removable { by_id: String },
 }
 
+/// Check a proposed WIPE against what the box reports RIGHT NOW.
+///
+/// The mirror image of `plan`, with the content checks inverted: content is the REASON to wipe,
+/// so `holds` refuses nothing here, and removability refuses nothing either — wiping a USB stick
+/// is an ordinary wish, it is JOINING one to a pool that stays forbidden. What cannot be passed
+/// by any confirmation is the same two absolutes as pool creation: the system disk, and anything
+/// mounted. The WWN re-check is verbatim the pool wizard's TOCTOU defence: the caller confirms a
+/// disk, the agent re-reads the inventory, and a device swapped in between is refused, not erased.
+pub fn wipe_plan(disk: &DiskRef, inventory: &[DiskInfo]) -> Result<(), PoolPlanError> {
+    let by_id = disk.by_id.as_str();
+    let Some(found) = inventory.iter().find(|d| d.by_id.as_deref() == Some(by_id)) else {
+        return Err(PoolPlanError::Unknown {
+            by_id: by_id.to_string(),
+        });
+    };
+    if found.wwn.as_deref() != Some(disk.wwn.as_str()) {
+        return Err(PoolPlanError::WwnMismatch {
+            by_id: by_id.to_string(),
+            expected: disk.wwn.clone(),
+            found: found.wwn.clone(),
+        });
+    }
+    if found.holds_system {
+        return Err(PoolPlanError::SystemDisk {
+            by_id: by_id.to_string(),
+        });
+    }
+    if found.mounted {
+        return Err(PoolPlanError::Mounted {
+            by_id: by_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Check a proposed pool against what the box reports RIGHT NOW, and build the argv.
 ///
 /// The inventory is a parameter rather than something this reads, so the caller decides when it

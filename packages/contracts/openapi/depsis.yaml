@@ -1170,6 +1170,38 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /system/disks/wipe:
+    post:
+      operationId: wipeDisk
+      tags: [system]
+      summary: Bir diski sıfırla — havuz sihirbazının kabul edeceği hâle getir
+      description: |
+        YIKICI: diskteki her şey geri dönüşsüz silinir. Tören havuz kurmanınkiyle aynı (§8.1):
+        ne silineceği ekranda, yazılı onay (`SİL`), parolayla yeniden kimlik doğrulama.
+
+        Asıl reddeden taraf ajan, ve iki reddi hiçbir onay geçemez: sistem diski ve üzerinde
+        BAĞLI bir şey olan disk. WWN silme anında yeniden doğrulanır — onay ekranı açıkken
+        yuvası değiştirilen disk silinmez, reddedilir. İçerik ret sebebi değildir (silmenin var
+        olma nedeni içerik), çıkarılabilirlik de değildir: USB bellek SİLİNEBİLİR; havuza
+        KATILAMAZ.
+
+        Yalnız kurucu yönetici.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DiskWipeRequest' }
+      responses:
+        '200':
+          description: Disk boş; wipefs'in kendi dökümü
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiskWipeResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
   /storage/pools:
     post:
       tags: [system]
@@ -4614,6 +4646,26 @@ components:
             Dizinde hiç girdi var mı. Bildiriliyor, çünkü `zfs create -o mountpoint=X` X'in
             üstüne şikâyet etmeden bağlanıyor: altındaki her şey görünmez oluyor, silinmeden,
             diski işgal etmeye devam ederek.
+
+    DiskWipeRequest:
+      type: object
+      required: [byId, wwn, confirm, password]
+      properties:
+        byId: { type: string, description: '`/dev/disk/by-id` adı, envanterden.' }
+        wwn:
+          type: string
+          description: Onaylanan diskin WWN'i. Ajan silme anında yeniden okuyup karşılaştırır.
+        confirm:
+          type: string
+          enum: ['SİL']
+          description: Yazılı onay. Havuz sihirbazı havuzun adını yazdırır; bir by-id adı yazdırmak insanlık dışı olurdu.
+        password: { type: string }
+
+    DiskWipeResult:
+      type: object
+      required: [detail]
+      properties:
+        detail: { type: [string, 'null'], description: wipefs'in sildiği imzaların dökümü. }
 
     CreatePoolRequest:
       type: object

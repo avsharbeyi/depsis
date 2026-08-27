@@ -61,6 +61,7 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::ReadSmartSummary { .. } => "read_smart_summary",
         Request::ListDisks {} => "list_disks",
         Request::CreatePool { .. } => "create_pool",
+        Request::WipeDisk { .. } => "wipe_disk",
         Request::ListPools {} => "list_pools",
         Request::ShareRootStatus {} => "share_root_status",
         Request::PrepareShareRoot { .. } => "prepare_share_root",

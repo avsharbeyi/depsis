@@ -1969,6 +1969,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/disks/wipe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bir diski sıfırla — havuz sihirbazının kabul edeceği hâle getir
+         * @description YIKICI: diskteki her şey geri dönüşsüz silinir. Tören havuz kurmanınkiyle aynı (§8.1):
+         *     ne silineceği ekranda, yazılı onay (`SİL`), parolayla yeniden kimlik doğrulama.
+         *
+         *     Asıl reddeden taraf ajan, ve iki reddi hiçbir onay geçemez: sistem diski ve üzerinde
+         *     BAĞLI bir şey olan disk. WWN silme anında yeniden doğrulanır — onay ekranı açıkken
+         *     yuvası değiştirilen disk silinmez, reddedilir. İçerik ret sebebi değildir (silmenin var
+         *     olma nedeni içerik), çıkarılabilirlik de değildir: USB bellek SİLİNEBİLİR; havuza
+         *     KATILAMAZ.
+         *
+         *     Yalnız kurucu yönetici.
+         */
+        post: operations["wipeDisk"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/storage/pools": {
         parameters: {
             query?: never;
@@ -6363,6 +6392,22 @@ export interface components {
              */
             empty: boolean;
         };
+        DiskWipeRequest: {
+            /** @description `/dev/disk/by-id` adı, envanterden. */
+            byId: string;
+            /** @description Onaylanan diskin WWN'i. Ajan silme anında yeniden okuyup karşılaştırır. */
+            wwn: string;
+            /**
+             * @description Yazılı onay. Havuz sihirbazı havuzun adını yazdırır; bir by-id adı yazdırmak insanlık dışı olurdu.
+             * @enum {string}
+             */
+            confirm: "SİL";
+            password: string;
+        };
+        DiskWipeResult: {
+            /** @description wipefs'in sildiği imzaların dökümü. */
+            detail: string | null;
+        };
         CreatePoolRequest: {
             /**
              * @description Havuz adı. İçinde `/` OLAMAZ — o bir dataset yolu olurdu. Harfle başlamak zorunda:
@@ -7190,6 +7235,34 @@ export interface operations {
             };
             403: components["responses"]["Problem"];
             422: components["responses"]["Problem"];
+        };
+    };
+    wipeDisk: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiskWipeRequest"];
+            };
+        };
+        responses: {
+            /** @description Disk boş; wipefs'in kendi dökümü */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiskWipeResult"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            429: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
         };
     };
     listShareSnapshots: {

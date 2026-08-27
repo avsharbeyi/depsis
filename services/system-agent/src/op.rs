@@ -1402,6 +1402,28 @@ pub enum Request {
     #[serde(rename = "start_scrub")]
     StartScrub { pool: SafeComponent },
 
+    /// Erase everything on ONE disk so the pool wizard can accept it. DESTRUCTIVE.
+    ///
+    /// The owner's principle forced this into the product: "a disk with something on it cannot
+    /// join a pool" is the right refusal, but when the only way to empty that disk was a shell,
+    /// the refusal pointed the owner at a terminal — and this appliance's owner does not use one.
+    /// So the cleaning is an operation with the same ceremony as pool creation (§8.1: analysis,
+    /// written confirmation, re-authentication) and the same TOCTOU defence: the operand is a
+    /// `DiskRef`, and the WWN the caller confirmed is re-checked against a fresh inventory taken
+    /// immediately before the wipe — a disk swapped mid-dialog is refused, not erased.
+    ///
+    /// TWO REFUSALS NO CONFIRMATION CAN PASS, the same two that guard pool creation: a disk
+    /// carrying `/`, `/boot` or the ESP, and a disk with anything MOUNTED. What it deliberately
+    /// does NOT refuse is content — content is the reason it exists — and removability: wiping a
+    /// USB stick is an ordinary wish, it is JOINING one to a pool that stays forbidden.
+    ///
+    /// The erase is `wipefs --all` on the whole device: partition table (GPT primary AND backup,
+    /// protective MBR) and every filesystem signature wipefs can see at the device level. Inner
+    /// superblocks of former partitions may survive as unreachable bytes; with no table naming
+    /// them, nothing enumerates or mounts them, and `zpool create` labels over them.
+    #[serde(rename = "wipe_disk")]
+    WipeDisk { disk: DiskRef },
+
     /// What `zpool status` says about scrubbing this pool.
     ///
     /// The visibility half, and the half that was missing. Debian's `zfsutils-linux` already puts
@@ -2250,6 +2272,10 @@ pub enum Response {
     ShareRootPrepared {
         dataset: String,
     },
+    /// The disk is empty. `detail` is wipefs's own account of what it erased, for the audit.
+    DiskWiped {
+        detail: String,
+    },
     /// The pool exists.
     PoolCreated {
         /// What `zpool` printed, kept so an operator can see the real words on a bad day.
@@ -2515,7 +2541,7 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 23;
+pub const SCHEMA_VERSION: u32 = 24;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

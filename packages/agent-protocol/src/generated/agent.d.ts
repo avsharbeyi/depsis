@@ -412,6 +412,10 @@ export type AgentRequest =
       pool: SafeComponent;
     }
   | {
+      disk: DiskRef;
+      op: 'wipe_disk';
+    }
+  | {
       op: 'scrub_status';
       pool: SafeComponent;
     }
@@ -1050,6 +1054,10 @@ export type AgentResponse =
   | {
       dataset: string;
       status: 'share_root_prepared';
+    }
+  | {
+      detail: string;
+      status: 'disk_wiped';
     }
   | {
       /**

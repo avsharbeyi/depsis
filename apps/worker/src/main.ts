@@ -51,7 +51,7 @@ import { WorkerService } from './worker.service.js';
     JobsModule,
     PosixIdentityModule,
     AclApplyModule,
-  AuditModule,
+    AuditModule,
     CopyModule,
     TrashRetentionModule,
     IndexerModule,

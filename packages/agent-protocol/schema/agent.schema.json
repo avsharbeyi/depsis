@@ -829,6 +829,24 @@
       ]
     },
     {
+      "description": "Erase everything on ONE disk so the pool wizard can accept it. DESTRUCTIVE.\n\nThe owner's principle forced this into the product: \"a disk with something on it cannot\njoin a pool\" is the right refusal, but when the only way to empty that disk was a shell,\nthe refusal pointed the owner at a terminal — and this appliance's owner does not use one.\nSo the cleaning is an operation with the same ceremony as pool creation (§8.1: analysis,\nwritten confirmation, re-authentication) and the same TOCTOU defence: the operand is a\n`DiskRef`, and the WWN the caller confirmed is re-checked against a fresh inventory taken\nimmediately before the wipe — a disk swapped mid-dialog is refused, not erased.\n\nTWO REFUSALS NO CONFIRMATION CAN PASS, the same two that guard pool creation: a disk\ncarrying `/`, `/boot` or the ESP, and a disk with anything MOUNTED. What it deliberately\ndoes NOT refuse is content — content is the reason it exists — and removability: wiping a\nUSB stick is an ordinary wish, it is JOINING one to a pool that stays forbidden.\n\nThe erase is `wipefs --all` on the whole device: partition table (GPT primary AND backup,\nprotective MBR) and every filesystem signature wipefs can see at the device level. Inner\nsuperblocks of former partitions may survive as unreachable bytes; with no table naming\nthem, nothing enumerates or mounts them, and `zpool create` labels over them.",
+      "type": "object",
+      "properties": {
+        "disk": {
+          "$ref": "#/$defs/DiskRef"
+        },
+        "op": {
+          "type": "string",
+          "const": "wipe_disk"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "disk"
+      ]
+    },
+    {
       "description": "What `zpool status` says about scrubbing this pool.\n\nThe visibility half, and the half that was missing. Debian's `zfsutils-linux` already puts\na monthly scrub in `/etc/cron.d`, so on an ordinary appliance scrubs ARE happening — and\nnothing in DEPSIS said whether they had run, what they found, or whether one is running\nnow. A scrub whose findings nobody sees is only more expensive than no scrub at all.",
       "type": "object",
       "properties": {
@@ -2016,6 +2034,23 @@
       "required": [
         "status",
         "dataset"
+      ]
+    },
+    {
+      "description": "The disk is empty. `detail` is wipefs's own account of what it erased, for the audit.",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "const": "disk_wiped"
+        }
+      },
+      "required": [
+        "status",
+        "detail"
       ]
     },
     {

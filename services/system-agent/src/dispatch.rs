@@ -33,6 +33,7 @@ pub mod bin {
     pub const ZFS: &str = "/usr/sbin/zfs";
     pub const ZPOOL: &str = "/usr/sbin/zpool";
     pub const SMARTCTL: &str = "/usr/sbin/smartctl";
+    pub const WIPEFS: &str = "/usr/sbin/wipefs";
     pub const TESTPARM: &str = "/usr/bin/testparm";
     pub const LSBLK: &str = crate::disks::LSBLK;
     /// Off-site replication's three. Absolute, for the reason every path here is: the agent runs
@@ -664,6 +665,34 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
         let out = self.runner.run(bin::ZPOOL, &borrowed)?;
         Ok(Response::PoolCreated { detail: out })
+    }
+
+    /// Erase one disk so the pool wizard can accept it. See `op::Request::WipeDisk`.
+    fn wipe_disk(&self, disk: &crate::op::DiskRef) -> Result<Response, SeamError> {
+        // A FRESH inventory, taken here and not reused from whatever dialogue the caller was
+        // looking at — the WWN re-check inside `wipe_plan` is only worth anything against the
+        // box's state at the moment of the erase.
+        let listing = self.runner.run(bin::LSBLK, &crate::disks::argv())?;
+        let (inventory, truncated) = crate::disks::parse(&listing)?;
+        if truncated {
+            return Ok(Response::Refused {
+                reason: "this machine reports more block devices than one inventory can carry;                          a wipe cannot be checked against a partial list"
+                    .to_string(),
+            });
+        }
+        if let Err(error) = crate::disks::wipe_plan(disk, &inventory) {
+            return Ok(Response::Refused {
+                reason: error.to_string(),
+            });
+        }
+
+        // The path is built from a `SafeComponent`, so it cannot climb out of by-id or carry a
+        // flag; `--` ends option parsing anyway, the same discipline as every other argv here.
+        let device = format!("/dev/disk/by-id/{}", disk.by_id.as_str());
+        let out = self
+            .runner
+            .run(bin::WIPEFS, &["--all", "--", device.as_str()])?;
+        Ok(Response::DiskWiped { detail: out })
     }
 
     /// Move one entry to another name inside a share, durably, without ever overwriting.
@@ -2036,6 +2065,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 topology,
                 disks,
             } => self.create_pool(pool.as_str(), *topology, disks),
+            crate::op::Request::WipeDisk { disk } => self.wipe_disk(disk),
 
             Request::ListPools {} => {
                 let out = self
@@ -2715,6 +2745,85 @@ mod tests {
       {"kname":"sdc","type":"disk","size":100,"wwn":"0xS","id-link":"ata-SYS","pttype":"gpt",
        "children":[{"kname":"sdc1","type":"part","size":100,"fstype":"ext4","mountpoint":"/"}]}
     ]}"#;
+
+    /// İçinde eski bir sistem imajı olan (GPT + bölümler, BAĞLI DEĞİL) ve çıkarılabilir bir disk.
+    const WIPE_DISKS: &str = r#"{"blockdevices":[
+      {"kname":"sdd","type":"disk","size":100,"wwn":"0xD","id-link":"ata-DOLU","pttype":"gpt",
+       "children":[{"kname":"sdd1","type":"part","size":100,"fstype":"vfat"}]},
+      {"kname":"sde","type":"disk","size":100,"wwn":"0xE","id-link":"usb-CUBUK","rm":true,
+       "pttype":"dos"},
+      {"kname":"sdc","type":"disk","size":100,"wwn":"0xS","id-link":"ata-SYS","pttype":"gpt",
+       "children":[{"kname":"sdc1","type":"part","size":100,"fstype":"ext4","mountpoint":"/"}]}
+    ]}"#;
+
+    #[test]
+    fn wiping_reads_the_box_first_and_then_runs_one_wipefs_all() {
+        // Havuz oluşturmadaki sıra özelliğinin aynısı: envanter TAZE, sonra tek bir wipefs.
+        // İçinde vfat olan bir disk (havuzun reddettiği durum) burada MEŞRU hedef — silmenin
+        // var olma sebebi içerik.
+        let r = MockCommandRunner::with_responses([WIPE_DISKS.into(), String::new()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"wipe_disk","disk":{"by_id":"ata-DOLU","wwn":"0xD"}}"#,
+            peer(API_UID),
+            "wd1",
+            "operator wiped a disk",
+        );
+        assert!(matches!(resp, Response::DiskWiped { .. }), "{resp:?}");
+
+        let inventory = r.call(0).expect("lsblk ran first");
+        assert_eq!(inventory[0], crate::disks::LSBLK);
+        let wipe = r.call(1).expect("wipefs ran second");
+        assert_eq!(wipe[0], bin::WIPEFS);
+        assert_eq!(wipe[1], "--all");
+        assert_eq!(wipe[2], "--");
+        assert_eq!(wipe[3], "/dev/disk/by-id/ata-DOLU");
+        assert!(r.call(2).is_none(), "wipefs'ten sonra başka komut yok");
+    }
+
+    #[test]
+    fn wiping_a_removable_stick_is_allowed_but_the_system_disk_never_is() {
+        // Çıkarılabilirlik havuz İÇİN ret sebebi, silme için değil: USB bellek silinebilir.
+        let r = MockCommandRunner::with_responses([WIPE_DISKS.into(), String::new()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"wipe_disk","disk":{"by_id":"usb-CUBUK","wwn":"0xE"}}"#,
+            peer(API_UID),
+            "wd2",
+            "operator wiped a stick",
+        );
+        assert!(matches!(resp, Response::DiskWiped { .. }), "{resp:?}");
+
+        // Sistem diski: hiçbir onay geçiremez, ve wipefs HİÇ çalışmaz.
+        let r = MockCommandRunner::with_responses([WIPE_DISKS.into()]);
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"wipe_disk","disk":{"by_id":"ata-SYS","wwn":"0xS"}}"#,
+            peer(API_UID),
+            "wd3",
+            "operator wiped the system disk",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        assert!(r.call(1).is_none(), "reddedilen silmede wipefs çalışmadı");
+    }
+
+    #[test]
+    fn wiping_refuses_a_swapped_disk_by_wwn() {
+        // Sihirbaz açıkken yuvadaki disk değişti: by-id aynı ada çözülüyor ama WWN başka.
+        // Onaylanan disk bu değil — silinmez.
+        let r = MockCommandRunner::with_responses([WIPE_DISKS.into()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"wipe_disk","disk":{"by_id":"ata-DOLU","wwn":"0xBASKA"}}"#,
+            peer(API_UID),
+            "wd4",
+            "operator wiped a disk",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        assert!(r.call(1).is_none());
+    }
 
     #[test]
     fn creating_a_pool_reads_the_box_first_and_then_runs_one_zpool_create() {
