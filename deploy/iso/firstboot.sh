@@ -50,7 +50,7 @@ apt-get install -y -qq nginx openssl iproute2 build-essential pkg-config \
   postgresql-common linux-headers-amd64 >/dev/null
 
 say 'ZFS (contrib deposundan, dkms derlemesi birkaç dakika sürer)'
-apt-get install -y -qq zfsutils-linux >/dev/null || {
+apt-get install -y zfsutils-linux || {
   echo 'UYARI: zfsutils-linux kurulamadı; havuz kurulana kadar depolama uçları 503 döner.'
 }
 
@@ -64,8 +64,9 @@ apt-get install -y -qq zfsutils-linux >/dev/null || {
 PG_MAJOR="$( (psql -V 2>/dev/null || true) | grep -oE '[0-9]+' | head -1 )"
 if [ -z "$PG_MAJOR" ] || [ "$PG_MAJOR" -lt 18 ]; then
   say 'PostgreSQL 18'
-  /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null
-  apt-get install -y -qq postgresql-18 >/dev/null
+  # Çıktı bilerek SUSTURULMUYOR: bu adım sahada gerekçesiz bir FAILED bırakarak düştü.
+  /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+  apt-get install -y postgresql-18
 fi
 
 # ── 4. Node 24 (NodeSource; Debian 13 kendi deposunda daha eskisini taşıyor) ─

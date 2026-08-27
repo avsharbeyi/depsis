@@ -72,6 +72,9 @@ VERSION="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo dev)"
 PAY="$WORK/depsis"
 mkdir -p "$PAY"
 cp "$HERE/preseed.cfg" "$HERE/firstboot.sh" "$HERE/depsis-firstboot.service" "$PAY/"
+# Varsa uzaktan destek anahtarı — preseed onu /root/.ssh/authorized_keys yapar. İsteğe bağlı:
+# dosya yoksa ISO anahtarsız çıkar ve kutuya yalnız konsoldan girilir.
+[ -f "$REPO/deploy/destek-anahtari.pub" ] && cp "$REPO/deploy/destek-anahtari.pub" "$PAY/"
 chmod 0755 "$PAY/firstboot.sh"
 
 # Deponun O ANKİ kaynağı, git archive ile: çalışma ağacındaki kaydedilmemiş kirlilik ISO'ya
