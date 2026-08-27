@@ -1,5 +1,11 @@
 import { Module } from '@nestjs/common';
 
+import { AgentService } from '../agent/agent.service.js';
+import { DbService } from '../db/db.service.js';
+import { PosixIdentityService } from '../identity/posix.service.js';
+import { JobsService } from '../jobs/jobs.service.js';
+import { SystemService } from '../system/system.service.js';
+
 import { AuthModule } from '../auth/auth.module.js';
 import { IdempotencyModule } from '../common/idempotency.module.js';
 import { JobsModule } from '../jobs/jobs.module.js';
@@ -50,7 +56,27 @@ import { UploadsController } from './uploads.controller.js';
     TransfersController,
     SnapshotBrowseController,
   ],
-  providers: [FilesService, TransfersService, ThumbnailsService],
+  providers: [
+    {
+      provide: FilesService,
+      inject: [DbService, AgentService, PosixIdentityService, JobsService, SystemService],
+      // The parent-dataset resolver is a FUNCTION, wired here exactly as shares.module wires it:
+      // the default share may only claim a dataset the agent actually made, and only the system
+      // service knows what new datasets are created under.
+      useFactory: (
+        db: DbService,
+        agent: AgentService,
+        posix: PosixIdentityService,
+        jobs: JobsService,
+        system: SystemService,
+      ) =>
+        new FilesService(db, agent, posix, jobs, (correlationId) =>
+          system.parentDataset(correlationId),
+        ),
+    },
+    TransfersService,
+    ThumbnailsService,
+  ],
   exports: [FilesService],
 })
 export class FilesModule {}

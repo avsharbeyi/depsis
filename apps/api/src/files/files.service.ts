@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import {
   canMove,
   isPermission,
@@ -56,6 +57,24 @@ export class InvalidNameError extends Error {
   constructor(reason: string) {
     super(reason);
     this.name = 'InvalidNameError';
+  }
+}
+
+/**
+ * The DI token for the parent-dataset resolver, because the value is a FUNCTION: a class token
+ * would make `CopyModule`'s plain class provider — which builds this service for the worker,
+ * where no default share is ever created — unresolvable, and it did exactly that.
+ */
+export const PARENT_DATASET_RESOLVER = 'depsis:files:parent-dataset-resolver';
+
+/** Storage is not set up, so the tenant's first share cannot be created yet. */
+export class NoStorageForSharesError extends Error {
+  constructor() {
+    super(
+      'this appliance has no storage pool yet, so there is nowhere to keep files. Create a pool ' +
+        'in the storage screen first',
+    );
+    this.name = 'NoStorageForSharesError';
   }
 }
 
@@ -637,16 +656,29 @@ export class FilesService {
      * close that, and only the queue can deliver it.
      */
     private readonly jobs: JobsService,
-  ) {}
+    /**
+     * Resolves the dataset new shares are created under — `SystemService.parentDataset`, handed
+     * in as a function by `files.module` the same way `shares.module` wires `SharesService`.
+     * Optional: null in tests constructed without storage plumbing and in `CopyModule`'s worker
+     * wiring, where nothing creates a default share; the null path keeps the historical
+     * row-only default share and must never be the API's production wiring.
+     */
+    @Optional()
+    @Inject(PARENT_DATASET_RESOLVER)
+    parentDataset: ((correlationId: string) => Promise<string | null>) | null = null,
+  ) {
+    this.parentDataset = parentDataset ?? null;
+  }
+
+  private readonly parentDataset: ((correlationId: string) => Promise<string | null>) | null;
 
   /**
    * The organisation's default share, created on first use.
    *
-   * A deliberate stopgap with a visible name, not a design. DEPSIS is multi-share by intent and
-   * there is no share administration surface yet; without something here a freshly claimed box has
-   * nowhere at all to put a file, so every file endpoint would 404 on a correctly configured
-   * appliance. When share administration lands, this becomes the seed of the first share rather
-   * than a hidden special case — which is why it is an ordinary row with an ordinary name.
+   * Share administration exists now; what this keeps is the freshly claimed box, where the file
+   * manager is opened before anyone has made a share. It creates a REAL one — dataset on disk
+   * first, row second — because its row-only ancestor left a ghost: `dataset = slug`, nothing
+   * behind it, every Samba publish on the box failing on a share that could hold no file.
    */
   async defaultShare(organizationId: string, slug: string): Promise<ShareRow> {
     return this.db.withTenant(organizationId, async (db) => {
@@ -660,11 +692,34 @@ export class FilesService {
       // The share name has to satisfy the agent's component rules, and an organisation slug is
       // already constrained to `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` — a superset-safe source.
       const name = slug;
+
+      // THE DATASET FIRST, AND FOR REAL. The first tokenless field install measured what the
+      // row-only version costs: this method wrote `dataset = slug` with nothing on disk, and that
+      // ghost — a share whose dataset does not exist — failed every Samba publish on the box
+      // (publish is all-or-nothing) and could hold no file. The row may only claim a dataset the
+      // agent just made or confirmed.
+      let dataset = name;
+      if (this.parentDataset !== null) {
+        const correlationId = randomUUID();
+        const parent = await this.parentDataset(correlationId);
+        if (parent === null) throw new NoStorageForSharesError();
+        dataset = `${parent}/${name}`;
+        const made = await this.agent.call(
+          { op: 'create_dataset', dataset, acltype: 'posixacl', refquota_bytes: null },
+          `create the default share '${name}'`,
+          correlationId,
+        );
+        // `conflict` is the dataset already existing — a re-run after a first attempt that made
+        // the dataset and lost the transaction. The dataset is exactly what we were about to
+        // create, and the ROW is what is missing, so the honest move is to proceed to it.
+        if (made.status !== 'conflict') expectStatus(made, 'created');
+      }
+
       const created = await db.query<ShareRow>(
         `INSERT INTO public.shares (organization_id, name, dataset)
          VALUES ($1, $2, $3)
          RETURNING id, name, dataset, read_only`,
-        [organizationId, name, name],
+        [organizationId, name, dataset],
       );
       const share = created[0];
       if (!share) throw new Error('the default share was not created');
