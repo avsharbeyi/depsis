@@ -70,10 +70,16 @@ TasksMax=64
 # the box cannot become a privilege escalation path through this service.
 NoNewPrivileges=yes
 
-# The agent speaks to exactly one socket family and reaches no network. If a future change
-# introduces an HTTP client into a root daemon, it fails here instead of shipping.
-RestrictAddressFamilies=AF_UNIX
+# LOOPBACK VE YALNIZ LOOPBACK. İlk hâli her IP ailesini yasaklıyordu ("ajan ağa hiç ulaşmaz"),
+# ve ilk gerçek kurulum bunun ZeroTier controller'ıyla çeliştiğini buldu: zerotier-one'ın yerel
+# API'si 127.0.0.1:9993'te — başka arayüzü yok — ve ajan ona ulaşamayınca her uzaktan-erişim
+# işlemi "ZeroTier yok" diye yanıtlandı. İzin tam olarak döngü arayüzü kadar açıldı:
+# IPAddressDeny=any duruyor, yalnız localhost delik. Dışarıya sızdırma koruması aynen yerinde —
+# root bir daemon'a HTTP istemcisi ekleyen gelecekteki bir değişiklik, internete yine buradan
+# değil ancak bilinçli bir birim düzenlemesiyle çıkabilir.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 IPAddressDeny=any
+IPAddressAllow=localhost
 
 RestrictNamespaces=yes
 RestrictRealtime=yes
