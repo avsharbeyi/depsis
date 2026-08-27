@@ -206,6 +206,23 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             });
         };
 
+        // The staging skeleton, made HERE and nowhere else. Nothing else creates
+        // `<share>/.depsis/staging` — not `create_dataset`, not the installer — and the first
+        // tokenless field box measured the consequence: every folder uploaded, every FILE died
+        // with "no such file: .depsis/staging/….part", because the first chunk of the first
+        // upload into a fresh share walked into a directory that had never existed. Owned by
+        // root at the seam's 0750: Samba's veto hides `.depsis` from clients, and no tenant id
+        // has any business owning the agent's own tree.
+        for (parent, name) in [
+            (&[share][..], STAGING_DIR[0]),
+            (&[share, STAGING_DIR[0]][..], STAGING_DIR[1]),
+        ] {
+            match paths.create_dir(parent, name, 0, 0) {
+                Ok(()) | Err(SeamError::AlreadyExists(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+
         let relative = [share, STAGING_DIR[0], STAGING_DIR[1], staging_name];
         // Append, not CreateNew: tus uploads resume, and the second PATCH for one upload must
         // continue the same `.part` rather than being refused for existing.
@@ -3603,6 +3620,25 @@ mod tests {
         let raw = format!(r#"{{"op":"open_transfer","share":"{share}","staging_name":"{name}"}}"#);
         h.agent(&r, &s)
             .handle(&raw, peer(API_UID), "c-transfer", "upload")
+    }
+
+    /// A FRESH share has no `.depsis/` at all — nothing creates it at dataset time — and the
+    /// first field box measured what that meant: every upload's first chunk answered "no such
+    /// file". Opening a transfer must build the skeleton itself.
+    #[test]
+    fn opening_a_transfer_builds_the_staging_skeleton_on_a_fresh_share() {
+        let h = Harness::with_share("alice");
+        std::fs::remove_dir_all(h.share_path(&["alice", ".depsis"])).expect("strip the skeleton");
+
+        match open_transfer(&h, "alice", "u1.part") {
+            Response::Transfer { offset, .. } => assert_eq!(offset, 0),
+            other => unreachable!("expected a transfer on a fresh share, got {other:?}"),
+        }
+        assert!(
+            h.share_path(&["alice", ".depsis", "staging", "u1.part"])
+                .exists(),
+            "the skeleton and the staging file must both exist"
+        );
     }
 
     #[test]
