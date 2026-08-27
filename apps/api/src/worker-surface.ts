@@ -16,6 +16,10 @@
  */
 
 export { AgentModule } from './agent/agent.module.js';
+// Denetim: @Global, ama Nest'te global'lik ancak modül BİR köke kayıtlıysa işler. Worker'ın kökü
+// bunu almayınca AuthService'in (ve denetim kaydeden her servisin) bağımlılığı worker'da
+// çözülemedi — ve bunu ilk yakalayan test değil, gerçek donanımdaki ilk kurulum oldu.
+export { AuditModule } from './audit/audit.module.js';
 export {
   AgentRefusedError,
   AgentService,

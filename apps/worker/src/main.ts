@@ -3,6 +3,7 @@ import { Logger, Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import {
   AclApplyModule,
+  AuditModule,
   AclApplyService,
   AgentModule,
   AgentService,
@@ -50,6 +51,7 @@ import { WorkerService } from './worker.service.js';
     JobsModule,
     PosixIdentityModule,
     AclApplyModule,
+  AuditModule,
     CopyModule,
     TrashRetentionModule,
     IndexerModule,
