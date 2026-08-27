@@ -92,12 +92,15 @@ xorriso -osirrox on -indev "$SRC_ISO" \
   -extract /md5sum.txt "$WORK/md5sum.txt" >/dev/null 2>&1
 chmod +w "$WORK/txt.cfg" "$WORK/grub.cfg" "$WORK/md5sum.txt"
 
+# `vga=788` YOK, ve bu bir saha dersi: Debian'ın kendi metin girdisindeki o eski VESA kipi bazı
+# ekran kartlarında "Trying to enable the frame buffer" satırında donuyor. Çekirdeğin kendi
+# kipini seçmesi her donanımda güvenli olan yol.
 KARGS='auto=true priority=high preseed/file=/cdrom/depsis/preseed.cfg'
 
 {
   printf 'default depsis\nlabel depsis\n\tmenu label ^DEPSIS kur (otomatik)\n'
   printf '\tkernel /install.amd/vmlinuz\n'
-  printf '\tappend %s vga=788 initrd=/install.amd/initrd.gz ---\n' "$KARGS"
+  printf '\tappend %s initrd=/install.amd/initrd.gz ---\n' "$KARGS"
   cat "$WORK/txt.cfg" | sed 's/^default .*//'
 } > "$WORK/txt.cfg.new"
 mv "$WORK/txt.cfg.new" "$WORK/txt.cfg"
@@ -105,7 +108,7 @@ mv "$WORK/txt.cfg.new" "$WORK/txt.cfg"
 {
   printf 'set default=0\nset timeout=8\n'
   printf 'menuentry "DEPSIS kur (otomatik)" {\n'
-  printf '    linux    /install.amd/vmlinuz %s vga=788 ---\n' "$KARGS"
+  printf '    linux    /install.amd/vmlinuz %s ---\n' "$KARGS"
   printf '    initrd   /install.amd/initrd.gz\n}\n'
   cat "$WORK/grub.cfg"
 } > "$WORK/grub.cfg.new"
