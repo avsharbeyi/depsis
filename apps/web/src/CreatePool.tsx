@@ -295,10 +295,14 @@ export function CreatePool({
           <summary className="note">
             Kullanılamayan {blocked.length} disk — neden olmadığıyla birlikte
           </summary>
+          {/* Sıfırla düğmesi BURADA DA — sahada ödendi: ilk disk temizlenince bu form açılıyor
+              ve düğme yalnız "hiç aday yok" dalında kaldığı için ikinci disk temizlenemiyordu.
+              Nedenle birlikte çare de aynı satırda durmalı. */}
           {blocked.map((disk) => (
             <div className="netrow" key={disk.byId ?? disk.kname}>
               <span className="lbl">{disk.model ?? disk.kname}</span>
               <span className="val m">{why(disk)}</span>
+              <WipeDisk disk={disk} notify={notify} onWiped={onCreated} />
             </div>
           ))}
         </details>
