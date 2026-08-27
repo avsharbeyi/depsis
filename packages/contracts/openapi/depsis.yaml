@@ -3587,9 +3587,8 @@ components:
 
     SetupClaimRequest:
       type: object
-      required: [token, organizationSlug, organizationName, adminUsername, adminPassword]
+      required: [organizationSlug, organizationName, adminUsername, adminPassword]
       properties:
-        token: { type: string, maxLength: 128 }
         organizationSlug:
           type: string
           maxLength: 63

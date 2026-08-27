@@ -771,8 +771,9 @@ finish() {
   printf "               %seden tek şey. Kendi sertifikanız varsa %s içine koyup nginx'i yenileyin.%s\n" "$D" "$TLS_DIR" "$Z"
 
   if grep -q '"setupRequired":true' <<<"$claimed" 2>/dev/null; then
-    printf "\n  İlk yönetici Kurulum sihirbazı bekliyor. Tek kullanımlık jeton API'nin günlüğünde:\n"
-    printf '               %ssudo journalctl -u depsis-api.service | grep -A2 "setup token"%s\n' "$D" "$Z"
+    printf '\n  İlk yönetici Kurulum sihirbazı bekliyor: yukarıdaki adresi tarayıcıda açın ve\n'
+    printf '               ilk hesabı kurun. İlk kuran cihazın yöneticisi olur ve sihirbaz kapanır;\n'
+    printf '               jeton ya da anahtar yok.\n'
   else
     printf '\n  İlk yönetici Kurulmuş. Oturum açabilirsiniz.\n'
   fi

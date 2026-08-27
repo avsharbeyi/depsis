@@ -5633,7 +5633,6 @@ export interface components {
             role: string | null;
         };
         SetupClaimRequest: {
-            token: string;
             organizationSlug: string;
             organizationName: string;
             adminUsername: string;

@@ -1,4 +1,4 @@
-import { expect, setupToken, test } from './fixtures.js';
+import { expect, test } from './fixtures.js';
 
 import type { Locator, Page } from '@playwright/test';
 
@@ -15,14 +15,13 @@ import type { Locator, Page } from '@playwright/test';
  *
  * ── THE ORDER OF THESE TESTS IS LOAD-BEARING ─────────────────────────────────────────────────
  *
- * The claim is one-time in two places at once — the database row and the token held in the API
- * process's memory — so the successful claim is the LAST test in this file and everything that
- * needs an unclaimed box comes before it. Playwright runs a file's tests in declaration order, and
- * the `kurulum` project pins `workers: 1` / `fullyParallel: false` so that order is the real one.
+ * The claim is single-shot in the database, so the successful claim is the LAST test in this file
+ * and everything that needs an unclaimed box comes before it. Playwright runs a file's tests in
+ * declaration order, and the `kurulum` project pins `workers: 1` / `fullyParallel: false` so that
+ * order is the real one.
  *
  * The corollary: this file passes ONCE per unclaimed database. A second run needs
- * `bash tools/dev/e2e-stack.sh --reset-setup`, which rebuilds that database and restarts that API
- * so a fresh token is printed.
+ * `bash tools/dev/e2e-stack.sh --reset-setup`, which rebuilds that database and restarts that API.
  */
 
 /** Clears the wizard's `minLength={12}` without looking like a real secret. */
@@ -59,7 +58,7 @@ function uyari(page: Page): Locator {
   return page.getByRole('alert').locator('.tx');
 }
 
-/** Everything except the token, which is what each test varies. */
+/** The whole form. */
 async function formuDoldur(page: Page): Promise<void> {
   await alan(page, 'Cihaz adı').fill('Ev');
   await alan(page, 'Kısa ad').fill('ev');
@@ -92,18 +91,16 @@ test.describe('kurulum sihirbazı', () => {
     await expect(page.getByRole('heading', { name: 'Cihazı kur' })).toBeVisible();
   });
 
-  test('sahiplenilmemiş cihaz sihirbazı açıyor ve anahtarın nereden alınacağını söylüyor', async ({
+  test('sahiplenilmemiş cihaz sihirbazı açıyor ve tek atımlık olduğunu söylüyor', async ({
     page,
   }) => {
-    // The point of the screen: somebody who has just plugged the box in has no reason to know a
-    // token exists, so the instruction has to name the command that prints it. "Check the logs" is
-    // the version of this sentence that generates a support question.
-    const komut = page.locator('pre');
-    await expect(komut).toBeVisible();
-    await expect(komut).toContainText('journalctl');
-    await expect(komut).toContainText('depsis-api');
-
-    await expect(alan(page, 'Kurulum anahtarı')).toBeVisible();
+    // Jetonsuz tasarımın iki yükü bu ekranda: ilk kuranın yönetici olacağı AÇIKÇA yazmalı, ve
+    // cihazı kurmayan birinin ne yapacağı da (fişi çek, yeniden kur). Bir jeton alanı ya da
+    // journalctl komutu görünmemeli — o dünyaya dönüş, bu testin yakalayacağı gerileme.
+    await expect(page.getByText('ilk hesap cihazın yöneticisi olur')).toBeVisible();
+    await expect(page.getByText('siz kurmadıysanız')).toBeVisible();
+    await expect(page.locator('pre')).toHaveCount(0);
+    await expect(page.getByText('Kurulum anahtarı')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Cihazı sahiplen' })).toBeEnabled();
   });
 
@@ -169,7 +166,6 @@ test.describe('kurulum sihirbazı', () => {
       if (istek.url().includes('/setup/claim')) istekSayisi += 1;
     });
 
-    await alan(page, 'Kurulum anahtarı').fill(setupToken());
     await formuDoldur(page);
     await alan(page, 'Parola (tekrar)').fill(`${PAROLA}-baska`);
     await page.getByRole('button', { name: 'Cihazı sahiplen' }).click();
@@ -177,46 +173,13 @@ test.describe('kurulum sihirbazı', () => {
     await expect(uyari(page)).toHaveText('İki parola aynı değil.');
     expect(istekSayisi).toBe(0);
 
-    // Still the wizard: a refused submit must not have navigated anywhere, and the box must still
-    // be unclaimed — this test fills in the REAL token, so a claim leaking out here would take the
-    // rest of the file with it.
+    // Still the wizard: a refused submit must not have navigated anywhere, and the box must
+    // still be unclaimed — a claim leaking out here would take the rest of the file with it.
     await expect(page.getByRole('heading', { name: 'Cihazı kur' })).toBeVisible();
   });
 
-  test('yanlış anahtar reddediliyor ve form temizlenmiyor', async ({ page, consoleWatch }) => {
-    // Chrome logs every failed fetch to the console itself, and this test's whole subject is a
-    // request that must fail. Tolerated narrowly — a 401 — so any OTHER console error in the same
-    // test still fails it.
-    consoleWatch.tolerate(
-      /Failed to load resource.*401/,
-      'The 401 on POST /setup/claim IS the behaviour under test.',
-    );
-
-    await alan(page, 'Kurulum anahtarı').fill('bu-anahtar-dogru-degil');
-    await formuDoldur(page);
-    await page.getByRole('button', { name: 'Cihazı sahiplen' }).click();
-
-    await expect(uyari(page)).toBeVisible();
-    // Not the local mismatch check — this refusal has to have come back from the server. Without
-    // this line the test would also pass if the two password fields had silently drifted apart.
-    await expect(uyari(page)).not.toHaveText('İki parola aynı değil.');
-
-    // The actual subject. Five fields the owner has just typed, and a rejected token is the one
-    // mistake most likely to be a typo in the sixth. Clearing the form here means retyping all of
-    // it, including the two passwords nobody can read back off the screen.
-    await expect(alan(page, 'Kurulum anahtarı')).toHaveValue('bu-anahtar-dogru-degil');
-    await expect(alan(page, 'Cihaz adı')).toHaveValue('Ev');
-    await expect(alan(page, 'Kısa ad')).toHaveValue('ev');
-    await expect(alan(page, 'Kullanıcı adı')).toHaveValue('serkan');
-    await expect(alan(page, 'Parola')).toHaveValue(PAROLA);
-    await expect(alan(page, 'Parola (tekrar)')).toHaveValue(PAROLA);
-
-    await expect(page.getByRole('heading', { name: 'Cihazı kur' })).toBeVisible();
-  });
-
-  // ── LAST. This burns the token; nothing after it can find an unclaimed box. ──
-  test('doğru anahtarla sahiplenme giriş ekranına götürüyor', async ({ page }) => {
-    await alan(page, 'Kurulum anahtarı').fill(setupToken());
+  // ── LAST. This claims the box; nothing after it can find an unclaimed one. ──
+  test('sahiplenme giriş ekranına götürüyor', async ({ page }) => {
     await formuDoldur(page);
     await page.getByRole('button', { name: 'Cihazı sahiplen' }).click();
 
@@ -226,8 +189,8 @@ test.describe('kurulum sihirbazı', () => {
     await expect(page.getByRole('heading', { name: 'Giriş yap' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Cihazı kur' })).toHaveCount(0);
 
-    // Signed OUT, not signed in. Claiming the box creates the administrator; it must not also hand
-    // whoever ran the wizard a session, because the token was readable by anyone with the journal.
+    // Signed OUT, not signed in. Claiming the box creates the administrator; the account then
+    // proves itself the same way it always will — by logging in with its password.
     await expect(page.getByRole('button', { name: 'Alt barı aç' })).toHaveCount(0);
 
     // The server now says so too. This is what separates "the interface moved on" from "the claim

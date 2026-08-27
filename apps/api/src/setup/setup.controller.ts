@@ -13,7 +13,6 @@ import { AuditService } from '../audit/audit.service.js';
 import { SetupService } from './setup.service.js';
 
 const claimSchema = z.object({
-  token: z.string().min(1).max(128),
   organizationSlug: z.string().min(1).max(63),
   organizationName: z.string().min(1).max(200),
   adminUsername: z.string().trim().min(1).max(64),
@@ -59,7 +58,8 @@ export class SetupController {
     switch (result.outcome) {
       case 'ok':
         // Kutunun İLK denetim satırı, ve tek seferlik: bu cihaz kimin tarafından, hangi kuruluş
-        // adıyla sahiplenildi. Jeton satırda yok — zaten tüketildi ve bir daha geçmez.
+        // adıyla sahiplenildi. Jetonsuz tasarımda bu satırın değeri arttı — sahiplenmenin tek
+        // görgü tanığı bu kayıt.
         await this.audit.record(result.organizationId, {
           actorId: result.userId,
           action: 'setup.claimed',
@@ -68,10 +68,6 @@ export class SetupController {
         return { status: 'ok', organizationSlug: parsed.data.organizationSlug };
       case 'already-complete':
         throw new HttpException('setup has already been completed', HttpStatus.GONE);
-      case 'bad-token':
-        // No detail, and no distinction between "wrong token" and "no token is outstanding". Either
-        // answer would tell someone probing the endpoint whether guessing is worth continuing.
-        throw new HttpException('invalid setup token', HttpStatus.UNAUTHORIZED);
       case 'invalid':
         // Reasons ARE given here, unlike everywhere else: the caller is the machine's owner filling
         // in a form once, not an attacker probing for which field exists.

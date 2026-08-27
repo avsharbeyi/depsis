@@ -9,44 +9,18 @@ interface Props {
 }
 
 /**
- * The command block that shows where the setup token comes from.
- *
- * Styled here rather than in the stylesheet: `styles.css` is the ported v5 sheet and has no `pre`
- * rule, and this is the only `<pre>` in the product. The values are the reference's own field
- * vocabulary — the recessed near-black well and hairline edge that `input` uses — so the block
- * cannot be told apart from the port.
- */
-const COMMAND_BLOCK: React.CSSProperties = {
-  margin: 0,
-  background: 'rgba(0, 0, 0, 0.26)',
-  border: '1px solid var(--edge)',
-  borderRadius: 9,
-  padding: '10px 12px',
-  fontFamily: 'var(--mono)',
-  fontSize: 11.5,
-  lineHeight: 1.6,
-  color: 'var(--ink2)',
-  overflowX: 'auto',
-};
-
-/**
  * The one-time claim, as a form.
  *
- * The token is asked for first and explained, because a person who has just installed DEPSIS has
- * no reason to know a token exists. The instruction names the exact command that shows it — an
- * instruction that says "check the logs" is an instruction that generates a support question.
+ * TOKENSIZ. İlk tasarım günlüğe basılan tek kullanımlık bir anahtar istiyordu; anahtarı okumanın
+ * tek yolu terminaldi ve sahibi bunu üç kere yaşadı. Kilit artık formun kendisi değil, arkadaki
+ * tek atımlık veritabanı kaydı: ilk kuran kazanır, kapı sonsuza dek kapanır. Kalan küçük risk —
+ * aynı ağdaki bir başkasının senden önce sahiplenmesi — alttaki uyarı cümlesiyle ve denetim
+ * kaydına düşen ilk satırla karşılanıyor.
  *
- * Two sections on one page, not two steps. Splitting six fields across a wizard would mean the
- * device name could be accepted before the token is known to be valid, and the whole form is one
- * `POST /setup/claim` that either succeeds or does not.
- *
- * Five fields, down from six. The account used to want a username AND a display name, which on a
- * box whose owner creates three accounts by hand is one question too many for no benefit; and the
- * username field used to be labelled "E-posta", which made people type an address that the login
- * form would then refuse.
+ * Two sections on one page, not two steps: the whole form is one `POST /setup/claim` that either
+ * succeeds or does not.
  */
 export function SetupWizard({ onComplete }: Props): React.JSX.Element {
-  const [token, setToken] = useState('');
   const [organizationName, setOrgName] = useState('');
   const [organizationSlug, setSlug] = useState('');
   const [adminUsername, setUsername] = useState('');
@@ -68,7 +42,7 @@ export function SetupWizard({ onComplete }: Props): React.JSX.Element {
 
     setBusy(true);
     const { error: failure } = await api.POST('/setup/claim', {
-      body: { token, organizationSlug, organizationName, adminUsername, adminPassword },
+      body: { organizationSlug, organizationName, adminUsername, adminPassword },
     });
     setBusy(false);
 
@@ -76,9 +50,7 @@ export function SetupWizard({ onComplete }: Props): React.JSX.Element {
       // Unlike the login path, this endpoint names the field it rejected — the contract says so
       // explicitly, on the grounds that the person on the other side owns the machine and is
       // filling the form once. So the server's own sentence is worth more than a generic one.
-      setError(
-        problemMessage(failure, 'Kurulum tamamlanamadı. Anahtarı kontrol edip tekrar deneyin.'),
-      );
+      setError(problemMessage(failure, 'Kurulum tamamlanamadı.'));
       return;
     }
     onComplete();
@@ -93,30 +65,12 @@ export function SetupWizard({ onComplete }: Props): React.JSX.Element {
 
           <h1>Cihazı kur</h1>
           <p>
-            Bu sunucu henüz sahiplenilmemiş. Kuran kişi olduğunuzu göstermek için, servis başlarken
-            yazdırdığı tek kullanımlık anahtarı girin:
+            Bu sunucu henüz sahiplenilmemiş. Aşağıda kuracağınız ilk hesap cihazın yöneticisi olur
+            ve bu ekran bir daha açılmaz. Bu cihazı siz kurmadıysanız devam etmeyin: fişini çekin ve
+            yeniden kurun.
           </p>
-          <pre style={COMMAND_BLOCK}>
-            journalctl -u depsis-api | grep -A4 &apos;not set up&apos;
-          </pre>
 
           <form onSubmit={(e) => void submit(e)}>
-            <label>
-              Kurulum anahtarı
-              <input
-                value={token}
-                onChange={(e) => setToken(e.target.value.trim())}
-                autoComplete="off"
-                spellCheck={false}
-                maxLength={128}
-                autoFocus
-                required
-              />
-              <span className="sub">
-                Anahtar her yeniden başlatmada değişir; şu anki çalışmanınkini kullanın.
-              </span>
-            </label>
-
             <h2>Cihaz</h2>
             <label>
               Cihaz adı
@@ -125,6 +79,7 @@ export function SetupWizard({ onComplete }: Props): React.JSX.Element {
                 onChange={(e) => setOrgName(e.target.value)}
                 placeholder="Ev"
                 maxLength={200}
+                autoFocus
                 required
               />
             </label>

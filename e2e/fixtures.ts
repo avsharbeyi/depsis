@@ -91,23 +91,6 @@ export const admin = {
   password: process.env.DEPSIS_E2E_ADMIN_PASSWORD ?? 'depsis-e2e-parola-42',
 } as const;
 
-/**
- * The one-time claim token the unclaimed stack printed at boot.
- *
- * Throws rather than returning an empty string: a wizard test given no token would fill the form
- * with nothing and assert on the server's refusal, which passes for entirely the wrong reason.
- */
-export function setupToken(): string {
-  const token = process.env.DEPSIS_E2E_SETUP_TOKEN;
-  if (token === undefined || token === '') {
-    throw new Error(
-      'DEPSIS_E2E_SETUP_TOKEN is not set. Bring the stack up with `bash tools/dev/e2e-stack.sh`, ' +
-        'or put the unclaimed side back with `bash tools/dev/e2e-stack.sh --reset-setup`.',
-    );
-  }
-  return token;
-}
-
 /* ─── the desk ──────────────────────────────────────────────────────────────── */
 
 /** The brand mark in the corner, which is also the button that opens the dock. */

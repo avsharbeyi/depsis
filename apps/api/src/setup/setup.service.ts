@@ -1,12 +1,10 @@
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import { PasswordService } from '../auth/password.service.js';
 import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import { DbService } from '../db/db.service.js';
 
 export interface ClaimRequest {
-  token: string;
   organizationSlug: string;
   organizationName: string;
   adminUsername: string;
@@ -15,39 +13,29 @@ export interface ClaimRequest {
 
 export type ClaimResult =
   | { outcome: 'ok'; organizationId: string; userId: string }
-  | { outcome: 'bad-token' }
   | { outcome: 'already-complete' }
   | { outcome: 'invalid'; reason: string };
 
 /**
  * The one-time claim that turns a freshly installed box into somebody's box.
  *
- * The problem ADR-0009 states but does not solve: a NAS plugged into a LAN answers to everyone on
- * that LAN, and a setup wizard that is first-come-first-served hands the machine to whoever notices
- * it first. On an appliance that is not a theoretical concern — it is the normal case, because the
- * owner is usually still walking back to their desk.
+ * TOKENLESS, and that is a decision with a date on it. The first design required a one-time token
+ * printed to the journal, on ADR-0009's argument that a fresh NAS on a LAN is first-come-first-
+ * served. The first real owner then hit the other edge of that argument three times: the only way
+ * to READ the token is a terminal, and this is a product whose owner must never need one. The
+ * window the token defended — the minutes between the installer finishing and the owner opening a
+ * browser on their own home network — did not justify making every single installation start with
+ * an SSH session.
  *
- * The claim therefore needs a token, and the token is printed to the journal on boot while setup is
- * outstanding. Reading it needs console or SSH access, which is exactly the authority that should
- * decide who the first administrator is.
- *
- * That is not §6.3 being bent. §6.3 forbids the PASSWORD reaching a log, a QR code or a default
- * config; this is not a password. It is single-use, it authenticates exactly one request, it is
- * regenerated on every boot so a token scraped from an old journal is already dead, and once setup
- * completes it means nothing at all.
+ * What still holds, and is the real lock: the claim is SINGLE-SHOT. `claim_system_setup` is a
+ * database singleton — the first claim wins, every later one gets `already-complete`, and nothing
+ * reopens it. The residual risk is honest and small: someone else on the same LAN claiming the
+ * box in that window. The wizard says what to do about it ("bu cihazı siz kurmadıysanız fişini
+ * çekin ve yeniden kurun"), and the claim lands in the audit trail as the box's first entry.
  */
 @Injectable()
 export class SetupService implements OnModuleInit {
   private readonly logger = new Logger(SetupService.name);
-
-  /**
-   * Held in memory, never stored.
-   *
-   * A restart invalidates it, which is the safe direction: an operator who was interrupted reads
-   * the new token from the new boot's log, while a token captured from an old log is worthless.
-   * Storing it would mean a leaked backup carries a live claim on any box restored from it.
-   */
-  private tokenHash: Buffer | null = null;
 
   constructor(
     private readonly db: DbService,
@@ -60,25 +48,11 @@ export class SetupService implements OnModuleInit {
       this.logger.log('setup is complete; setup endpoints are closed');
       return;
     }
-
-    const token = randomBytes(32).toString('base64url');
-    this.tokenHash = createHash('sha256').update(token, 'utf8').digest();
-
-    // Deliberately loud and deliberately multi-line. An operator reading `journalctl -u depsis-api`
-    // has to be able to find this without knowing it exists.
+    // Loud on purpose, secret-free by design: whoever reads the journal learns only what the
+    // browser would also tell them.
     this.logger.warn(
-      '\n' +
-        '═══════════════════════════════════════════════════════════════════\n' +
-        '  DEPSIS is not set up yet.\n' +
-        '\n' +
-        '  Open the web interface and enter this one-time setup token:\n' +
-        '\n' +
-        `      ${token}\n` +
-        '\n' +
-        '  It is valid until this process restarts, and once only. Anyone who\n' +
-        '  can read it can become the first administrator, so treat it as a\n' +
-        '  credential until setup is finished.\n' +
-        '═══════════════════════════════════════════════════════════════════',
+      'DEPSIS is not set up yet. Open the web interface: the first account created there ' +
+        'becomes the administrator, once, and then setup closes forever.',
     );
   }
 
@@ -92,7 +66,6 @@ export class SetupService implements OnModuleInit {
 
   async claim(request: ClaimRequest): Promise<ClaimResult> {
     if (await this.isComplete()) return { outcome: 'already-complete' };
-    if (!this.tokenMatches(request.token)) return { outcome: 'bad-token' };
 
     const invalid = validate(request);
     if (invalid !== null) return { outcome: 'invalid', reason: invalid };
@@ -142,10 +115,6 @@ export class SetupService implements OnModuleInit {
         );
       }
 
-      // Burned even though the database already refuses a second claim. Two locks on a door that
-      // can only be opened once costs nothing, and the in-memory one closes the window between the
-      // database committing and the next request arriving.
-      this.tokenHash = null;
       this.logger.warn(`setup completed: organization ${row.organization_id}`);
 
       return { outcome: 'ok', organizationId: row.organization_id, userId: row.user_id };
@@ -155,14 +124,6 @@ export class SetupService implements OnModuleInit {
       if (isAlreadyComplete(error)) return { outcome: 'already-complete' };
       throw error;
     }
-  }
-
-  private tokenMatches(supplied: string): boolean {
-    if (this.tokenHash === null) return false;
-    const candidate = createHash('sha256').update(supplied, 'utf8').digest();
-    // Both are 32-byte digests, so the lengths always match and `timingSafeEqual` cannot throw.
-    // Hashing first is what guarantees that: comparing the raw strings would leak their length.
-    return timingSafeEqual(this.tokenHash, candidate);
   }
 }
 

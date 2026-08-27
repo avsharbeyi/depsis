@@ -31,9 +31,9 @@
 #   MAIN   depsis_e2e        migrated and CLAIMED, an administrator seeded    :3210
 #   SETUP  depsis_setup_e2e  migrated and NEVER claimed                       :3211
 #
-# The setup token lives only in the API process's memory and is regenerated on every boot, so
-# `--reset-setup` rebuilds that database AND restarts that process — which is what makes the wizard
-# test runnable twice on one machine instead of passing once and then failing forever.
+# The claim is tokenless but still single-shot in the database, so `--reset-setup` rebuilds that
+# database and restarts that process — which is what makes the wizard test runnable twice on one
+# machine instead of passing once and then failing forever.
 #
 # ── ONE ORIGIN PER STACK ──────────────────────────────────────────────────────────────────────
 #
@@ -418,13 +418,6 @@ launch_web() {
   return 1
 }
 
-# The one-time token is printed to the log at startup and never stored, so reading it out of the
-# log is exactly what an operator does with `journalctl -u depsis-api`. The pattern matches the
-# indented line SetupService prints inside its banner.
-read_setup_token() {
-  grep -oE '^ {6}[A-Za-z0-9_-]{20,}$' "$RUN/$1-api.log" | tail -1 | tr -d ' '
-}
-
 write_env_file() {
   # Read by e2e/playwright.config.ts. It lands in the repository rather than in $RUN because on a
   # developer box the stack runs inside WSL while Playwright runs from Windows, and the working
@@ -437,7 +430,6 @@ DEPSIS_E2E_SETUP_BASE_URL=http://127.0.0.1:$SETUP_WEB_PORT
 DEPSIS_E2E_ADMIN_USERNAME=$ADMIN_USERNAME
 DEPSIS_E2E_ADMIN_PASSWORD=$ADMIN_PASSWORD
 DEPSIS_E2E_ORG_SLUG=$ORG_SLUG
-DEPSIS_E2E_SETUP_TOKEN=$1
 # Which web bundle is being served, and whether the file tests have an agent to work through.
 # Neither is read by the config; both are here so a report can be traced to what produced it.
 DEPSIS_E2E_WEB_BUNDLE=${BUNDLE_ID:-unknown}
@@ -461,12 +453,7 @@ if [ "${1:-}" = '--reset-setup' ]; then
   echo '→ setup API'
   launch_api setup "$SETUP_API_PORT" "$SETUP_DB"
   wait_health "$SETUP_API_PORT" setup || exit 1
-  TOKEN="$(read_setup_token setup)"
-  [ -n "$TOKEN" ] || {
-    echo 'the setup API came up but printed no claim token; is that database already claimed?'
-    exit 1
-  }
-  write_env_file "$TOKEN"
+  write_env_file
   echo "  unclaimed again at http://127.0.0.1:$SETUP_WEB_PORT"
   exit 0
 fi
@@ -669,18 +656,13 @@ launch_web main "$MAIN_WEB_PORT" "$MAIN_API_PORT" || exit 1
 launch_web setup "$SETUP_WEB_PORT" "$SETUP_API_PORT" || exit 1
 
 echo '→ administrator on the main stack'
-MAIN_TOKEN="$(read_setup_token main)"
-[ -n "$MAIN_TOKEN" ] || {
-  echo 'the main API printed no claim token, so there is nobody to sign in as'
-  exit 1
-}
 # Through the WEB origin, not straight at the API. It is one more thing proven before a single test
 # runs: if the proxy or the CSRF check is wrong, this claim fails here with a readable message
 # instead of surfacing as fourteen sign-in tests that cannot explain themselves.
 CLAIM=$(curl -sS -X POST "http://127.0.0.1:$MAIN_WEB_PORT/api/v1/setup/claim" \
   -H 'content-type: application/json' \
   -H "origin: http://127.0.0.1:$MAIN_WEB_PORT" \
-  -d "{\"token\":\"$MAIN_TOKEN\",\"organizationName\":\"$ORG_NAME\",\"organizationSlug\":\"$ORG_SLUG\",\"adminUsername\":\"$ADMIN_USERNAME\",\"adminPassword\":\"$ADMIN_PASSWORD\"}")
+  -d "{\"organizationName\":\"$ORG_NAME\",\"organizationSlug\":\"$ORG_SLUG\",\"adminUsername\":\"$ADMIN_USERNAME\",\"adminPassword\":\"$ADMIN_PASSWORD\"}")
 case "$CLAIM" in
 *'"status":"ok"'*) echo '  claimed' ;;
 *)
@@ -725,12 +707,7 @@ if [ "$AGENT_ON" = 1 ]; then
   esac
 fi
 
-SETUP_TOKEN="$(read_setup_token setup)"
-[ -n "$SETUP_TOKEN" ] || {
-  echo 'the setup API printed no claim token'
-  exit 1
-}
-write_env_file "$SETUP_TOKEN"
+write_env_file
 
 cat <<INFO
 

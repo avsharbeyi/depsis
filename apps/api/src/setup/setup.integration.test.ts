@@ -17,10 +17,11 @@ import { SetupService } from './setup.service.js';
 /**
  * The one-time claim, against a real PostgreSQL.
  *
- * What has to be true is narrow and unforgiving: it works exactly once, a wrong token gets nothing,
- * two simultaneous claims produce one organization rather than two, and once it is done the door
- * does not reopen. Every one of those is a database property rather than a TypeScript one — the
- * singleton primary key is the arbiter, not the service — so none of it can be settled with a fake.
+ * What has to be true is narrow and unforgiving: it works exactly once, two simultaneous claims
+ * produce one organization rather than two, and once it is done the door does not reopen. There
+ * is no token any more — the claim is deliberately open until the first one lands — so the
+ * database singleton is the ONLY lock, and every one of these is a database property rather than
+ * a TypeScript one; none of it can be settled with a fake.
  *
  * These tests need a database with NO setup row, so they run against their own database rather
  * than the shared one. DEPSIS_TEST_SETUP_DATABASE_URL names it; without it they skip.
@@ -51,16 +52,6 @@ describeDb('system setup, against a real PostgreSQL', () => {
   let owner: DbService;
   let setup: SetupService;
 
-  /**
-   * The token, read the way an operator reads it: out of the log.
-   *
-   * The service never stores it — only its SHA-256 — so there is nothing to read back, and adding a
-   * getter that exists only for tests would mean testing a path production does not take. Capturing
-   * the log line exercises the real one, and it fails loudly if the message ever stops carrying the
-   * token, which is itself worth catching.
-   */
-  let lastToken = '';
-
   async function freshSetup(): Promise<SetupService> {
     // Wipe whatever a previous run left, so "works exactly once" is measured from a known state.
     await owner.withoutTenant('setup-status', async (q) => {
@@ -72,22 +63,24 @@ describeDb('system setup, against a real PostgreSQL', () => {
       await q.query('DELETE FROM organizations');
     });
 
-    lastToken = '';
+    // The boot log must not leak anything a browser would not also learn: the tokened design
+    // printed a credential here, and this pin is what keeps one from quietly coming back.
+    const printed: string[] = [];
     const spy = vi.spyOn(Logger.prototype, 'warn').mockImplementation((message: unknown) => {
-      const found = /\s([A-Za-z0-9_-]{40,})\s/.exec(String(message));
-      if (found?.[1] !== undefined) lastToken = found[1];
+      printed.push(String(message));
     });
     try {
       const service = new SetupService(db, new PasswordService(), noIdentity());
       await service.onModuleInit();
-      expect(lastToken, 'the boot log must carry a setup token').not.toBe('');
+      expect(
+        printed.some((line) => /[A-Za-z0-9_-]{40,}/.test(line)),
+        'the boot log must not carry a secret-shaped string',
+      ).toBe(false);
       return service;
     } finally {
       spy.mockRestore();
     }
   }
-
-  const tokenOf = (_service: SetupService): string => lastToken;
 
   beforeAll(async () => {
     db = new DbService(SETUP_URL as string);
@@ -101,8 +94,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
     await owner?.onModuleDestroy();
   });
 
-  const claimBody = (token: string, slug = 'firstorg'): Parameters<SetupService['claim']>[0] => ({
-    token,
+  const claimBody = (slug = 'firstorg'): Parameters<SetupService['claim']>[0] => ({
     organizationSlug: slug,
     organizationName: 'First Organisation',
     adminUsername: 'admin',
@@ -113,15 +105,9 @@ describeDb('system setup, against a real PostgreSQL', () => {
     expect(await setup.isComplete()).toBe(false);
   });
 
-  it('refuses a wrong token, and says nothing about why', async () => {
-    const result = await setup.claim(claimBody('not-the-token'));
-    expect(result).toEqual({ outcome: 'bad-token' });
-    expect(await setup.isComplete()).toBe(false);
-  });
-
   it('refuses a short password before touching the database', async () => {
     const result = await setup.claim({
-      ...claimBody(tokenOf(setup)),
+      ...claimBody(),
       adminPassword: 'short',
     });
     expect(result.outcome).toBe('invalid');
@@ -132,7 +118,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
     // A constraint violation reaching the caller as a 500 is a worse answer than a sentence naming
     // the field, and the person on the other end is the machine's owner filling in a form.
     const result = await setup.claim({
-      ...claimBody(tokenOf(setup)),
+      ...claimBody(),
       organizationSlug: 'Not A Slug',
     });
     expect(result.outcome).toBe('invalid');
@@ -140,7 +126,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
 
   it('claims the system, creating the organization and its administrator', async () => {
     const service = await freshSetup();
-    const result = await service.claim(claimBody(tokenOf(service)));
+    const result = await service.claim(claimBody());
 
     expect(result.outcome).toBe('ok');
     if (result.outcome !== 'ok') return;
@@ -163,7 +149,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
     // The claim is worthless if the account it produces cannot be used, and a password hashed into
     // a column nobody can verify against is exactly the kind of thing that passes every other test.
     const service = await freshSetup();
-    const claimed = await service.claim(claimBody(tokenOf(service)));
+    const claimed = await service.claim(claimBody());
     expect(claimed.outcome).toBe('ok');
 
     const auth = new AuthService(
@@ -187,12 +173,11 @@ describeDb('system setup, against a real PostgreSQL', () => {
     expect(login.outcome).toBe('ok');
   });
 
-  it('refuses a second claim, even with a valid token', async () => {
+  it('refuses a second claim', async () => {
     const service = await freshSetup();
-    const token = tokenOf(service);
-    expect((await service.claim(claimBody(token))).outcome).toBe('ok');
+    expect((await service.claim(claimBody())).outcome).toBe('ok');
 
-    const second = await service.claim(claimBody(token, 'secondorg'));
+    const second = await service.claim(claimBody('secondorg'));
     expect(second.outcome).toBe('already-complete');
 
     const orgs = await owner.withoutTenant('setup-status', (q) =>
@@ -202,17 +187,15 @@ describeDb('system setup, against a real PostgreSQL', () => {
   });
 
   it('a second SERVICE cannot claim an already-claimed system', async () => {
-    // A restart mints a new token. That must not reopen setup — otherwise restarting the API is a
-    // way to take the machine back from whoever owns it.
+    // A restart must not reopen setup — otherwise restarting the API is a way to take the
+    // machine back from whoever owns it.
     const service = await freshSetup();
-    expect((await service.claim(claimBody(tokenOf(service)))).outcome).toBe('ok');
+    expect((await service.claim(claimBody())).outcome).toBe('ok');
 
     const restarted = new SetupService(db, new PasswordService(), noIdentity());
     await restarted.onModuleInit();
     expect(await restarted.isComplete()).toBe(true);
-    expect((await restarted.claim(claimBody(tokenOf(restarted), 'thirdorg'))).outcome).toBe(
-      'already-complete',
-    );
+    expect((await restarted.claim(claimBody('thirdorg'))).outcome).toBe('already-complete');
   });
 
   it('two simultaneous claims produce exactly one organization', async () => {
@@ -220,11 +203,10 @@ describeDb('system setup, against a real PostgreSQL', () => {
     // check, both call the function, and the database decides — not the order the checks happened
     // to run in.
     const service = await freshSetup();
-    const token = tokenOf(service);
 
     const results = await Promise.all([
-      service.claim(claimBody(token, 'raceone')),
-      service.claim(claimBody(token, 'racetwo')),
+      service.claim(claimBody('raceone')),
+      service.claim(claimBody('racetwo')),
     ]);
 
     const succeeded = results.filter((r) => r.outcome === 'ok');
@@ -240,8 +222,8 @@ describeDb('system setup, against a real PostgreSQL', () => {
     const service = await freshSetup();
     // A duplicate slug is impossible on a clean system, so the failure is forced from the other
     // side: claim once, then claim again and confirm the second attempt created no orphan.
-    expect((await service.claim(claimBody(tokenOf(service)))).outcome).toBe('ok');
-    await service.claim(claimBody(tokenOf(service), 'leftover'));
+    expect((await service.claim(claimBody())).outcome).toBe('ok');
+    await service.claim(claimBody('leftover'));
 
     const orphans = await owner.withoutTenant('setup-status', (q) =>
       q.query<{ n: string }>(
