@@ -635,6 +635,10 @@ reverse_proxy() {
 units() {
   step 'systemd birimleri'
   local f
+  # tmpfiles: podman'ın paylaşılan çalışma dizini, doğru sahiplikle (gerekçe dosyanın içinde).
+  install -m 0644 "$REPO/deploy/tmpfiles/depsis-apps.conf" /etc/tmpfiles.d/depsis-apps.conf
+  systemd-tmpfiles --create /etc/tmpfiles.d/depsis-apps.conf || true
+
   for f in "$REPO"/deploy/systemd/*; do
     install -m 0644 "$f" "/etc/systemd/system/$(basename "$f")"
   done

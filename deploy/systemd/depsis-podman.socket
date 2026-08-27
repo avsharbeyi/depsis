@@ -17,8 +17,8 @@ ListenStream=/run/depsis-apps/podman.sock
 SocketUser=depsis-apps
 SocketGroup=depsis-api
 SocketMode=0660
-RuntimeDirectory=depsis-apps
-RuntimeDirectoryMode=0750
+# Dizin tmpfiles.d/depsis-apps.conf ile, depsis-apps sahipliginde yaratilir. Buradaki
+# RuntimeDirectory ROOT sahipliginde yaratiyordu ve podman kendi alt dizinini acamiyordu.
 # API bağlanır ama soketi silip yerine kendi dinleyicisini koyamaz — ajan soketiyle aynı gerekçe.
 Accept=no
 RemoveOnStop=yes

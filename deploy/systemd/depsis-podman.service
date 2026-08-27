@@ -18,7 +18,10 @@ Environment=HOME=/home/depsis-apps
 ExecStart=/usr/bin/podman system service --time=0
 Restart=on-failure
 RestartSec=2s
-NoNewPrivileges=yes
+# NoNewPrivileges BURADA OLMAZ ve bu da sahada ölçüldü: köksüz podman, kullanıcı ad alanını
+# setuid `newuidmap`/`newgidmap` ile kurar; NNP setuid'i keser ve servis "write to uid_map
+# failed" ile 125'e düşer. Köksüzlüğün kendisi zaten kısıtın büyüğü — konteynerler kutuda
+# yetkisiz bir hesabın ad alanında koşar.
 
 [Install]
 WantedBy=multi-user.target
