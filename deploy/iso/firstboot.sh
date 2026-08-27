@@ -61,7 +61,10 @@ apt-get install -y zfsutils-linux || {
 # hata basıp boş dönüyor, boş dize sayı karşılaştırmasını patlatıyor ve `if` koşulu sessizce
 # yanlışa düşüyordu — PostgreSQL hiç kurulmadan geçiliyordu. Sürümü hatayı yutarak oku; boşsa
 # "yok" say.
-PG_MAJOR="$( (psql -V 2>/dev/null || true) | grep -oE '[0-9]+' | head -1 )"
+# Sondaki `|| true` süs değil: psql yokken grep "eşleşme yok" ile 1 döner, `pipefail` bunu
+# komut değiştirmenin durumuna taşır ve `set -e` betiği TAM BURADA öldürür — üç saha kurulumu
+# arka arkaya, ZFS'ten hemen sonra, tek satır iz bırakmadan böyle düştü.
+PG_MAJOR="$( (psql -V 2>/dev/null || true) | grep -oE '[0-9]+' | head -1 || true )"
 if [ -z "$PG_MAJOR" ] || [ "$PG_MAJOR" -lt 18 ]; then
   say 'PostgreSQL 18'
   # Çıktı bilerek SUSTURULMUYOR: bu adım sahada gerekçesiz bir FAILED bırakarak düştü.
@@ -70,7 +73,7 @@ if [ -z "$PG_MAJOR" ] || [ "$PG_MAJOR" -lt 18 ]; then
 fi
 
 # ── 4. Node 24 (NodeSource; Debian 13 kendi deposunda daha eskisini taşıyor) ─
-NODE_MAJOR="$( (node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true) | head -1 )"
+NODE_MAJOR="$( (node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true) | head -1 || true )"
 if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 24 ]; then
   say 'Node 24'
   curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null
