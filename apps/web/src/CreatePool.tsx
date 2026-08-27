@@ -266,6 +266,15 @@ export function CreatePool({
         <div className="lbl" style={{ marginBottom: 6 }}>
           Diskler ({selected.length} seçili, en az {MINIMUM[topology]})
         </div>
+        {/* USB'DEN BAĞLI DİSK UYARISI — sahada ödendi: USB kutudaki SSD bir an düşünce havuz
+            askıya alındı ve cihaz donmuş gibi göründü. Yasak değil (tek diskli kutularda çoğu
+            zaman tek yol bu), ama seçen kişi neye imza attığını görsün. */}
+        {candidates.some((disk) => disk.transport === 'usb') && (
+          <p className="note" style={{ color: 'var(--warn)' }}>
+            USB ile bağlı disk: kablo ya da güç bir an kesilirse havuz askıya alınır ve depolama
+            duraklar. Mümkünse SATA/NVMe tercih edin; USB kullanacaksanız kablosuna güvenin.
+          </p>
+        )}
         {candidates.map((disk) => (
           <label key={disk.byId} className="netrow" style={{ cursor: 'pointer' }}>
             <input

@@ -778,6 +778,9 @@ impl ExecRunner {
     /// needs to see EOF and far shorter than anyone would call a hang.
     const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+    /// Tek bir komutun en fazla ne kadar koşabileceği; gerekçe `run` içinde.
+    const RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
     /// The writer's output if it finishes within the grace, `None` if it is still running.
     fn reap(
         child: &mut std::process::Child,
@@ -837,9 +840,40 @@ impl ExecRunner {
 
 impl CommandRunner for ExecRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, SeamError> {
-        let out = Self::hardened(program, args)
-            .output()
+        // ZAMAN AŞIMI, ve sahada ödenmiş bedeli var: USB'deki disk bir anlığına düşünce ZFS
+        // havuzu ASKIYA aldı, askıdaki havuza dokunan `zfs` komutu D durumunda asılı kaldı, ve
+        // ajanın SIRALI kontrol soketi o tek komutun arkasında sonsuza dek bekledi — sahibin
+        // gördüğü şey "depolama ve sistem ajanları yanıt vermiyor"du, oysa asılı olan tek bir
+        // alt süreçti. Bir komutun asılması artık O KOMUTUN hatasıdır, cihazın felci değil.
+        //
+        // İki dakika: dkms kurulumları buradan geçmiyor (onlar firstboot'un işi) ve buradan
+        // geçen en uzun meşru iş — büyük bir `zfs send` dilimi, bir scrub başlatması — on
+        // saniyeler mertebesinde. Süre dolunca çocuk öldürülür ve hata, neyin dolduğunu söyler.
+        let mut child = Self::hardened(program, args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| SeamError::Io(format!("spawn {program}: {e}")))?;
+
+        let until = std::time::Instant::now() + Self::RUN_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Err(e) => return Err(SeamError::Io(format!("wait {program}: {e}"))),
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() >= until => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(SeamError::Io(format!(
+                        "{program} {} saniyede yanıt vermedi ve öldürüldü — askıya alınmış bir                          havuz (zpool status: SUSPENDED) en bilinen sebep",
+                        Self::RUN_TIMEOUT.as_secs()
+                    )));
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            }
+        }
+        let out = child
+            .wait_with_output()
+            .map_err(|e| SeamError::Io(format!("wait {program}: {e}")))?;
 
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
