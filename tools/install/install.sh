@@ -500,7 +500,7 @@ DEPSIS_SHARE_PARENT_DATASET=$SHARE_PARENT_DATASET
 DEPSIS_SMB_HOST=$HOSTNAME_WANTED
 $( if id -u depsis-apps >/dev/null 2>&1; then
      printf '# Köksüz podman (ADR-0019): kataloğun konteynerleri yetkisiz depsis-apps hesabında koşar.
-DEPSIS_PODMAN_SOCKET=/run/user/%s/podman/podman.sock' "$(id -u depsis-apps)"
+DEPSIS_PODMAN_SOCKET=/run/depsis-apps/podman.sock'
    else
      printf '# podman köksüz hesabı yok; varsayılan (kök) soket ve katalog kurulumları kapalı kalır.'
    fi )
@@ -643,6 +643,12 @@ units() {
 
   # Soketler önce: ajan soket etkinlemeli, ve API kalkarken soketin orada olması gerekiyor.
   systemctl enable --now depsis-agent.socket depsis-agent-data.socket depsis-console.socket >/dev/null 2>&1
+  # Podman cifti yalniz hesap varsa: hesabi ISO'nun ilk acilisi ya da operator acar. Soket
+  # /run/depsis-apps altinda ve depsis-api grubuna 0660 — kullanici oturum dizini (0700) degil;
+  # ilk saha kurulumunda EACCES'in dersi bu satirlarin varligi.
+  if id -u depsis-apps >/dev/null 2>&1; then
+    systemctl enable --now depsis-podman.socket >/dev/null 2>&1 || true
+  fi
   ok 'soketler açık'
 
   # Soket etkinlemeli servislerin ESKİ SÜRECİ, ikili değişince kendiliğinden yenilenmez — saha

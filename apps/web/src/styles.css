@@ -3323,3 +3323,40 @@ select option {
     rgba(2, 4, 10, 0.5) 100%
   );
 }
+
+/* ─── pencere boyları — saha ayarı ───────────────────────────────────────────
+   "Dosyalar içeriğe göre uzuyor, minicik kalıyor": ana pencereler artık makul bir tabanla
+   açılır, içerik azsa altında boşluk kalır — göz, pencerenin nerede bittiğini kestirir.
+   Kaplama (ovl) içindeki seçici pencereler de üsttekiyle aynı genişliği kullanabilir; bir
+   modalın ebeveyninden küçük olmak zorunda olduğu kuralı yoktu, alışkanlıktı. */
+.win {
+  min-height: min(520px, 82vh);
+}
+.ovl .win {
+  width: min(720px, 96%);
+  min-height: min(560px, 86vh);
+}
+@media (max-width: 680px) {
+  .win {
+    min-height: min(420px, 78vh);
+  }
+}
+
+/* ─── mobil notlar — yazma alanı büyür, liste kısalır ────────────────────────
+   "Not yazma ekranı minicikken not seçme kocaman": dar ekranda öncelik metnin. Liste kaydırılır
+   kısa bir şerit olur, düzenleyici kalan yüksekliğin tamamını alır. */
+@media (max-width: 680px) {
+  .notelist,
+  .nlist {
+    max-height: 150px;
+    overflow-y: auto;
+    flex: 0 0 auto;
+  }
+  .nedit,
+  .neditor,
+  .notebody,
+  .notes textarea {
+    flex: 1 1 auto;
+    min-height: 46vh;
+  }
+}

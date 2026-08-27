@@ -1,0 +1,24 @@
+# Podman API servisi, depsis-apps olarak — soketi tarafından, talep üzerine başlatılır.
+#
+# `podman system service` sistemd soket etkinlemesini kendisi anlıyor (LISTEN_FDS); --time=0
+# boşta kendiliğinden kapanmayı kapatıyor. XDG_RUNTIME_DIR paylaşılan çalışma dizinine bakıyor,
+# çünkü bu hesap gerçek bir oturum açmıyor ve /run/user/<uid> ancak oturumla var olur.
+
+[Unit]
+Description=DEPSIS uygulama kataloğu podman servisi
+Requires=depsis-podman.socket
+After=depsis-podman.socket
+
+[Service]
+Type=exec
+User=depsis-apps
+Group=depsis-apps
+Environment=XDG_RUNTIME_DIR=/run/depsis-apps
+Environment=HOME=/home/depsis-apps
+ExecStart=/usr/bin/podman system service --time=0
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

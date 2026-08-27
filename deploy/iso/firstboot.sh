@@ -111,12 +111,10 @@ if ! command -v podman >/dev/null 2>&1; then
   apt-get install -y -qq podman uidmap slirp4netns dbus-user-session >/dev/null ||     echo 'UYARI: podman kurulamadı; uygulama kataloğu 503 döner.'
 fi
 if command -v podman >/dev/null 2>&1; then
+  # Yalniz hesap: soketi sistemd cifti (deploy/systemd/depsis-podman.*) yonetiyor ve install.sh
+  # etkinlestiriyor. Kullanici oturumu soketi DENENDI ve sahada dustu: /run/user/<uid> 0700,
+  # API iceri giremedi.
   id -u depsis-apps >/dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin depsis-apps
-  loginctl enable-linger depsis-apps || true
-  APPS_UID="$(id -u depsis-apps)"
-  # linger, kullanıcı yöneticisini başlatır; soketin gelmesi bir iki saniye alabilir.
-  for _ in $(seq 1 10); do [ -d "/run/user/$APPS_UID" ] && break; sleep 1; done
-  XDG_RUNTIME_DIR="/run/user/$APPS_UID"     runuser -u depsis-apps -- systemctl --user enable --now podman.socket 2>/dev/null ||     echo 'UYARI: podman kullanıcı soketi açılamadı; uygulama kataloğu 503 döner.'
 fi
 
 # ── 6. kaynak ────────────────────────────────────────────────────────────────

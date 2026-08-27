@@ -34,9 +34,11 @@ const NOTHING: Desk = { loaded: false, root: null, notes: null, tasks: null };
 
 export function Tiles({
   snapshot,
+  meId,
   onOpen,
 }: {
   snapshot: Snapshot;
+  meId: string;
   onOpen: (pane: PaneId) => void;
 }): React.JSX.Element {
   const [desk, setDesk] = useState<Desk>(NOTHING);
@@ -81,7 +83,7 @@ export function Tiles({
     <div className="tiles">
       <FilesTile desk={desk} snapshot={snapshot} onOpen={onOpen} />
       <NotesTile desk={desk} onOpen={onOpen} />
-      <TasksTile desk={desk} onOpen={onOpen} />
+      <TasksTile desk={desk} meId={meId} onOpen={onOpen} />
     </div>
   );
 }
@@ -208,12 +210,20 @@ function NotesTile({
 
 function TasksTile({
   desk,
+  meId,
   onOpen,
 }: {
   desk: Desk;
+  meId: string;
   onOpen: (pane: PaneId) => void;
 }): React.JSX.Element {
-  const tasks = desk.tasks;
+  // Sahibin kurali: PANO herkesindir, ama MASAÜSTÜ kisiseldir — bu kutucukta yalniz bana
+  // atanmis (ya da henuz kimseye atanmamis) isler durur. Baskasinin isini burada
+  // saymak, "senin 3 isin var" diyen bir sayacin yalan soylemesiydi.
+  const tasks =
+    desk.tasks === null
+      ? null
+      : desk.tasks.filter((task) => task.assigneeId === meId || task.assigneeId === null);
   const done = tasks === null ? 0 : tasks.filter((task) => task.doneAt !== null).length;
   const total = tasks?.length ?? 0;
 

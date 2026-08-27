@@ -1,0 +1,27 @@
+# Uygulama kataloğunun podman soketi — KÖKSÜZ, ama SİSTEM tarafından yönetilen.
+#
+# İlk deneme kullanıcı oturumu soketiydi (linger + `systemctl --user`): soket
+# /run/user/<uid>/podman/ altına düşüyor ve o dizin 0700 — API (depsis-api) kapıdan bile
+# geçemedi, katalog EACCES ile "motor yok" dedi. Saha dersi: iki AYRI hesabın konuşacağı bir
+# soketin yeri, birinin özel oturum dizini değildir.
+#
+# Şimdi ajan ve konsolla aynı kalıp: sistemd soketi yaratır, sahipliği ve kipi BURADA, gözden
+# geçirilebilir hâlde durur. Konteynerler yine yetkisiz depsis-apps olarak koşar (ADR-0019) —
+# değişen yalnız kapının adresi.
+
+[Unit]
+Description=DEPSIS uygulama kataloğu podman soketi
+
+[Socket]
+ListenStream=/run/depsis-apps/podman.sock
+SocketUser=depsis-apps
+SocketGroup=depsis-api
+SocketMode=0660
+RuntimeDirectory=depsis-apps
+RuntimeDirectoryMode=0750
+# API bağlanır ama soketi silip yerine kendi dinleyicisini koyamaz — ajan soketiyle aynı gerekçe.
+Accept=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

@@ -1,4 +1,5 @@
 import type { OpenApi } from '@depsis/contracts';
+import React from 'react';
 import { useEffect, useState } from 'react';
 
 import type { PaneId } from './App.js';
@@ -326,40 +327,30 @@ function RemoteCard({
 
         {remote.state === 'ready' && remote.status.available && (
           <>
-            <div className="netrow">
-              <span className="lbl">Düğüm kimliği</span>
-              <span className="val">{nonEmpty(remote.status.nodeId) ?? '—'}</span>
-            </div>
-            {nonEmpty(remote.status.version) !== undefined && (
-              <div className="netrow">
-                <span className="lbl">Sürüm</span>
-                <span className="val">{nonEmpty(remote.status.version)}</span>
-              </div>
-            )}
-            <div className="netrow">
-              <span className="lbl">Ağ</span>
-              <span className="val">{remote.status.networks.length}</span>
-            </div>
-
-            {remote.status.networks.length === 0 ? (
-              <span className="thint">Henüz bir ağa katılmadınız.</span>
-            ) : (
-              remote.status.networks.map((network) => {
-                const state = networkState(network);
-                return (
-                  <div className="r" key={network.networkId}>
-                    <span className="d" style={{ background: state.colour }} />
-                    {/* The user's own nickname wins, and `Remote.tsx` orders it the same way. The
-                        two disagreed before, so one network could carry two different names on
-                        the desk and in the window that manages it. */}
-                    <span className="n" title={network.networkId}>
-                      {nonEmpty(network.label) ?? nonEmpty(network.name) ?? network.networkId}
-                    </span>
-                    <span className="v">{state.text}</span>
+            {/* Sahibin sözüyle: "bakınca görmen gereken önemli şeyler". Düğüm kimliği ve sürüm
+                bir tanılama ayrıntısı — onlar Uzaktan erişim penceresinde. Burada, bir cihazdan
+                bağlanacak kişinin KOPYALAYACAĞI üç şey duruyor. */}
+            {remote.status.networks.slice(0, 1).map((n) => (
+              <React.Fragment key={n.networkId}>
+                {n.addresses.length > 0 && (
+                  <div className="r">
+                    <span className="d" style={{ background: 'var(--live)' }} />
+                    <span>Bağlantı IP</span>
+                    <b className="m">{n.addresses.join(' · ')}</b>
                   </div>
-                );
-              })
-            )}
+                )}
+                <div className="r">
+                  <span className="d" style={{ background: 'var(--cyan, #5bc8f5)' }} />
+                  <span>Bağlantı kimliği</span>
+                  <b className="m">{n.networkId}</b>
+                </div>
+              </React.Fragment>
+            ))}
+            <div className="r">
+              <span className="d" style={{ background: 'var(--iris, #8fa6ff)' }} />
+              <span>Samba</span>
+              <b className="m">{'\\\\depsis'}</b>
+            </div>
           </>
         )}
       </div>
