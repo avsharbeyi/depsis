@@ -36,6 +36,37 @@ bir depolama arızası, teşhis için gereken giriş ekranını da götürmemeli
 
 ## 2. Kurulum
 
+### 2.0 Tek komutla kurulum
+
+Aşağıdaki 2.1–2.7 adımlarının tamamını tek betik yapar:
+
+```bash
+sudo bash tools/install/install.sh --hostname depsis --shares-root /srv/depsis
+```
+
+Betik idempotenttir: yarıda kesilirse aynı komut kaldığı yerden sürer, her şey yerindeyse hiçbir
+şeyi değiştirmez. Ön kontroller (donanım, port çakışması, PostgreSQL, Node sürümü), servis
+hesapları, sırlar, veritabanı ve göçler, derleme ve yerleştirme, kendinden imzalı TLS sertifikası,
+güvenlik başlıklarıyla nginx ters vekili, systemd birimleri ve uçtan uca doğrulama — sırasıyla.
+
+Bitince üç şey yazar ve üçü de önemlidir:
+
+- **Adres** — `https://<hostname>/` ve makinenin IP'leri.
+- **Sertifikanın SHA-256 parmak izi.** Tarayıcı ilk açılışta uyarı verir çünkü sertifika
+  kendinden imzalı; uyarı ekranındaki parmak izini betiğin yazdığıyla karşılaştırmak, ortadaki
+  adamı ayırt eden tek şeydir. Kendi sertifikanız varsa `/etc/depsis/tls/` içine koyup nginx'i
+  yeniden yükleyin.
+- **Kurtarma anahtarı** — yalnız İLK kurulumda ve yalnız bir kez. Bu, at-rest şifreleme
+  anahtarının (`/etc/depsis/secret.key`) kendisidir; kaybederseniz mühürlü TOTP sırları ve SMB
+  parolaları geri gelmez. Cihazın dışında saklayın.
+
+Faydalı iki değişke: `--check-only` yalnız ön kontrolleri koşar, hiçbir şeyi değiştirmez;
+`--renew-cert` yalnız sertifikayı yeniler. Diğer seçenekler için `--help`.
+
+Betiğin KURMADIĞI dört şey bilinçli: ZFS havuzu (kurulum sihirbazının işi, §3.9), ZeroTier
+(ADR-0020: DEPSIS onu paketlemez), PostgreSQL (dağıtımın paketi), ve ilk yönetici (tarayıcıdan,
+§2.7). Aşağıdaki adımlar hem betiğin ne yaptığını anlamak hem de elle kurmak isteyenler için.
+
 ### 2.1 Gerekenler
 
 - Debian 13 (trixie) veya dengi, **Linux 5.6+** (`openat2` için — daha eskisinde ajan başlamaz)

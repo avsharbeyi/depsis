@@ -36,6 +36,16 @@ Bilmeniz gereken üç şey:
 Dosyaları pencereye sürükleyip bırakın, ya da **Yükle** düğmesini kullanın. Büyük dosyalar
 parça parça gider: bağlantınız koparsa kaldığı yerden devam eder, baştan başlamaz.
 
+Sekmeyi kapattıysanız da kayıp yok: **aynı tarayıcıda** aynı dosyayı yeniden seçtiğinizde yükleme
+kaldığı yerden sürer. Başka bir tarayıcıda ya da temizlenmiş bir profilde baştan başlar — devam
+bilgisi tarayıcınızda durur, çünkü hangi YEREL dosyanın devamı olduğunu yalnız o bilir.
+
+### Önizleme
+
+Bir fotoğrafa ya da videoya bakmak için indirmek gerekmez: satıra tıklayıp **önizleme** açın.
+Fotoğraf klasörlerinde satırların yanında küçük resimler görünür — bunlar dosyanın içine gömülü
+küçük kopyadır, yani liste açılırken dev fotoğraflar inmez.
+
 ### Taşıma, yeniden adlandırma, kopyalama
 
 Bir satırı başka bir klasörün üzerine sürükleyerek taşıyabilirsiniz. Birden fazla satır seçiliyken
@@ -76,9 +86,41 @@ yazan da aynı sonucu alır, ve `cagri` yazmak `Çağrı` dosyalarını bulur.
 3. **Yanlış paylaşımdasınız.** Birden fazla paylaşım varsa dosya yöneticisinin üstündeki
    seçiciden değiştirin.
 
+### Bir klasörü başkasına açma
+
+Bir klasörde **İzin yönet** hakkınız varsa (yöneticiniz ya da klasörün sahibi vermiş olabilir),
+klasörü seçip **İzinler** panelinden kişi ya da ekip ekleyebilirsiniz. Kaydetmeden önce DEPSIS
+değişikliğin **kimleri etkileyeceğini** gösterir — izinler alt klasörlere miras kaldığı için bu
+sayı tahmin edilemez, o yüzden her seferinde hesaplanır.
+
 ---
 
-## 3. Windows'tan bağlanma
+## 3. Pano: notlar, görevler, bildirimler
+
+### Notlar
+
+**Notlar** paneli kişisel not defterinizdir. Yazdıklarınız yalnız size görünür ve cihazda durur —
+tarayıcıda değil, yani başka bir makineden girdiğinizde de oradadır.
+
+### Görevler
+
+**Görevler** ortak bir iş panosudur: herkes her işi görür, sütunlar kişilere göredir. Bir işe
+tıklayınca ayrıntı paneli açılır — açıklama, kontrol listesi, etiketler, bağlı dosyalar, yorumlar.
+
+- Bir işi meslektaşınıza **atayabilirsiniz**; sütununa düşer ve zili yanar.
+- Yorumda `@ad` yazmak o kişiye bildirim gönderir.
+- **İzle** düğmesi, üzerinize olmayan bir işin gelişmelerini de zilinize düşürür.
+- Bir işi yalnız **açan, atanan ya da yönetici** silebilir. Panoyu herkes görür; silmek başka.
+
+### Bildirimler
+
+Üst çubuktaki **zil**, size atanan işleri, anıldığınız yorumları ve izlediğiniz işlerdeki
+gelişmeleri toplar. Panelin açılması tek başına "okundu" saymaz; tek tek ya da topluca
+işaretlersiniz.
+
+---
+
+## 4. Windows'tan bağlanma
 
 DEPSIS bir ağ sürücüsü olarak da görünür. **Paylaşımlar** ekranında her paylaşımın adresi yazıyor
 (`\\depsis\belgeler` gibi).
@@ -97,7 +139,7 @@ alanı. Oraya bir şey koymayın.
 
 ---
 
-## 4. Hesabım
+## 5. Hesabım
 
 ### Parola değiştirme
 
@@ -122,17 +164,18 @@ kayma kodları geçersiz kılar.
 
 ---
 
-## 5. Aktarımlar ve işler
+## 6. Aktarımlar ve işler
 
 **Aktarımlar** paneli süren yüklemelerinizi gösterir — yalnız sizinkileri. Bir aktarım "durdu"
-diyorsa bağlantı kesilmiş demektir; kaldığı yerden devam edebilirsiniz.
+diyorsa bağlantı kesilmiş demektir; yüklemeyi başlatan tarayıcıda aynı dosyayı yeniden seçerseniz
+kaldığı yerden devam eder.
 
 Kopyalama gibi uzun işler arka planda çalışır. İlerlemelerini yönetici **Sistem işleri** panosunda
 görebilir.
 
 ---
 
-## 6. Bir hata mesajı aldım
+## 7. Bir hata mesajı aldım
 
 DEPSIS'in hata kutularında bazen bir **correlation id** olur — `a1b2c3d4-...` gibi. Yöneticinize
 söylerken o id'yi de verin: sunucu günlüğünde o isteğe ait her satırı onunla bulabilir.
