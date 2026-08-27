@@ -270,14 +270,20 @@ export function Sky({
 
   if (src !== null && attempt === 'image') {
     return (
-      <img
-        id="sky"
-        alt=""
-        aria-hidden
-        src={src}
-        style={{ objectFit: 'cover' }}
-        onError={() => setAttempt('video')}
-      />
+      <>
+        <img
+          id="sky"
+          alt=""
+          aria-hidden
+          src={src}
+          style={{ objectFit: 'cover' }}
+          onError={() => setAttempt('video')}
+        />
+        {/* Sahada bulundu: parlak bir fotoğrafın üstünde cam pencere kromu ve sekme çizgisi
+            kayboluyor — "tab incecik kalıyor". Tül fotoğrafı örtmez, kromun okunduğu üst ve alt
+            bantları hafifçe karartır. Yalnız dosya kipinde: galaksi ve düz renkler zaten koyu. */}
+        <div className="skyveil" aria-hidden />
+      </>
     );
   }
 

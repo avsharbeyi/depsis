@@ -166,6 +166,14 @@ export function Console({ notify }: { notify: Notify }): React.JSX.Element {
     if (data === undefined) {
       if (response.status === 401) {
         setFailure({ text: 'Parola hatalı.', fatal: false });
+      } else if (response.status === 429) {
+        // Sayaç oturum açmayla ortak (bilerek: çalınan bir çerezle burada parola denemek,
+        // girişteki hızda kilitlenmeli). Kullanıcıya düşen tek şey beklemek — ve bunun bir
+        // servis arızası OLMADIĞINI bilmek; ilk hâli buraya düşünce systemctl komutu öneriyordu.
+        setFailure({
+          text: 'Çok fazla yanlış deneme. Birkaç dakika bekleyip yeniden deneyin — bu sayaç oturum açmayla ortaktır.',
+          fatal: false,
+        });
       } else if (response.status === 403) {
         setFailure({ text: 'Konsol yalnız yöneticilere açık.', fatal: true });
       } else if (response.status === 503) {

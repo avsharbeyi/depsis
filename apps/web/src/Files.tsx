@@ -3,7 +3,6 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 
 import { api, API_BASE_URL, problemMessage } from './api.js';
 import { formatBytes } from './Dashboard.js';
-import { History } from './History.js';
 import type { Tone } from './ui.js';
 import { Bar, ConfirmBox, Empty, FolderPicker, PromptBox, TONES, toneRgb, Win } from './ui.js';
 import { Permissions, type PermissionTarget } from './Permissions.js';
@@ -311,22 +310,8 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
   /** The folder whose permissions panel is open, if any. */
   const [permissionsFor, setPermissionsFor] = useState<PermissionTarget | null>(null);
   const [shares, setShares] = useState<SharePick[] | null>(null);
-  /* Geçmiş sürümler penceresi. */
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [shareId, setShareId] = useState<string | undefined>(undefined);
   const shareQuery = shareId === undefined ? {} : { shareId };
-  /**
-   * Which share the history window would open on.
-   *
-   * `shareId` is undefined while "Varsayılan" is picked, and the snapshot endpoints need a
-   * concrete id — the same one `GET /files` resolves to, which is the first in the list. Null
-   * when there are no shares at all, and the button is then absent rather than opening a window
-   * that could only be empty.
-   */
-  const historyShare =
-    shareId === undefined
-      ? (shares?.[0] ?? null)
-      : (shares?.find((item) => item.id === shareId) ?? null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1256,32 +1241,9 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
         </div>
       )}
 
-      {/* GEÇMİŞ SÜRÜMLER, çöpün yanında ve bilerek: ikisi de "sildiğim şey nerede" sorusunun
-          cevabı, ama farklı sorunun. Çöp DEPSIS üzerinden silinenleri tutuyor; SMB üzerinden
-          silinen ya da üzerine YAZILAN bir dosyanın tek izi anlık görüntüde. */}
-      {historyShare !== null && !trashed && (
-        <div className="netrow" style={{ marginBottom: 10 }}>
-          <button type="button" className="b" onClick={() => setHistoryOpen(true)}>
-            🕓 Geçmiş sürümler
-          </button>
-          <span className="note">Silinen ya da üzerine yazılan bir dosyayı geri getirin.</span>
-        </div>
-      )}
-
-      {historyOpen && historyShare !== null && (
-        <History
-          shareId={historyShare.id}
-          shareName={historyShare.name}
-          // NEREDE DURUYORSA ORAYA iniyor, paylaşımın köküne değil: geri getiren kişi zaten
-          // dosyanın ait olduğu klasöre gitmiş oluyor, ve köke indirmek onu ikinci kez aratmak
-          // olurdu.
-          destinationId={parentId ?? null}
-          destinationLabel={last?.name ?? historyShare.name}
-          onClose={() => setHistoryOpen(false)}
-          onRestored={reload}
-          notify={notify}
-        />
-      )}
+      {/* "Geçmiş sürümler" düğmesi buradan KALDIRILDI, sahibinin kararıyla: çöp kutusu ve
+          Yedekleme ekranı aynı soruyu zaten cevaplıyor ve üçüncü bir kapı yalnız kafa
+          karıştırıyordu. History penceresi kodda duruyor; gerekirse Yedekleme'den yaşar. */}
 
       <div className="quick">
         <button type="button" className={!trashed ? 'qf on' : 'qf'} onClick={() => go(ROOT)}>

@@ -710,13 +710,20 @@ describeDb('opening a share', () => {
     // THE INVARIANT, measured on the row that was just written rather than assumed from the code:
     // a share exists and it has a grant.
     const grants = await grantsOf(made.share.id);
-    expect(grants).toHaveLength(1);
-    expect(grants[0]?.user_id).toBe(admin);
-    expect(grants[0]?.team_id).toBeNull();
+    // İKİ satır, sahibin ilk gerçek kullanımda koyduğu kuralla: kurucu HER ŞEYİ yapabilir,
+    // Herkes takımı SALT OKUR. İlk hâli yalnız kurucuya yazıyordu ve ikinci hesap, açılan
+    // paylaşımı bomboş gördü — doğru davranan izin modeli, açıklanana kadar bozuk ürün gibi
+    // görünüyor.
+    expect(grants).toHaveLength(2);
+    const mine = grants.find((g) => g.user_id === admin);
+    const everyone = grants.find((g) => g.team_id !== null);
+    expect(mine?.team_id).toBeNull();
     // All eleven, because nobody said otherwise and the person who created it is the person who
     // should be able to hand it out. `manage` is in there for that reason.
-    expect(grants[0]?.permissions).toHaveLength(11);
-    expect(grants[0]?.permissions).toContain('manage');
+    expect(mine?.permissions).toHaveLength(11);
+    expect(mine?.permissions).toContain('manage');
+    // Herkes: görür, okur, indirir — değiştiremez, silemez, yönetemez.
+    expect(everyone?.permissions?.slice().sort()).toEqual(['download', 'list', 'read']);
   });
 
   it('writes the grants the caller named, and nothing for the caller', async () => {

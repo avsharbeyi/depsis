@@ -722,6 +722,17 @@ export function Tasks({
                     void add(group);
                   }}
                 />
+                {/* Mobil klavyelerin çoğu Enter'ı form gönderimi olarak vermiyor; sahada işler
+                    telefondan hiç eklenemedi. Düğme her zaman var, Enter da çalışmaya devam
+                    ediyor. */}
+                <button
+                  type="button"
+                  className="b"
+                  aria-label="İşi ekle"
+                  onClick={() => void add(group)}
+                >
+                  Ekle
+                </button>
               </div>
             )}
           </div>

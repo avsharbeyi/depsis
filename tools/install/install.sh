@@ -498,6 +498,12 @@ DEPSIS_SHARES_ROOT=$SHARES_ROOT
 DEPSIS_SHARE_PARENT_DATASET=$SHARE_PARENT_DATASET
 
 DEPSIS_SMB_HOST=$HOSTNAME_WANTED
+$( if id -u depsis-apps >/dev/null 2>&1; then
+     printf '# Köksüz podman (ADR-0019): kataloğun konteynerleri yetkisiz depsis-apps hesabında koşar.
+DEPSIS_PODMAN_SOCKET=/run/user/%s/podman/podman.sock' "$(id -u depsis-apps)"
+   else
+     printf '# podman köksüz hesabı yok; varsayılan (kök) soket ve katalog kurulumları kapalı kalır.'
+   fi )
 DEPSIS_ZFS_POOLS=$ZFS_POOLS
 DEPSIS_SMART_DISKS=$SMART_DISKS
 ENV

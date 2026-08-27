@@ -296,9 +296,12 @@ export class SharesService {
     // `grants: []` means "the caller said nobody", which is a request for exactly the ungoverned
     // share this method exists to make impossible.
     if (input.grants !== null && input.grants.length === 0) throw new ShareWithoutGrantsError();
-    const grants: readonly GrantInput[] = input.grants ?? [
-      { userId: actorId, teamId: null, permissions: [...ALL_PERMISSIONS] },
-    ];
+    // Varsayilan, sahibin ilk gercek kullanimda koydugu kural: YENI BIR PAYLASIMI HERKES GORUR,
+    // KIMSE BOZAMAZ. Ilk hali yalniz kurucuya izin veriyordu ve ikinci hesap actigi paylasimi
+    // bombos gordu — dogru davranan bir izin modeli, aciklanana kadar bozuk bir urun gibi
+    // gorunuyor. Herkes takimina list/read/download; yazma, silme ve yonetim kurucuda kalir,
+    // ve daraltmak istenirse Izinler paneli tam da bunun icin var.
+    const grants: readonly GrantInput[] | null = input.grants;
 
     const dataset = `${parent}/${input.name}`;
 
@@ -331,7 +334,25 @@ export class SharesService {
     expectStatus(created, 'created');
 
     const row = await this.db.withTenant(organizationId, async (q) => {
-      await assertPrincipalsInOrganization(q, organizationId, grants);
+      const applied: readonly GrantInput[] =
+        grants ??
+        (await (async () => {
+          const everyone = await q.query<{ id: string }>(
+            `SELECT public.everyone_team($1)::text AS id`,
+            [organizationId],
+          );
+          const everyoneId = everyone[0]?.id;
+          if (everyoneId === undefined) throw new Error('everyone_team() returned no row');
+          return [
+            { userId: actorId, teamId: null, permissions: [...ALL_PERMISSIONS] },
+            {
+              userId: null,
+              teamId: everyoneId,
+              permissions: ['list', 'read', 'download'] as GrantInput['permissions'],
+            },
+          ];
+        })());
+      await assertPrincipalsInOrganization(q, organizationId, applied);
 
       const inserted = await q.query<ShareRow>(
         `INSERT INTO public.shares (organization_id, name, dataset, read_only)
@@ -344,7 +365,7 @@ export class SharesService {
 
       // `entry_id` NULL is the share root: the convention `folder_grants` uses everywhere, and the
       // node `AclApplyService` walks down from.
-      for (const grant of grants) {
+      for (const grant of applied) {
         await q.query(
           `INSERT INTO public.folder_grants
              (organization_id, share_id, entry_id, user_id, team_id, permissions, granted_by)

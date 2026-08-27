@@ -101,6 +101,24 @@ if ! command -v zerotier-cli >/dev/null 2>&1; then
   curl -fsSL https://install.zerotier.com | bash ||     echo 'UYARI: ZeroTier kurulamadı; uzaktan erişim uçları 503 döner.'
 fi
 
+# ── 5c. Uygulama kataloğu: podman, KÖKSÜZ ────────────────────────────────────
+#
+# Sahibin ilkesi ZeroTier'la aynı: motor cihazla gelir, terminal istenmez. ADR-0019'un istediği
+# gibi köksüz — kataloğun kurduğu bir imaj ele geçse bile kutuda root değil, yetkisiz bir hesap.
+# Her adım en iyi çaba: düşerse uyarı, cihaz çalışmaya devam eder ve /apps 503 ile nedenini söyler.
+if ! command -v podman >/dev/null 2>&1; then
+  say 'Podman (uygulama kataloğu)'
+  apt-get install -y -qq podman uidmap slirp4netns dbus-user-session >/dev/null ||     echo 'UYARI: podman kurulamadı; uygulama kataloğu 503 döner.'
+fi
+if command -v podman >/dev/null 2>&1; then
+  id -u depsis-apps >/dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin depsis-apps
+  loginctl enable-linger depsis-apps || true
+  APPS_UID="$(id -u depsis-apps)"
+  # linger, kullanıcı yöneticisini başlatır; soketin gelmesi bir iki saniye alabilir.
+  for _ in $(seq 1 10); do [ -d "/run/user/$APPS_UID" ] && break; sleep 1; done
+  XDG_RUNTIME_DIR="/run/user/$APPS_UID"     runuser -u depsis-apps -- systemctl --user enable --now podman.socket 2>/dev/null ||     echo 'UYARI: podman kullanıcı soketi açılamadı; uygulama kataloğu 503 döner.'
+fi
+
 # ── 6. kaynak ────────────────────────────────────────────────────────────────
 say 'DEPSIS kaynağı'
 if [ ! -f "$REPO/tools/install/install.sh" ]; then

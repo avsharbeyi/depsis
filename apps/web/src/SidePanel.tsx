@@ -56,8 +56,8 @@ export function SidePanel({
 
   return (
     <aside className="side" aria-label="Cihaz durumu">
-      <StorageCard snapshot={snapshot} />
-      <SystemCard snapshot={snapshot} />
+      <StorageCard snapshot={snapshot} {...(onOpen === undefined ? {} : { onOpen })} />
+      <SystemCard snapshot={snapshot} {...(onOpen === undefined ? {} : { onOpen })} />
       <RemoteCard remote={remote} {...(onOpen === undefined ? {} : { onOpen })} />
     </aside>
   );
@@ -77,7 +77,13 @@ function Notice({ text }: { text: string }): React.JSX.Element {
 
 /* ─── storage ───────────────────────────────────────────────────────────────── */
 
-function StorageCard({ snapshot }: { snapshot: Snapshot }): React.JSX.Element {
+function StorageCard({
+  snapshot,
+  onOpen,
+}: {
+  snapshot: Snapshot;
+  onOpen?: (pane: PaneId) => void;
+}): React.JSX.Element {
   const telemetry = snapshot.telemetry;
   const pools = telemetry?.pools ?? [];
   const used = pools.reduce((sum, pool) => sum + pool.used, 0);
@@ -91,6 +97,7 @@ function StorageCard({ snapshot }: { snapshot: Snapshot }): React.JSX.Element {
       glyph="💽"
       tone="cool"
       title="Depolama"
+      {...(onOpen === undefined ? {} : { onClick: () => onOpen('disks') })}
       meta={pools.length === 0 ? '' : `${pools.length} havuz`}
     >
       <div className="cb">
@@ -172,7 +179,13 @@ function diskLabel(id: string): string {
 
 /* ─── system ────────────────────────────────────────────────────────────────── */
 
-function SystemCard({ snapshot }: { snapshot: Snapshot }): React.JSX.Element {
+function SystemCard({
+  snapshot,
+  onOpen,
+}: {
+  snapshot: Snapshot;
+  onOpen?: (pane: PaneId) => void;
+}): React.JSX.Element {
   const telemetry = snapshot.telemetry;
   const cpu = telemetry?.cpu;
   const load = cpu?.loadAverage?.[0];
@@ -182,7 +195,13 @@ function SystemCard({ snapshot }: { snapshot: Snapshot }): React.JSX.Element {
   const memoryTotal = memory?.totalBytes;
 
   return (
-    <Card glyph="📊" tone="rose" title="Sistem" meta="">
+    <Card
+      glyph="📊"
+      tone="rose"
+      title="Sistem"
+      {...(onOpen === undefined ? {} : { onClick: () => onOpen('jobs') })}
+      meta=""
+    >
       <div className="cb">
         {telemetry === null ? (
           <Notice text={snapshot.telemetryNote ?? 'Sistem durumu okunamadı.'} />

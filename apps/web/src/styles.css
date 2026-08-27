@@ -3297,3 +3297,29 @@ label textarea,
     transition-duration: 0.001s !important;
   }
 }
+
+/* ─── açılır listelerin seçenekleri ──────────────────────────────────────────
+   Sahada bulundu: <option> ögeleri işletim sisteminin varsayılan (beyaz) zeminiyle çiziliyor ve
+   bu temanın açık renk metni beyaz üstünde kayboluyordu — liste "bembeyaz", seçilince görünen
+   satırlar. option'ın stillenebilirliği tarayıcıya göre değişir ama zemin/metin çifti her yerde
+   geçer; ikisini birlikte vermek okunurluğun tek garantisi. */
+select,
+select option {
+  background-color: #0b1420;
+  color: var(--ink);
+}
+
+/* Dosya duvar kağıdının okunurluk tülü — gerekçesi sky.tsx'te. */
+.skyveil {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(2, 4, 10, 0.62) 0%,
+    rgba(2, 4, 10, 0.18) 22%,
+    rgba(2, 4, 10, 0.14) 70%,
+    rgba(2, 4, 10, 0.5) 100%
+  );
+}
