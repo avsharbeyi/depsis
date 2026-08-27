@@ -54,14 +54,22 @@ apt-get install -y -qq zfsutils-linux >/dev/null || {
 }
 
 # ── 3. PostgreSQL 18 (resmî PGDG deposu; Debian 13 kendi deposunda 17 taşıyor) ─
-if ! command -v psql >/dev/null 2>&1 || [ "$(psql -V | grep -oE '[0-9]+' | head -1)" -lt 18 ]; then
+#
+# `command -v psql` YETMEZ ve bunu ilk saha kurulumu öğretti: postgresql-common, gerçek istemci
+# kurulu olmadan da /usr/bin/psql diye bir SARMALAYICI koyuyor. O sarmalayıcı sürüm sorulunca
+# hata basıp boş dönüyor, boş dize sayı karşılaştırmasını patlatıyor ve `if` koşulu sessizce
+# yanlışa düşüyordu — PostgreSQL hiç kurulmadan geçiliyordu. Sürümü hatayı yutarak oku; boşsa
+# "yok" say.
+PG_MAJOR="$( (psql -V 2>/dev/null || true) | grep -oE '[0-9]+' | head -1 )"
+if [ -z "$PG_MAJOR" ] || [ "$PG_MAJOR" -lt 18 ]; then
   say 'PostgreSQL 18'
   /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null
   apt-get install -y -qq postgresql-18 >/dev/null
 fi
 
 # ── 4. Node 24 (NodeSource; Debian 13 kendi deposunda daha eskisini taşıyor) ─
-if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 24 ]; then
+NODE_MAJOR="$( (node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true) | head -1 )"
+if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 24 ]; then
   say 'Node 24'
   curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null
   apt-get install -y -qq nodejs >/dev/null
