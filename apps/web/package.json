@@ -15,6 +15,7 @@
     "@depsis/contracts": "workspace:*",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "@zxing/library": "^0.23.0",
     "openapi-fetch": "0.17.0",
     "qrcode": "1.5.4",
     "react": "19.2.8",
