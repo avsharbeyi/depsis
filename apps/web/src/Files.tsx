@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { Fragment, useEffect, useRef, useState } from 'react';
 
 import { api, API_BASE_URL, problemMessage } from './api.js';
+import { History } from './History.js';
 import { formatBytes } from './Dashboard.js';
 import type { Tone } from './ui.js';
 import { Bar, ConfirmBox, Empty, FolderPicker, PromptBox, TONES, toneRgb, Win } from './ui.js';
@@ -213,6 +214,9 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
   const [query, setQuery] = useState('');
   const [term, setTerm] = useState('');
   const [picking, setPicking] = useState(false);
+  /** Yedek gezgini açık mı. Kapı burada, pencere History.tsx'te — "çöp ve yedek" ikilisinin
+      yedek yarısı. Sahibi bunu Dosyalar'ın içinde arıyor; ayrı ekran kafa karıştırıyordu. */
+  const [backups, setBackups] = useState(false);
   const [sel, setSel] = useState<ReadonlySet<string>>(new Set());
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -1264,6 +1268,18 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
           <span className="l">Çöp</span>
           <span className="c">{counts.trash ?? '—'}</span>
         </button>
+        <button
+          type="button"
+          className="qf"
+          disabled={shares === null || shares.length === 0}
+          title="Bu paylaşımın yedeklerine (anlık görüntülerine) göz at"
+          onClick={() => setBackups(true)}
+        >
+          <span className="g" style={tint('cool', 0.2)} aria-hidden>
+            🕘
+          </span>
+          <span className="l">Yedekler</span>
+        </button>
       </div>
 
       <div className={sel.size > 0 ? 'selbar on' : 'selbar'}>
@@ -1711,6 +1727,21 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
           yesLabel="Taşı"
           onYes={() => void move(modal.entries, modal.target.id, modal.target.name)}
           onNo={() => setModal({ kind: 'none' })}
+        />
+      )}
+
+      {backups && shares !== null && shares[0] !== undefined && (
+        <History
+          shareId={(shares.find((it) => it.id === shareId) ?? shares[0]).id}
+          shareName={(shares.find((it) => it.id === shareId) ?? shares[0]).name}
+          destinationId={parentId ?? null}
+          destinationLabel={last?.name ?? 'paylaşımın kökü'}
+          onClose={() => setBackups(false)}
+          onRestored={() => {
+            setBackups(false);
+            reload();
+          }}
+          notify={notify}
         />
       )}
 

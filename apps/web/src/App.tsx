@@ -864,6 +864,7 @@ function Desktop({
           onClose={closePane}
         >
           <PaneBody
+            onOpenPane={openPane}
             onAccountChanged={() => setMeKey((k) => k + 1)}
             pane={visiblePane}
             me={me}
@@ -900,6 +901,7 @@ function PaneBody({
   onAccountChanged,
   notify,
   onUnauthenticated,
+  onOpenPane,
 }: {
   pane: PaneId;
   me: CurrentUser;
@@ -913,6 +915,8 @@ function PaneBody({
   onUnauthenticated: (note?: string) => void;
   /** Ask the shell to re-read `/me`. See `meKey`. */
   onAccountChanged: () => void;
+  /** Bir pencereden başka bir pencere açmak — Sistem'deki görev yöneticisi çarkı bunu kullanıyor. */
+  onOpenPane: (pane: PaneId) => void;
 }): React.JSX.Element {
   switch (pane) {
     case 'files':
@@ -944,7 +948,12 @@ function PaneBody({
     case 'processes':
       return <Processes notify={notify} />;
     case 'system':
-      return <System snapshot={snapshot} />;
+      return (
+        <System
+          snapshot={snapshot}
+          onProcesses={isAdmin ? () => onOpenPane('processes') : undefined}
+        />
+      );
     case 'account':
       return <Account me={me} notify={notify} onChanged={onAccountChanged} />;
     case 'transfers':

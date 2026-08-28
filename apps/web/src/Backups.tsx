@@ -133,6 +133,18 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
 
   return (
     <>
+      {/* Sahibin sorusu bire bir buydu: "yedekleme ilk diski ikinci diske kopyalayacak ama yok."
+          VAR — ama yedek olarak değil, aynanın kendisi olarak; ve bu ayrımı ekran söylemezse
+          kimse söylemez. Ayna anı korur, yedek geçmişi: ikisi ayrı soru. */}
+      <div className="note">
+        <b>Disk kopyası ile yedek ayrı şeylerdir.</b> Havuzunuzu <b>ayna (mirror)</b> kurduysanız
+        birinci diskteki her bayt zaten <b>anında</b> ikinci diske de yazılıyor — disk kopyası
+        sürekli ve kendiliğinden, bir düğmesi yok. Aynanın koruMAdığı şey geçmiştir: yanlışlıkla
+        silinen dosya iki diskten birden silinir. Onu koruyan aşağıdaki <b>yedekler</b> — belirli
+        anların dondurulmuş görüntüleri. Bir zamanlama kurun; silinen dosya Dosyalar ekranındaki
+        "Yedekler" kapısından geri gelir.
+      </div>
+
       {/* `complete` false OLDUĞUNDA, ve artık bunun tek bir sebebi var: ajana ulaşılamadı.
           Eskiden her zaman false'tu — ajanda anlık görüntüleri listeleyecek bir işlem yoktu ve bu
           kutu "bu liste havuzun envanteri değil" diyordu. Artık liste havuzla karşılaştırılıyor,

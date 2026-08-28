@@ -13,7 +13,15 @@ import { Ring, Spark } from './sky.js';
  * Grafik, `cpuHistory`: son ~6 dakikanın yük ortalaması. Anlık bir sayı "şu an ne oluyor"u
  * söyler ama "biraz önce ne oldu"yu değil, ve bir NAS'ta ikincisi çoğu zaman aranan sorudur.
  */
-export function System({ snapshot }: { snapshot: Snapshot | null }): React.JSX.Element {
+export function System({
+  snapshot,
+  onProcesses,
+}: {
+  snapshot: Snapshot | null;
+  /** Görev yöneticisini aç — sahibi onu bu ekranın içinde arıyor, ayrı bir rıhtım simgesinde
+      değil. Yalnız kurucu yöneticiye veriliyor; yoksa düğme hiç çizilmiyor. */
+  onProcesses?: (() => void) | undefined;
+}): React.JSX.Element {
   if (snapshot === null) return <p className="note">Sistem durumu okunuyor…</p>;
 
   const telemetry = snapshot.telemetry;
@@ -30,6 +38,15 @@ export function System({ snapshot }: { snapshot: Snapshot | null }): React.JSX.E
 
   return (
     <>
+      {onProcesses !== undefined && (
+        <div className="netrow" style={{ marginBottom: 4 }}>
+          <span className="lbl">Arka plan görevleri</span>
+          <button type="button" className="b" onClick={onProcesses}>
+            ⚙ Görev yöneticisi
+          </button>
+        </div>
+      )}
+
       {/* ── işlemci ── */}
       <div className="syshead">İşlemci</div>
       <div className="sysgrid">
