@@ -20,9 +20,11 @@ import {
 import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
+import { AuditService } from '../audit/audit.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import {
+  CustomAppInvalidError,
   AlreadyInstalledError,
   AppNotInCatalogueError,
   CatalogueShapeError,
@@ -47,6 +49,27 @@ type Schemas = OpenApi.components['schemas'];
 // here as well as in the database because a slug becomes part of a container name, and a value
 // that reaches a URL should be refused at the edge rather than deep inside a client.
 const slugSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
+
+/**
+ * Özel uygulama tanımı. Şekil burada, kayıt defteri sınırı ve imaj biçimi serviste; İÇERİK hiçbir
+ * yerde — DEPSIS eklenen imaja kefil olmaz ve arayüz bunu kullanıcıya aynen söyler.
+ */
+const customSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  slug: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]{0,39}$/, 'kısa ad: küçük harf, rakam ve tire')
+    .optional(),
+  icon: z.string().trim().min(1).max(8).optional(),
+  image: z.string().trim().min(1).max(255),
+  tag: z.string().trim().min(1).max(128).default('latest'),
+  containerPort: z.number().int().min(1).max(65535),
+  env: z.record(z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/), z.string().max(1024)).default({}),
+  volumes: z
+    .array(z.string().regex(/^\/[A-Za-z0-9._/-]{1,127}$/, 'mutlak bir konteyner yolu olmalı'))
+    .max(4)
+    .default(['/config']),
+});
 
 const installSchema = z.object({
   mounts: z
@@ -80,7 +103,10 @@ const logsSchema = z.object({
 @Controller('apps')
 @UseGuards(SessionGuard)
 export class AppsController {
-  constructor(private readonly apps: AppsService) {}
+  constructor(
+    private readonly apps: AppsService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Get()
   async list(@Req() request: AuthenticatedRequest): Promise<Schemas['AppPage']> {
@@ -141,6 +167,87 @@ export class AppsController {
     try {
       const view = await this.apps.setState(organizationId, name.data, parsed.data.state);
       return toApp(view);
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Post('custom')
+  @UseGuards(AdminGuard)
+  async addCustom(
+    @Req() request: AuthenticatedRequest,
+    @Body() body: unknown,
+  ): Promise<Schemas['CustomApp']> {
+    requireSameOrigin(request);
+    const session = requireSession(request);
+    const parsed = customSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new UnprocessableEntityException(
+        parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      );
+    }
+    const input = parsed.data;
+    const slug =
+      input.slug ??
+      input.name
+        .toLowerCase()
+        .replaceAll(/[^a-z0-9]+/gu, '-')
+        .replaceAll(/^-+|-+$/gu, '')
+        .slice(0, 40);
+    if (!/^[a-z0-9][a-z0-9-]{0,39}$/u.test(slug)) {
+      throw new UnprocessableEntityException(
+        'addan bir kısa ad türetilemedi; kısa adı kendiniz verin',
+      );
+    }
+    try {
+      const row = await this.apps.addCustom(session.organizationId, session.userId, {
+        name: input.name,
+        slug,
+        icon: input.icon ?? '📦',
+        image: input.image,
+        tag: input.tag,
+        containerPort: input.containerPort,
+        env: input.env,
+        volumes: input.volumes,
+      });
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: 'apps.custom-added',
+        target: { kind: 'app', id: row.slug, label: row.name },
+        summary: `'${row.name}' özel uygulaması kataloğa eklendi (${row.image}:${row.tag}).`,
+      });
+      return {
+        slug: row.slug,
+        name: row.name,
+        icon: row.icon,
+        image: row.image,
+        tag: row.tag,
+        containerPort: row.container_port,
+      };
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Delete('custom/:slug')
+  @HttpCode(204)
+  @UseGuards(AdminGuard)
+  async removeCustom(
+    @Req() request: AuthenticatedRequest,
+    @Param('slug') slug: string,
+  ): Promise<void> {
+    requireSameOrigin(request);
+    const session = requireSession(request);
+    const name = slugSchema.safeParse(slug);
+    if (!name.success) throw new NotFoundException();
+    try {
+      await this.apps.removeCustom(session.organizationId, name.data);
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: 'apps.custom-removed',
+        target: { kind: 'app', id: name.data },
+        summary: `'${name.data}' özel uygulaması katalogdan silindi.`,
+      });
     } catch (error) {
       throw translate(error);
     }
@@ -306,12 +413,23 @@ function translate(error: unknown): Error {
     return new ServiceUnavailableException(error.message);
   }
   if (error instanceof PodmanError) {
-    if (error.status === 404) return new NotFoundException(error.detail);
+    if (error.status === 404) {
+      // Sahada ölçüldü: kurulum sürerken (1,5 GB'lık immich-server hâlâ inerken) Başlat'a basan
+      // sahibi podman'ın çıplak "no such container" cümlesini gördü ve bozuk sandı. Konteynerin
+      // yokluğunun tek olağan sebebi bu — kurulumun henüz bitmemiş olması.
+      return new ConflictException(
+        'Uygulamanın konteynerleri henüz hazır değil — kurulum (imaj indirme) büyük olasılıkla ' +
+          'sürüyor. Bir-iki dakika sonra yeniden deneyin.',
+      );
+    }
     if (error.status === 409) return new ConflictException(error.detail);
     return new ServiceUnavailableException(`the container runtime refused: ${error.detail}`);
   }
   // The catalogue said no. 404 for a slug that is not a row — the same answer as "not installed",
   // because from outside there is no difference worth telling apart.
+  if (error instanceof CustomAppInvalidError) {
+    return new UnprocessableEntityException(error.message);
+  }
   if (error instanceof AppDataDirError) {
     // 409: the appliance is exactly as it was — the folder was not made and no container exists —
     // and the agent's sentence names what to change before retrying.

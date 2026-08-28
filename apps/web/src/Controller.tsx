@@ -62,6 +62,23 @@ export function Controller({
   const [adding, setAdding] = useState(false);
   const [newMember, setNewMember] = useState('');
   const [newLabel, setNewLabel] = useState('');
+  /** Takma adı düzenlenen üye ve taslağı. Sahibin sözü: "kimin cihazı olduğu bilinsin." */
+  const [naming, setNaming] = useState<{ id: string; draft: string } | null>(null);
+
+  async function rename(memberId: string, label: string): Promise<void> {
+    if (network === null) return;
+    const text = label.trim();
+    if (text === '') return;
+    const { response, error } = await api.PATCH(
+      '/remote/controller/networks/{networkId}/members/{memberId}',
+      { params: { path: { networkId: network.networkId, memberId } }, body: { label: text } },
+    );
+    if (!response.ok) {
+      notify('error', problemMessage(error, 'Takma ad kaydedilemedi.'));
+      return;
+    }
+    if (chosen !== null) await loadMembers(chosen);
+  }
 
   const load = useCallback(async (): Promise<void> => {
     const found = await api.GET('/remote/controller', {});
@@ -337,7 +354,46 @@ export function Controller({
                 {members.map((member) => (
                   <tr key={member.memberId}>
                     <td>
-                      <b>{member.label === null || member.label === '' ? '—' : member.label}</b>
+                      {naming?.id === member.memberId ? (
+                        <input
+                          value={naming.draft}
+                          maxLength={64}
+                          autoFocus
+                          aria-label="Cihazın takma adı"
+                          placeholder="Ayşe'nin telefonu"
+                          onChange={(event) =>
+                            setNaming({ id: member.memberId, draft: event.target.value })
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === 'Escape') setNaming(null);
+                            if (event.key !== 'Enter') return;
+                            event.preventDefault();
+                            void rename(member.memberId, naming.draft);
+                            setNaming(null);
+                          }}
+                          onBlur={() => {
+                            if (naming.draft.trim() !== (member.label ?? '')) {
+                              void rename(member.memberId, naming.draft);
+                            }
+                            setNaming(null);
+                          }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          className="lnk"
+                          title="Takma adı değiştir"
+                          onClick={() =>
+                            setNaming({ id: member.memberId, draft: member.label ?? '' })
+                          }
+                        >
+                          <b>
+                            {member.label === null || member.label === ''
+                              ? 'ad ver ✎'
+                              : member.label}
+                          </b>
+                        </button>
+                      )}
                       <div className="m">{member.memberId}</div>
                     </td>
                     <td>

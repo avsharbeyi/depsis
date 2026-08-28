@@ -330,6 +330,136 @@ interface Props {
  * lives in the database and listing it needs nothing from podman. That is why this screen can draw
  * a full grid and merely disable it, instead of showing an error page where a product should be.
  */
+/**
+ * Özel uygulama formu — sahibin "mağaza devasa olsun" isteğinin kapılı hâli.
+ *
+ * Kullanıcı bir İMAJ ADRESİ verir (docker.io/…, lscr.io/… gibi), DEPSIS onu köksüz motorda
+ * koşturur. İki sınır açıkça söylenir: yalnız bilinen kayıt defterleri, ve içeriğe kefalet yok —
+ * ne kurduğunu bilen kurar. Uzak sayfadan İKON KAZINMAZ; cihaz form dolduruldu diye internetten
+ * sayfa çekip ayrıştırmaz — ikon eldeki iki karakterdir (harf ya da emoji).
+ */
+function CustomAppForm({
+  notify,
+  onAdded,
+}: {
+  notify: Notify;
+  onAdded: () => void;
+}): React.JSX.Element {
+  const [name, setName] = useState('');
+  const [image, setImage] = useState('');
+  const [tag, setTag] = useState('latest');
+  const [port, setPort] = useState('');
+  const [icon, setIcon] = useState('');
+  const [env, setEnv] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    const portNo = Number.parseInt(port, 10);
+    if (!Number.isInteger(portNo) || portNo < 1 || portNo > 65535) {
+      notify('error', 'Uygulamanın kendi portunu yazın (imajın belgelerinde yazar).');
+      return;
+    }
+    const envPairs: Record<string, string> = {};
+    for (const line of env.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed === '') continue;
+      const at = trimmed.indexOf('=');
+      if (at <= 0) {
+        notify('error', `Ortam değişkenleri AD=değer biçiminde olmalı: "${trimmed}"`);
+        return;
+      }
+      envPairs[trimmed.slice(0, at).trim()] = trimmed.slice(at + 1);
+    }
+    setBusy(true);
+    const { data, error } = await api.POST('/apps/custom', {
+      body: {
+        name,
+        image: image.trim(),
+        tag: tag.trim() === '' ? 'latest' : tag.trim(),
+        containerPort: portNo,
+        ...(icon.trim() === '' ? {} : { icon: icon.trim() }),
+        ...(Object.keys(envPairs).length === 0 ? {} : { env: envPairs }),
+      },
+    });
+    setBusy(false);
+    if (data === undefined) {
+      notify('error', problemMessage(error, 'Özel uygulama eklenemedi.'));
+      return;
+    }
+    notify('ok', `${data.name} kataloğa eklendi — artık kartından kurabilirsiniz.`);
+    onAdded();
+  }
+
+  return (
+    <form
+      onSubmit={(event) => void submit(event)}
+      style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}
+    >
+      <div className="warn">
+        <span className="ic" aria-hidden>
+          ⚠
+        </span>
+        <span className="tx">
+          <b>DEPSIS eklediğiniz imajın içeriğine kefil olmaz.</b>
+          Yalnız güvendiğiniz kaynaklardan ekleyin (docker.io, ghcr.io, lscr.io, quay.io). Uygulama
+          köksüz motorda, yetkisiz bir hesabın ad alanında koşar.
+        </span>
+      </div>
+      <label className="fld">
+        <span className="lbl">Ad</span>
+        <input value={name} onChange={(e) => setName(e.target.value)} maxLength={80} required />
+      </label>
+      <label className="fld">
+        <span className="lbl">İmaj adresi</span>
+        <input
+          value={image}
+          onChange={(e) => setImage(e.target.value)}
+          placeholder="ör. lscr.io/linuxserver/jellyfin"
+          maxLength={255}
+          required
+        />
+      </label>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <label className="fld" style={{ flex: 1 }}>
+          <span className="lbl">Etiket</span>
+          <input value={tag} onChange={(e) => setTag(e.target.value)} maxLength={128} />
+        </label>
+        <label className="fld" style={{ width: 110 }}>
+          <span className="lbl">Port</span>
+          <input
+            value={port}
+            onChange={(e) => setPort(e.target.value.replaceAll(/[^0-9]/gu, ''))}
+            placeholder="8080"
+            required
+          />
+        </label>
+        <label className="fld" style={{ width: 90 }}>
+          <span className="lbl">Simge</span>
+          <input
+            value={icon}
+            onChange={(e) => setIcon(e.target.value)}
+            placeholder="🎬"
+            maxLength={8}
+          />
+        </label>
+      </div>
+      <label className="fld">
+        <span className="lbl">Ortam değişkenleri (isteğe bağlı, satır başına AD=değer)</span>
+        <textarea
+          value={env}
+          rows={3}
+          onChange={(e) => setEnv(e.target.value)}
+          placeholder={'TZ=Europe/Istanbul\nPUID=911'}
+        />
+      </label>
+      <button type="submit" className="b pri" disabled={busy}>
+        {busy ? 'Ekleniyor…' : 'Kataloğa ekle'}
+      </button>
+    </form>
+  );
+}
+
 export function Apps({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.Element {
   const [page, setPage] = useState<AppPage | null>(null);
   const [failed, setFailed] = useState(false);
@@ -340,6 +470,20 @@ export function Apps({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.E
   const [reloadKey, setReloadKey] = useState(0);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
+  /** Özel uygulama formu açık mı (yalnız yönetici görür). */
+  const [adding, setAdding] = useState(false);
+
+  async function dropCustom(slug: string): Promise<void> {
+    const { response, error } = await api.DELETE('/apps/custom/{slug}', {
+      params: { path: { slug } },
+    });
+    if (!response.ok) {
+      notify('error', problemMessage(error, 'Özel uygulama silinemedi.'));
+      return;
+    }
+    notify('ok', 'Özel uygulama katalogdan silindi.');
+    reload();
+  }
 
   useEffect(() => {
     let alive = true;
@@ -518,6 +662,23 @@ export function Apps({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.E
         </div>
       )}
 
+      {isAdmin && (
+        <div style={{ marginBottom: 10 }}>
+          <button type="button" className="b" onClick={() => setAdding((open) => !open)}>
+            {adding ? 'Vazgeç' : '+ Özel uygulama ekle'}
+          </button>
+        </div>
+      )}
+      {adding && (
+        <CustomAppForm
+          notify={notify}
+          onAdded={() => {
+            setAdding(false);
+            reload();
+          }}
+        />
+      )}
+
       {page.items.length === 0 ? (
         <Empty glyph="🧩" text="Katalog boş." />
       ) : (
@@ -534,6 +695,11 @@ export function Apps({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.E
                     {cat.icon}
                   </Glyph>
                   <b>{cat.name}</b>
+                  {cat.custom === true && (
+                    <span className="pill dim" title="Sahibin eklediği uygulama">
+                      özel
+                    </span>
+                  )}
                   <span className={state === null ? 'st2 dn' : state.pill}>
                     {state === null ? 'kurulu değil' : state.label}
                   </span>
@@ -555,6 +721,17 @@ export function Apps({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.E
                       >
                         Kur
                       </button>
+                      {cat.custom === true && isAdmin && (
+                        <button
+                          type="button"
+                          className="revoke"
+                          disabled={busy}
+                          title="Özel uygulamayı katalogdan sil"
+                          onClick={() => void dropCustom(cat.slug)}
+                        >
+                          Sil
+                        </button>
+                      )}
                     </div>
                     {/* Why it is disabled, in text on the card. It used to live in a `title`, which
                         is invisible on a touch screen — and a touch screen is most of how a NAS

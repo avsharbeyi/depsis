@@ -1257,9 +1257,12 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
           <span className="l">Dosyalarım</span>
           <span className="c">{counts.home ?? '—'}</span>
         </button>
+        {/* Çöp ve Yedekler KÜÇÜK ve SAĞDA — sahibin sözü. Asıl kapı Dosyalarım; bu ikisi
+            başvurulan yerler, ve mobilde koca bir ikinci satır olarak taşmamalılar. */}
+        <span className="qsp" aria-hidden />
         <button
           type="button"
-          className={trashed ? 'qf on' : 'qf'}
+          className={trashed ? 'qf sm on' : 'qf sm'}
           onClick={() => go({ trashed: true, trail: [] })}
         >
           <span className="g" style={tint('rose', 0.18)} aria-hidden>
@@ -1270,7 +1273,7 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
         </button>
         <button
           type="button"
-          className="qf"
+          className="qf sm"
           disabled={shares === null || shares.length === 0}
           title="Bu paylaşımın yedeklerine (anlık görüntülerine) göz at"
           onClick={() => setBackups(true)}

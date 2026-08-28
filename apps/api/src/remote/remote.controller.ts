@@ -13,6 +13,7 @@ import {
   UnauthorizedException,
   UnprocessableEntityException,
   UseGuards,
+  Patch,
 } from '@nestjs/common';
 import type { OpenApi } from '@depsis/contracts';
 import { randomUUID } from 'node:crypto';
@@ -23,6 +24,7 @@ import { requireSameOrigin } from '../auth/origin.js';
 import { AuditService } from '../audit/audit.service.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import {
+  MemberNotFoundError,
   NETWORK_ID,
   NetworkAlreadyJoinedError,
   NetworkNotJoinedError,
@@ -295,6 +297,35 @@ export class RemoteController {
     }
   }
 
+  @Patch('controller/networks/:networkId/members/:memberId')
+  @HttpCode(204)
+  @UseGuards(AdminGuard)
+  async renameMember(
+    @Req() request: AuthenticatedRequest,
+    @Param('networkId') networkId: string,
+    @Param('memberId') memberId: string,
+    @Body() body: unknown,
+  ): Promise<void> {
+    requireSameOrigin(request);
+    const session = requireSession(request);
+    if (!NETWORK_ID.test(networkId) || !/^[0-9a-f]{10}$/u.test(memberId)) {
+      throw new UnprocessableEntityException('ağ ya da üye kimliği geçersiz');
+    }
+    const parsed = z.object({ label: z.string().trim().min(1).max(64) }).safeParse(body);
+    if (!parsed.success) throw new UnprocessableEntityException('takma ad 1-64 karakter olmalı');
+    try {
+      await this.remote.renameMember(
+        session.organizationId,
+        networkId,
+        memberId,
+        parsed.data.label,
+        randomUUID(),
+      );
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
   @Post('networks')
   @UseGuards(AdminGuard)
   async join(@Req() request: AuthenticatedRequest, @Body() body: unknown): Promise<RemoteNetwork> {
@@ -368,6 +399,7 @@ function requireSession(request: AuthenticatedRequest): {
 }
 
 function translate(error: unknown): Error {
+  if (error instanceof MemberNotFoundError) return new NotFoundException(error.message);
   // 503, never 500. zerotier-one absent or stopped is a configuration state of the appliance, and
   // the card the user sees has to be able to say so (ADR-0020).
   if (error instanceof RemoteUnavailableError) {

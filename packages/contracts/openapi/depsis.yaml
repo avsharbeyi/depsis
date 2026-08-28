@@ -2545,6 +2545,30 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /remote/controller/networks/{networkId}/members/{memberId}:
+    patch:
+      tags: [remote]
+      summary: Cihaza takma ad ver
+      description: |
+        Yalnız adı değiştirir — yetki durumuna, "kim aldı" kaydına ve denetim izine dokunmaz.
+        Ad vermek bir yetki işlemi değildir ve öyle kaydedilmemelidir.
+      parameters:
+        - { name: networkId, in: path, required: true, schema: { type: string } }
+        - { name: memberId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        '204': { description: Ad değişti }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
   /remote/controller/networks/{networkId}/members:
     get:
       operationId: listControllerMembers
@@ -2933,6 +2957,34 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AppPage' }
+
+  /apps/custom:
+    post:
+      tags: [apps]
+      summary: Özel uygulama ekle (yalnız yönetici)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CustomAppRequest' }
+      responses:
+        '201':
+          description: Eklendi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomApp' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /apps/custom/{slug}:
+    delete:
+      tags: [apps]
+      summary: Özel uygulamayı katalogdan sil (kuruluysa önce kaldırılmalı)
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Silindi }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
 
   /apps/{slug}:
     parameters:
@@ -4974,11 +5026,49 @@ components:
         cols: { type: integer, minimum: 20, maximum: 500 }
         rows: { type: integer, minimum: 5, maximum: 200 }
 
+    CustomApp:
+      type: object
+      required: [slug, name, icon, image, tag, containerPort]
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        icon: { type: string }
+        image: { type: string }
+        tag: { type: string }
+        containerPort: { type: integer }
+
+    CustomAppRequest:
+      type: object
+      required: [name, image, containerPort]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        slug: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,39}$' }
+        icon: { type: string, minLength: 1, maxLength: 8 }
+        image:
+          type: string
+          maxLength: 255
+          description: |
+            Yalnız bilinen kayıt defterleri: docker.io, ghcr.io, lscr.io, quay.io. DEPSIS imajın
+            İÇERİĞİNE kefil olmaz; bu sınır yalnız yazım taklidi yüzeyini daraltır.
+        tag: { type: string, maxLength: 128, default: latest }
+        containerPort: { type: integer, minimum: 1, maximum: 65535 }
+        env:
+          type: object
+          additionalProperties: { type: string, maxLength: 1024 }
+        volumes:
+          type: array
+          maxItems: 4
+          items: { type: string }
+          description: Kalıcı tutulacak konteyner-içi mutlak yollar. Varsayılan ["/config"].
+
     AppCatalogueEntry:
       type: object
       required: [slug, name, summary, icon, containerPort, mounts, containers]
       properties:
         slug: { type: string }
+        custom:
+          type: boolean
+          description: Sahibin eklediği girdi. Katalogdan farkı arayüzde rozetle söylenir.
         name: { type: string }
         summary: { type: string }
         icon: { type: string }

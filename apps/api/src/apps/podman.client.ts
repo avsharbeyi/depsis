@@ -286,6 +286,11 @@ export interface CreateContainerSpec {
   env: Readonly<Record<string, string>>;
   mounts: readonly BindMount[];
   volumes?: readonly NamedVolume[];
+  /**
+   * /dev/shm boyutu, bayt. Tarayıcı imajları (KasmVNC/Chromium) 64 MB varsayılanla sekme açar
+   * açmaz çöker. Katalog satırından gelir (0039), istekten asla; null varsayılanı bırakır.
+   */
+  shmBytes?: number | null;
 
   /**
    * Publish on 127.0.0.1, or do not publish at all.
@@ -457,6 +462,9 @@ export class PodmanClient {
       // Restart on boot, but not in a crash loop that hides a broken app from its own logs.
       restart_policy: 'on-failure',
       restart_tries: 3,
+      ...(spec.shmBytes === null || spec.shmBytes === undefined
+        ? {}
+        : { shm_size: Math.trunc(spec.shmBytes) }),
     };
     await this.json('POST', `${API}/containers/create`, payload);
   }

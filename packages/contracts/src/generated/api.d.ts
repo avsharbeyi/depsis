@@ -3999,6 +3999,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/remote/controller/networks/{networkId}/members/{memberId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Cihaza takma ad ver
+         * @description Yalnız adı değiştirir — yetki durumuna, "kim aldı" kaydına ve denetim izine dokunmaz.
+         *     Ad vermek bir yetki işlemi değildir ve öyle kaydedilmemelidir.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    networkId: string;
+                    memberId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        label: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Ad değişti */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        trace?: never;
+    };
     "/remote/controller/networks/{networkId}/members": {
         parameters: {
             query?: never;
@@ -4716,6 +4765,85 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/custom": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Özel uygulama ekle (yalnız yönetici) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CustomAppRequest"];
+                };
+            };
+            responses: {
+                /** @description Eklendi */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CustomApp"];
+                    };
+                };
+                422: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/custom/{slug}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Özel uygulamayı katalogdan sil (kuruluysa önce kaldırılmalı) */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Silindi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -6666,8 +6794,36 @@ export interface components {
             cols: number;
             rows: number;
         };
+        CustomApp: {
+            slug: string;
+            name: string;
+            icon: string;
+            image: string;
+            tag: string;
+            containerPort: number;
+        };
+        CustomAppRequest: {
+            name: string;
+            slug?: string;
+            icon?: string;
+            /**
+             * @description Yalnız bilinen kayıt defterleri: docker.io, ghcr.io, lscr.io, quay.io. DEPSIS imajın
+             *     İÇERİĞİNE kefil olmaz; bu sınır yalnız yazım taklidi yüzeyini daraltır.
+             */
+            image: string;
+            /** @default latest */
+            tag: string;
+            containerPort: number;
+            env?: {
+                [key: string]: string;
+            };
+            /** @description Kalıcı tutulacak konteyner-içi mutlak yollar. Varsayılan ["/config"]. */
+            volumes?: string[];
+        };
         AppCatalogueEntry: {
             slug: string;
+            /** @description Sahibin eklediği girdi. Katalogdan farkı arayüzde rozetle söylenir. */
+            custom?: boolean;
             name: string;
             summary: string;
             icon: string;

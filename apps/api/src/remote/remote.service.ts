@@ -101,6 +101,13 @@ export class NetworkAlreadyJoinedError extends Error {
  * same way `UserNotFoundError` does — the daemon is device-wide while the table is tenant-scoped,
  * so distinguishing them would tell one tenant something about another.
  */
+export class MemberNotFoundError extends Error {
+  constructor() {
+    super('no such member on this network');
+    this.name = 'MemberNotFoundError';
+  }
+}
+
 export class NetworkNotJoinedError extends Error {
   constructor() {
     super('this device has not joined that network');
@@ -519,6 +526,52 @@ export class RemoteService {
       authorizedBy: record?.authorized_by_username ?? null,
       authorizedAt: record?.authorized_at?.toISOString() ?? null,
     };
+  }
+
+  /**
+   * Yalnız TAKMA ADI değiştir — yetki dokunulmadan.
+   *
+   * `setMemberAuthorized`'dan geçirmek işe yarardı ama iki yalan söylerdi: `authorized_at/by`
+   * yeniden yazılır ("kim aldı" ad değiştirene döner) ve denetim izine bir "yetkilendirildi"
+   * satırı düşer. Ad vermek bir yetki işlemi değil; kendi yolu var.
+   */
+  async renameMember(
+    organizationId: string,
+    networkId: string,
+    memberId: string,
+    label: string,
+    correlationId: string,
+  ): Promise<void> {
+    await this.requireControlled(organizationId, networkId);
+    // Controller da adı tutuyor; oradaki kopya güncel kalsın diye mevcut yetki durumuyla aynı
+    // op gönderiliyor — durum okunup aynen geri yazılıyor, değişen yalnız ad.
+    const current = (await this.members(organizationId, networkId, correlationId)).find(
+      (member) => member.memberId === memberId,
+    );
+    if (current === undefined) throw new MemberNotFoundError();
+    const answer = await this.ask(
+      {
+        op: 'zerotier_set_member_authorized',
+        network_id: networkId,
+        member: memberId,
+        authorized: current.authorized,
+        label,
+      },
+      `remote access: renaming ${memberId} on ${networkId}`,
+      correlationId,
+    );
+    if (answer.status !== 'zerotier_member_updated') {
+      throw this.unexpected('zerotier_member_updated', answer);
+    }
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `INSERT INTO public.remote_members (organization_id, network_id, member_id, label)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (organization_id, network_id, member_id) DO UPDATE
+            SET label = EXCLUDED.label, updated_at = now()`,
+        [organizationId, networkId, memberId, label],
+      ),
+    );
   }
 
   /** The network ids this tenant controls. */

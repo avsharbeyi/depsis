@@ -6,6 +6,7 @@ import { TagBar, type Tag } from './TagBar.js';
 import { TaskThread } from './TaskThread.js';
 import type { Tone } from './ui.js';
 import { Empty, Glyph } from './ui.js';
+import { downloadXlsx } from './xlsx.js';
 
 type Task = OpenApi.components['schemas']['Task'];
 type Status = Task['status'];
@@ -109,43 +110,31 @@ function logValue(field: string, value: string | null): string {
 }
 
 /**
- * Arşivi Excel'in doğrudan açtığı bir dosyaya çevir.
+ * Arşivi gerçek bir .xlsx olarak indirt.
  *
- * CSV, ama Excel'in beklediği biçimde: başta BOM (Türkçe karakterler için şart — BOM'suz UTF-8'i
- * Excel hâlâ yerel kod sayfasıyla açıyor) ve ayraç NOKTALI VİRGÜL, çünkü Türkçe yerel ayarda
- * Excel virgülü ondalık işareti sayar ve virgüllü CSV'yi tek sütuna yığar.
+ * İlk sürüm BOM'lu CSV'ydi ve sahibi sonucu gördü: sütunlar taşıyor, hücre içi satır sonları
+ * satırları kaydırıyor, "yazılar iç içe". CSV'nin nasıl açılacağı Excel'in yerel ayarına kalıyor;
+ * .xlsx'te hücre hücredir ve sütun genişliği dosyanın içinde yazar. Yazıcı `xlsx.ts`'te.
  */
 function excelExport(rows: Task[]): void {
-  const cell = (value: string | null | undefined): string =>
-    `"${String(value ?? '').replaceAll('"', '""')}"`;
-  const lines = [
-    ['İş', 'Açıklama', 'Durum', 'Öncelik', 'Atanan', 'Bitirilme', 'Son tarih', 'Etiketler'].join(
-      ';',
-    ),
-    ...rows.map((task) =>
-      [
-        cell(task.body),
-        cell(task.description),
-        cell(STATUS_LABEL[task.status]),
-        cell(PRIORITY_LABEL[task.priority]),
-        cell(task.assigneeUsername ?? 'Atanmamış'),
-        cell(task.doneAt === null ? '' : new Date(task.doneAt).toLocaleString('tr-TR')),
-        cell(
-          task.dueAt === null || task.dueAt === undefined
-            ? ''
-            : new Date(task.dueAt).toLocaleDateString('tr-TR'),
-        ),
-        cell((task.tags ?? []).map((tag) => tag.name).join(', ')),
-      ].join(';'),
-    ),
-  ];
-  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `is-arsivi-${new Date().toISOString().slice(0, 10)}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadXlsx(
+    `is-arsivi-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    'İş arşivi',
+    ['İş', 'Açıklama', 'Durum', 'Öncelik', 'Atanan', 'Bitirilme', 'Son tarih', 'Etiketler'],
+    rows.map((task) => [
+      task.body,
+      task.description ?? '',
+      STATUS_LABEL[task.status],
+      PRIORITY_LABEL[task.priority],
+      task.assigneeUsername ?? 'Atanmamış',
+      task.doneAt === null ? '' : new Date(task.doneAt).toLocaleString('tr-TR'),
+      task.dueAt === null || task.dueAt === undefined
+        ? ''
+        : new Date(task.dueAt).toLocaleDateString('tr-TR'),
+      (task.tags ?? []).map((tag) => tag.name).join(', '),
+    ]),
+    [42, 48, 13, 10, 14, 17, 12, 20],
+  );
 }
 
 const AVATAR_TONES: readonly Tone[] = ['cool', 'iris', 'warn', 'live', 'rose'];

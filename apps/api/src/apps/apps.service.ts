@@ -207,6 +207,49 @@ const catalogueMountSchema = z.object({
 });
 
 const catalogueMountsSchema = z.array(catalogueMountSchema);
+
+/** Özel imajların gelebileceği kayıt defterleri. İçeriğe kefalet değil, typosquat daraltması. */
+const CUSTOM_REGISTRIES = new Set(['docker.io', 'ghcr.io', 'lscr.io', 'quay.io']);
+
+/** Girdi kabul edilemez — sebep cümlenin kendisi. */
+export class CustomAppInvalidError extends Error {
+  constructor(detail: string) {
+    super(detail);
+    this.name = 'CustomAppInvalidError';
+  }
+}
+
+/** Özel satırın katalog görünümü. `custom: true` — arayüz rozetini buradan çizer. */
+function customEntry(row: CustomRow): CatalogueRow {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    summary: `Özel uygulama — ${row.image}:${row.tag}. DEPSIS içeriğine kefil değildir.`,
+    icon: row.icon,
+    container_port: row.container_port,
+    custom: true,
+  };
+}
+
+/** Özel satırın tek konteynerlik gövdesi — plan() bunun üstünde katalogla aynı yolu yürür. */
+function customContainer(row: CustomRow): ContainerRow {
+  const targets = Array.isArray(row.volumes)
+    ? row.volumes.filter((it): it is string => typeof it === 'string')
+    : [];
+  return {
+    catalogue_id: row.id,
+    role: 'app',
+    ordinal: 0,
+    is_primary: true,
+    image: row.image,
+    tag: row.tag,
+    env: row.env,
+    mounts: [],
+    volumes: targets.map((target) => ({ target, purpose: 'Kalıcı veri' })),
+    shm_bytes: null,
+  };
+}
 const catalogueEnvSchema = z.record(z.string(), z.string());
 
 /** A managed volume is a target and a sentence; the user never picks where it lives. */
@@ -222,6 +265,8 @@ export interface CatalogueRow {
   icon: string;
   /** The port the POD publishes on 127.0.0.1 — a fact about the application, not a container. */
   container_port: number;
+  /** Özel (sahibin eklediği) girdi mi. Katalog satırlarında yok; görünümde bilgi. */
+  custom?: true;
 }
 
 /** One container of one application, in start order. Migration 0031. */
@@ -234,6 +279,21 @@ export interface ContainerRow {
   tag: string;
   env: unknown;
   mounts: unknown;
+  volumes: unknown;
+  /** /dev/shm boyutu (0039). Tarayıcı gibi imajlar 64 MB varsayılanla çöker; null = varsayılan. */
+  shm_bytes: number | null;
+}
+
+/** Sahibin kendi eklediği uygulama (0039). Kataloğun kapılı genişletmesi — yalnız yönetici yazar. */
+export interface CustomRow {
+  id: string;
+  slug: string;
+  name: string;
+  icon: string;
+  image: string;
+  tag: string;
+  container_port: number;
+  env: unknown;
   volumes: unknown;
 }
 
@@ -266,6 +326,7 @@ interface ContainerPlan {
   env: Record<string, string>;
   mounts: BindMount[];
   volumes: NamedVolume[];
+  shm: number | null;
 }
 
 /**
@@ -462,6 +523,7 @@ export class AppsService {
           env: container.env,
           mounts: container.mounts,
           volumes: container.volumes,
+          shmBytes: container.shm,
           pod,
         });
       }
@@ -631,10 +693,24 @@ export class AppsService {
       // applications is six round trips saved today and a page that does not get slower as the
       // catalogue grows.
       const containers = await db.query<ContainerRow>(
-        `SELECT catalogue_id::text AS catalogue_id, role, ordinal, is_primary, image, tag, env, mounts, volumes
+        `SELECT catalogue_id::text AS catalogue_id, role, ordinal, is_primary, image, tag, env,
+                mounts, volumes, shm_bytes::double precision AS shm_bytes
            FROM public.app_catalogue_containers
           ORDER BY ordinal`,
       );
+      // Özel girdiler aynı görünümün parçası: katalog satırı ve tek konteynerlik gövdesi olarak
+      // sentezlenip listeye eklenir — aşağısı ikisini ayırt etmek zorunda kalmaz.
+      const custom = await db.query<CustomRow>(
+        `SELECT id::text AS id, slug, name, icon, image, tag, container_port, env, volumes
+           FROM public.app_custom
+          WHERE organization_id = $1
+          ORDER BY name`,
+        [organizationId],
+      );
+      for (const row of custom) {
+        catalogue.push(customEntry(row));
+        containers.push(customContainer(row));
+      }
       const instances = await db.query<InstanceRow>(
         `SELECT id::text AS id, catalogue_id::text AS catalogue_id, container_name, host_port,
                 created_at, pod_name
@@ -651,6 +727,88 @@ export class AppsService {
    * primary, is a broken migration, and every path that installs or drives an application would
    * otherwise have to notice it separately.
    */
+  /**
+   * Özel bir uygulama ekle. YALNIZ ŞEKİL doğrulanır, içerik değil — ve bu sınır arayüzde de
+   * yazıyor: DEPSIS eklenen imajın ne yaptığına kefil olmaz. Şeklin sınırı da dar: yalnız bilinen
+   * kayıt defterleri, ADR-0019'un "kullanıcı imaj adı yazamaz" kuralının kapılı gevşemesi olarak.
+   */
+  async addCustom(
+    organizationId: string,
+    userId: string,
+    input: {
+      name: string;
+      slug: string;
+      icon: string;
+      image: string;
+      tag: string;
+      containerPort: number;
+      env: Record<string, string>;
+      volumes: string[];
+    },
+  ): Promise<CustomRow> {
+    const registry = input.image.split('/')[0] ?? '';
+    if (!CUSTOM_REGISTRIES.has(registry)) {
+      throw new CustomAppInvalidError(
+        `imaj adresi şu kayıt defterlerinden biriyle başlamalı: ${[...CUSTOM_REGISTRIES].join(', ')}`,
+      );
+    }
+    // `imageReference` biçimi zaten reddediyor; burada çağrılması, bozuk bir adresin tabloya
+    // girmeden ölmesi için.
+    imageReference(input.image, input.tag);
+
+    try {
+      const rows = await this.db.withTenant(organizationId, (db) =>
+        db.query<CustomRow>(
+          `INSERT INTO public.app_custom
+                  (organization_id, slug, name, icon, image, tag, container_port, env, volumes, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10)
+           RETURNING id::text AS id, slug, name, icon, image, tag, container_port, env, volumes`,
+          [
+            organizationId,
+            input.slug,
+            input.name,
+            input.icon,
+            input.image,
+            input.tag,
+            input.containerPort,
+            JSON.stringify(input.env),
+            JSON.stringify(input.volumes),
+            userId,
+          ],
+        ),
+      );
+      const row = rows[0];
+      if (row === undefined) throw new Error('the custom app row was not returned');
+      return row;
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new CustomAppInvalidError(`'${input.slug}' adında bir uygulama zaten var`);
+      }
+      throw error;
+    }
+  }
+
+  /** Özel uygulamayı sil. Kurulu olanı SİLMEZ — önce kaldırılmalı; FK yerine bu kural koruyor. */
+  async removeCustom(organizationId: string, slug: string): Promise<void> {
+    await this.db.withTenant(organizationId, async (db) => {
+      const rows = await db.query<{ id: string }>(
+        `SELECT id::text AS id FROM public.app_custom
+          WHERE organization_id = $1 AND slug = $2`,
+        [organizationId, slug],
+      );
+      const row = rows[0];
+      if (row === undefined) throw new AppNotInCatalogueError(slug);
+      const installed = await db.query(
+        `SELECT 1 FROM public.app_instances WHERE catalogue_id = $1`,
+        [row.id],
+      );
+      if (installed.length > 0) {
+        throw new CustomAppInvalidError('bu uygulama kurulu; önce Kaldır ile kaldırın');
+      }
+      await db.query(`DELETE FROM public.app_custom WHERE id = $1`, [row.id]);
+    });
+  }
+
   private async requireCatalogue(
     organizationId: string,
     slug: string,
@@ -667,7 +825,8 @@ export class AppsService {
       return {
         entry: found,
         containers: await db.query<ContainerRow>(
-          `SELECT catalogue_id::text AS catalogue_id, role, ordinal, is_primary, image, tag, env, mounts, volumes
+          `SELECT catalogue_id::text AS catalogue_id, role, ordinal, is_primary, image, tag, env,
+                  mounts, volumes, shm_bytes::double precision AS shm_bytes
              FROM public.app_catalogue_containers
             WHERE catalogue_id = $1
             ORDER BY ordinal`,
@@ -676,7 +835,21 @@ export class AppsService {
       };
     });
 
-    if (entry === undefined) throw new AppNotInCatalogueError(slug);
+    if (entry === undefined) {
+      // Katalogda yok — sahibin kendi girdilerinde mi? Kurulum, durum, kaldırma: hepsi buradan
+      // geçtiği için tek bu geri dönüş, özel uygulamaları bütün akışlara katıyor.
+      const rows = await this.db.withTenant(organizationId, (db) =>
+        db.query<CustomRow>(
+          `SELECT id::text AS id, slug, name, icon, image, tag, container_port, env, volumes
+             FROM public.app_custom
+            WHERE organization_id = $1 AND slug = $2`,
+          [organizationId, slug],
+        ),
+      );
+      const found = rows[0];
+      if (found === undefined) throw new AppNotInCatalogueError(slug);
+      return { entry: customEntry(found), containers: [customContainer(found)] };
+    }
     if (containers.length === 0) {
       throw new CatalogueShapeError(`${slug} has no containers in the catalogue`);
     }
@@ -768,6 +941,7 @@ export class AppsService {
           name: volumeNameFor(name, index, volume.target),
           destination: volume.target,
         })),
+        shm: container.shm_bytes,
       };
     });
   }
