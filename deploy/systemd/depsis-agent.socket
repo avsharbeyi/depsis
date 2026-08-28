@@ -12,9 +12,14 @@
 [Unit]
 Description=DEPSIS system agent control socket
 Documentation=file:///usr/share/doc/depsis/adr/0006-system-agent.md
-# The agent is useless before ZFS is up, and starting the socket early would let the API
-# connect and get failures that look like bugs rather than like "not ready yet".
-After=zfs.target
+# ZFS'İ BEKLEMEK BURADA YASAK, ve bedeli sahada ödendi. İlk hâli `After=zfs.target` idi —
+# "ZFS kalkmadan ajan işe yaramaz" diye — ve Samba kurulduğu gün bir DÖNGÜ doğurdu:
+# sockets.target → bu soket → zfs.target → zfs-share → smbd → basic.target → sockets.target.
+# systemd döngüyü kırmak için RASTGELE bir işi siliyor; bir açılışta zfs-share'i seçti ve her
+# şey çalıştı, ertesi açılışta BU SOKETİ seçti ve "depolama ajanı çalışmıyor" oldu — aynı
+# yapılandırma, yazı tura. Erken açılan soket zararsız: bağlantı kuyruklanır, servis zfs'i
+# kendi After'ıyla bekler, API en kötü "henüz hazır değil" görür. Bir soket birimi asla geç
+# hedefleri beklememeli.
 
 [Socket]
 ListenStream=/run/depsis/agent.sock
