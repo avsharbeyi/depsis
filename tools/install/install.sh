@@ -696,6 +696,11 @@ units() {
   if id -u depsis-apps >/dev/null 2>&1; then
     systemctl enable --now depsis-podman.socket >/dev/null 2>&1 || true
   fi
+  # Kiosk: paketleri ve hesabı firstboot kurar; ekran kartı da varsa cihaz ekranı arayüz olur.
+  # Koşullar birimin kendisinde de var (Condition*); buradaki if yalnız gereksiz enable'ı atlar.
+  if id -u depsis-kiosk >/dev/null 2>&1 && [ -e /dev/dri/card0 ]; then
+    systemctl enable depsis-kiosk.service >/dev/null 2>&1 || true
+  fi
   ok 'soketler açık'
 
   # pasta'nın AppArmor profili yalnız /run/user/<uid> yolunu tanır; motorumuz oturumsuz hesapla

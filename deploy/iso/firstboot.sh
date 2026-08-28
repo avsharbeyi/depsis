@@ -62,6 +62,15 @@ apt-get install -y -qq samba smbclient >/dev/null || \
 apt-get install -y -qq wsdd2 >/dev/null || \
   echo 'UYARI: wsdd2 kurulamadı; cihaz Gezgin Ağ görünümünde kendiliğinden listelenmez.'
 
+# ── Kiosk: cihazın kendi ekranında arayüz ────────────────────────────────────
+#
+# Monitör takan sahibi login: satırı değil DEPSIS'i görmeli. cage tek pencerelik bileştirici,
+# chromium cihazın GERÇEK tarayıcısı; birim (depsis-kiosk.service) ekran kartı yoksa hiç
+# başlamıyor, yani ekransız kutuda bu paketler yalnız yer kaplar — o yüzden en iyi çaba.
+say 'Kiosk (cihaz ekranında arayüz)'
+apt-get install -y -qq cage chromium >/dev/null ||   echo 'UYARI: kiosk paketleri kurulamadı; cihaz ekranında konsol görünür, arayüz ağdan çalışır.'
+id -u depsis-kiosk >/dev/null 2>&1 ||   useradd --create-home --shell /usr/sbin/nologin --groups video,input,render depsis-kiosk
+
 say 'ZFS (contrib deposundan, dkms derlemesi birkaç dakika sürer)'
 apt-get install -y zfsutils-linux || {
   echo 'UYARI: zfsutils-linux kurulamadı; havuz kurulana kadar depolama uçları 503 döner.'

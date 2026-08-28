@@ -1,0 +1,49 @@
+# Cihazın kendi ekranı — açılınca tam ekran DEPSIS arayüzü.
+#
+# Sahibin sorusu bire birdi: "debian yüklü olan cihazı açtığımda arayüz gelecek mi?" Gelmiyordu:
+# ekranda bir metin konsolu duruyordu ve arayüz yalnız BAŞKA cihazların tarayıcısında yaşıyordu.
+# Bir tüketici cihazına monitör takan kişi siyah bir login: satırı değil ürünü görmeli.
+#
+# Yapı: `cage` (tek pencerelik Wayland bileştiricisi) tty1'de açılır ve içinde CİHAZIN KENDİ
+# Chromium'u kiosk kipinde https://127.0.0.1'i gösterir. Konteyner değil, gerçek yerel tarayıcı —
+# katalogtaki Chromium uygulaması ekransız ve ağdan kullanılır, bu ise fiziksel ekranın kendisi.
+#
+# `--ignore-certificate-errors` YALNIZ BURADA meşru: bu tarayıcı yalnız kendi loopback'ine, kendi
+# kendinden imzalı sertifikasına bağlanıyor. Ortadaki adam olacaksa cihazın kendisidir. LAN'daki
+# tarayıcılara aynı bayrağı kimse önermiyor.
+#
+# `ConditionPathExists=/dev/dri/card0`: ekran kartı olmayan (gerçek sunucu) kutuda birim hiç
+# başlamaz — yoksa cage DRM bulamayıp Restart=always ile sonsuz döngüye girerdi.
+
+[Unit]
+Description=DEPSIS kiosk — cihaz ekranında arayüz
+ConditionPathExists=/dev/dri/card0
+ConditionPathExists=/usr/bin/cage
+ConditionPathExists=/usr/bin/chromium
+Wants=depsis-api.service
+After=systemd-user-sessions.service depsis-api.service getty@tty1.service
+Conflicts=getty@tty1.service
+
+[Service]
+User=depsis-kiosk
+Group=depsis-kiosk
+# PAM oturumu: logind bu servise koltuğu (DRM + klavye + fare) buradan verir; seatd gerekmez.
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+Environment=XDG_RUNTIME_DIR=/run/depsis-kiosk
+# API ayağa kalkmadan Chromium açılırsa ekranda bağlantı hatası donar; kiosk sayfayı kendisi
+# yenilemez. En çok iki dakika beklenir, sonra yine de açılır — boş ekran hiç açılmamaktan kötü.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -skf -o /dev/null https://127.0.0.1/api/v1/health && exit 0; sleep 2; done; exit 0'
+ExecStart=/usr/bin/cage -d -- /usr/bin/chromium --kiosk --noerrdialogs \
+  --disable-session-crashed-bubble --disable-infobars --no-first-run \
+  --ignore-certificate-errors --ozone-platform=wayland https://127.0.0.1/
+Restart=always
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
