@@ -15,6 +15,13 @@ Nextcloud, bir torrent istemcisi.
 
 ## Karar
 
+> **REVİZE (saha), iki maddede.** (1) Podman artık cihazla GELİYOR: kurulumu ISO'nun ilk açılışı
+> yapıyor (`deploy/iso/firstboot.sh`), çünkü "apt ile kurun" bir tüketici cihazında kurulum adımı
+> değil ürünün eksiği. Köksüzlük şartı aynen duruyor. (2) Katalog artık YALNIZ migration ile
+> yazılmıyor: yönetici kendi imajını ekleyebiliyor (`app_custom`, 0039), ama yalnız bilinen kayıt
+> defterlerinden (docker.io, ghcr.io, lscr.io, quay.io) ve DEPSIS'in içeriğe kefil olmadığı arayüzde
+> yazılı olarak. Aşağıdaki iki başlığı bu iki cümleyle okuyun.
+
 ### Motor: Podman, ve DEPSIS onu paketlemez
 
 `podman`, dağıtımın kendi paketinden. DEPSIS bir konteyner çalışma zamanı **taşımaz**; kuruluysa
@@ -46,6 +53,9 @@ işlem kümesine on yeni varyant eklemek pahasına, ayrıcalığı azaltmadan ka
 çünkü soket zaten ayrıcalıksız.
 
 ### Katalog küratörlüdür, keyfi `docker run` değil
+
+> Revize: aşağıdaki kural kataloğun KENDİSİ için hâlâ geçerli. Yanına eklenen şey kapılı bir
+> genişleme — bkz. yukarıdaki not.
 
 Kullanıcı bir imaj adı yazamaz. `public.app_catalogue` tablosunda DEPSIS'in tanıdığı uygulamalar
 durur; her satır imajı, açtığı portu, istediği bağlama noktalarını ve ortam değişkenlerini

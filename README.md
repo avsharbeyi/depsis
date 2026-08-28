@@ -1,10 +1,16 @@
 # DEPSIS
 
-Yerel ağda çalışan bir NAS cihazının yazılımı: web arayüzü, SMB paylaşımı, ZFS depolama ve
-ayrıcalıklı işlemleri yapan küçük bir sistem ajanı.
+Yerel ağda çalışan bir NAS cihazının yazılımı: web arayüzü, SMB paylaşımı, ZFS depolama, uygulama
+kataloğu, uzaktan erişim ve ayrıcalıklı işlemleri yapan küçük bir sistem ajanı. Önyüklenebilir bir
+kurulum ISO'su olarak paketleniyor; kurulan kutu monitöre takılınca kendi ekranında arayüzü açıyor.
 
-Tasarım kararları `docs/adr/` altında, ölçümler `tools/poc/` altında. Bu dosya yalnızca "nasıl
-çalıştırırım, nasıl girerim" sorusunu cevaplıyor.
+**Ölçüt terminalsizlik.** Bu bir tüketici cihazı, "Linux bilenler için" bir sunucu dağıtımı değil:
+bir özelliğin çalıştığı, ancak arayüzden — kabuğa hiç girmeden — kullanılabildiğinde söylenebilir.
+Bağımlılıklar (Samba, ZeroTier, Podman, ZFS, tarayıcı) cihazla birlikte gelir; "şunu apt ile
+kurun" bir kurulum adımı değil, ürünün eksiğidir.
+
+Tasarım kararları `docs/adr/` altında, ölçümler `tools/poc/` altında. Bu dosya "nasıl kurarım,
+nasıl çalıştırırım, ne çalışıyor" sorularını cevaplıyor.
 
 ## Çalıştırmak
 
@@ -63,7 +69,22 @@ sudo PGHOST=127.0.0.1 PGUSER=postgres PGPASSWORD=... bash tools/poc/p1-d-systemd
 
 ## Gerçek kurulum
 
-Temiz bir Debian kutusuna kurulum tek betik (§19'un "denetlenebilir bootstrap installer"ı):
+### Kurulum ISO'su (asıl yol)
+
+```bash
+bash deploy/iso/build-iso.sh          # Debian netinst'i indirir, doğrular, DEPSIS'i içine koyar
+```
+
+Çıkan ISO USB'ye ham yazılır (Rufus/balenaEtcher "dd kipi"). Debian'ın **imzalı** kurulum zinciri
+olduğu gibi kalır; eklenen tek şey veri dosyalarıdır — ön-yanıt (`preseed.cfg`), ilk açılış betiği
+ve deponun o anki kaynağı. Yani `deploy/iso/build-iso.sh`'in diff'i, ISO'nun Debian'dan farkının
+tamamıdır.
+
+Kurulum iki şey sorar (hangi disk, ilk hesap), gerisini kendi yapar. İlk açılışta
+`deploy/iso/firstboot.sh` bağımlılıkları kurar — PostgreSQL 18, Node 24, Rust, ZFS, Samba (+ wsdd2),
+`acl`, Podman, ZeroTier, kiosk için cage + Chromium — ve sonra işi aşağıdaki betiğe devreder.
+
+### Elle kurulum (kurulu bir Debian üstüne)
 
 ```bash
 sudo bash tools/install/install.sh --hostname depsis --shares-root /srv/depsis
@@ -76,37 +97,73 @@ aynı komut kaldığı yerden sürer. `--check-only` yalnız ön kontrolleri ko�
 sertifikayı yeniler. Betik bitince adresi, sertifikanın SHA-256 parmak izini ve — ilk kurulumda,
 yalnız bir kez — kurtarma anahtarını yazar. Ayrıntı: `docs/operations/01-yonetici-kilavuzu.md` §2.
 
-## Cihazın dışındaki üç şey
+## Cihazla gelen dört şey
 
-Konsol, uygulamalar ve uzak erişim; üçü de DEPSIS'in **paketlemediği** bir şeyi yönetiyor.
-Kuruluysa yönetir, değilse arayüz "kurulu değil" der. Hiçbiri sessizce bozulmaz: eksik bir arka uç
-503 döner ya da `available: false` ile 200 — asla 500.
+Bu bölüm bir kararın TERSİNE ÇEVRİLİŞİNİ anlatıyor, ve durduğu yerde durması önemli. İlk tasarım
+Samba'yı, ZeroTier'i ve Podman'ı "DEPSIS paketlemez, kurmaz" diye dışarıda bırakıyordu (ADR-0019,
+ADR-0020) — kâğıt üstünde temiz bir sınırdı. İlk gerçek kurulumda sahibi uzaktan erişimi açmak
+istedi ve karşısına terminal çıktı; paylaşımlar "yayınlandı" göründü ama 445 hiç dinlemiyordu,
+çünkü Samba kutuda yoktu. Bir tüketici cihazında bu sınır, ürünün eksiğinin adıydı.
 
-Geliştirme kutusuna üçünü de kuran betik:
+Artık dördü de cihazla geliyor — kurulumu ISO'nun ilk açılışı yapıyor, yapılandırmayı
+`tools/install/install.sh`:
+
+- **Samba** — paylaşımların var olma sebebi. `smb.conf`'a tek satır `include` eklenir, ajanın
+  yazdığı `depsis.conf` oradan okunur; `map to guest = Never` (Debian'ın varsayılanı bilinmeyen
+  kullanıcıyı misafire düşürüyor ve Windows o yüzden parola penceresini hiç açmıyordu). `wsdd2`
+  ile cihaz Gezgin'in "Ağ" görünümünde kendiliğinden belirir.
+- **Uzak erişim / ZeroTier** (ADR-0020, revize) — cihaz uzaktan erişim YETENEĞİYLE gelir; bir ağa
+  katılmak yine arayüzden, yine sahibinin kararıyla olur. Kendi denetleyicisini de kendisi
+  koşuyor: ağı kutu kuruyor, cihazları kutu yetkilendiriyor, `my.zerotier.com` gerekmiyor. Her
+  cihaza takma ad verilir ki "kimin cihazı" sorusu cevaplanabilsin.
+- **Uygulamalar / Podman** (ADR-0019, revize) — KÖKSÜZ: kataloğun kurduğu bir imaj ele geçse bile
+  kutuda root değil, yetkisiz bir hesabın ad alanındadır. Katalog küratörlü (migration ile yazılır)
+  **ve** yönetici kendi imajını ekleyebilir: yalnız bilinen kayıt defterlerinden (docker.io,
+  ghcr.io, lscr.io, quay.io), çünkü serbest bir imaj adı "internetten indirilen keyfi kodu
+  çalıştır" demektir ve DEPSIS eklenen imajın içeriğine kefil olmaz — arayüz bunu aynen söyler.
+  Kaldırma konteyneri siler, **bağlanan paylaşımlara dokunmaz**. Uygulamanın verisi paylaşımın
+  köküne değil içinde kendi klasörüne bağlanır (`prepare_app_data_dir`), ve açılışta kurulu
+  uygulamaları `depsis-apps-restore.service` geri getirir — köksüz podman'ın restart politikası
+  yeniden başlatmayı taşımıyor.
+- **Kiosk tarayıcısı** — cage + Chromium. Monitör takılan kutu açılınca kendi ekranında tam ekran
+  DEPSIS arayüzünü gösterir (`depsis-kiosk.service`). Ekran kartı olmayan kutuda birim hiç
+  başlamaz; cihaz ekransız NAS olarak çalışmaya devam eder.
+
+**Konsol** (ADR-0018) bunlardan ayrı: DEPSIS'in kendi ikilisi, yalnız yönetici, oturum açıkken bile
+parola sorar. Ayrıcalıklı ajanda ÇALIŞMAZ — `services/console` kendi systemd birimi, varsayılan
+olarak ayrıcalıksız bir kullanıcıda. `systemctl disable depsis-console` özelliği tamamen kapatır.
+Girilen her satır denetime yazılır, çıktı yazılmaz.
+
+Hiçbiri sessizce bozulmaz: eksik bir arka uç 503 döner ya da `available: false` ile 200 — asla 500.
+
+Geliştirme kutusuna bunları kuran betik ayrı duruyor:
 
 ```bash
 sudo bash tools/dev/provision-vm.sh
 ```
 
-- **Konsol** (ADR-0018) — yalnız yönetici, üstelik oturum açıkken bile parola sorar. Ayrıcalıklı
-  ajanda ÇALIŞMAZ: `services/console` kendi systemd birimi, varsayılan olarak ayrıcalıksız bir
-  kullanıcıda. `systemctl disable depsis-console` özelliği tamamen kapatır. Girilen her satır
-  denetime yazılır, çıktı yazılmaz. Root kabuk isteyen kurulum birim dosyasını elle düzenler.
-- **Uygulamalar** (ADR-0019) — Podman. Katalog küratörlü: kullanıcı imaj adı yazamaz, çünkü
-  serbest imaj adı "internetten indirilen keyfi kodu çalıştır" demektir. Kaldırma konteyneri
-  siler, **bağlanan paylaşımlara dokunmaz**.
-- **Uzak erişim** (ADR-0020) — ZeroTier. Jeton root okunabilir olduğu için ajanın arkasından,
-  dört tiplenmiş işlemle. Bir ağa katılmak, ağ yöneticisi cihazı onaylayana kadar bağlantı
-  sağlamaz; arayüz bunu "onay bekliyor" diye gösterir, "bağlanıyor" diye değil.
+ZeroTier'in kendi kurulum betiği (`curl | bash`) yalnız ISO'nun ilk açılışında koşuyor;
+`provision-vm.sh` onu imzalı apt deposundan kuruyor. Fark bilinçli ve bedeli kabul: ilk açılış
+zaten ağdan Node, Rust ve PostgreSQL çekiyor, ve ZeroTier'in apt deposunu elle kurmak aynı güven
+zincirinin daha uzun yazılmış hâli.
 
-DEPSIS hiçbirini indirmez ve `curl | bash` çalıştırmaz — `provision-vm.sh` ZeroTier'i kendi
-imzalı apt deposundan kurar.
+## İlk açılış: jeton yok
 
-## Faz 1'de henüz olmayanlar
+Cihaz sahiplenilmemişken tarayıcıda kurulum sihirbazı açılır ve **ilk kurulan hesap yönetici olur**;
+sonra sihirbaz sonsuza dek kapanır (`claim_system_setup`, tek atımlık bir veritabanı kaydı).
+
+İlk tasarım günlüğe basılan tek kullanımlık bir jeton istiyordu — ADR-0009'un argümanı doğruydu:
+yerel ağdaki bir NAS'ı ilk gören sahiplenmemeli. Ama o jetonu okumanın tek yolu terminaldi, yani
+her kurulum bir SSH oturumuyla başlıyordu. Kalan risk açıkça küçük (kurulumla tarayıcının açılması
+arasındaki birkaç dakika, kendi ev ağında) ve sihirbaz onu söylüyor: "bu cihazı siz kurmadıysanız
+fişini çekin ve yeniden kurun." Sahiplenme denetim kaydının ilk satırı olarak düşüyor.
+
+## Faz 1: neyin eksik olduğu, ve kapananlar
 
 Bu liste elle tutuluyordu ve dört yerde bayat çıktı, o yüzden koda karşı DOĞRULANDI: spec'in her
-maddesi tarandı ve her bulgu ayrıca çürütülmeye çalışıldı. Sonuç 85 madde; tamamı
-[Eksikler Panosu](https://claude.ai/code/artifact/7949358c-b855-4128-9e99-082e15249ea2)'nda.
+maddesi tarandı ve her bulgu ayrıca çürütülmeye çalışıldı. Bugün geçerli hâli
+[`docs/bilinen-sinirlamalar.md`](docs/bilinen-sinirlamalar.md)'de — üç ayrı liste olarak: bilerek
+yapılmayan (sınırlama), yanlış yerde yapılan (borç), sırası gelmeyen (backlog).
 
 ### En pahalı sınıftı: yazıldı, ulaşılamıyordu — kapandı
 
@@ -368,8 +425,10 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   güvenli yön. Kapalı hesap listede yok; gid'i olmayan ekip de yok. Ad `PosixName` tipiyle
   taşınıyor, yani satır sonu içeren bir "kullanıcı adı" dosyaya yeni bir direktif yazamıyor.
 
-- Anlık görüntü listesi havuzun envanteri DEĞİL. Ajanda "listele" işlemi yok, o yüzden `/backups`
-  yalnız DEPSIS'in kendi aldıklarını gösterir ve yanıtta `complete: false` ile bunu söyler.
+- Anlık görüntü listesi artık havuzla KARŞILAŞTIRILIYOR. Ajanın `ListSnapshots` işlemi eklendikten
+  sonra `/backups`'ın her satırı bir durum taşıyor: havuzda, havuzda yok (kayıt duruyor ama görüntü
+  gitmiş — var olmayan bir geri dönüş noktası), kabuktan alınmış, ya da doğrulanamadı. `complete:
+false` artık "listeleyemiyoruz" değil, "havuza sorulamadı" demek.
 - **§21'in dört operatör belgesi yazıldı** — [`docs/operations/`](docs/operations/): yönetici
   kılavuzu, son kullanıcı kılavuzu, yedekleme, felaket kurtarma. Her komut ve her sayı depodaki
   karşılığına bakılarak yazıldı, ve her belge ürünün o alanda YAPMADIKLARIYLA bitiyor — yedekleme
@@ -405,6 +464,57 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   cümlenin dayandığı sayıların dışarıdan okunabilmesi.
 
 - §21'in kalan teslimatları: Storybook ve imzalı build prosedürü.
+
+## Sahada eklenenler
+
+Cihaz gerçek donanıma kurulduktan sonra sahibinin kullanımından çıkan işler. Hepsinin ortak yanı,
+listenin başındaki ilkeyi uygulaması: bir şey ancak arayüzden yapılabildiğinde var sayılıyor.
+
+- **Denetim kaydı** (`audit_events`, 0036) — "bu kutuda dün ne oldu" sorusunun tek cevabı. Ekle-only
+  ve bu uygulama katmanında değil GRANT'ta: `depsis_app` rolünün UPDATE ve DELETE yetkisi yok, yani
+  silme kodu yazılsa da çalışmaz. Giriş, oturum kapatma, parola değişikliği, izin, paylaşım, havuz,
+  disk silme, uygulama, uzak erişim — hepsi yazıyor.
+- **Diski arayüzden sıfırlama** — §8.1'in töreni (ne silineceğin listesi, yazılı onay, parola) ile.
+  Sistem diski ve bağlı disk hiçbir onayla geçmiyor; WWN silme ANINDA yeniden doğrulanıyor.
+- **Görev yöneticisi ve sistem ekranı** — arka plan süreçleri, sistem olmayanı kapatma (SIGTERM,
+  SIGKILL yok), ve işlemci/bellek/sıcaklık/havuz grafikleri. "Sistem süreci" kararı tek yerde,
+  ajanda: arayüzün düğme çizmediğine ajan zaten "hayır" diyor.
+- **İşler panosu büyüdü** — her işin altında yönergesi (açıklama), biten işler için arşiv ve
+  arşivden `.xlsx` dışa aktarma (bağımlılıksız yazıcı; CSV'nin Excel yerel-ayar kumarı yok), ve
+  bütün panonun izi olan iş günlüğü: kim, neyi, ne zaman, neyden neye.
+- **Dosyalar ↔ işler köprüsü** — dosya seçip "İşe bağla"; bağ işin tartışmasında listeleniyor.
+  Görülemeyen bağlar sayı olarak söyleniyor, içerikleri değil.
+- **Kod okutma kestirmesi** — arama kutusundaki düğme kamerayı açar, okunan QR/barkod aranır,
+  bulunan klasöre girilir ve fotoğraf yükleme açılır. Çözme cihazda: tarayıcının yerli çözücüsü,
+  yoksa pakete gömülü ZXing (`apps/web/src/scan.ts`). Sayfa içi canlı kamera DENENDİ ve düştü —
+  Chrome, kendinden imzalı sertifikalı sayfaya kamerayı sormadan reddediyor, iOS Safari de çözücü
+  API'yi hiç vermiyor; telefonun kendi kamerasıyla fotoğraf ikisinde de çalışıyor.
+- **Yedek ile aynanın farkı ekranda** — "ilk diski ikinciye kopyalama" zaten ayna havuzun kendisi
+  ve sürekli; aynanın korumadığı şey geçmiş. Yedekleme ekranı bunu söylüyor, çünkü söylemeyen bir
+  ürün, kullanıcısına var olan bir özelliği yok sandırıyor.
+
+### Sahada bulunan, kod tarafında kalıcı olarak kapatılan hatalar
+
+Sırf sahada göründükleri için değil, bir daha aynı biçimde doğmasınlar diye burada:
+
+- **Paylaşım çözümü EXDEV veriyordu** — her paylaşım kendi ZFS veri kümesi, yani kendi bağlama
+  noktası; `RESOLVE_NO_XDEV` kök→paylaşım sıçramasını reddediyordu. Çözüm iki aşamalı: o tek adım
+  gevşetilmiş bayraklarla, paylaşımın İÇİ tam kümeyle.
+- **`setfacl` hiçbir izni yazmıyordu** — ajan hedefi `/proc/self/fd/N` diye veriyordu, ama tanıtıcı
+  CLOEXEC; çocuk süreçte o numara yok. `/proc/<ajan pid>/fd/N` oldu, ve testi artık gerçek bir
+  exec'in ardından ölçüyor.
+- **Yüklemenin ilk parçası "no such file" ile ölüyordu** — taze bir paylaşımda `.depsis/staging`
+  iskeletini kimse kurmuyordu; klasörler yükleniyor, dosyalar yüklenmiyordu.
+- **Açılışta ajan soketi rastgele düşüyordu** — Samba kurulunca doğan birim döngüsü
+  (soketler → ajan soketi → `zfs.target` → `zfs-share` → `smbd` → `basic.target` → soketler).
+  systemd döngüyü kırmak için rastgele bir işi siliyor: bir açılışta başkasını, ertesinde ajanı.
+  Soket artık geç hedefleri beklemiyor.
+- **Parola özeti eski işlemcide çöküyordu** — `@node-rs/argon2`'nin hazır ikilisi x86-64-v2
+  istiyor; 2009 model bir işlemcide API açılırken SIGILL. Bir cihaz sahibinin en eski
+  bilgisayarında da çalışmak zorunda: kurulduğu makinede derlenen C `argon2`.
+- **Konteynerlerin ağ ad alanı açılamıyordu** — AppArmor'ın `pasta` profili yalnız
+  `/run/user/<uid>`'i tanıyor, bizim motor `/run/depsis-apps` altında koşuyor. Yerel kural
+  `install.sh` ile yerine konuyor.
 
 ## CI koşuyor, ve ilk tamamlanan koşumunda beş kusur buldu
 
@@ -477,6 +587,9 @@ packages/agent-protocol  ajanın şeması, Rust'tan üretilir
 services/system-agent    ayrıcalıklı ajan (Rust, root)
 services/console         yönetici konsolu (Rust, ayrı birim — ajan DEĞİL)
 deploy/systemd  birim dosyaları
+deploy/iso      kurulum ISO'su: üretici betik, ön-yanıt, ilk açılış
+deploy/nginx    TLS ters vekil şablonları
+tools/install   cihaza kurulum betiği (install.sh)
 docs/adr        mimari kararlar
 docs/operations §21'in operatör belgeleri: kurulum, kullanım, yedekleme, kurtarma
 docs/threat-model  güven sınırları

@@ -17,6 +17,13 @@ oluyor; dosya `0600` ve root'a ait.
 
 ## Karar
 
+> **REVİZE (saha).** Aşağıdaki başlık artık geçerli DEĞİL ve olduğu gibi bırakılması yanlış
+> olurdu: cihaz ZeroTier ile birlikte geliyor — kurulumu ISO'nun ilk açılışı yapıyor
+> (`deploy/iso/firstboot.sh`). Sebep, kararın kendisinden güçlü çıktı: sahibi uzaktan erişimi
+> açmak istediğinde karşısına terminal çıktı, ve bu ürünün kabul ölçütü "sahibi terminale
+> girmesin". Kararın DEĞİŞMEYEN yarısı: bir ağa katılmak hâlâ arayüzden ve sahibinin kararıyla
+> olur; DEPSIS kimseyi kendiliğinden bir ağa sokmaz.
+
 ### DEPSIS ZeroTier'i paketlemez, kurmaz, indirmez
 
 Kuruluysa yönetir. Kurulu değilse kart "kurulu değil" der ve kurulum yolunu gösterir.
