@@ -3,7 +3,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 
 import { api, API_BASE_URL, problemMessage } from './api.js';
 import { History } from './History.js';
-import { Scan } from './Scan.js';
+import { decodeImage, warmScanner } from './scan.js';
 import { formatBytes } from './Dashboard.js';
 import type { Tone } from './ui.js';
 import { Bar, ConfirmBox, Empty, FolderPicker, PromptBox, TONES, toneRgb, Win } from './ui.js';
@@ -219,8 +219,25 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
       yedek yarısı. Sahibi bunu Dosyalar'ın içinde arıyor; ayrı ekran kafa karıştırıyordu. */
   const [backups, setBackups] = useState(false);
   /** "İşe bağla" penceresi: seçili girdiler + panodan gelen açık işler. */
-  /** Kod okuyucu penceresi açık mı. Sonucu arama kutusuna koyar; arama zaten oradan akar. */
-  const [scanning, setScanning] = useState(false);
+  /**
+   * Kod okuma KESTİRMESİ — sahibin tarif ettiği tek dokunuşluk zincir.
+   *
+   * Düğme → kamera → kod → arama → bulunan klasöre gir → fotoğraf yükleme. Araya onay ekranı
+   * KONMUYOR, ve bu bilinçli bir geri adım: ilk sürüm okunanı gösterip "Tamam" bekliyordu, ama
+   * QR'ın hata düzeltmesi ve barkodun kontrol hanesi zaten yanlış DEĞER üretilmesini engelliyor
+   * (bkz. `scan.ts`) — kalan tek risk okuyamamak, ve onun cevabı onay değil yeniden çekmek.
+   * Ne okunduğu yine söyleniyor: gidilen klasörle birlikte, bir bildirimde.
+   */
+  const [scanBusy, setScanBusy] = useState(false);
+  /**
+   * Kestirmenin son adımı: "bu klasöre fotoğraf yükle".
+   *
+   * Tarayıcılar dosya seçiciyi yalnız TAZE bir kullanıcı hareketiyle açıyor; kod çözme ve klasöre
+   * gitme arasında geçen saniyeler o tazeliği tüketebiliyor. O yüzden iki yol birden: hareket hâlâ
+   * geçerliyse seçici kendiliğinden açılır, değilse klasörün başında tek dokunuşluk bu şerit
+   * durur. Sessizce hiçbir şey olmaması, ikisinden de kötü.
+   */
+  const [photoPrompt, setPhotoPrompt] = useState<string | null>(null);
   const [linking, setLinking] = useState<{
     entries: FileEntry[];
     tasks: { id: string; body: string }[] | null;
@@ -249,6 +266,7 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
   const pickFile = useRef<HTMLInputElement>(null);
   const pickDir = useRef<HTMLInputElement>(null);
   const pickPhoto = useRef<HTMLInputElement>(null);
+  const pickCode = useRef<HTMLInputElement>(null);
 
   const loc = history[pos] ?? ROOT;
   const trail = loc.trail;
@@ -281,6 +299,7 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
   /** Back and forward drop the search with them: a result list left over from two folders ago,
    *  under a breadcrumb pointing somewhere else, is the one view that cannot be read correctly. */
   function jump(to: number): void {
+    setPhotoPrompt(null);
     setPos(to);
     setQuery('');
     setTerm('');
@@ -305,6 +324,77 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
       parent = data.parentId;
     }
     go({ trashed: false, trail: chain });
+  }
+
+  /** Bir girdinin İÇİNDE BULUNDUĞU klasöre git — dosya eşleşmesinin doğru varış noktası. */
+  async function openContaining(entry: FileEntry): Promise<void> {
+    const chain: Crumb[] = [];
+    let parent = entry.parentId;
+    for (let depth = 0; depth < 64 && parent !== null && parent !== undefined; depth += 1) {
+      const { data } = await api.GET('/files/{id}', { params: { path: { id: parent } } });
+      if (data === undefined) break;
+      chain.unshift({ id: data.id, name: data.name });
+      parent = data.parentId;
+    }
+    go({ trashed: false, trail: chain });
+  }
+
+  /**
+   * Kestirmenin tamamı: fotoğraftaki kodu çöz, ara, bul, gir, yüklemeyi aç.
+   *
+   * Eşleşme seçimi ÖNCE ADI BİREBİR TUTAN KLASÖR: bir barkod numarası çoğu zaman klasörün tam
+   * adıdır ve "içinde geçen" bir sonucu ona tercih etmek, kestirmeyi kumara çevirirdi. Sonra
+   * herhangi bir klasör, en sonda bir dosyanın bulunduğu klasör — hiçbiri yoksa kestirme durur
+   * ve okunan metni söyler; kullanıcı elindeki aramayla devam eder.
+   */
+  async function runCodeShortcut(file: File): Promise<void> {
+    setScanBusy(true);
+    setPhotoPrompt(null);
+    let text: string | null = null;
+    try {
+      text = await decodeImage(file);
+    } catch {
+      text = null;
+    }
+    setScanBusy(false);
+    if (text === null) {
+      notify('error', 'Kod okunamadı. Kodu ortalayıp daha yakından, ışıklı bir yerde çekin.');
+      return;
+    }
+
+    // Arama kutusuna YAZILIYOR: kestirme bir klasöre girse de, kullanıcı ne arandığını görmeli —
+    // ve eşleşme çıkmazsa ekranda kalan şey doğrudan o aramanın sonucu olur.
+    setQuery(text);
+    setTerm(text);
+
+    const found = await api.GET('/search', {
+      params: { query: { q: text, limit: PAGE, ...shareQuery } },
+    });
+    const items = found.data?.items ?? [];
+    const fold = (value: string): string => value.trim().toLocaleLowerCase('tr');
+    const exact = items.find((it) => it.kind === 'folder' && fold(it.name) === fold(text));
+    const folder = exact ?? items.find((it) => it.kind === 'folder');
+    const target = folder ?? items[0];
+
+    if (target === undefined) {
+      notify('error', `Kod okundu ("${text}") ama eşleşen bir şey yok.`);
+      return;
+    }
+
+    if (target.kind === 'folder') {
+      await openFound(target);
+      notify('ok', `${text} → ${target.name}`);
+    } else {
+      await openContaining(target);
+      notify('ok', `${text} → ${target.name} dosyasının klasörü`);
+    }
+
+    // Tarayıcı hâlâ "kullanıcı az önce dokundu" sayıyorsa seçiciyi kendimiz açıyoruz; saymıyorsa
+    // şerit kalıyor. `userActivation` olmayan tarayıcıda denemek serbest: en kötü hiçbir şey olmaz
+    // ve şerit zaten orada.
+    setPhotoPrompt(target.kind === 'folder' ? target.name : 'bu klasör');
+    const activation = (navigator as { userActivation?: { isActive?: boolean } }).userActivation;
+    if (activation?.isActive !== false) pickPhoto.current?.click();
   }
 
   /* ── search: one request per pause, not one per keystroke ── */
@@ -1082,10 +1172,15 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
           <button
             type="button"
             className="qrbtn"
-            disabled={trashed}
-            title="Kamerayla QR kod / barkod okut"
-            aria-label="Kamerayla kod okut"
-            onClick={() => setScanning(true)}
+            disabled={trashed || scanBusy}
+            title="Kodu okut: kamera açılır, okunan kod aranır ve klasöre fotoğraf yüklemeye geçilir"
+            aria-label="Kodu okut ve fotoğraf yükle"
+            onClick={() => {
+              // Çözücüyü ŞİMDİ indirmeye başla: kullanıcı fotoğrafı çekerken modül yüklenir ve
+              // çözme anında beklenecek tek şey çözmenin kendisi kalır.
+              warmScanner();
+              pickCode.current?.click();
+            }}
           >
             <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true">
               <path
@@ -1168,6 +1263,23 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
           multiple
           hidden
           onChange={(e) => chosen(e, false)}
+        />
+        {/* Kod karesi. `capture` telefonda doğrudan kamerayı açar — web kamera izni istemez ve
+            kendinden imzalı sertifikayı umursamaz; sayfa içi canlı kameranın Android'de sessizce
+            reddedilmesinin cevabı buydu. Masaüstünde sıradan bir dosya seçici olur, yani elde
+            duran bir barkod fotoğrafı da okunur. */}
+        <input
+          ref={pickCode}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          hidden
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            // Aynı kare ikinci kez seçilebilsin: value temizlenmezse change bir daha düşmez.
+            event.target.value = '';
+            if (file !== undefined) void runCodeShortcut(file);
+          }}
         />
       </div>
 
@@ -1309,6 +1421,34 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
           <span className="l">Yedekler</span>
         </button>
       </div>
+
+      {scanBusy && (
+        <div className="scanbar" role="status" aria-live="polite">
+          <span className="sp" aria-hidden />
+          Kod okunuyor…
+        </div>
+      )}
+
+      {photoPrompt !== null && (
+        <div className="scanbar act">
+          <span className="tx">
+            📷 <b>{photoPrompt}</b> klasörüne fotoğraf yükleyin
+          </span>
+          <button
+            type="button"
+            className="b pri"
+            onClick={() => {
+              setPhotoPrompt(null);
+              pickPhoto.current?.click();
+            }}
+          >
+            Fotoğrafları seç
+          </button>
+          <button type="button" className="lnk" onClick={() => setPhotoPrompt(null)}>
+            Kapat
+          </button>
+        </div>
+      )}
 
       <div className={sel.size > 0 ? 'selbar on' : 'selbar'}>
         <span className="n">{sel.size} seçili</span>
@@ -1781,17 +1921,6 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
           yesLabel="Taşı"
           onYes={() => void move(modal.entries, modal.target.id, modal.target.name)}
           onNo={() => setModal({ kind: 'none' })}
-        />
-      )}
-
-      {scanning && (
-        <Scan
-          onResult={(text) => {
-            setScanning(false);
-            setQuery(text);
-            notify('ok', `Aranıyor: ${text}`);
-          }}
-          onClose={() => setScanning(false)}
         />
       )}
 
