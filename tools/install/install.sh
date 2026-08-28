@@ -695,6 +695,9 @@ units() {
   # ilk saha kurulumunda EACCES'in dersi bu satirlarin varligi.
   if id -u depsis-apps >/dev/null 2>&1; then
     systemctl enable --now depsis-podman.socket >/dev/null 2>&1 || true
+    # Açılışta kurulu uygulamalar geri gelsin: köksüz podman'ın restart politikası yeniden
+    # başlatmayı taşımaz — bkz. depsis-apps-restore.service.
+    systemctl enable depsis-apps-restore.service >/dev/null 2>&1 || true
   fi
   # Kiosk: paketleri ve hesabı firstboot kurar; ekran kartı da varsa cihaz ekranı arayüz olur.
   # Koşullar birimin kendisinde de var (Condition*); buradaki if yalnız gereksiz enable'ı atlar.

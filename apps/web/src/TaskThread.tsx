@@ -6,6 +6,8 @@ import { when } from './Notifications.js';
 import type { Tag } from './TagBar.js';
 
 type Comment = OpenApi.components['schemas']['TaskComment'];
+type FileLink = OpenApi.components['schemas']['TaskFileLink'];
+type Activity = OpenApi.components['schemas']['TaskActivity'];
 type ChecklistItem = OpenApi.components['schemas']['ChecklistItem'];
 type Task = OpenApi.components['schemas']['Task'];
 type Watcher = OpenApi.components['schemas']['TaskWatcher'];
@@ -78,6 +80,11 @@ export function TaskThread({
   const [tagDraft, setTagDraft] = useState('');
   const [draft, setDraft] = useState('');
   const [describing, setDescribing] = useState(description ?? '');
+  /** Bağlı dosyalar. `hidden`: çağıranın GÖREMEDİĞİ bağ sayısı — §7, sayı olarak bile sızmasın. */
+  const [links, setLinks] = useState<{ items: FileLink[]; hidden: number } | null>(null);
+  /** Bu işin kendi geçmişi — kapalı doğar; açan okur, açmayan yükünü ödemez. */
+  const [trail, setTrail] = useState<Activity[] | null>(null);
+  const [trailOpen, setTrailOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   /** Okunamadı ile "henüz yorum yok" ayrı şeyler; ikisini aynı ekrana çevirmek bir yalan. */
   const [failed, setFailed] = useState(false);
@@ -129,14 +136,18 @@ export function TaskThread({
 
   const load = useCallback(async (): Promise<void> => {
     const mine = (reading.current += 1);
-    const [thread, who, list] = await Promise.all([
+    const [thread, who, list, files] = await Promise.all([
       api.GET('/tasks/{id}/comments', { params: { path: { id: taskId } } }),
       api.GET('/tasks/{id}/watchers', { params: { path: { id: taskId } } }),
       api.GET('/tasks/{id}/checklist', { params: { path: { id: taskId } } }),
+      api.GET('/tasks/{id}/files', { params: { path: { id: taskId } } }),
     ]);
     // Daha yeni bir okuma ya da bir yazma başladıysa bu cevap ESKİ. Yazmak, kullanıcının az önce
     // yaptığı şeyi geri almak olurdu.
     if (mine !== reading.current) return;
+    if (files.data !== undefined) {
+      setLinks({ items: files.data.items, hidden: files.data.hidden });
+    }
     if (list.data !== undefined) {
       setItems(list.data.items);
       counts.current(
@@ -320,6 +331,35 @@ export function TaskThread({
     },
     [onError, taskId],
   );
+
+  const unlink = useCallback(
+    async (linkId: string): Promise<void> => {
+      const { response, error } = await api.DELETE('/tasks/{id}/files/{linkId}', {
+        params: { path: { id: taskId, linkId } },
+      });
+      if (!response.ok) {
+        onError(problemMessage(error, 'Bağ koparılamadı.'));
+        return;
+      }
+      setLinks((current) =>
+        current === null
+          ? current
+          : { ...current, items: current.items.filter((it) => it.id !== linkId) },
+      );
+    },
+    [onError, taskId],
+  );
+
+  const loadTrail = useCallback(async (): Promise<void> => {
+    const { data, error } = await api.GET('/tasks/{id}/activity', {
+      params: { path: { id: taskId } },
+    });
+    if (data === undefined) {
+      onError(problemMessage(error, 'Geçmiş okunamadı.'));
+      return;
+    }
+    setTrail(data.items);
+  }, [onError, taskId]);
 
   const toggleWatch = useCallback(async (): Promise<void> => {
     const next = !watching;
@@ -528,6 +568,73 @@ export function TaskThread({
           </div>
         </>
       )}
+
+      {/* ─── bağlı dosyalar ──────────────────────────────────────────────── */}
+
+      {/* Kod aylarca buradaydı da kapısı yoktu: panodaki 🗂 rozeti sayıyor, bağlayan uç Dosyalar
+          seçim çubuğunda ("İşe bağla"), liste ve koparma burada. Yol tıklanınca kopyalanabilir
+          bir metin: dosyaya ATLAMAK ayrı bir gezinme işi ve yarım bir bağlantı, yanlış klasörde
+          biten bir tıklamadan iyi değil. */}
+      {links !== null && (links.items.length > 0 || links.hidden > 0) && (
+        <>
+          <div className="pmh">Bağlı dosyalar</div>
+          {links.items.map((link) => (
+            <div className="citem" key={link.id}>
+              <span className="tx">
+                {link.kind === 'folder' ? '📁' : '📄'} {link.name}
+                <span className="s" style={{ marginLeft: 6 }}>
+                  {link.path}
+                </span>
+              </span>
+              <button
+                type="button"
+                className="del"
+                aria-label={`"${link.name}" bağını kopar`}
+                title="Bağı kopar (dosya silinmez)"
+                onClick={() => void unlink(link.id)}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+          {links.hidden > 0 && (
+            <p className="note">Göremediğiniz {links.hidden} bağlı dosya daha var.</p>
+          )}
+        </>
+      )}
+
+      {/* ─── geçmiş ──────────────────────────────────────────────────────── */}
+
+      <div className="pmh">
+        <button
+          type="button"
+          className="lnk"
+          aria-expanded={trailOpen}
+          onClick={() => {
+            const next = !trailOpen;
+            setTrailOpen(next);
+            if (next && trail === null) void loadTrail();
+          }}
+        >
+          Geçmiş {trailOpen ? '▾' : '▸'}
+        </button>
+      </div>
+      {trailOpen && trail === null && <p className="note">Okunuyor…</p>}
+      {trailOpen &&
+        trail !== null &&
+        (trail.length === 0 ? (
+          <p className="note">Bu işte henüz kayıtlı değişiklik yok.</p>
+        ) : (
+          trail.slice(0, 30).map((entry) => (
+            <div className="lgrow" key={entry.id}>
+              <span className="s">{when(entry.at)}</span>
+              <b>{entry.actorUsername ?? 'Silinmiş hesap'}</b>
+              <span className="tx">
+                {entry.field}: {entry.oldValue ?? '—'} → {entry.newValue ?? '—'}
+              </span>
+            </div>
+          ))
+        ))}
 
       {/* ─── tartışma ────────────────────────────────────────────────────── */}
 

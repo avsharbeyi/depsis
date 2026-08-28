@@ -574,29 +574,6 @@ function Desktop({
   const isAdmin = me?.role === 'admin';
   const snapshot = useSnapshot({ onUnauthenticated });
 
-  /**
-   * Rıhtımdaki Chrome kısayolunun hedefi: kutuda kurulu ve ÇALIŞAN chromium uygulamasının portu.
-   * Sahibin isteği "alt bara chrome ekle ki internete çıkabilelim" — kısayol varsa doğrudan
-   * tarayıcıyı açar, yoksa Uygulamalar ekranına götürür (kurulacak yer orası).
-   */
-  const [chromePort, setChromePort] = useState<number | null>(null);
-  useEffect(() => {
-    let alive = true;
-    void (async () => {
-      const { data } = await api.GET('/apps', {});
-      if (!alive || data === undefined) return;
-      const chromium = data.items.find(
-        (app) => app.catalogue.slug === 'chromium' && app.state === 'running',
-      );
-      setChromePort(chromium?.hostPort ?? null);
-    })();
-    return () => {
-      alive = false;
-    };
-    // Pano her açılıp kapandığında değil, oturumda bir kez ve pencereler değiştikçe: uygulama
-    // kurulumu zaten Uygulamalar ekranından geçiyor ve o ekran kapanınca pane değişiyor.
-  }, [pane]);
-
   const openPane = useCallback((next: PaneId) => {
     sfx.open();
     window.location.hash = paneHref(next);
@@ -832,25 +809,6 @@ function Desktop({
             </button>
           );
         })}
-        {/* Chrome — kutuda koşan Chromium'a kısayol. Kuruluysa ve çalışıyorsa yeni sekmede
-            doğrudan açılır; değilse Uygulamalar'a götürür ve orada tek tıkla kurulur. */}
-        <button
-          key="chrome"
-          type="button"
-          className="dk"
-          onClick={() => {
-            if (chromePort !== null) {
-              window.open(`http://${window.location.hostname}:${chromePort}`, '_blank');
-              return;
-            }
-            openPane('apps');
-          }}
-        >
-          <span className="g" style={{ background: tint('cool', 0.24) }} aria-hidden>
-            🌐
-          </span>
-          Chrome
-        </button>
       </nav>
 
       <div className={powerOpen ? 'pmenu top on' : 'pmenu top'} ref={powerMenuRef}>

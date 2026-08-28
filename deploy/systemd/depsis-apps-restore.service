@@ -1,0 +1,30 @@
+# Açılışta kurulu uygulamaları geri getir.
+#
+# Sahada ödendi: "uygulamalar sistem resetlenince portlarını yitiriyor ama yenisi almıyor."
+# Köksüz podman'da konteynerlerin restart politikası yalnız ÇALIŞAN bir motorun içinde geçerli —
+# kutu yeniden başlayınca hiçbir şey pod'ları ayağa kaldırmıyordu; arayüz portu (veritabanından)
+# göstermeye devam ediyor ama o portta kimse dinlemiyordu. Bu birim açılışta bir kez koşar:
+# önce pod'lar (immich gibi yığınlar), sonra pod'suz eski kurulumlar.
+#
+# `|| true` bilinçli: tek bir bozuk konteyner (ör. imajı yarım inmiş bir deneme) diğer bütün
+# uygulamaların açılışını rehin almamalı. Kim başlamadıysa durumu Uygulamalar ekranında zaten
+# "durdu" olarak görünür ve tek tıkla yeniden denenir.
+
+[Unit]
+Description=DEPSIS uygulamalarını açılışta başlat
+Wants=network-online.target depsis-podman.socket
+After=network-online.target depsis-podman.socket
+
+[Service]
+Type=oneshot
+User=depsis-apps
+Group=depsis-apps
+Environment=XDG_RUNTIME_DIR=/run/depsis-apps
+Environment=HOME=/home/depsis-apps
+ExecStart=/bin/sh -c 'podman pod start --all || true; podman start --all || true'
+# Konteyner sayısı arttıkça imaj bağlama ve ağ kurulumu uzayabilir; oneshot'ın varsayılan
+# doksan saniyesi dolu bir katalogda yetmeyebilir.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

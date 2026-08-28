@@ -217,6 +217,11 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
   /** Yedek gezgini açık mı. Kapı burada, pencere History.tsx'te — "çöp ve yedek" ikilisinin
       yedek yarısı. Sahibi bunu Dosyalar'ın içinde arıyor; ayrı ekran kafa karıştırıyordu. */
   const [backups, setBackups] = useState(false);
+  /** "İşe bağla" penceresi: seçili girdiler + panodan gelen açık işler. */
+  const [linking, setLinking] = useState<{
+    entries: FileEntry[];
+    tasks: { id: string; body: string }[] | null;
+  } | null>(null);
   const [sel, setSel] = useState<ReadonlySet<string>>(new Set());
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -1360,6 +1365,32 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
             >
               ⧉ Kopyala
             </button>
+            {/* İş panosuyla köprü: bağ arka uçta aylardır vardı (panodaki 🗂 rozeti onu sayıyor)
+                ama BAĞLAYAN bir kapı yoktu. Bağlamak dosyayı taşımaz, kopyalamaz — işin
+                tartışmasında bir işaret açar. */}
+            <button
+              type="button"
+              className="sb"
+              disabled={busy || selected.length === 0}
+              onClick={() => {
+                setLinking({ entries: selected, tasks: null });
+                void (async () => {
+                  const { data } = await api.GET('/tasks', {});
+                  setLinking((current) =>
+                    current === null
+                      ? current
+                      : {
+                          ...current,
+                          tasks: (data?.items ?? [])
+                            .filter((t) => t.status !== 'done' && t.status !== 'cancelled')
+                            .map((t) => ({ id: t.id, body: t.body })),
+                        },
+                  );
+                })();
+              }}
+            >
+              ✓ İşe bağla
+            </button>
             <button
               type="button"
               className="sb dl"
@@ -1731,6 +1762,53 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
           onYes={() => void move(modal.entries, modal.target.id, modal.target.name)}
           onNo={() => setModal({ kind: 'none' })}
         />
+      )}
+
+      {linking !== null && (
+        <Win title="İşe bağla" glyph="✓" tone="live" onClose={() => setLinking(null)}>
+          <p className="note">
+            {linking.entries.length} öge seçili. Bağ, dosyayı taşımaz — işin tartışmasında
+            &quot;bağlı dosyalar&quot; olarak görünür ve panodaki 🗂 sayacına işler.
+          </p>
+          {linking.tasks === null && <p className="note">İşler okunuyor…</p>}
+          {linking.tasks !== null && linking.tasks.length === 0 && (
+            <Empty glyph="✓" text="Açık iş yok — önce İşler panosunda bir iş açın." />
+          )}
+          {(linking.tasks ?? []).map((task) => (
+            <button
+              key={task.id}
+              type="button"
+              className="pm"
+              style={{ width: '100%', textAlign: 'left' }}
+              disabled={busy}
+              onClick={() => {
+                const chosenEntries = linking.entries;
+                setLinking(null);
+                void (async () => {
+                  let failedCount = 0;
+                  for (const entry of chosenEntries) {
+                    const { response } = await api.POST('/tasks/{id}/files', {
+                      params: { path: { id: task.id } },
+                      body: { fileEntryId: entry.id },
+                    });
+                    if (!response.ok) failedCount += 1;
+                  }
+                  if (failedCount > 0) {
+                    notify('error', `${failedCount} öge bağlanamadı (belki zaten bağlıydı).`);
+                  } else {
+                    notify(
+                      'ok',
+                      `${chosenEntries.length} öge "${task.body.slice(0, 40)}" işine bağlandı.`,
+                    );
+                  }
+                  stopPicking();
+                })();
+              }}
+            >
+              {task.body.length <= 70 ? task.body : `${task.body.slice(0, 69)}…`}
+            </button>
+          ))}
+        </Win>
       )}
 
       {backups && shares !== null && shares[0] !== undefined && (
