@@ -3606,3 +3606,26 @@ select option {
     display: none;
   }
 }
+
+/* Arama kutusundaki kod okuyucu düğmesi: alanın içinde, girişin sağında, alanı büyütmeden. */
+.qrbtn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink2);
+  cursor: pointer;
+}
+.qrbtn:hover:not(:disabled) {
+  background: rgba(91, 200, 245, 0.18);
+  color: var(--ink);
+}
+.qrbtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}

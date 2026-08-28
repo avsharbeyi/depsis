@@ -3,6 +3,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 
 import { api, API_BASE_URL, problemMessage } from './api.js';
 import { History } from './History.js';
+import { Scan } from './Scan.js';
 import { formatBytes } from './Dashboard.js';
 import type { Tone } from './ui.js';
 import { Bar, ConfirmBox, Empty, FolderPicker, PromptBox, TONES, toneRgb, Win } from './ui.js';
@@ -218,6 +219,8 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
       yedek yarısı. Sahibi bunu Dosyalar'ın içinde arıyor; ayrı ekran kafa karıştırıyordu. */
   const [backups, setBackups] = useState(false);
   /** "İşe bağla" penceresi: seçili girdiler + panodan gelen açık işler. */
+  /** Kod okuyucu penceresi açık mı. Sonucu arama kutusuna koyar; arama zaten oradan akar. */
+  const [scanning, setScanning] = useState(false);
   const [linking, setLinking] = useState<{
     entries: FileEntry[];
     tasks: { id: string; body: string }[] | null;
@@ -1074,6 +1077,23 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
             placeholder={trashed ? 'Çöpte arama yapılamaz' : 'Dosya, klasör veya tür ara…'}
             aria-label="Ara"
           />
+          {/* Kod okuyucu — kutunun İÇİNDE, girişin hemen sağında: mobilde arama zaten tam
+              genişlik ilk satır, düğme düzeni bozmadan onun ucunda durur. */}
+          <button
+            type="button"
+            className="qrbtn"
+            disabled={trashed}
+            title="Kamerayla QR kod / barkod okut"
+            aria-label="Kamerayla kod okut"
+            onClick={() => setScanning(true)}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM5 5h3v3H5zM16 5h3v3h-3zM5 16h3v3H5zM14 14h3v3h-3zM18 14h3v3h-3zM14 18h3v3h-3zM18 18h3v3h-3z"
+                fill="currentColor"
+              />
+            </svg>
+          </button>
         </div>
         <button
           type="button"
@@ -1761,6 +1781,17 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
           yesLabel="Taşı"
           onYes={() => void move(modal.entries, modal.target.id, modal.target.name)}
           onNo={() => setModal({ kind: 'none' })}
+        />
+      )}
+
+      {scanning && (
+        <Scan
+          onResult={(text) => {
+            setScanning(false);
+            setQuery(text);
+            notify('ok', `Aranıyor: ${text}`);
+          }}
+          onClose={() => setScanning(false)}
         />
       )}
 
