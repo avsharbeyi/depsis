@@ -141,12 +141,16 @@ jobs:
         # frontend bundle, an API response, or a log.
         uses: gitleaks/gitleaks-action@v2
         env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
           # PULL REQUEST'te ZORUNLU. Bu depo bugüne kadar yalnız main'e push aldı ve eksikliği hiç
           # görünmedi; ilk PR'da iş "GITHUB_TOKEN is now required to scan pull requests" ile düştü.
           # Kendiliğinden üretilen jeton yeter — ek bir sır gerekmiyor.
+          #
+          # AYNI blokta, ikinci bir `env:` olarak DEĞİL: ilk denemem adıma ikinci bir env anahtarı
+          # ekledi, ve bunun bedeli README'nin anlattığı sınıfın ta kendisiydi — Python'un YAML
+          # okuyucusu yinelenen anahtarı sessizce yutuyor, GitHub ise DOSYANIN TAMAMINI reddediyor
+          # ve koşum sıfır saniyede "workflow file issue" ile düşüyor. Doğrulayan araç actionlint.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        env:
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   migrations:
     name: migrations · tenant isolation (PostgreSQL 18)
