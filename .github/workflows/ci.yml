@@ -810,11 +810,16 @@ jobs:
           # Koşucunun çekirdeğinde varsayılan olarak YOK, ve `A && B` yazmak bunu SESSİZCE yutar:
           # `set -e`, bir AND-OR listesinin SON komutu olmayan başarısızlığı yok sayar. İlk koşum
           # tam böyle "hazır" deyip sıfır sahte disk buldu — adımın kendisi yalan söylüyordu.
-          if ! sudo modprobe scsi_debug dev_size_mb=1 num_tgts=1; then
+          #
+          # Burada YALNIZCA varlığı sınanıyor, modül yüklenmiyor: yükleyip hemen kaldırmayı denemek
+          # "Module scsi_debug is in use" ile düştü — udev aygıtları daha işlerken modül meşguldü.
+          # Üstelik 1 MB'lık bir prova modülü yanlış parametrelerle yüklü bırakır ve betiğin kendi
+          # `modprobe`'u sessizce hiçbir şey yapmaz. Yükleme, parametrelerin doğru yeri olan
+          # betiğin işi.
+          if ! modinfo scsi_debug >/dev/null 2>&1; then
             sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
-            sudo modprobe scsi_debug dev_size_mb=1 num_tgts=1
+            modinfo scsi_debug >/dev/null
           fi
-          sudo rmmod scsi_debug
           echo 'scsi_debug hazır'
 
       - name: The appliance layer, for real

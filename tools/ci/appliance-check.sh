@@ -211,6 +211,9 @@ check 'smbd paylaşımı gerçekten sunuyor' \
 # ve havuz kurulurken kimligi ANINDA yeniden dogrular. Risk R1 in tek gercek azaltmasi bu ve
 # bugune kadar hicbir otomatik kapida kosmadi — cunku kosacak bir disk yoktu.
 say 'disk kimligi zinciri (ADR-0012)'
+# Once KALDIRILIYOR: modul baska parametrelerle zaten yukluyse `modprobe` SESSIZCE hicbir sey
+# yapmaz ve kapi yanlis boyutta/sayida diskle karsilasir.
+rmmod scsi_debug 2>/dev/null || true
 modprobe scsi_debug dev_size_mb=128 num_tgts=2 2>/dev/null || true
 udevadm settle 2>/dev/null || sleep 2
 
