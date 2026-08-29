@@ -255,11 +255,18 @@ if [ "${#FAKE[@]}" -ge 2 ]; then
     "$(printf '%s' "$INVENTORY" | node "$REPO/tools/ci/holds-system.mjs" "$ROOT_DISK")" \
     'true'
 
+  # Duzenegin kendi gecerliligi: IKI AYRI disk olmali. Iddia edilmezse, ayni diski iki kez
+  # veren bir duzenek "havuz kurulamadi" diye URUNU suclar.
+  printf '    (d1: %s / %s)
+    (d2: %s / %s)
+' "$D1_BYID" "$D1_WWN" "$D2_BYID" "$D2_WWN"
+  check 'iki sahte diskin kimlikleri farkli'     "$([ "$D1_BYID" != "$D2_BYID" ] && [ "$D1_WWN" != "$D2_WWN" ] && echo FARKLI || echo AYNI)"     'FARKLI'
+
   # HAVUZ, GERCEK DISKLERLE ve DOGRU kimlikle: dosya vdev i buraya kadar gelemiyordu.
   check 'dogru WWN ile havuz kuruldu' \
     "$(ask pool "{\"op\":\"create_pool\",\"pool\":\"$ID_POOL\",\"topology\":\"mirror\",\"disks\":[{\"by_id\":\"$D1_BYID\",\"wwn\":\"$D1_WWN\"},{\"by_id\":\"$D2_BYID\",\"wwn\":\"$D2_WWN\"}]}")" \
     '"status":"pool_created"'
-  check 've havuz gercekten var' "$(zpool list -H -o name "$ID_POOL" 2>&1)" "$ID_POOL"
+  check 've havuz gercekten var'     "$(zpool list -H -o name "$ID_POOL" 2>/dev/null || echo YOK-BOYLE-BIR-HAVUZ)" "$ID_POOL"
   zpool destroy "$ID_POOL" 2>/dev/null
 
   # RISK R1 IN TEK GERCEK AZALTMASI: sihirbazin diski listeledigi an ile dugmeye basildigi an
@@ -269,7 +276,9 @@ if [ "${#FAKE[@]}" -ge 2 ]; then
   check 'yanlis WWN ile ayni istek reddediliyor' \
     "$(ask pool "{\"op\":\"create_pool\",\"pool\":\"$ID_POOL\",\"topology\":\"mirror\",\"disks\":[{\"by_id\":\"$D1_BYID\",\"wwn\":\"0xdeadbeefdeadbeef\"},{\"by_id\":\"$D2_BYID\",\"wwn\":\"$D2_WWN\"}]}")" \
     'not the one that was confirmed'
-  check 've reddedilen havuz gercekten kurulmadi' "$(zpool list -H -o name "$ID_POOL" 2>&1)" 'no such pool'
+  # `2>&1` DEGIL: zpool un "cannot open 'depsisid': no such pool" hatasi havuzun ADINI iceriyor,
+  # yani alt dizge araması havuz VARKEN de YOKKEN de geciyordu. Yokluk kendi sozcugunu almali.
+  check 've reddedilen havuz gercekten kurulmadi'     "$(zpool list -H -o name "$ID_POOL" 2>/dev/null || echo YOK-BOYLE-BIR-HAVUZ)"     'YOK-BOYLE-BIR-HAVUZ'
 
   # Diski silme de ayni kimlik kapisindan geciyor: yanlis WWN, silme icin de yeterli degil.
   check 'yanlis WWN ile disk silme de reddediliyor' \
