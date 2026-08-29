@@ -110,13 +110,20 @@ test('sunucunun reddettiği bir geçiş arayüzde SÖYLENİYOR, sessizce yutulmu
   const body = unique('e2e-kapat');
   const task = await addTask(pane, body);
   await task.getByLabel('Durum', { exact: true }).selectOption('done');
-  await expect(task.getByLabel('Durum', { exact: true })).toHaveValue('done');
 
-  await task.getByLabel('Durum', { exact: true }).selectOption('cancelled');
+  // KAPANAN İŞ ARŞİVE TAŞINIYOR — pano yalnız açık işleri gösteriyor. Bu testin ikinci yarısı bu
+  // yüzden Arşiv sekmesinde: yasaklı geçişlerin ikisi de kapalı bir durumdan başlıyor, yani
+  // reddin kullanıcıya ulaştığını ölçmenin yeri artık orası. Arşiv satırı durum kutusunu tam da
+  // bunun için taşıyor.
+  await pane.getByRole('tab', { name: /^Arşiv/ }).click();
+  const archived = row(pane, body);
+  await expect(archived.getByLabel('Durum', { exact: true })).toHaveValue('done');
+
+  await archived.getByLabel('Durum', { exact: true }).selectOption('cancelled');
 
   await expect(page.locator('.toasts .toast.error')).toBeVisible();
   // Ve değer değişmedi: ekran reddedilen bir değeri kabul edilmiş gibi göstermiyor.
-  await expect(task.getByLabel('Durum', { exact: true })).toHaveValue('done');
+  await expect(archived.getByLabel('Durum', { exact: true })).toHaveValue('done');
 
   await removeTask(pane, body);
 });

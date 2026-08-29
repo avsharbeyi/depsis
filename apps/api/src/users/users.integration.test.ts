@@ -90,6 +90,12 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     if (owner !== undefined) {
       await owner.withoutTenant('migration-status', async (q) => {
         await q.query(`DELETE FROM sessions WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        // Ekipler kullanıcılardan ÖNCE, kuruluştan önce: hesap açmak artık 'Herkes' ekibini de
+        // tarıyor (`everyone_team`), yani bu süit çalıştıktan sonra kiracının bir ekibi var ve
+        // `teams_organization_id_fkey` RESTRICT kuruluşun silinmesini reddediyor. Ürün doğru
+        // davranıyordu; temizlik eksikti.
+        await q.query(`DELETE FROM team_members WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        await q.query(`DELETE FROM teams WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM users WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM organizations WHERE id = ANY($1)`, [[orgA, orgB]]);
       });

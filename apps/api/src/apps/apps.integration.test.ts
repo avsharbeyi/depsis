@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { AdminGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import type { AgentService } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
 import { SecretBox } from '../auth/secret-box.js';
 import {
@@ -132,10 +133,32 @@ class RecordingPodman {
   }
 }
 
+/**
+ * Ajanın yerine geçen, yalnız `prepare_app_data_dir`'i bilen bir sahte.
+ *
+ * 0037'den beri katalogdaki bazı bağlamalar paylaşımın KÖKÜNÜ değil içindeki bir klasörü
+ * istiyor (Nextcloud, Immich), ve o klasörü ajan açıyor — köksüz motorun kimliğine ait olarak.
+ * Kurulum bu yüzden ajansız yapılamıyor, ve bu süit onu vermediği için yedi test birden düştü:
+ * ÜRÜN doğruydu, fikstür eksikti. Sahte, istekleri kaydediyor ki testler klasörün gerçekten
+ * istendiğini de iddia edebilsin.
+ */
+class RecordingAgent {
+  readonly calls: { share: string; directory: string }[] = [];
+
+  call(request: { op: string; share?: string; directory?: string }): Promise<unknown> {
+    if (request.op !== 'prepare_app_data_dir') {
+      return Promise.reject(new Error(`beklenmeyen işlem: ${request.op}`));
+    }
+    this.calls.push({ share: request.share ?? '', directory: request.directory ?? '' });
+    return Promise.resolve({ status: 'app_data_dir_ready', created: true });
+  }
+}
+
 describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
   let db: DbService;
   let owner: DbService;
   let podman: RecordingPodman;
+  let agent: RecordingAgent;
   let apps: AppsService;
 
   let orgA = '';
@@ -150,7 +173,15 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
     await db.onModuleInit();
     owner = new DbService(OWNER_URL as string);
     podman = new RecordingPodman();
-    apps = new AppsService(db, podman as unknown as PodmanClient, SHARES_ROOT, false, TEST_KEY);
+    agent = new RecordingAgent();
+    apps = new AppsService(
+      db,
+      podman as unknown as PodmanClient,
+      SHARES_ROOT,
+      false,
+      TEST_KEY,
+      agent as unknown as AgentService,
+    );
 
     await owner.withoutTenant('migration-status', async (q) => {
       await q.query(
@@ -416,10 +447,16 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
 
     // The share was bound to the SERVER and to nothing else. A photograph library bound into the
     // database container would be a second copy of the user's data with no reason to exist.
+    //
+    // Ve paylaşımın KÖKÜNE değil, İÇİNDEKİ klasöre (0037). İlk hâli kökü bağlıyordu ve saha
+    // ikisini birden ölçtü: köksüz eşlemede konteynerin kimliği aile paylaşımının köküne
+    // dokunamıyor, ve Immich veri dizinini sahipleniyor — dolu bir kökü zaten kabul etmezdi.
+    // Klasörü ajan açıyor; `agent.calls` onun gerçekten istendiğini söylüyor.
     const server = specs.at(-1);
     expect(server?.mounts.map((mount) => [mount.destination, mount.source])).toEqual([
-      ['/usr/src/app/upload', `${SHARES_ROOT}/Filmler`],
+      ['/usr/src/app/upload', `${SHARES_ROOT}/Filmler/Immich`],
     ]);
+    expect(agent.calls.at(-1)).toEqual({ share: 'Filmler', directory: 'Immich' });
     expect(specs[0]?.mounts).toEqual([]);
 
     // The database's own directory is a managed volume, not a share the user had to choose.
@@ -479,12 +516,15 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
     // The two fallbacks available here are both worse than the refusal: a constant in the
     // catalogue is the same password on every DEPSIS, and a random one has to be stored, which
     // puts a plaintext server password in every backup.
+    // Ajan VERİLİYOR: bu test anahtarsızlığı ölçüyor, ajansızlığı değil. Ajansız bırakıldığında
+    // kurulum veri klasörü adımında — yani ölçülmek isteneni görmeden — düşüyordu.
     const keyless = new AppsService(
       db,
       podman as unknown as PodmanClient,
       SHARES_ROOT,
       false,
       null,
+      agent as unknown as AgentService,
     );
     await expect(
       keyless.install(orgB, adminA, 'nextcloud', [

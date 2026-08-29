@@ -522,8 +522,14 @@ Hesap kilidi kalkana kadar bu depoda GitHub Actions hiç çalışmadı — koşu
 listeleniyor, her biri **sıfır adımla** beş saniyede düşüyordu. Kilit kalktı, 41 commit tek seferde
 itildi, ve iş akışı hayatında ilk kez tamamlandı.
 
-Altı işin altısı yeşil. Oraya varmak beş düzeltme aldı, ve **beşi de aynı aileden**: bu makinede
-doğru olduğu için hiç sınanmamış varsayımlar.
+Altı işin altısı yeşil oldu. Oraya varmak beş düzeltme aldı, ve **beşi de aynı aileden**: bu
+makinede doğru olduğu için hiç sınanmamış varsayımlar.
+
+Sonra saha turları başladı ve `main` günlerce kırmızı kaldı — üç işte, ve üçü de yine aynı
+aileden. Yerel kapılar yeşildi çünkü **CI'ın koştuğunu koşmuyorlardı**: clippy `--all-targets`
+almıyordu (test modülleri denetlenmiyordu), tümleşik süitler bir veritabanı istediği için
+`pnpm check`'e girmiyor ve elle koşulmuyordu, e2e yığını da öyle. Üçü de düzeltildi ve kapı
+listesi CI'a eşitlendi; ders listenin kendisinde yazıyor.
 
 | Ne                                                                     | Neden yerelde görünemezdi                                                                                        |
 | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
@@ -537,12 +543,18 @@ Yerel kapılar hâlâ geçerli ve hâlâ ilk savunma hattı — CI'a itmeden ön
 
 ```bash
 pnpm check                                   # format · lint · typecheck · generate · unit
+bash tools/dev/wsl-rust-gate.sh              # fmt · clippy --all-targets · cargo test
 bash tools/ci/permissions-schema-check.sh    # izin şemasının kısıtları gerçekten ısırıyor mu
 DB_NAME=depsis_gate_ci bash tools/dev/wsl-migration-check.sh
 bash tools/dev/wsl-itest.sh                  # dört veritabanı URL'siyle tümleşik süitler
 bash tools/dev/wsl-e2e-stack.sh && pnpm test:e2e --workers=3
 bash tools/wsl-cargo-windows-check.sh        # ADR-0006'nın çekirdek iddiası
 ```
+
+`wsl-rust-gate.sh` listeye sonradan eklendi ve sebebi kayda değer: yerel alışkanlık clippy'yi
+`--all-targets` OLMADAN koşuyordu, yani test kodu hiç denetlenmiyordu. `procs.rs`'in test modülü
+diğerlerinin taşıdığı `#[allow(clippy::unwrap_used, …)]` bloğunu taşımıyordu; yerelde görünmedi,
+CI'da on dört hatayla düştü. Bir kapı, CI'ın koştuğunun aynısını koşmuyorsa kapı değildir.
 
 Koşumu izlemek için `bash tools/dev/ci-watch.sh` — kimliksiz API saatte altmış istek, ve otuz
 saniyelik bir yoklama onu bir koşumda bitiriyor.

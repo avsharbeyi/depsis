@@ -67,17 +67,6 @@ export class InvalidNameError extends Error {
  */
 export const PARENT_DATASET_RESOLVER = 'depsis:files:parent-dataset-resolver';
 
-/** Storage is not set up, so the tenant's first share cannot be created yet. */
-export class NoStorageForSharesError extends Error {
-  constructor() {
-    super(
-      'this appliance has no storage pool yet, so there is nowhere to keep files. Create a pool ' +
-        'in the storage screen first',
-    );
-    this.name = 'NoStorageForSharesError';
-  }
-}
-
 /** The entry does not exist, or belongs to another tenant — deliberately the same answer. */
 export class EntryNotFoundError extends Error {
   constructor() {
@@ -693,16 +682,26 @@ export class FilesService {
       // already constrained to `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` — a superset-safe source.
       const name = slug;
 
-      // THE DATASET FIRST, AND FOR REAL. The first tokenless field install measured what the
-      // row-only version costs: this method wrote `dataset = slug` with nothing on disk, and that
-      // ghost — a share whose dataset does not exist — failed every Samba publish on the box
-      // (publish is all-or-nothing) and could hold no file. The row may only claim a dataset the
-      // agent just made or confirmed.
+      // THE DATASET FIRST, AND FOR REAL — ama YALNIZ bir üst veri kümesi varken.
+      //
+      // Sahada ölçülen hata: bu metot `dataset = slug` yazıp diske hiçbir şey koymuyordu, ve o
+      // hayalet — veri kümesi olmayan bir paylaşım — kutudaki her Samba yayınını düşürüyordu
+      // (yayın hepsi-ya-da-hiçbiri) ve tek bayt tutamıyordu. Satır artık ancak ajanın az önce
+      // yarattığı ya da doğruladığı bir veri kümesini iddia edebiliyor.
+      //
+      // ZFS OLMAYAN KUTUDA ESKİ DAVRANIŞ SÜRÜYOR, ve bunu geri koymak bir gerileme değil: e2e
+      // yığını ve geliştirme kurulumu paylaşımları düz dizin olarak tutuyor, ve orada reddetmek
+      // dosya yöneticisini tamamen öldürüyordu (CI bunu "Klasör okunamadı" + 503 diye ölçtü).
+      // O kutularda zaten `zfs` yok, yani hayaletin bozacağı bir yayın da yok.
+      //
+      // Kalan pencere dürüstçe söylenmeli: HAVUZU OLMAYAN bir cihazda birisi havuz kurmadan
+      // dosya yöneticisini açarsa yine hayalet bir satır doğar. Sihirbaz havuzla birlikte
+      // paylaşım ağacını da kurduğu için (`prepareShareRoot`, artık sunucunun kararı) bu pencere
+      // kurulumun ilk dakikalarıyla sınırlı.
       let dataset = name;
-      if (this.parentDataset !== null) {
+      const parent = this.parentDataset === null ? null : await this.parentDataset(randomUUID());
+      if (parent !== null) {
         const correlationId = randomUUID();
-        const parent = await this.parentDataset(correlationId);
-        if (parent === null) throw new NoStorageForSharesError();
         dataset = `${parent}/${name}`;
         const made = await this.agent.call(
           { op: 'create_dataset', dataset, acltype: 'posixacl', refquota_bytes: null },

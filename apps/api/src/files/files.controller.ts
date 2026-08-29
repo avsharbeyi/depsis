@@ -59,7 +59,6 @@ import {
   type FileEntryPage,
   type FileEntryRow,
   type SortOrder,
-  NoStorageForSharesError,
 } from './files.service.js';
 
 type Schemas = OpenApi.components['schemas'];
@@ -1127,10 +1126,6 @@ export function requireSession(request: AuthenticatedRequest): Caller {
  * existence oracle the row-level policy exists to close.
  */
 export function translate(error: unknown): Error {
-  if (error instanceof NoStorageForSharesError) {
-    // 503: the box is healthy and the repair is a screen, not a retry. The sentence names it.
-    return new ServiceUnavailableException(error.message);
-  }
   if (error instanceof EntryNotFoundError) return new NotFoundException();
   if (error instanceof NameTakenError) {
     // The message is the whole value of this answer. A bare 409 tells a user their restore failed;

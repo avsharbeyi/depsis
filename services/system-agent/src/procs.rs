@@ -209,6 +209,13 @@ pub fn check_kill(proc_root: &Path, pid: u32, expected_comm: &str) -> Result<(),
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "Crate düzeyindeki yasaklar root bir daemon'da panik bir hizmet reddi olduğu için               var. Testte tersi doğru: başarısız bir iddia PANİKLEMELİ, ve bir fikstürü               indekslemek Option açmaktan okunaklı. Aynı blok acl.rs, dispatch.rs ve unix.rs'in               test modüllerinde de duruyor; procs.rs'de UNUTULMUŞTU ve CI'ı on dört hatayla               kırdı — yerel kapı `--all-targets` geçmediği için testler hiç denetlenmiyordu."
+)]
 mod tests {
     use super::*;
 

@@ -3602,8 +3602,19 @@ select option {
   .quick {
     flex-wrap: nowrap;
   }
+  /* Etiket GÖRÜNMEZ ama SİLİNMEZ. `display: none` yazmak düğmeyi ekranda küçültüyor ve
+     erişilebilirlik ağacından ADINI da siliyordu: simge-düğme, ekran okuyucuya isimsiz bir
+     kutu olarak kalıyor, ve e2e süiti onu adıyla bulamıyordu. Görsel olarak kırpmak ikisini
+     birden çözüyor — dar ekranda yalnız simge görünür, ad yerinde durur. */
   .qf.sm .l {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 }
 

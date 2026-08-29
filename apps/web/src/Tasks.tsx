@@ -577,7 +577,31 @@ export function Tasks({
           {archived.map((task) => (
             <div className="jitem done arch" key={task.id}>
               <span className="tx">{task.body}</span>
-              <span className="pill dim">{STATUS_LABEL[task.status]}</span>
+              {/* Durum kutusu ARŞİVDE DE var, ve olmaması bir eksiklikti: durum makinesinin iki
+                  yasaklı geçişi de KAPALI bir durumdan başlıyor (`done → cancelled`,
+                  `cancelled → in_progress`). Kapanan iş panodan arşive taşınınca o geçişleri
+                  deneyecek bir kontrol hiçbir ekranda kalmamıştı — yani kural yerinde duruyor
+                  ama kimse ona dokunamıyor, ve reddin kullanıcıya ulaştığı da bir daha
+                  ölçülemiyordu. Yanlışlıkla iptal edilmiş bir işi düzeltmenin yeri de burası. */}
+              <select
+                value={task.status}
+                disabled={busy}
+                aria-label="Durum"
+                style={{ fontSize: 11, padding: '3px 6px', borderRadius: 7 }}
+                onChange={(event) => {
+                  void update(
+                    task,
+                    { status: event.target.value as Status },
+                    'Durum değiştirilemedi.',
+                  );
+                }}
+              >
+                {(Object.keys(STATUS_LABEL) as Status[]).map((value) => (
+                  <option key={value} value={value}>
+                    {STATUS_LABEL[value]}
+                  </option>
+                ))}
+              </select>
               <span className="pill dim">{task.assigneeUsername ?? 'Atanmamış'}</span>
               {task.doneAt !== null && (
                 <span className="pill dim">
