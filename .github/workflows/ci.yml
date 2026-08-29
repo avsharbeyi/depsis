@@ -748,15 +748,52 @@ jobs:
   # These exist so their absence is visible in every CI run. Each is enabled by the
   # PoC named in its ADR.
 
-  integration:
-    name: integration (needs Debian VM — ADR-0012)
+  appliance:
+    name: appliance (ZFS · Samba · privileged agent)
     runs-on: ubuntu-latest
+    # ÖNCEKİ HÂLİ HİÇBİR ŞEY KOŞMUYORDU. Bu iş "integration (needs Debian VM — ADR-0012)" adıyla
+    # duruyor ve gövdesi birkaç `echo`'dan ibaretti: her push'ta yeşil yanan, hiçbir şey ölçmeyen
+    # bir kutu. Sahte bir yeşil kırmızıdan kötüdür — kırmızı bakılacak yeri söyler, sahte yeşil
+    # bakmayı gereksiz kılar.
+    #
+    # Beklenen VM'in yapabileceklerinin çoğunu bu koşucu zaten yapabiliyor: root var, systemd var,
+    # ZFS modülü ve Samba depoda, döngü/dosya vdev'leri çalışıyor. Kalan tek gerçek eksik ADR-0012'
+    # nin disk kimliği zinciri (fiziksel disk ister) ve betik bunu sonunda açıkça söylüyor.
     steps:
-      - run: |
-          echo "::notice::Partially implemented. The PostgreSQL half now runs on every push"
-          echo "in the 'migrations' job above (P1-A's schema assertions, ADR-0013/0014)."
-          echo "What still needs the Hyper-V/Debian target: ZFS (P0-A/G), Samba ACLs (P0-B),"
-          echo "filesystem events (P0-D) and the privileged agent (P0-E)."
-          echo "Also P1-C (tools/poc/p1-c-api-agent.sh): the API and the agent talking over a real"
-          echo "Unix socket, which needs root and socket activation. apps/api's"
-          echo "agent.integration.test.ts is excluded from the migrations job for that reason."
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # e2e ile AYNI anahtar: ikisi de tek bir release ikilisi derliyor, yani aynı önbellek
+          # ikisine de isabet ediyor. `rust` işininkiyle paylaşmak ise ikisini birden ıskalatırdı.
+          key: e2e-agent
+
+      - name: Build the storage agent
+        run: cargo build --locked --release --bin depsis-agent
+
+      - name: Workspace packages
+        # Vitest doğrudan çağrılıyor, yani `test:unit`'in `dependsOn: ["^build"]` zinciri koşmuyor;
+        # @depsis/agent-protocol kendi dist'i üzerinden çözülüyor ve onsuz süit "Failed to resolve
+        # entry for package" ile düşer.
+        run: pnpm build
+
+      - name: ZFS and Samba
+        # `zfsutils-linux` modülü de getiriyor; getirmezse çekirdeğin ek modül paketi devrede.
+        # `acl` betiğin getfacl'ı, `attr` xattr=sa için, `smbclient` ajanın canlı yayın kanıtı için.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zfsutils-linux samba smbclient acl attr
+          sudo modprobe zfs || sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
+          sudo modprobe zfs
+          zfs version
+
+      - name: The appliance layer, for real
+        run: sudo --preserve-env=PATH bash tools/ci/appliance-check.sh

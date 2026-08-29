@@ -32,6 +32,26 @@ printf '
 '
 bash "$(dirname "${BASH_SOURCE[0]}")/../wsl-cargo-windows-check.sh"
 
+# ŞEMA TAZE Mİ — CI'ın bu işteki beşinci adımı, ve yine yalnız burada sınanabilir: sınırın
+# sözleşmesini ikili üretiyor (ADR-0006), depodaki JSON onun bir KOPYASI, ve bir kopya ancak
+# biri onu aslıyla karşılaştırdığı sürece dürüst kalır. op.rs değişip şema yenilenmezse
+# TypeScript tarafı var olmayan bir ajanı tarif eder.
 printf '
-Rust kapisi gecti (fmt - clippy --all-targets - test - Windows caprazi).
+-> sema tazeligi (--emit-schema, depodakiyle karsilastirma)
+'
+here="$(dirname "${BASH_SOURCE[0]}")"
+emitted="$(mktemp)"
+trap 'rm -f "$emitted"' EXIT
+bash "$here/../wsl-cargo.sh" run --quiet -- --emit-schema >"$emitted"
+if ! diff -u "$here/../../packages/agent-protocol/schema/agent.schema.json" "$emitted"; then
+  printf '
+HATA: agent.schema.json bayat. Tazelemek icin:
+'
+  printf '  bash tools/wsl-emit-schema.sh && pnpm --filter @depsis/agent-protocol generate
+'
+  exit 1
+fi
+
+printf '
+Rust kapisi gecti (fmt - clippy --all-targets - test - Windows caprazi - sema).
 '

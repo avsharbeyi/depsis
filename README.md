@@ -543,7 +543,8 @@ Yerel kapılar hâlâ geçerli ve hâlâ ilk savunma hattı — CI'a itmeden ön
 
 ```bash
 pnpm check                                   # format · lint · typecheck · generate · unit
-bash tools/dev/wsl-rust-gate.sh              # fmt · clippy --all-targets · cargo test
+bash tools/dev/wsl-rust-gate.sh              # fmt · clippy --all-targets · test · Windows · şema
+sudo bash tools/ci/appliance-check.sh        # gerçek ZFS + Samba + ajan (atılabilir bir Linux'ta)
 bash tools/ci/permissions-schema-check.sh    # izin şemasının kısıtları gerçekten ısırıyor mu
 DB_NAME=depsis_gate_ci bash tools/dev/wsl-migration-check.sh
 bash tools/dev/wsl-itest.sh                  # dört veritabanı URL'siyle tümleşik süitler
