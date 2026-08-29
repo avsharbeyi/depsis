@@ -546,8 +546,8 @@ listesi CI'a eşitlendi; ders listenin kendisinde yazıyor.
 Yerel kapılar hâlâ geçerli ve hâlâ ilk savunma hattı — CI'a itmeden önce:
 
 ```bash
-pnpm check                                   # format · lint · typecheck · generate · unit
-bash tools/dev/wsl-rust-gate.sh              # fmt · clippy --all-targets · test · Windows · şema
+pnpm check                                   # format · lint · iş akışı · typecheck · generate · unit
+bash tools/dev/rust-gate.sh                  # fmt · clippy --all-targets · test · Windows · şema
 sudo bash tools/ci/appliance-check.sh        # gerçek ZFS + Samba + ajan (atılabilir bir Linux'ta)
 bash tools/ci/permissions-schema-check.sh    # izin şemasının kısıtları gerçekten ısırıyor mu
 DB_NAME=depsis_gate_ci bash tools/dev/wsl-migration-check.sh
@@ -555,6 +555,19 @@ bash tools/dev/wsl-itest.sh                  # dört veritabanı URL'siyle tüml
 bash tools/dev/wsl-e2e-stack.sh && pnpm test:e2e --workers=3
 bash tools/wsl-cargo-windows-check.sh        # ADR-0006'nın çekirdek iddiası
 ```
+
+`rust-gate.sh`, `wsl-rust-gate.sh`'i araç zincirinin **gerçekten kurulu olduğu** WSL dağıtımında
+koşturur. Depodaki `wsl-*.sh` betikleri `wsl.exe`'yi dağıtım seçmeden çağırıyor, yani varsayılan
+dağıtımda koşuyorlar — ve bu makinede `cargo` bir başkasında kurulu. Ortaya çıkan hata
+("cd: No such file or directory", "cargo: command not found") bir derleyici hatasına değil bir
+ortam kazasına benziyor, ve kapı atlanıyor. Bir kapının koşmaması, kırmızı vermesinden daha
+tehlikelidir: kırmızı bakılacak yeri söyler.
+
+`pnpm check` artık iş akışı dosyalarını da denetliyor (`tools/ci/workflow-lint.mjs`), ve bu da
+ödenmiş bir bedelin karşılığı: bir adıma ikinci bir `env:` anahtarı girdiğinde GitHub dosyayı
+**reddetti**, koşum sıfır saniyede `startup_failure` verdi, hiçbir iş çalışmadı. Böyle bir hatayı
+CI yakalayamaz — CI zaten başlamıyor. Yakalanacak tek yer yerel kapı, ve tek gereken hoşgörülü bir
+ayrıştırıcı yerine katı olanı kullanmak.
 
 `wsl-rust-gate.sh` listeye sonradan eklendi ve sebebi kayda değer: yerel alışkanlık clippy'yi
 `--all-targets` OLMADAN koşuyordu, yani test kodu hiç denetlenmiyordu. `procs.rs`'in test modülü
