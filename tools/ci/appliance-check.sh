@@ -403,7 +403,9 @@ FP_AFTER=$(ask tls '{"op":"tls_status"}' | node -e '
     try { process.stdout.write(String(JSON.parse(raw).fingerprint ?? "")); } catch { process.stdout.write(""); }
   });
 ')
-check 'eski sertifika geri kondu' "$FP_AFTER" "$FP_BEFORE"
+# `:-` ile: iki BOS dizgeyi karsilastirmak her zaman gecer, ve bu iddia tam da hicbir sertifika
+# okunamadigi kosumda yesil verdi. Yokluk kendi sozcugunu aliyor.
+check 'eski sertifika geri kondu' "${FP_AFTER:-SONRA-BOS}" "${FP_BEFORE:-ONCE-BOS}"
 
 # ── 7. Sınırın iki yarısı: TypeScript istemci ↔ Rust ajan ──────────────────
 #

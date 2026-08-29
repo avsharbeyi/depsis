@@ -58,7 +58,12 @@ pub fn key_path() -> PathBuf {
 /// Sertifikanın anlatısı, tek `openssl` çağrısında.
 ///
 /// `-noout` şart: onsuz PEM'in kendisi de çıktıya giriyor ve yanıtı gereksizce şişiriyor.
-pub fn describe_argv(path: &str) -> [&str; 12] {
+///
+/// SEÇENEK SONU İŞARETİ (`--`) YOK, ve bu dosyanın geri kalanındaki disipline aykırı değil:
+/// `openssl` onu ANLAMIYOR — `x509 -in -- /yol` çağrısı "Use -help for summary" ile düşüyor
+/// (ölçüldü, appliance kapısında). Yolun çağırandan gelmemesi de zaten burada; yollar
+/// sabitlerden ya da ortamdan geliyor, istekten değil.
+pub fn describe_argv(path: &str) -> [&str; 11] {
     [
         "x509",
         "-noout",
@@ -70,21 +75,20 @@ pub fn describe_argv(path: &str) -> [&str; 12] {
         "-ext",
         "subjectAltName",
         "-in",
-        "--",
         path,
     ]
 }
 
 /// Sertifikanın taşıdığı açık anahtar.
-pub fn cert_pubkey_argv(path: &str) -> [&str; 6] {
-    ["x509", "-noout", "-pubkey", "-in", "--", path]
+pub fn cert_pubkey_argv(path: &str) -> [&str; 5] {
+    ["x509", "-noout", "-pubkey", "-in", path]
 }
 
 /// Özel anahtardan türetilen açık anahtar. İkisinin AYNI olması, çiftin gerçekten çift olduğunun
 /// kanıtı — ve bu kontrol olmadan, kutuya birbirine ait olmayan iki dosya konabilir ve nginx
 /// yeniden yüklenene kadar hiçbir şey yanlış görünmez.
-pub fn key_pubkey_argv(path: &str) -> [&str; 5] {
-    ["pkey", "-pubout", "-in", "--", path]
+pub fn key_pubkey_argv(path: &str) -> [&str; 4] {
+    ["pkey", "-pubout", "-in", path]
 }
 
 /// Süresi dolmuş mu. `-checkend 0`: şu an geçerli değilse sıfırdan farklı çıkış.
@@ -213,6 +217,19 @@ pub fn replace(from: &std::path::Path, to: &std::path::Path) -> Result<(), Strin
     std::fs::rename(from, to).map_err(|error| format!("{} yerine konamadi: {error}", to.display()))
 }
 
+/// Yeni dosyanin YANINA yazilacagi yol: `<yol>.new`.
+///
+/// `with_extension` DEGIL, ve bu ayrim olculdu: `depsis.crt` ile `depsis.key` in ikisi de
+/// `with_extension("new")` ile `depsis.new` oluyor — yani sertifika ve anahtar AYNI gecici
+/// dosyaya yaziliyor. Ilki 0444 ile olusturuldugu icin ikincisi "Permission denied" veriyor,
+/// ve bu yalniz kok OLMAYAN bir kullanicida gorunuyor: yerelde kok olarak kosan testler
+/// gecti, CI dustu.
+pub fn staged(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".new");
+    std::path::PathBuf::from(name)
+}
+
 /// Var olan dosyanin bir kopyasi. Yoksa HATA DEGIL: ilk kurulumda sertifika olmayabilir, ve
 /// olmayan bir seyi yedekleyememek bir arıza degil.
 pub fn backup(path: &std::path::Path, suffix: &str) -> Option<std::path::PathBuf> {
@@ -300,14 +317,32 @@ X509v3 Subject Alternative Name: \n\
     }
 
     #[test]
-    fn every_argv_ends_option_parsing_before_the_path() {
-        // Yollar sabit ama disiplin dosya boyunca aynı: `--` olmadan `-` ile başlayan bir yol
-        // openssl için bir seçenek olurdu.
-        let describe = describe_argv("/x");
-        assert_eq!(describe[describe.len() - 2], "--");
-        let cert = cert_pubkey_argv("/x");
-        assert_eq!(cert[cert.len() - 2], "--");
-        let key = key_pubkey_argv("/x");
-        assert_eq!(key[key.len() - 2], "--");
+    fn the_path_is_the_last_argument_and_openssl_gets_no_end_of_options_marker() {
+        // `--` BİLEREK YOK: openssl onu anlamıyor ve `x509 -in -- /yol` "Use -help for
+        // summary" ile düşüyor. Bu test o kararı yazılı tutuyor, çünkü dosyanın geri kalanı
+        // (ve projedeki her argv) tersini yapıyor — biri "burada eksik" diye ekleyecek olursa
+        // sertifika okuması sessizce değil, burada düşsün.
+        for argv in [
+            describe_argv("/x").to_vec(),
+            cert_pubkey_argv("/x").to_vec(),
+            key_pubkey_argv("/x").to_vec(),
+        ] {
+            assert_eq!(
+                argv.last().copied(),
+                Some("/x"),
+                "yol son argüman olmalı: {argv:?}"
+            );
+            assert!(!argv.contains(&"--"), "openssl `--` anlamıyor: {argv:?}");
+        }
+    }
+
+    #[test]
+    fn the_two_staged_paths_are_two_different_files() {
+        // `with_extension` ikisini de `depsis.new` yapıyordu: sertifika ve anahtar aynı
+        // geçici dosyaya yazılıyor, ve ilki 0444 olduğu için ikincisi düşüyordu.
+        let cert = staged(std::path::Path::new("/etc/depsis/tls/depsis.crt"));
+        let key = staged(std::path::Path::new("/etc/depsis/tls/depsis.key"));
+        assert_ne!(cert, key);
+        assert!(cert.to_string_lossy().ends_with("depsis.crt.new"));
     }
 }

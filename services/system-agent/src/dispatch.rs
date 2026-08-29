@@ -734,9 +734,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             .run(crate::tls::OPENSSL, &crate::tls::describe_argv(path))
         {
             Ok(output) => Ok(Self::tls_response(&crate::tls::parse_facts(&output))),
-            Err(error) => Ok(Response::Refused {
-                reason: format!("sertifika okunamadı: {error}"),
-            }),
+            // OKUNAMAMASI BİR CEVAP, bir hata değil. Kurulum tamamlanmadan sertifika yok, ve o
+            // kutuda ekranın söylemesi gereken şey "okunabilir bir sertifika yok". Bunu bir
+            // ret olarak döndürmek, API tarafında 400 üretiyordu: Sistem ekranını AÇMAK bir
+            // istemci hatası sayılıyordu, ve e2e süiti bunu konsol hatası olarak yakaladı.
+            Err(_) => Ok(Self::tls_response(&crate::tls::Facts::default())),
         }
     }
 
@@ -790,8 +792,8 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
 
         let cert_path = crate::tls::cert_path();
         let key_path = crate::tls::key_path();
-        let staged_cert = cert_path.with_extension("new");
-        let staged_key = key_path.with_extension("new");
+        let staged_cert = crate::tls::staged(&cert_path);
+        let staged_key = crate::tls::staged(&key_path);
 
         // 0400 ve 0444: anahtarı yalnız kök okur, sertifika herkese açık — nginx'in kök olmayan
         // işçileri onu okuyor.
@@ -3319,7 +3321,7 @@ mod tests {
     }
 
     #[test]
-    fn reading_the_certificate_asks_openssl_and_ends_option_parsing() {
+    fn reading_the_certificate_asks_openssl_with_the_path_last() {
         let r = MockCommandRunner::with_responses([
             "subject=CN=depsis\nissuer=CN=depsis\nsha256 Fingerprint=AA:BB\n".into(),
         ]);
@@ -3345,7 +3347,11 @@ mod tests {
         let call = r.call(0).expect("openssl çalıştı");
         assert_eq!(call[0], crate::tls::OPENSSL);
         assert_eq!(call[1], "x509");
-        assert_eq!(call[call.len() - 2], "--");
+        // `--` YOK: openssl onu anlamiyor (bkz. tls::describe_argv). Yol son arguman.
+        assert_eq!(
+            call.last().map(String::as_str),
+            Some(crate::tls::cert_path().to_string_lossy().as_ref())
+        );
     }
     /// Güncelleme dosyalarını OLMAYAN bir yere bakmaya zorlar.
     ///

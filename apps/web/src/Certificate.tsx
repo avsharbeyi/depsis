@@ -94,6 +94,10 @@ export function CertificatePanel({ notify }: { notify: Notify }): React.JSX.Elem
         <span className="val">{status === null ? '—' : commonName(status.subject)}</span>
         {status === null ? (
           <span className="pill dim">okunuyor…</span>
+        ) : status.fingerprint === '' ? (
+          // Ajan sertifikayi okuyamadi. Bunu bos alanlarla gostermek, kurulmamis bir kutuyu
+          // bozuk bir kutudan ayirt edilemez yapardi.
+          <span className="pill warn">okunabilir bir sertifika yok</span>
         ) : status.selfSigned ? (
           <span className="pill warn">kendinden imzalı</span>
         ) : (
@@ -101,7 +105,7 @@ export function CertificatePanel({ notify }: { notify: Notify }): React.JSX.Elem
         )}
       </div>
 
-      {status !== null && (
+      {status !== null && status.fingerprint !== '' && (
         <>
           {names.length > 0 && (
             <div className="netrow">
@@ -122,7 +126,7 @@ export function CertificatePanel({ notify }: { notify: Notify }): React.JSX.Elem
         </>
       )}
 
-      {status?.selfSigned === true && (
+      {status?.selfSigned === true && status.fingerprint !== '' && (
         <p className="note">
           Tarayıcı bu sertifika için uyarı gösteriyor, ve uyarı doğru: cihazın kendi ürettiği bir
           sertifikayı hiçbir tarayıcı doğrulayamaz. Uyarı ekranında gösterilen parmak izi yukarıdaki
