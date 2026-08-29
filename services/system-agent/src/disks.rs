@@ -45,8 +45,25 @@ pub const BY_ID_DIR: &str = "/dev/disk/by-id";
 /// `@`/`@home`, openSUSE, Fedora — the partition is mounted at `/` with `subvol=@` and at `/home`
 /// with `subvol=@home`, neither entry has fs-root `/`, and the singular column answers `/home`.
 /// The appliance's own boot disk then reports `holds_system: false`.
-pub const COLUMNS: &str =
-    "KNAME,TYPE,SIZE,MODEL,SERIAL,WWN,ROTA,RM,TRAN,FSTYPE,PTTYPE,MOUNTPOINT,MOUNTPOINTS,ID-LINK";
+///
+/// `NAME` IS IN THE LIST AND NOTHING READS IT. lsblk draws its tree on the NAME column, and with
+/// NAME absent from `--output` it does not nest at all: the JSON comes back FLAT, every partition
+/// a top-level entry of type `part`, every disk carrying no children. [`parse`] drops non-disks,
+/// so the appliance's own boot disk then reports `holds: ["gpt"]`, `mounted: false` and
+/// `holds_system: false` — the guard that refuses to build a pool on the disk the box boots from
+/// never fires. This shipped, and every unit test below passed throughout, because the fixtures
+/// were written with `children` — they encoded what lsblk produces WITH NAME, not what this argv
+/// asked for. Measured on util-linux 2.39.3 and 2.41. Remove the column and the tree goes with it.
+///
+/// `concat!` AND NOT A BACKSLASH CONTINUATION. Written as one literal split over two lines with a
+/// trailing `\`, rustfmt joined the lines back and left the indentation INSIDE the string; lsblk
+/// then answered `unknown column: <spaces>MOUNTPOINT,...` and the whole inventory failed. No unit
+/// test could see it — the constant only means anything to the real command — so the invariant is
+/// asserted directly below instead.
+pub const COLUMNS: &str = concat!(
+    "NAME,KNAME,TYPE,SIZE,MODEL,SERIAL,WWN,ROTA,RM,TRAN,",
+    "FSTYPE,PTTYPE,MOUNTPOINT,MOUNTPOINTS,ID-LINK"
+);
 
 pub fn argv() -> [&'static str; 4] {
     ["--json", "--bytes", "--output", COLUMNS]
@@ -119,6 +136,15 @@ pub fn parse(json: &str) -> Result<(Vec<DiskInfo>, bool), SeamError> {
     let mut truncated = false;
 
     for node in &output.blockdevices {
+        // A PARTITION AT THE TOP LEVEL means the output is not a tree — see [`COLUMNS`]. Every
+        // disk in such a listing looks empty, which is the one wrong answer this module must never
+        // give, so the call fails instead. The same direction the missing ID-LINK column fails in.
+        if node.kind.as_deref() == Some("part") {
+            return Err(SeamError::Io(
+                "lsblk returned a flat list: a partition appears at the top level, so no disk's                  content can be read from it"
+                    .to_string(),
+            ));
+        }
         // `disk` only. `loop`, `rom` and `md` are block devices and not things a pool is built on;
         // `part` never appears at the top level, but naming the type rather than excluding a list
         // of others means a device class added to lsblk later is dropped rather than offered.
@@ -467,6 +493,54 @@ mod tests {
         {"kname":"loop0","type":"loop","size":12345,"children":[]}
       ]
     }"#;
+
+    #[test]
+    fn the_column_list_is_a_column_list_and_not_prose() {
+        // lsblk takes `--output` as ONE argument and matches each name exactly: a stray space
+        // makes the whole call fail with `unknown column`, and the box reports no disks at all.
+        // This is not hypothetical — a rustfmt-joined line continuation put twenty-seven spaces in
+        // the middle of the constant, and nothing in this file could tell until lsblk ran.
+        assert!(
+            !COLUMNS.contains(char::is_whitespace),
+            "no whitespace anywhere in an --output list: {COLUMNS}"
+        );
+        for column in COLUMNS.split(',') {
+            assert!(
+                !column.is_empty()
+                    && column
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c == '-' || c.is_ascii_digit()),
+                "not a column name: {column:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_columns_keep_the_one_that_makes_lsblk_nest() {
+        // NAME is read by nothing and looks like a duplicate of KNAME, which is exactly why it is
+        // at risk of being tidied away. It is the column lsblk draws the tree on.
+        assert!(
+            COLUMNS.starts_with("NAME,"),
+            "without NAME lsblk emits a flat list and every disk reports holding nothing"
+        );
+    }
+
+    #[test]
+    fn a_flat_listing_is_a_failure_and_not_a_box_full_of_empty_disks() {
+        // WHAT THE APPLIANCE GATE CAUGHT ON REAL HARDWARE. lsblk asked without NAME answers with
+        // partitions at the top level; the disk they belong to carries no children and comes back
+        // as `holds: ["gpt"], mounted: false, holds_system: false`. That is the boot disk offered
+        // as a pool candidate. Refusing the listing is the only safe reading of it.
+        let json = r#"{"blockdevices":[
+          {"kname":"sda","type":"disk","size":161061273600,"pttype":"gpt"},
+          {"kname":"sda1","type":"part","size":160000000000,"fstype":"ext4",
+           "mountpoints":["/"]}]}"#;
+        let error = parse(json).expect_err("a flat listing cannot be read");
+        assert!(
+            format!("{error:?}").contains("flat list"),
+            "the failure has to name what went wrong: {error:?}"
+        );
+    }
 
     #[test]
     fn reports_whole_disks_and_not_partitions() {

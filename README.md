@@ -286,7 +286,11 @@ veremiyordun._ Bu kümenin tamamı artık arayüzde:
   zaten sildiği şey için her on beş dakikada bir İKİNCİ satır yazardı.
 
 - **Kutuda hangi disklerin olduğu artık biliniyor** — ve bu, olmadığı sürece havuz sihirbazının
-  yazılamayacağı parçaydı.
+  yazılamayacağı parçaydı. Kimlik zinciri artık her push'ta ölçülüyor: `appliance` işi
+  `scsi_debug` ile udev'in gördüğü gerçek SCSI diskleri yaratıyor, `/dev/disk/by-id` bağlantısının
+  aygıta çözüldüğünü, WWN'in okunduğunu, ajanın envanterinin ikisini de taşıdığını, ve **yanlış
+  WWN ile gelen bir havuz kurma ya da disk silme isteğinin reddedildiğini** kanıtlıyor — risk
+  R1'in tek gerçek azaltması buydu ve hiçbir otomatik kapıda koşmuyordu.
 
   Ajanın kapalı işlem kümesinde `ReadSmartSummary` vardı, "diskleri listele" yoktu. İki sonucu
   oldu. `DEPSIS_SMART_DISKS` bir operatörün `api.env`'e ELLE yazdığı `/dev/disk/by-id` adları

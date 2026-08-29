@@ -803,6 +803,24 @@ jobs:
           sudo modprobe zfs || sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
           sudo modprobe zfs
           zfs version
+          # `scsi_debug`: udev'in gördüğü GERÇEK SCSI diskleri — kendi VPD sayfaları, yani kendi
+          # WWN'leri ve /dev/disk/by-id bağlantılarıyla. ADR-0012'nin disk kimliği zinciri uzun
+          # süre "fiziksel donanım ister" diye kapsam dışıydı; gereken tek şey bu modülmüş.
+          #
+          # Koşucunun çekirdeğinde varsayılan olarak YOK, ve `A && B` yazmak bunu SESSİZCE yutar:
+          # `set -e`, bir AND-OR listesinin SON komutu olmayan başarısızlığı yok sayar. İlk koşum
+          # tam böyle "hazır" deyip sıfır sahte disk buldu — adımın kendisi yalan söylüyordu.
+          #
+          # Burada YALNIZCA varlığı sınanıyor, modül yüklenmiyor: yükleyip hemen kaldırmayı denemek
+          # "Module scsi_debug is in use" ile düştü — udev aygıtları daha işlerken modül meşguldü.
+          # Üstelik 1 MB'lık bir prova modülü yanlış parametrelerle yüklü bırakır ve betiğin kendi
+          # `modprobe`'u sessizce hiçbir şey yapmaz. Yükleme, parametrelerin doğru yeri olan
+          # betiğin işi.
+          if ! modinfo scsi_debug >/dev/null 2>&1; then
+            sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
+            modinfo scsi_debug >/dev/null
+          fi
+          echo 'scsi_debug hazır'
 
       - name: The appliance layer, for real
         run: sudo --preserve-env=PATH bash tools/ci/appliance-check.sh
