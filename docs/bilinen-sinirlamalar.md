@@ -15,13 +15,13 @@ borç gibi okunduğu bir liste, kimsenin bakmadığı bir listedir.
 
 ### 1.1 Depolama
 
-| Ne                                                                                       | Neden                                                                                                                                                                                                                                          |
-| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Havuzu yok etmek, vdev değiştirmek, disk temizlemek yok.** Havuz OLUŞTURMA var (§3.9). | Ajan `zpool`'a hiçbir zaman `-f` geçmiyor, yani üstünde bir şey olan bir disk havuza katılamıyor. Bu kapıyı açmak, diğer bütün korumaları süs yapardı: sistem diski reddi ve WWN doğrulaması, ancak "temizle" düğmesi olmadığı sürece anlamlı. |
-| **Çok diskli stripe ifade edilemiyor.**                                                  | Herhangi bir diski kaybetmenin her şeyi kaybettirdiği düzen, dosya saklamak için var olan bir cihazda bir listeden yanlış maddeyi seçerek ulaşılabilecek bir şey olmamalı. `single` var ve ne olduğunu söylüyor.                               |
-| **Paylaşım silinemiyor.**                                                                | Grant'lar paylaşımı tutuyor (`ON DELETE RESTRICT`) ve son grant'ı silmek de reddediliyor: paylaşımı silmek dataset'i silmek demek. Kapatmanın yolu, kimseyi adlandırmayan bir kök izni.                                                        |
-| **Anlık görüntü listesi havuzun envanteri değil.**                                       | Ajanda anlık görüntü için "listele" işlemi yok, o yüzden `/backups` yalnız DEPSIS'in kendi aldıklarını gösteriyor — ve yanıtta `complete: false` ile bunu söylüyor.                                                                            |
-| **Btrfs yok ve "destekleniyor" diye gösterilmiyor.**                                     | ADR-0007: Btrfs bir PORT, yapılandırma seçeneği değil. `ino_generation` ve `zfs diff` karşılıkları farklı semantik.                                                                                                                            |
+| Ne                                                                                          | Neden                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Havuzu yok etmek ve vdev değiştirmek yok.** Havuz OLUŞTURMA (§3.9) ve disk TEMİZLEME var. | Ajan `zpool`'a hiçbir zaman `-f` geçmiyor, yani üstünde bir şey olan bir disk havuza katılamıyor. Havuza katılacak disk bu yüzden önce temizleniyor, ve `wipe_disk` de aynı kimlik kapısından geçiyor: sistem diski reddediliyor, WWN sihirbazın gösterdiğiyle uyuşmuyorsa istek düşüyor. İkisi de artık her push'ta ölçülüyor (`appliance` işi). |
+| **Çok diskli stripe ifade edilemiyor.**                                                     | Herhangi bir diski kaybetmenin her şeyi kaybettirdiği düzen, dosya saklamak için var olan bir cihazda bir listeden yanlış maddeyi seçerek ulaşılabilecek bir şey olmamalı. `single` var ve ne olduğunu söylüyor.                                                                                                                                  |
+| **Paylaşım silinemiyor.**                                                                   | Grant'lar paylaşımı tutuyor (`ON DELETE RESTRICT`) ve son grant'ı silmek de reddediliyor: paylaşımı silmek dataset'i silmek demek. Kapatmanın yolu, kimseyi adlandırmayan bir kök izni.                                                                                                                                                           |
+| **Anlık görüntü listesi havuzun envanteri değil.**                                          | Ajanda anlık görüntü için "listele" işlemi yok, o yüzden `/backups` yalnız DEPSIS'in kendi aldıklarını gösteriyor — ve yanıtta `complete: false` ile bunu söylüyor.                                                                                                                                                                               |
+| **Btrfs yok ve "destekleniyor" diye gösterilmiyor.**                                        | ADR-0007: Btrfs bir PORT, yapılandırma seçeneği değil. `ino_generation` ve `zfs diff` karşılıkları farklı semantik.                                                                                                                                                                                                                               |
 
 ### 1.2 Ajan
 
@@ -104,18 +104,44 @@ satırı koymak.
 böyle yazıyor. `MAX_DATA_CONNECTIONS = 16`, `MAX_STREAMS = 64`, `MAX_POOL_DISKS = 24` de aynı
 sınıftan: makul, ölçülmemiş.
 
-### 2.5 Bu makinede koşmayanlar
+### 2.5 Bu makinede koşmayanlar — ödendi
 
-`zpool create`, `prepare_share_root`, `full_audit` akışının host tarafı ve gerçek Samba bağlantısı
-burada hiç çalışmadı — geliştirme distrosunda ZFS ve Samba yok. Komutların ÖNÜNDEKİ her şey testli
-(argv'nin tam biçimi, reddedişler, reddedilen bir planda komutun hiç çalışmadığı), ama komutun
-kendisi Debian VM'de doğrulanmalı.
+Bu başlık uzun süre `zpool create`, `prepare_share_root` ve gerçek Samba bağlantısının "Debian
+VM'de doğrulanması gerektiğini" söylüyordu. Artık `appliance` işi her push'ta atılabilir bir
+Linux'ta gerçek ZFS havuzu kuruyor, gerçek Samba'yı yayına alıyor, ayrıcalıklı ajanı üretimdeki
+soket yollarında ayağa kaldırıyor ve `scsi_debug` ile udev'in gördüğü gerçek SCSI diskleri
+üzerinde disk kimliği zincirini ölçüyor (`tools/ci/appliance-check.sh`, 32 iddia).
+
+Bunun bir bedeli vardı ve kaydı burada dursun: kapı açılır açılmaz gerçek bir ürün hatası buldu.
+Ajan `lsblk`'i `NAME` kolonu olmadan çağırıyordu; lsblk ağacı o kolon üzerine çizdiği için çıktı
+düzleşiyor, bölümler kayboluyordu. Sonuç, kutunun kendi açılış diskinin "üzerinde hiçbir şey yok"
+diye raporlanmasıydı — yani sistem diskini reddeden koruma gerçek donanımda hiç ateşlenmiyordu.
+Birim testleri bunu göremezdi: veri örnekleri elle `children` ile yazılmıştı, yani komutun
+gerçekte ne döndürdüğünü değil ne döndürmesini beklediğimizi kodluyorlardı.
+
+Geriye kalan tek ölçülmemiş şey bir hipervizör olgusu: Hyper-V'de `storvsc` INQUIRY sayfa 0x80'i
+bastırdığı için seri numarası yok. Kod tarafı — serinin opsiyonel olması, kimliğin WWN'e dayanması
+— yukarıdaki kapıda sınanıyor.
 
 ### 2.6 SSE akışı ve tarayıcı sınırı
 
 `EventsService.MAX_STREAMS = 64`. Bir vekil sunucu arkasında birden fazla sekmesi olan birkaç
 yönetici bunu doldurabilir; ucun cevabı 429 ve `Retry-After`, yani `EventSource` geri dönüyor —
 ama sınırın doğru sayı olduğu ölçülmedi.
+
+### 2.7 Düzeltilmiş bir hatanın cihaza ulaşacak terminalsiz yolu yok
+
+Ajanda güncelleme işlemi yok, arayüzde güncelleme ekranı yok. Depoda düzelen bir şey, sahadaki
+kutuya ancak ISO yeniden üretilip yeniden kurularak ya da kutuda bir kabuk açılarak gidiyor —
+ikincisi ürünün kabul ölçütüne aykırı, birincisi de verinin durduğu bir cihaz için makul değil.
+
+Bu borç bugüne kadar teorikti. `lsblk` hatası onu somutlaştırdı: sistem diskini koruyan kapının
+hiç ateşlenmediği ölçüldü, düzeltmesi `main`'e girdi, ve sahadaki cihaz hâlâ hatalı sürümü
+koşuyor. Bir güvenlik düzeltmesinin kullanıcıya ulaşamaması, düzeltmenin kendisinden daha büyük
+bir kusurdur.
+
+§21'in 13. teslimatı (imzalı build ve güncelleme üretim prosedürü) bunun kapsayan işi; sırası
+geldiğinde önce "kutu kendini güncelleyebiliyor mu" sorusu cevaplanmalı, imzalama ondan sonra.
 
 ---
 
@@ -443,4 +469,3 @@ Bunları "yapılmadı" diye saymak yanıltıcı olur; yapılamıyorlar:
 - **iOS.** Mac, Apple geliştirici hesabı ve entitlement onayı gerekiyor. Spec'in kendisi "iOS,
   entitlement doğrulamasından sonra" diyor (§3.3, Faz 3).
 - **Android'in derlenmesi.** SDK bu makinede kurulu değil; kod yazılabilir, üretilemez.
-- **Gerçek ZFS/Samba davranışı.** Bkz. 2.5 — Debian VM gerekiyor.
