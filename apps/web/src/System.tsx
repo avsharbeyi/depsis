@@ -2,6 +2,7 @@ import type { Snapshot } from './snapshot.js';
 import { formatBytes } from './Dashboard.js';
 import { Empty } from './ui.js';
 import { Ring, Spark } from './sky.js';
+import { CertificatePanel } from './Certificate.js';
 import { UpdatePanel } from './Update.js';
 
 /**
@@ -31,6 +32,7 @@ export function System({
     return (
       <>
         {notify !== undefined && <UpdatePanel notify={notify} />}
+        {notify !== undefined && <CertificatePanel notify={notify} />}
         <p className="note">Sistem durumu okunuyor…</p>
       </>
     );
@@ -40,6 +42,7 @@ export function System({
     return (
       <>
         {notify !== undefined && <UpdatePanel notify={notify} />}
+        {notify !== undefined && <CertificatePanel notify={notify} />}
         <Empty glyph="📈" text={snapshot.telemetryNote ?? 'Sistem durumu okunamadı.'} />
       </>
     );
@@ -55,6 +58,7 @@ export function System({
   return (
     <>
       {notify !== undefined && <UpdatePanel notify={notify} />}
+      {notify !== undefined && <CertificatePanel notify={notify} />}
 
       {onProcesses !== undefined && (
         <div className="netrow" style={{ marginBottom: 4 }}>

@@ -961,6 +961,44 @@
       ]
     },
     {
+      "description": "Kutunun sunduğu sertifika ne.\n\nKurulum kendinden imzalı bir sertifika üretiyor ve tarayıcı haklı olarak uyarıyor. O uyarı\nekranında karşılaştırılacak tek şey PARMAK İZİ, ve bugüne kadar onu görmenin tek yolu\nkurulum çıktısına bakmaktı — yani cihazı kuran kişinin o anki terminaliydi.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "tls_status"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "Sahibinin kendi sertifikasını kur.\n\nÖZEL ANAHTAR BU İSTEKTE, ve bu, işlem kümesi hakkında söylenen bir şeyi değiştiriyor —\n`audit` modülünün notu buna göre düzeltildi. Denetim kaydına giren şey değişmiyor: kayıt\nyalnız işlem adını taşıyor, isteğin kendisini değil.\n\nDOĞRULAMA ÜÇ ŞEY: sertifika ayrıştırılabilmeli, anahtar O sertifikaya ait olmalı, ve süresi\ndolmamış olmalı. Zincir doğrulaması YOK ve olmamalı — hangi CA nın güvenilir olduğu\ntarayıcının kararı, ve kendi CA sını kuran bir ev ağı da meşru.\n\nnginx ÖNCE SINANIR sonra yeniden yüklenir: bozuk bir yapılandırmayla `reload`, çalışan\nnginx i olduğu gibi bırakıp sessizce başarısız oluyor. Herhangi bir adım düşerse eski\nsertifika geri konuyor — kutunun HTTPS sunamaz hâle gelmesi, kabul edilebilir bir sonuç\ndeğil.",
+      "type": "object",
+      "properties": {
+        "certificate": {
+          "description": "PEM. Zincir de olabilir: ara sertifikalar sunucu tarafından sunulmazsa bazı istemciler\nbağlanamaz, ve operatörün elindeki dosya çoğunlukla zaten zincirdir.",
+          "type": "string"
+        },
+        "op": {
+          "type": "string",
+          "const": "install_certificate"
+        },
+        "private_key": {
+          "description": "PEM. Şifreli bir anahtar KABUL EDİLMİYOR: parolayı da istemek, o parolanın kutuda bir\nyerde durması demek olurdu, ve dosyanın kendisi zaten 0400 kök.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "certificate",
+        "private_key"
+      ]
+    },
+    {
       "description": "What `zpool status` says about scrubbing this pool.\n\nThe visibility half, and the half that was missing. Debian's `zfsutils-linux` already puts\na monthly scrub in `/etc/cron.d`, so on an ordinary appliance scrubs ARE happening — and\nnothing in DEPSIS said whether they had run, what they found, or whether one is running\nnow. A scrub whose findings nobody sees is only more expensive than no scrub at all.",
       "type": "object",
       "properties": {
@@ -1926,6 +1964,54 @@
       "required": [
         "status",
         "full_name"
+      ]
+    },
+    {
+      "description": "Kutunun sunduğu sertifika.",
+      "type": "object",
+      "properties": {
+        "fingerprint": {
+          "description": "SHA-256, iki nokta ile ayrılmış. Tarayıcının uyarı ekranında karşılaştırılan şey.",
+          "type": "string"
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "names": {
+          "description": "SAN listesi: `DNS:nas.example.com`, `IP Address:192.168.1.10`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "not_after": {
+          "type": "string"
+        },
+        "not_before": {
+          "type": "string"
+        },
+        "self_signed": {
+          "description": "Konu ile veren aynı. Tarayıcı uyarısının sebebi, ve ekranda söylenmesi gereken şey.",
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "const": "tls"
+        },
+        "subject": {
+          "description": "Sertifikanın konusu, `openssl`in yazdığı gibi.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "subject",
+        "issuer",
+        "not_before",
+        "not_after",
+        "fingerprint",
+        "names",
+        "self_signed"
       ]
     },
     {

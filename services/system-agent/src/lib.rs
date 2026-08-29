@@ -55,6 +55,7 @@ pub mod seams;
 pub mod smart;
 pub mod snapshots;
 pub mod sweep;
+pub mod tls;
 pub mod transfer;
 pub mod update;
 pub mod zerotier;
