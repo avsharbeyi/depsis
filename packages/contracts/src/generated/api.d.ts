@@ -6874,6 +6874,13 @@ export interface components {
             error: string | null;
             /** @description Güncelleyicinin günlüğünün son satırları — uzun bir kurulumun "hâlâ yaşıyor" kanıtı. */
             logTail: string[];
+            /**
+             * @description Kutu İMZALI kipte mi: yalnız yayınlanmış ve imzalanmış sürümleri mi kuruyor. Kipi
+             *     belirleyen şey cihazdaki açık anahtarın varlığı (`deploy/release/README.md`).
+             *     Bilinmiyorsa `false` — güvenin kaynağı hakkında ekranda duran bir yalan, hiç bilgi
+             *     vermemekten kötüdür.
+             */
+            signed: boolean;
         };
         TlsStatus: {
             subject: string;

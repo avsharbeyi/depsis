@@ -63,6 +63,14 @@ ARGS_FILE=/etc/depsis/install.args
 # birinin kutuda zaten kök yetkisi vardır.
 UPDATE_REPO=avsharbeyi/depsis
 UPDATE_BRANCH=main
+
+# İMZALI KİP İLE İMZASIZ KİP ARASINDAKİ TEK FARK BU DOSYA. Varsa, güncelleyici yalnız
+# YAYINLANMIŞ VE İMZALI sürümleri kabul eder; yoksa dalın son commit’ini kurar ve arayüz
+# bunu "imzasız kaynak" diye söyler.
+#
+# Yedek yol bilerek YOK: imza doğrulanamazsa kurulum düşer, "o zaman imzasız devam edelim"
+# demez. Öyle bir yedek yol, tam olarak saldırganın kullanacağı yoldur.
+RELEASE_PUBKEY=/usr/local/lib/depsis/release-key.pub
 # `if`, `[ … ] && …` değil: dosya YOKKEN test düşer, ve `set -e` altında bir AND-OR listesinin
 # son çalışan komutunun düşmesi betiği sonlandırır — yani dosyanın olmaması güncellemeyi
 # sessizce öldürürdü. install.sh aynı tuzağı aynı yorumla taşıyor.
@@ -130,11 +138,51 @@ need() {
 
 # ── denetim ──────────────────────────────────────────────────────────────────
 
+# YAYINLANMIŞ SÜRÜM. Kimlik bir etiket (`v0.1.0`), commit değil: imzalanan şey bir etiketin
+# arşividir, ve kutuya kurulan şeyin adı da o olmalı.
+check_release() {
+  log "denetim: $UPDATE_REPO yayinlanmis surumler (imzali kip)"
+  local meta
+  if ! meta=$(curl -fsSL --max-time 60 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'User-Agent: depsis-update' \
+    "https://api.github.com/repos/$UPDATE_REPO/releases/latest" 2>&1); then
+    fail "surum bilgisi alinamadi (ag ya da GitHub): $(printf '%s' "$meta" | tail -c 300)"
+  fi
+
+  local found
+  if ! found=$(printf '%s' "$meta" | "$NODE" -e '
+    const meta = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+    const commit = String(meta.tag_name ?? "");
+    // Etiket bir URL parcasi olacak: harf, rakam, nokta, tire ve alt cizgi disinda hicbir sey.
+    if (!/^v[A-Za-z0-9._-]{1,60}$/.test(commit)) {
+      console.error("beklenen etiket gelmedi");
+      process.exit(1);
+    }
+    const subject = String(meta.name ?? commit).split("\n")[0].slice(0, 200);
+    const committed_at = String(meta.published_at ?? "");
+    process.stdout.write(JSON.stringify({ commit, subject, committed_at }));
+  ' 2>&1); then
+    fail "surum bilgisi anlasilamadi: $(printf '%s' "$found" | tail -c 200)"
+  fi
+
+  printf '{"phase":"idle","checked_at":%s,"available":%s,"signed":true,"error":null}\n' \
+    "$(json_string "$(now)")" "$found" | state_merge
+  log "bulunan surum: $(printf '%s' "$found" | "$NODE" -e '
+    process.stdout.write(JSON.parse(require("node:fs").readFileSync(0, "utf8")).commit);
+  ')"
+}
+
 cmd_check() {
   need curl
   need "$NODE"
   printf '{"phase":"checking","error":null}\n' | state_merge
-  log "denetim: $UPDATE_REPO ($UPDATE_BRANCH)"
+
+  if [ -f "$RELEASE_PUBKEY" ]; then
+    check_release
+    return 0
+  fi
+  log "denetim: $UPDATE_REPO ($UPDATE_BRANCH) — imzasiz kaynak"
 
   local meta
   if ! meta=$(curl -fsSL --max-time 60 \
@@ -159,7 +207,7 @@ cmd_check() {
     fail "sürüm bilgisi anlaşılamadı: $(printf '%s' "$found" | tail -c 200)"
   fi
 
-  printf '{"phase":"idle","checked_at":%s,"available":%s,"error":null}\n' \
+  printf '{"phase":"idle","checked_at":%s,"available":%s,"signed":false,"error":null}\n' \
     "$(json_string "$(now)")" "$found" | state_merge
   log "bulunan sürüm: $(printf '%s' "$found" | "$NODE" -e '
     process.stdout.write(JSON.parse(require("node:fs").readFileSync(0, "utf8")).commit);
@@ -167,6 +215,82 @@ cmd_check() {
 }
 
 # ── kurulum ──────────────────────────────────────────────────────────────────
+
+# İmzalı bir sürümü indirir, DOĞRULAR, ve kurar.
+#
+# Doğrulama açmadan ÖNCE: bir arşivi açmak, içindekilere disk ayırmak ve dosya adlarına
+# güvenmek demek. İmza tutmuyorsa o arşiv hiç açılmamalı.
+apply_release() {
+  local tag="$1"
+  local base="https://github.com/$UPDATE_REPO/releases/download/$tag"
+  local work="$STATE_DIR/work"
+  rm -rf "$work"
+  install -d -m 0700 "$work"
+
+  printf '{"phase":"downloading","started_at":%s,"finished_at":null,"error":null}\n' \
+    "$(json_string "$(now)")" | state_merge
+  log "kurulacak surum: $tag (imzali)"
+
+  if ! curl -fsSL --max-time 900 -H 'User-Agent: depsis-update' \
+    -o "$work/src.tar.gz" "$base/depsis-$tag.tar.gz"; then
+    fail 'surum arsivi indirilemedi'
+  fi
+  if ! curl -fsSL --max-time 120 -H 'User-Agent: depsis-update' \
+    -o "$work/src.tar.gz.sig" "$base/depsis-$tag.tar.gz.sig"; then
+    fail 'surum imzasi indirilemedi'
+  fi
+
+  phase verifying
+  if ! openssl dgst -sha256 -verify "$RELEASE_PUBKEY" \
+    -signature "$work/src.tar.gz.sig" "$work/src.tar.gz" >/dev/null 2>&1; then
+    rm -rf "$work"
+    fail 'IMZA DOGRULANAMADI: bu arsiv bu cihazin guvendigi anahtarla imzalanmamis. Hicbir sey kurulmadi.'
+  fi
+  log "imza dogrulandi"
+
+  local top="depsis-$tag"
+  tar -xzf "$work/src.tar.gz" -C "$work"
+  [ -f "$work/$top/tools/install/install.sh" ] || fail 'indirilen arsivde kurulum betigi yok'
+  printf '%s\n' "$tag" >"$work/$top/.depsis-version"
+  install_tree "$work" "$top" "$tag"
+}
+
+# Yeni agaci yerine koyar, kurulumu kosturur, duserse eskisine doner.
+#
+# İki cagirani var (imzali ve imzasiz kip) ve tek yerde durmasinin sebebi bu: geri alma
+# mantiginin iki kopyasi, bir gun ikisinden birinde eksik kalir.
+install_tree() {
+  local work="$1" top="$2" version="$3"
+
+  rm -rf "$SRC_TREE.previous"
+  if [ -d "$SRC_TREE" ]; then mv "$SRC_TREE" "$SRC_TREE.previous"; fi
+  mv "$work/$top" "$SRC_TREE"
+  rm -rf "$work"
+
+  phase installing
+  log 'kurulum basliyor (derleme dahil; bu uzun surebilir)'
+
+  local args=()
+  mapfile -t args < <(grep -v '^$' "$ARGS_FILE")
+  if bash "$SRC_TREE/tools/install/install.sh" "${args[@]}" >>"$LOG" 2>&1; then
+    printf '{"phase":"done","finished_at":%s,"error":null}\n' "$(json_string "$(now)")" | state_merge
+    log "guncelleme bitti: $version"
+    rm -rf "$SRC_TREE.previous"
+    return 0
+  fi
+
+  phase rolling_back
+  log 'kurulum dustu; eski surume donuluyor'
+  if [ -d "$SRC_TREE.previous" ]; then
+    rm -rf "$SRC_TREE"
+    mv "$SRC_TREE.previous" "$SRC_TREE"
+    if bash "$SRC_TREE/tools/install/install.sh" "${args[@]}" >>"$LOG" 2>&1; then
+      fail 'guncelleme kurulamadi; cihaz eski surume geri alindi ve calisir durumda'
+    fi
+    fail 'guncelleme kurulamadi VE geri alma da dustu; gunluge bakin'
+  fi
+  fail 'guncelleme kurulamadi; geri alinacak eski surum yoktu'
+}
 
 cmd_apply() {
   need curl
@@ -181,6 +305,17 @@ cmd_apply() {
     try { state = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
     process.stdout.write(String(state.available?.commit ?? ""));
   ' "$STATE")
+
+  # İMZALI KİP. Kimlik bir etiket, ve indirilen arşiv doğrulanmadan hiçbir yere konmuyor.
+  if [ -f "$RELEASE_PUBKEY" ]; then
+    case "$commit" in
+      v[A-Za-z0-9._-]*) : ;;
+      *) fail 'kurulacak surum bilinmiyor; once denetim calistirin' ;;
+    esac
+    apply_release "$commit"
+    return 0
+  fi
+
   case "$commit" in
     [0-9a-f]*) [ "${#commit}" -eq 40 ] || fail 'kurulacak sürüm geçersiz; önce denetim çalıştırın' ;;
     *) fail 'kurulacak sürüm bilinmiyor; önce denetim çalıştırın' ;;
@@ -215,38 +350,9 @@ cmd_apply() {
   [ -f "$work/$top/tools/install/install.sh" ] || fail 'indirilen arşivde kurulum betiği yok'
   printf '%s\n' "$commit" >"$work/$top/.depsis-version"
 
-  # ESKİSİ ÖNCE SAKLANIYOR. Bundan sonrasında düşen her şey geri alınabilir olmalı.
-  rm -rf "$SRC_TREE.previous"
-  if [ -d "$SRC_TREE" ]; then mv "$SRC_TREE" "$SRC_TREE.previous"; fi
-  mv "$work/$top" "$SRC_TREE"
-  rm -rf "$work"
-
-  phase installing
-  log 'kurulum başlıyor (derleme dahil; bu uzun sürebilir)'
-
-  # Boş satırlar ELENİYOR: `install.sh`e boş bir argüman gitmesi "bilinmeyen seçenek: " ile
-  # düşmek demek, ve dosyanın sonundaki tek bir satır sonu bunu üretmeye yeter.
-  local args=()
-  mapfile -t args < <(grep -v '^$' "$ARGS_FILE")
-  if bash "$SRC_TREE/tools/install/install.sh" "${args[@]}" >>"$LOG" 2>&1; then
-    printf '{"phase":"done","finished_at":%s,"error":null}\n' "$(json_string "$(now)")" | state_merge
-    log "güncelleme bitti: $commit"
-    rm -rf "$SRC_TREE.previous"
-    return 0
-  fi
-
-  # ── geri alma ──────────────────────────────────────────────────────────────
-  phase rolling_back
-  log 'kurulum düştü; eski sürüme dönülüyor'
-  if [ -d "$SRC_TREE.previous" ]; then
-    rm -rf "$SRC_TREE"
-    mv "$SRC_TREE.previous" "$SRC_TREE"
-    if bash "$SRC_TREE/tools/install/install.sh" "${args[@]}" >>"$LOG" 2>&1; then
-      fail 'güncelleme kurulamadı; cihaz eski sürüme geri alındı ve çalışır durumda'
-    fi
-    fail 'güncelleme kurulamadı VE geri alma da düştü; günlüğe bakın'
-  fi
-  fail 'güncelleme kurulamadı; geri alınacak eski sürüm yoktu'
+  # Bundan sonrasi iki kipte de AYNI, ve tek yerde duruyor: geri alma mantiginin iki kopyasi,
+  # bir gun ikisinden birinde eksik kalir.
+  install_tree "$work" "$top" "$commit"
 }
 
 # ── akış ─────────────────────────────────────────────────────────────────────

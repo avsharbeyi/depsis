@@ -121,6 +121,19 @@ export function UpdatePanel({ notify }: { notify: Notify }): React.JSX.Element |
           {short(installed)}
         </span>
         <Pill status={status} unreachable={unreachable} />
+        {status !== null &&
+          (status.signed ? (
+            <span className="pill">imzalı sürüm</span>
+          ) : (
+            // Kutunun neye güvendiği EKRANDA. İmzasız kipte güvenilen tek şey HTTPS ve kaynağın
+            // adresinin güncelleyicide sabit olması: aradaki ağ dışarıda, kaynağın kendisi değil.
+            <span
+              className="pill dim"
+              title="Bu cihaz imzalı sürüm anahtarı taşımıyor; güncelleme doğrudan kaynak deposundan geliyor."
+            >
+              imzasız kaynak
+            </span>
+          ))}
       </div>
 
       {installed === null && status !== null && (

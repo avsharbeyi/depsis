@@ -987,6 +987,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             finished_at: state.finished_at,
             error: state.error,
             log_tail: crate::update::tail(&log, crate::update::LOG_TAIL_LINES),
+            signed: state.signed.unwrap_or(false),
         })
     }
 

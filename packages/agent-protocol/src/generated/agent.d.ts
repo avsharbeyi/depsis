@@ -1054,6 +1054,13 @@ export type AgentResponse =
        * `downloading`, `building`, `installing`, `verifying`, `rolling_back`, `done`, `failed`.
        */
       phase: string;
+      /**
+       * Kutu İMZALI kipte mi: yalnız yayınlanmış ve imzalanmış sürümleri mi kuruyor.
+       *
+       * Kipi belirleyen şey kutudaki açık anahtarın varlığı. Bilinmiyorsa `false` — güvenin
+       * kaynağı hakkında ekranda duran bir yalan, hiç bilgi vermemekten kötüdür.
+       */
+      signed: boolean;
       started_at?: string | null;
       status: 'update';
       /**

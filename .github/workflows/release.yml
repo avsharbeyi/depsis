@@ -1,0 +1,121 @@
+# DEPSIS sürümü üretir: kaynak arşivi, sha256, ve İMZA.
+#
+# ── bu iş akışının var olma nedeni ────────────────────────────────────────────
+#
+# Cihaz kendini güncelleyebiliyor (Sistem → Yazılım sürümü), ama güvendiği tek şey HTTPS ve
+# kaynağın adresinin güncelleyici betikte sabit olmasıydı. Bu, aradaki ağı dışarıda tutar;
+# kaynağın kendisini dışarıda tutmaz. Kök yetkiyle kurulacak bir kod için bu yeterli değil.
+#
+# Buradan çıkan sürüm İMZALI, ve cihaz imzayı kendi taşıdığı açık anahtarla doğruluyor. Anahtarı
+# olmayan bir saldırgan, deponun tamamını ele geçirse bile kutuya kod kuramaz.
+#
+# ── anahtar nerede ────────────────────────────────────────────────────────────
+#
+# Özel anahtar `DEPSIS_RELEASE_KEY` sırrında, ve bu depoda ÜRETİLMEDİ: bir üretim imza anahtarını
+# üreten ve saklayan taraf cihazın sahibidir. `deploy/release/README.md` tek seferlik komutları
+# taşıyor. Sır yoksa bu iş akışı DÜŞER — imzasız bir sürüm, imzalı sürümün var olma sebebini
+# ortadan kaldırır, ve "imzasız da olur" diyen bir yedek yol tam olarak saldırganın kullanacağı
+# yoldur.
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  # Elle de üretilebilir: bir etiketi yeniden yayınlamak (imza anahtarı değiştiğinde) ya da ilk
+  # sürümü çıkarmak için.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Yayınlanacak etiket (örn. v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: imzalı sürüm
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Etiketin kendisi: `git archive` bunun üzerinde çalışıyor.
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Etiketi belirle
+        id: tag
+        run: |
+          TAG="${{ inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${GITHUB_REF#refs/tags/}"
+          case "$TAG" in
+            v*) : ;;
+            *) echo "etiket 'v' ile başlamalı: $TAG" >&2; exit 1 ;;
+          esac
+          echo "tag=$TAG" >>"$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse "$TAG^{commit}")" >>"$GITHUB_OUTPUT"
+
+      - name: Kaynak arşivi
+        # `git archive`, deponun O ETİKETTEKİ hâlini paketler: çalışma ağacındaki hiçbir kirlilik
+        # arşive giremez. `--prefix` ile açılan dizin, güncelleyicinin beklediği biçimde.
+        run: |
+          TAG='${{ steps.tag.outputs.tag }}'
+          git archive --format=tar --prefix="depsis-$TAG/" "$TAG" \
+            | gzip -n > "depsis-$TAG.tar.gz"
+          sha256sum "depsis-$TAG.tar.gz" > "depsis-$TAG.tar.gz.sha256"
+          ls -l "depsis-$TAG.tar.gz"
+
+      - name: İmzala
+        # SIR YOKSA DÜŞ. Bu adımın sessizce atlanması, imzasız bir sürümün "sürüm" diye
+        # yayınlanması demek olurdu — ve cihaz onu reddedince ortaya "güncelleme bozuk" gibi
+        # görünen, aslında "bu sürüm imzalanmamış" olan bir durum çıkardı.
+        env:
+          RELEASE_KEY: ${{ secrets.DEPSIS_RELEASE_KEY }}
+        run: |
+          if [ -z "$RELEASE_KEY" ]; then
+            echo 'DEPSIS_RELEASE_KEY sırrı yok; imzalı sürüm üretilemez.' >&2
+            echo 'Tek seferlik kurulum: deploy/release/README.md' >&2
+            exit 1
+          fi
+          TAG='${{ steps.tag.outputs.tag }}'
+          umask 077
+          printf '%s\n' "$RELEASE_KEY" > signing.pem
+          openssl pkey -in signing.pem -pubout -out release-key.pub
+          openssl dgst -sha256 -sign signing.pem \
+            -out "depsis-$TAG.tar.gz.sig" "depsis-$TAG.tar.gz"
+          # HEMEN DOĞRULA. Bir imza, üretildiği yerde doğrulanmazsa ancak cihazda — yani
+          # güncelleme yarıda kaldığında — yanlış olduğu anlaşılır.
+          openssl dgst -sha256 -verify release-key.pub \
+            -signature "depsis-$TAG.tar.gz.sig" "depsis-$TAG.tar.gz"
+          # Depodaki açık anahtarla AYNI mı: cihazlar onu taşıyor, ve farklıysa üretilen sürümü
+          # hiçbir kutu kuramaz.
+          if [ -f deploy/release/release-key.pub ]; then
+            if ! cmp -s release-key.pub deploy/release/release-key.pub; then
+              echo 'İmza anahtarı deploy/release/release-key.pub ile uyuşmuyor:' >&2
+              echo 'bu sürümü hiçbir cihaz doğrulayamaz.' >&2
+              exit 1
+            fi
+          else
+            echo 'UYARI: deploy/release/release-key.pub yok; cihazlar bu sürümü doğrulayamaz.' >&2
+          fi
+          rm -f signing.pem
+
+      - name: Yayınla
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG='${{ steps.tag.outputs.tag }}'
+          gh release create "$TAG" \
+            "depsis-$TAG.tar.gz" \
+            "depsis-$TAG.tar.gz.sig" \
+            "depsis-$TAG.tar.gz.sha256" \
+            --title "$TAG" \
+            --notes "Commit ${{ steps.tag.outputs.commit }}. Arşiv imzalıdır; cihaz onu \
+              \`deploy/release/release-key.pub\` ile doğrular." \
+            || gh release upload "$TAG" \
+              "depsis-$TAG.tar.gz" \
+              "depsis-$TAG.tar.gz.sig" \
+              "depsis-$TAG.tar.gz.sha256" \
+              --clobber

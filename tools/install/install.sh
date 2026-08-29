@@ -427,6 +427,18 @@ payload() {
   install -m 0755 "$REPO/tools/install/update.sh" "$PREFIX/update.sh"
   ok "güncelleyici $PREFIX/update.sh"
 
+  # SÜRÜM İMZA ANAHTARI, varsa. Bu dosyanın varlığı güncelleyicinin kipini belirliyor: varsa
+  # yalnız imzalı sürümler kurulur, yoksa dalın son commiti kurulur ve arayüz bunu söyler.
+  # Deponun içinde olmaması olağan — özel anahtarı üreten ve saklayan taraf cihazın sahibi
+  # (bkz. deploy/release/README.md), ve açık anahtar ancak o adım atıldığında depoya girer.
+  if [ -f "$REPO/deploy/release/release-key.pub" ]; then
+    install -m 0444 "$REPO/deploy/release/release-key.pub" "$PREFIX/release-key.pub"
+    ok 'sürüm imza anahtarı kuruldu; yalnız imzalı sürümler kabul edilecek'
+  else
+    rm -f "$PREFIX/release-key.pub"
+    warn 'sürüm imza anahtarı yok; güncelleme imzasız kaynaktan yapılacak (deploy/release/README.md)'
+  fi
+
   # `pnpm deploy --prod` bir SELF-CONTAINED dizin üretiyor: düz bir node_modules ve dist/.
   # Çalışma alanını kopyalamak işe yaramıyor, çünkü pnpm'in paket başına node_modules'ü depo
   # köküne göre sembolik bağ ağacı — kısmi kopya hiçbir şeyi çözemiyor, tam kopya kaynakları
