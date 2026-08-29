@@ -4,6 +4,7 @@ import { AgentService } from '../agent/agent.service.js';
 import { AuthModule } from '../auth/auth.module.js';
 import { IdempotencyModule } from '../common/idempotency.module.js';
 import { APP_CONFIG } from '../config.module.js';
+import { LICENSE_KEY_FILE_DEFAULT } from '../config.js';
 import type { AppConfig } from '../config.js';
 import { DbService } from '../db/db.service.js';
 import { JobsModule } from '../jobs/jobs.module.js';
@@ -18,6 +19,8 @@ import { ReplicationController } from './replication.controller.js';
 import { DiskWipeController } from './disk-wipe.controller.js';
 import { ProcessesController } from './processes.controller.js';
 import { SystemController } from './system.controller.js';
+import { LicenseController } from './license.controller.js';
+import { LicenseService } from './license.service.js';
 import { ShareTreeController } from './share-tree.controller.js';
 import { SystemService } from './system.service.js';
 import { TlsController } from './tls.controller.js';
@@ -38,6 +41,7 @@ import { UpdateController } from './update.controller.js';
     UpdateController,
     ShareTreeController,
     TlsController,
+    LicenseController,
   ],
   providers: [
     {
@@ -61,6 +65,14 @@ import { UpdateController } from './update.controller.js';
     // rather than from a deployment setting, and a setting would be the wrong shape for it: the
     // answer differs per organisation and changes whenever a share is created.
     BackupsService,
+    {
+      provide: LicenseService,
+      inject: [DbService, APP_CONFIG],
+      // Açık anahtarın YOLU yapılandırmadan, dosyanın kendisi her okumada diskten: kurulum
+      // onu yerine koyuyor ve bir güncelleme yenileyebiliyor.
+      useFactory: (db: DbService, config: AppConfig) =>
+        new LicenseService(db, config.licenseKeyFile ?? LICENSE_KEY_FILE_DEFAULT),
+    },
   ],
   // `SystemService` is exported for `SharesModule`, which asks it where new datasets go. That used
   // to be a string fixed at construction from `DEPSIS_SHARE_PARENT_DATASET`, so the only way to

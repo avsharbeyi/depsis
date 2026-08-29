@@ -565,6 +565,13 @@ BAD=$(db -c "
                            -- kiraci ekini tasiyor; bu indeks onu veritabaninda da garanti ediyor,
                            -- yani cakismayi podman degil veritabani reddediyor.
                            'app_instances_pod_unique',
+                           -- Lisans CIHAZI kapsiyor, bir kiraciyi degil: kutuyu satin alan taraf
+                           -- kutunun sahibi, ve icindeki organizasyonlar onun kendi duzeni.
+                           -- Tablo TEK SATIRLI ve birincil anahtari o tekligin kilidi
+                           -- (id boolean CHECK (id)), yani kiraci ekini tasiyacak bir boyutu
+                           -- YOK. Buradaki bir 23505 hicbir kiraciya digeri hakkinda bir sey
+                           -- soylemez; yalnizca ikinci bir lisans satiri yazilamayacagini soyler.
+                           'license_pkey',
                            'depsis_migrations_pkey')
 ")
 [ -z "$BAD" ] && ok 'every unique/exclusion index carries organization_id or is allow-listed' \

@@ -1327,6 +1327,48 @@ paths:
         '429': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /system/license:
+    get:
+      operationId: licenseStatus
+      tags: [system]
+      summary: Cihazın lisansı
+      description: |
+        Kime, hangi plan, kaç yuva ve ne zamana kadar. Oturum açmış herkes okuyabilir: bir
+        cihazın ne zaman desteksiz kalacağı, onu kullanan herkesin görebilmesi gereken bir olgu.
+
+        Lisans anahtarı İMZALI bir veridir ve cihaz onu **internete çıkmadan** doğrular. Her
+        okumada imza yeniden doğrulanır: veritabanına yazabilen biri kendine lisans uyduramasın.
+      responses:
+        '200':
+          description: Lisansın durumu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LicenseStatus' }
+
+    post:
+      operationId: installLicense
+      tags: [system]
+      summary: Lisans anahtarını kur
+      description: |
+        Satıcıdan alınan anahtar yapıştırılır. İmza tutmuyorsa istek reddedilir ve hiçbir şey
+        saklanmaz.
+
+        Parola sorulmaz: lisans kurmak yıkıcı değil, geri alınabilir, ve yanlış bir anahtar
+        zaten imza doğrulamasında düşer. Yalnız kurucu yönetici.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LicenseInstallRequest' }
+      responses:
+        '200':
+          description: Lisans kuruldu; yanıt yeni durum
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LicenseStatus' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+
   /system/tls:
     get:
       operationId: tlsStatus
@@ -5098,6 +5140,42 @@ components:
             belirleyen şey cihazdaki açık anahtarın varlığı (`deploy/release/README.md`).
             Bilinmiyorsa `false` — güvenin kaynağı hakkında ekranda duran bir yalan, hiç bilgi
             vermemekten kötüdür.
+
+    LicenseInstallRequest:
+      type: object
+      required: [key]
+      properties:
+        key:
+          type: string
+          maxLength: 4096
+          description: 'Satıcıdan alınan lisans anahtarı: `DEPSIS-1.<içerik>.<imza>`.'
+
+    LicenseStatus:
+      type: object
+      required:
+        [state, licensedTo, licenseId, plan, seats, issuedAt, expiresAt, installedAt, detail]
+      properties:
+        state:
+          type: string
+          enum: [valid, expired, absent, invalid, unconfigured]
+          description: |
+            DÖRT DURUM DEĞİL BEŞ, ve hepsi ayrı: `valid` geçerli, `expired` süresi dolmuş,
+            `absent` hiç kurulmamış, `invalid` kurulu ama doğrulanamıyor (kurcalanmış satır),
+            `unconfigured` bu cihazda doğrulama anahtarı yok. Sonuncu ikisini `absent` ile
+            birleştirmek, kurcalanmış bir satırı hiç kurulmamış bir lisanstan ayırt edilemez
+            yapardı.
+        licensedTo: { type: [string, 'null'] }
+        licenseId: { type: [string, 'null'] }
+        plan: { type: [string, 'null'] }
+        seats: { type: [integer, 'null'] }
+        issuedAt: { type: [string, 'null'] }
+        expiresAt:
+          type: [string, 'null']
+          description: '`null` SÜRESİZ demek. Hiç dolmayacak bir tarih yazmak, o tarihe gelindiğinde açıklanamayan bir arıza üretir.'
+        installedAt: { type: [string, 'null'] }
+        detail:
+          type: [string, 'null']
+          description: Doğrulamanın kendi cümlesi. `invalid` ve `unconfigured` dışında boş.
 
     TlsStatus:
       type: object

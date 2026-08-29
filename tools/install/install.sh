@@ -439,6 +439,16 @@ payload() {
     warn 'sürüm imza anahtarı yok; güncelleme imzasız kaynaktan yapılacak (deploy/release/README.md)'
   fi
 
+  # LİSANS AÇIK ANAHTARI. Gizli değil — gizli olan, satıcının elindeki özel anahtar. Yoksa
+  # arayüz "lisans doğrulaması yapılandırılmamış" der; "lisanssız" DEĞİL, çünkü ikisi ayrı
+  # şeyler ve ekranın söyleyeceği cümle de ayrı.
+  if [ -f "$REPO/deploy/release/license-key.pub" ]; then
+    install -m 0444 "$REPO/deploy/release/license-key.pub" "$ETC/license-key.pub"
+    ok 'lisans doğrulama anahtarı kuruldu'
+  else
+    same 'lisans doğrulama anahtarı yok; lisans kurulamayacak'
+  fi
+
   # `pnpm deploy --prod` bir SELF-CONTAINED dizin üretiyor: düz bir node_modules ve dist/.
   # Çalışma alanını kopyalamak işe yaramıyor, çünkü pnpm'in paket başına node_modules'ü depo
   # köküne göre sembolik bağ ağacı — kısmi kopya hiçbir şeyi çözemiyor, tam kopya kaynakları
