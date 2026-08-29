@@ -13,7 +13,6 @@ export interface LicensePayload {
   id: string;
   to: string;
   plan: string | null;
-  seats: number | null;
   issued: string;
   until: string | null;
   note: string | null;
@@ -192,26 +191,17 @@ export class LicenseService {
     await this.db.withoutTenant('device-license', (db) =>
       db.query(
         `INSERT INTO public.license
-         (id, token, license_id, licensed_to, plan, seats, issued_at, expires_at)
-       VALUES (true, $1, $2, $3, $4, $5, $6, $7)
+         (id, token, license_id, licensed_to, plan, issued_at, expires_at)
+       VALUES (true, $1, $2, $3, $4, $5, $6)
        ON CONFLICT (id) DO UPDATE SET
          token = EXCLUDED.token,
          license_id = EXCLUDED.license_id,
          licensed_to = EXCLUDED.licensed_to,
          plan = EXCLUDED.plan,
-         seats = EXCLUDED.seats,
          issued_at = EXCLUDED.issued_at,
          expires_at = EXCLUDED.expires_at,
          installed_at = now()`,
-        [
-          token.trim(),
-          payload.id,
-          payload.to,
-          payload.plan,
-          payload.seats,
-          payload.issued,
-          payload.until,
-        ],
+        [token.trim(), payload.id, payload.to, payload.plan, payload.issued, payload.until],
       ),
     );
   }

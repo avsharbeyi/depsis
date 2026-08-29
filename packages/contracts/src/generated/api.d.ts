@@ -6931,7 +6931,6 @@ export interface components {
             licensedTo: string | null;
             licenseId: string | null;
             plan: string | null;
-            seats: number | null;
             issuedAt: string | null;
             /** @description `null` SÜRESİZ demek. Hiç dolmayacak bir tarih yazmak, o tarihe gelindiğinde açıklanamayan bir arıza üretir. */
             expiresAt: string | null;

@@ -97,10 +97,7 @@ export function LicensePanel({
             {status.plan !== null && (
               <div className="netrow">
                 <span className="lbl">Plan</span>
-                <span className="note">
-                  {status.plan}
-                  {status.seats === null ? '' : ` · ${status.seats} yuva`}
-                </span>
+                <span className="note">{status.plan}</span>
               </div>
             )}
             <div className="netrow">

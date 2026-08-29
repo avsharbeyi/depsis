@@ -112,9 +112,6 @@ const device = await ask(rl, '  Cihaz kodu (XXXX-XXXX-XXXX, boş=serbest) : ', {
 
 console.log('');
 const plan = await ask(rl, '  Plan (boş geçilebilir) : ');
-const seats = await ask(rl, '  Yuva sayısı (boş=sınırsız) : ', {
-  check: (value) => (/^\d+$/u.test(value) && Number(value) > 0 ? null : 'pozitif bir sayı yazın'),
-});
 const until = await ask(rl, '  Bitiş tarihi (YYYY-AA-GG, boş=süresiz) : ', {
   check: (value) =>
     /^\d{4}-\d{2}-\d{2}$/u.test(value) && !Number.isNaN(Date.parse(value))
@@ -127,7 +124,6 @@ rl.close();
 const args = [KEYGEN, 'issue', '--key', keyPath, '--to', to];
 if (device !== '') args.push('--device', device);
 if (plan !== '') args.push('--plan', plan);
-if (seats !== '') args.push('--seats', seats);
 if (until !== '') args.push('--until', until);
 
 let token;
@@ -143,7 +139,7 @@ try {
 // DEFTERE YAZ. Bir müşteri "lisansımı kaybettim" dediğinde bakılacak tek yer burası.
 const ledger = join(dirname(keyPath), 'lisans-defteri.csv');
 if (!existsSync(ledger)) {
-  appendFileSync(ledger, 'tarih,musteri,cihaz,plan,yuva,bitis,jeton\n');
+  appendFileSync(ledger, 'tarih,musteri,cihaz,plan,bitis,jeton\n');
 }
 const cell = (value) => `"${String(value).replaceAll('"', '""')}"`;
 appendFileSync(
@@ -153,7 +149,6 @@ appendFileSync(
     cell(to),
     cell(device === '' ? '(serbest)' : device),
     cell(plan),
-    cell(seats),
     cell(until === '' ? '(süresiz)' : until),
     cell(token),
   ].join(',') + '\n',

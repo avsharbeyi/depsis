@@ -52,14 +52,13 @@ beforeAll(() => {
 
 describe('LicenseService.check', () => {
   it('satıcı aracının ürettiği jetonu kabul eder ve içindekini okur', () => {
-    const token = issue('--plan', 'ev', '--seats', '5', '--until', '2030-01-01');
+    const token = issue('--plan', 'ev', '--until', '2030-01-01');
     const result = service().check(token);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.payload.to).toBe('Ornek Musteri');
     expect(result.payload.plan).toBe('ev');
-    expect(result.payload.seats).toBe(5);
     expect(result.payload.until).not.toBeNull();
   });
 

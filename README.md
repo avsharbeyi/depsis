@@ -557,7 +557,7 @@ Storybook bilerek kurulmadı; gerekçesi `docs/bilinen-sinirlamalar.md` §21 mad
 
 ## Lisans
 
-Sistem ekranında **Lisans** bölümü: kime, hangi plan, kaç yuva, ne zamana kadar. Okumak oturum
+Sistem ekranında **Lisans** bölümü: kime, hangi plan, ne zamana kadar, ve bu cihazın kodu. Okumak oturum
 açmış herkese açık (bir cihazın ne zaman desteksiz kalacağı sır değil), kurmak kurucu yöneticiye.
 
 Lisans anahtarı **imzalı bir veridir** ve cihaz onu **internete çıkmadan** doğrular; elindeki tek
@@ -573,7 +573,7 @@ almaktır. Zorlama istenirse bu ayrı ve bilinçli bir karardır; varsayılan ol
 Satıcı tarafı `tools/license/keygen.mjs`:
 
 ```bash
-node tools/license/keygen.mjs issue --key ~/depsis-anahtarlar/depsis-license.key --to “Ad Soyad” --plan ev --seats 5 --until 2027-12-31
+node tools/license/keygen.mjs issue --key ~/depsis-anahtarlar/depsis-license.key --to “Ad Soyad” --plan ev --device XXXX-XXXX-XXXX --until 2027-12-31
 ```
 
 Anahtar çiftini bir kez `keygen.mjs init <dizin>` üretir. **Özel anahtar depoya girmez**; depoda

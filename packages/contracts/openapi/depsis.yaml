@@ -5153,18 +5153,7 @@ components:
     LicenseStatus:
       type: object
       required:
-        [
-          state,
-          licensedTo,
-          licenseId,
-          plan,
-          seats,
-          issuedAt,
-          expiresAt,
-          installedAt,
-          deviceId,
-          detail,
-        ]
+        [state, licensedTo, licenseId, plan, issuedAt, expiresAt, installedAt, deviceId, detail]
       properties:
         state:
           type: string
@@ -5178,7 +5167,6 @@ components:
         licensedTo: { type: [string, 'null'] }
         licenseId: { type: [string, 'null'] }
         plan: { type: [string, 'null'] }
-        seats: { type: [integer, 'null'] }
         issuedAt: { type: [string, 'null'] }
         expiresAt:
           type: [string, 'null']

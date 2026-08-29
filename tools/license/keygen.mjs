@@ -4,7 +4,7 @@
 //
 // ── ne üretiyor ──────────────────────────────────────────────────────────────
 //
-// Bir lisans anahtarı, İMZALI BİR VERİDİR: kime verildiği, hangi plan, kaç yuva ve ne zamana
+// Bir lisans anahtarı, İMZALI BİR VERİDİR: kime verildiği, hangi plan ve ne zamana
 // kadar geçerli olduğu açık açık içinde yazar, ve bir Ed25519 imzası taşır. Cihaz onu İNTERNETE
 // ÇIKMADAN doğrular — elindeki tek şey açık anahtardır.
 //
@@ -28,7 +28,7 @@
 //       Açık anahtar depoya girer; özel anahtar ASLA.
 //
 //   node tools/license/keygen.mjs issue --key <özel-anahtar> --to "Ad Soyad" \
-//        [--plan ev|pro] [--seats 5] [--until 2027-01-01] [--note "..."]
+//        [--plan ev|pro] [--device XXXX-XXXX-XXXX] [--until 2027-01-01] [--note "..."]
 //       Bir lisans jetonu basar. `--until` verilmezse SÜRESİZ.
 //
 //   node tools/license/keygen.mjs verify --pub <açık-anahtar> <jeton>
@@ -97,7 +97,6 @@ function issue(privateKeyPem, fields) {
     id: fields.id,
     to: fields.to,
     plan: fields.plan ?? null,
-    seats: fields.seats ?? null,
     issued: fields.issued,
     until: fields.until ?? null,
     note: fields.note ?? null,
@@ -169,7 +168,7 @@ function cmdIssue(argv) {
   const to = argOf(argv, '--to');
   if (keyPath === undefined || to === undefined) {
     console.error(
-      'kullanım: keygen.mjs issue --key <özel-anahtar> --to "Ad Soyad" [--plan p] [--seats n] [--until YYYY-MM-DD] [--note "..."]',
+      'kullanım: keygen.mjs issue --key <özel-anahtar> --to "Ad Soyad" [--plan p] [--device XXXX-XXXX-XXXX] [--until YYYY-MM-DD] [--note "..."]',
     );
     process.exit(2);
   }
@@ -178,18 +177,11 @@ function cmdIssue(argv) {
     console.error(`--until okunamadı: ${until} (beklenen: YYYY-MM-DD)`);
     process.exit(2);
   }
-  const seatsRaw = argOf(argv, '--seats');
-  const seats = seatsRaw === undefined ? undefined : Number(seatsRaw);
-  if (seats !== undefined && (!Number.isInteger(seats) || seats < 1)) {
-    console.error(`--seats bir pozitif tam sayı olmalı: ${seatsRaw}`);
-    process.exit(2);
-  }
 
   const token = issue(readFileSync(keyPath, 'utf8'), {
     id: licenseId(),
     to,
     plan: argOf(argv, '--plan'),
-    seats,
     issued: new Date().toISOString(),
     until: until === undefined ? undefined : new Date(`${until}T23:59:59Z`).toISOString(),
     note: argOf(argv, '--note'),
@@ -230,7 +222,7 @@ function cmdBatch(argv) {
   const count = Number(countRaw);
   if (keyPath === undefined || out === undefined || !Number.isInteger(count) || count < 1) {
     console.error(
-      'kullanım: keygen.mjs batch --key <özel-anahtar> --count 50 --out lisanslar.csv [--plan p] [--seats n] [--until YYYY-MM-DD]',
+      'kullanım: keygen.mjs batch --key <özel-anahtar> --count 50 --out lisanslar.csv [--plan p] [--until YYYY-MM-DD]',
     );
     process.exit(2);
   }
@@ -239,7 +231,6 @@ function cmdBatch(argv) {
     console.error(`--until okunamadı: ${until}`);
     process.exit(2);
   }
-  const seatsRaw = argOf(argv, '--seats');
   const privateKeyPem = readFileSync(keyPath, 'utf8');
   const publicKeyPem = readFileSync(
     argOf(argv, '--pub') ?? keyPath.replace(/depsis-license.key$/u, 'license-key.pub'),
@@ -262,7 +253,6 @@ function cmdBatch(argv) {
       // Havuzdaki jetonlar HENÜZ KİMSEYE ait değil; kime verildiği satış anında kaydedilir.
       to: argOf(argv, '--to') ?? '(atanmadı)',
       plan: argOf(argv, '--plan'),
-      seats: seatsRaw === undefined ? undefined : Number(seatsRaw),
       issued: new Date().toISOString(),
       until: until === undefined ? undefined : new Date(`${until}T23:59:59Z`).toISOString(),
       note: argOf(argv, '--note'),
