@@ -6931,11 +6931,19 @@ export interface components {
             licensedTo: string | null;
             licenseId: string | null;
             plan: string | null;
-            seats: number | null;
             issuedAt: string | null;
             /** @description `null` SÜRESİZ demek. Hiç dolmayacak bir tarih yazmak, o tarihe gelindiğinde açıklanamayan bir arıza üretir. */
             expiresAt: string | null;
             installedAt: string | null;
+            /**
+             * @description Bu CİHAZIN kodu, `XXXX-XXXX-XXXX`. Bir lisansı tek cihaza bağlamak için satıcıya
+             *     iletilen değer. `/etc/machine-id`den TÜRETİLMİŞ, onun kendisi değil: makine kimliği
+             *     sistem genelinde bir parmak izidir ve olduğu gibi paylaşılmamalı.
+             *
+             *     KURULUM başına, donanım başına değil — diski değişen bir NAS lisansını kaybetmez,
+             *     yeniden KURULAN bir kutu ise yeni bir bağ ister.
+             */
+            deviceId: string | null;
             /** @description Doğrulamanın kendi cümlesi. `invalid` ve `unconfigured` dışında boş. */
             detail: string | null;
         };

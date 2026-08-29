@@ -5153,7 +5153,7 @@ components:
     LicenseStatus:
       type: object
       required:
-        [state, licensedTo, licenseId, plan, seats, issuedAt, expiresAt, installedAt, detail]
+        [state, licensedTo, licenseId, plan, issuedAt, expiresAt, installedAt, deviceId, detail]
       properties:
         state:
           type: string
@@ -5167,12 +5167,20 @@ components:
         licensedTo: { type: [string, 'null'] }
         licenseId: { type: [string, 'null'] }
         plan: { type: [string, 'null'] }
-        seats: { type: [integer, 'null'] }
         issuedAt: { type: [string, 'null'] }
         expiresAt:
           type: [string, 'null']
           description: '`null` SÜRESİZ demek. Hiç dolmayacak bir tarih yazmak, o tarihe gelindiğinde açıklanamayan bir arıza üretir.'
         installedAt: { type: [string, 'null'] }
+        deviceId:
+          type: [string, 'null']
+          description: |
+            Bu CİHAZIN kodu, `XXXX-XXXX-XXXX`. Bir lisansı tek cihaza bağlamak için satıcıya
+            iletilen değer. `/etc/machine-id`den TÜRETİLMİŞ, onun kendisi değil: makine kimliği
+            sistem genelinde bir parmak izidir ve olduğu gibi paylaşılmamalı.
+
+            KURULUM başına, donanım başına değil — diski değişen bir NAS lisansını kaybetmez,
+            yeniden KURULAN bir kutu ise yeni bir bağ ister.
         detail:
           type: [string, 'null']
           description: Doğrulamanın kendi cümlesi. `invalid` ve `unconfigured` dışında boş.

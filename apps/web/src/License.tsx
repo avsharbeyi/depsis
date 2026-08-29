@@ -71,6 +71,25 @@ export function LicensePanel({
 
       {status.detail !== null && <p className="note warn">{status.detail}</p>}
 
+      {/* CİHAZ KODU. Bir lisansı tek cihaza bağlatmak isteyen müşterinin satıcıya ileteceği şey,
+          ve bu yüzden lisans olsa da olmasa da GÖRÜNÜYOR: kurulumu yeni bitmiş, henüz lisanssız
+          bir kutuda tam olarak buna ihtiyaç var. */}
+      {status.deviceId !== null && (
+        <div className="netrow">
+          <span className="lbl">Cihaz kodu</span>
+          <span className="note" style={{ fontFamily: 'var(--mono)', letterSpacing: '0.06em' }}>
+            {status.deviceId}
+          </span>
+          <button
+            type="button"
+            className="b ghost"
+            onClick={() => void navigator.clipboard?.writeText(status.deviceId ?? '')}
+          >
+            Kopyala
+          </button>
+        </div>
+      )}
+
       {status.state !== 'absent' &&
         status.state !== 'unconfigured' &&
         status.state !== 'invalid' && (
@@ -78,10 +97,7 @@ export function LicensePanel({
             {status.plan !== null && (
               <div className="netrow">
                 <span className="lbl">Plan</span>
-                <span className="note">
-                  {status.plan}
-                  {status.seats === null ? '' : ` · ${status.seats} yuva`}
-                </span>
+                <span className="note">{status.plan}</span>
               </div>
             )}
             <div className="netrow">

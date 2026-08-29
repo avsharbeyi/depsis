@@ -104,10 +104,10 @@ export class LicenseController {
         licensedTo: null,
         licenseId: null,
         plan: null,
-        seats: null,
         issuedAt: null,
         expiresAt: null,
         installedAt: null,
+        deviceId: this.license.deviceId(),
         detail: configured
           ? null
           : 'bu cihazda lisans açık anahtarı kurulu değil; lisans doğrulanamaz',
@@ -119,10 +119,10 @@ export class LicenseController {
         licensedTo: null,
         licenseId: null,
         plan: null,
-        seats: null,
         issuedAt: null,
         expiresAt: null,
         installedAt: null,
+        deviceId: this.license.deviceId(),
         detail: current.invalid,
       };
     }
@@ -133,10 +133,10 @@ export class LicenseController {
       licensedTo: payload.to,
       licenseId: payload.id,
       plan: payload.plan,
-      seats: payload.seats,
       issuedAt: payload.issued,
       expiresAt: payload.until,
       installedAt: current.installedAt,
+      deviceId: this.license.deviceId(),
       detail: null,
     };
   }

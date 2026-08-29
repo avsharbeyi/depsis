@@ -1,4 +1,4 @@
-import { createPublicKey, verify } from 'node:crypto';
+import { createHash, createPublicKey, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import { Injectable } from '@nestjs/common';
@@ -13,10 +13,16 @@ export interface LicensePayload {
   id: string;
   to: string;
   plan: string | null;
-  seats: number | null;
   issued: string;
   until: string | null;
   note: string | null;
+  /**
+   * Bu lisansın bağlı olduğu cihaz. YOKSA her cihazda geçerli.
+   *
+   * Bağsız jetonlar toplu havuzdan çıkar (deneme, bayi, hızlı kurulum); bağlı olanlar,
+   * müşterinin ekranda gördüğü kodu satıcıya iletmesiyle üretilir.
+   */
+  dev?: string | null;
 }
 
 export type LicenseCheck = { ok: true; payload: LicensePayload } | { ok: false; reason: string };
@@ -42,7 +48,40 @@ export class LicenseService {
     private readonly db: DbService,
     /** Açık anahtarın yolu. Dosya yoksa lisans YAPILANDIRILMAMIŞ sayılır. */
     private readonly publicKeyPath: string,
+    /** Cihaz kimliğinin türetildiği dosya. systemd her kurulumda birini yazıyor. */
+    private readonly machineIdPath: string = '/etc/machine-id',
   ) {}
+
+  /**
+   * Bu cihazın kimliği: `/etc/machine-id`den TÜRETİLMİŞ, onun kendisi değil.
+   *
+   * `machine-id` sistem genelinde bir parmak izidir ve onu olduğu gibi bir lisans jetonuna
+   * yazmak, satıcıya müşterinin makinesini başka bağlamlarda da tanıyabileceği bir değer
+   * vermek olurdu. Özet alınıp kısaltılmış hâli aynı işi görüyor: aynı kurulum için hep aynı,
+   * farklı kurulumlar için farklı, ve geri döndürülemez.
+   *
+   * KURULUM BAŞINA, donanım başına DEĞİL. Diski değişen bir NAS lisansını kaybetmemeli;
+   * yeniden KURULAN bir kutu ise yeni bir kurulumdur ve yeni bir bağ ister.
+   */
+  deviceId(): string | null {
+    let raw: string;
+    try {
+      raw = readFileSync(this.machineIdPath, 'utf8').trim();
+    } catch {
+      return null;
+    }
+    if (raw === '') return null;
+    // Sekiz bayt, base32 gibi okunan bir alfabeyle: telefonla okunabilecek kadar kısa,
+    // çakışması düşünülemeyecek kadar uzun. `I`, `O`, `1`, `0` yok — elle yazılırken
+    // karıştırılan harfler.
+    const digest = createHash('sha256').update(`depsis-device:${raw}`).digest();
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let out = '';
+    for (let index = 0; index < 12; index += 1) {
+      out += alphabet[(digest[index] ?? 0) % alphabet.length];
+    }
+    return `${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8, 12)}`;
+  }
 
   /**
    * Açık anahtar HER ÇAĞRIDA okunuyor, önbelleğe alınmıyor.
@@ -103,6 +142,27 @@ export class LicenseService {
     if (typeof payload.to !== 'string' || payload.to === '' || typeof payload.id !== 'string') {
       return { ok: false, reason: 'lisans anahtarı kime verildiğini söylemiyor' };
     }
+
+    // CİHAZ BAĞI. Jeton bir cihaza bağlıysa, o cihaz BU olmalı.
+    //
+    // Bağın ne olduğu konusunda dürüst olmak gerekiyor: bu, aynı jetonun iki kutuya
+    // yazılmasını ancak jeton BAĞLIYSA engeller. Bağsız bir jeton kopyalanabilir, ve bunu
+    // çevrimdışı bir cihazın fark etmesi mümkün değil — bilebilecek tek taraf bir sunucudur.
+    const bound = payload.dev ?? null;
+    if (typeof bound === 'string' && bound !== '') {
+      const mine = this.deviceId();
+      if (mine === null) {
+        // Kimliği okuyamayan bir kutu, bağlı bir lisansı DOĞRULAYAMAZ. Güvenli yön reddetmek:
+        // "okuyamadım" ile "uyuyor" arasında geçiş yapmak, bağı tamamen anlamsız kılardı.
+        return { ok: false, reason: `bu lisans bir cihaza bağlı ama cihaz kimliği okunamıyor` };
+      }
+      if (bound !== mine) {
+        return {
+          ok: false,
+          reason: `bu lisans başka bir cihaz için verilmiş (${bound}); bu cihazın kodu ${mine}`,
+        };
+      }
+    }
     return { ok: true, payload };
   }
 
@@ -131,26 +191,17 @@ export class LicenseService {
     await this.db.withoutTenant('device-license', (db) =>
       db.query(
         `INSERT INTO public.license
-         (id, token, license_id, licensed_to, plan, seats, issued_at, expires_at)
-       VALUES (true, $1, $2, $3, $4, $5, $6, $7)
+         (id, token, license_id, licensed_to, plan, issued_at, expires_at)
+       VALUES (true, $1, $2, $3, $4, $5, $6)
        ON CONFLICT (id) DO UPDATE SET
          token = EXCLUDED.token,
          license_id = EXCLUDED.license_id,
          licensed_to = EXCLUDED.licensed_to,
          plan = EXCLUDED.plan,
-         seats = EXCLUDED.seats,
          issued_at = EXCLUDED.issued_at,
          expires_at = EXCLUDED.expires_at,
          installed_at = now()`,
-        [
-          token.trim(),
-          payload.id,
-          payload.to,
-          payload.plan,
-          payload.seats,
-          payload.issued,
-          payload.until,
-        ],
+        [token.trim(), payload.id, payload.to, payload.plan, payload.issued, payload.until],
       ),
     );
   }

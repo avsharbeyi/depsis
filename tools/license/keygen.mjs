@@ -4,7 +4,7 @@
 //
 // ── ne üretiyor ──────────────────────────────────────────────────────────────
 //
-// Bir lisans anahtarı, İMZALI BİR VERİDİR: kime verildiği, hangi plan, kaç yuva ve ne zamana
+// Bir lisans anahtarı, İMZALI BİR VERİDİR: kime verildiği, hangi plan ve ne zamana
 // kadar geçerli olduğu açık açık içinde yazar, ve bir Ed25519 imzası taşır. Cihaz onu İNTERNETE
 // ÇIKMADAN doğrular — elindeki tek şey açık anahtardır.
 //
@@ -28,12 +28,19 @@
 //       Açık anahtar depoya girer; özel anahtar ASLA.
 //
 //   node tools/license/keygen.mjs issue --key <özel-anahtar> --to "Ad Soyad" \
-//        [--plan ev|pro] [--seats 5] [--until 2027-01-01] [--note "..."]
+//        [--plan ev|pro] [--device XXXX-XXXX-XXXX] [--until 2027-01-01] [--note "..."]
 //       Bir lisans jetonu basar. `--until` verilmezse SÜRESİZ.
 //
 //   node tools/license/keygen.mjs verify --pub <açık-anahtar> <jeton>
 //       Jetonu doğrular ve içindekini yazar. Cihazın yaptığının aynısı.
-import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
+import {
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomBytes,
+  sign,
+  verify,
+} from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -55,16 +62,47 @@ function payloadBytes(payloadB64) {
   return Buffer.from(payloadB64, 'ascii');
 }
 
+/**
+ * Lisansın kendi kimliği.
+ *
+ * RASTGELE, saatten türetilmiş DEĞİL. İlk hâli `Date.now()` kullanıyordu ve aynı milisaniyede
+ * verilen iki lisans AYNI numarayı alıyordu — tek tek verirken görülmesi zor, toplu üretimde ise
+ * elli lisansın hepsi aynı numarada. Numara bir gün iptal listesinde adlandıracağımız şey; iki
+ * müşterinin aynı numarayı taşıması, o listeyi kullanılamaz yapardı.
+ */
+/**
+ * Cihaz kodunu kabul edilebilir tek biçime getirir.
+ *
+ * Müşteri kodu telefonda okur, e-postaya yapıştırır, küçük harfle yazar. Buradaki tolerans
+ * onun içindir — ama SESSİZ DEĞİL: tanınmayan bir kod hata veriyor, çünkü yanlış bir koda
+ * bağlanmış bir lisansı ancak müşteri fark eder, ve ancak kuramadığı zaman.
+ */
+function normaliseDevice(value) {
+  if (value === undefined) return undefined;
+  const clean = value.toUpperCase().replace(/[^A-Z0-9]/gu, '');
+  if (clean.length !== 12) {
+    console.error(`--device okunamadı: ${value} (beklenen: XXXX-XXXX-XXXX)`);
+    process.exit(2);
+  }
+  return `${clean.slice(0, 4)}-${clean.slice(4, 8)}-${clean.slice(8, 12)}`;
+}
+
+function licenseId() {
+  return `L-${randomBytes(5).toString('hex').toUpperCase()}`;
+}
+
 function issue(privateKeyPem, fields) {
   const payload = {
     v: VERSION,
     id: fields.id,
     to: fields.to,
     plan: fields.plan ?? null,
-    seats: fields.seats ?? null,
     issued: fields.issued,
     until: fields.until ?? null,
     note: fields.note ?? null,
+    // Bağlı lisanslarda cihazın kodu. Bağsızlarda ALAN HİÇ YOK — `null` yazmak, eski
+    // sürümlerin göremeyeceği bir fark üretmez ama jetonu gereksizce uzatır.
+    ...(fields.device === undefined ? {} : { dev: fields.device }),
   };
   const payloadB64 = b64url(JSON.stringify(payload));
   const signature = sign(null, payloadBytes(payloadB64), createPrivateKey(privateKeyPem));
@@ -130,7 +168,7 @@ function cmdIssue(argv) {
   const to = argOf(argv, '--to');
   if (keyPath === undefined || to === undefined) {
     console.error(
-      'kullanım: keygen.mjs issue --key <özel-anahtar> --to "Ad Soyad" [--plan p] [--seats n] [--until YYYY-MM-DD] [--note "..."]',
+      'kullanım: keygen.mjs issue --key <özel-anahtar> --to "Ad Soyad" [--plan p] [--device XXXX-XXXX-XXXX] [--until YYYY-MM-DD] [--note "..."]',
     );
     process.exit(2);
   }
@@ -139,23 +177,15 @@ function cmdIssue(argv) {
     console.error(`--until okunamadı: ${until} (beklenen: YYYY-MM-DD)`);
     process.exit(2);
   }
-  const seatsRaw = argOf(argv, '--seats');
-  const seats = seatsRaw === undefined ? undefined : Number(seatsRaw);
-  if (seats !== undefined && (!Number.isInteger(seats) || seats < 1)) {
-    console.error(`--seats bir pozitif tam sayı olmalı: ${seatsRaw}`);
-    process.exit(2);
-  }
 
   const token = issue(readFileSync(keyPath, 'utf8'), {
-    // Lisansın kendi kimliği: iki lisans aynı müşteriye aynı gün verilse bile ayırt edilebilsin,
-    // ve bir gün iptal listesi gerekirse adlandıracak bir şey olsun.
-    id: `L-${Date.now().toString(36).toUpperCase()}`,
+    id: licenseId(),
     to,
     plan: argOf(argv, '--plan'),
-    seats,
     issued: new Date().toISOString(),
     until: until === undefined ? undefined : new Date(`${until}T23:59:59Z`).toISOString(),
     note: argOf(argv, '--note'),
+    device: normaliseDevice(argOf(argv, '--device')),
   });
 
   // ÜRETTİĞİNİ HEMEN DOĞRULA: bir imza, üretildiği yerde doğrulanmazsa ancak müşterinin
@@ -173,6 +203,70 @@ function cmdIssue(argv) {
   }
 
   console.log(token);
+}
+
+/**
+ * TOPLU ÜRETİM — ve bunun asıl sebebi güvenlik, kolaylık değil.
+ *
+ * Lisansları bir sunucunun anlık üretmesi için ÖZEL ANAHTARIN O SUNUCUDA durması gerekir: yani
+ * internete bakan bir makinede, sürekli. O makine ele geçirildiği gün saldırgan sınırsız lisans
+ * basar. Önceden basılmış bir havuzda ise anahtar çevrimdışı kalır; sunucunun elinde yalnızca
+ * ÜRETİLMİŞ jetonlar durur, ve onları çalan biri o kadarını çalar — daha fazlasını üretemez.
+ *
+ * Bir satış sitesi ya da aktivasyon ucu kurulacaksa, ona verilecek şey bu dosyadır.
+ */
+function cmdBatch(argv) {
+  const keyPath = argOf(argv, '--key');
+  const countRaw = argOf(argv, '--count');
+  const out = argOf(argv, '--out');
+  const count = Number(countRaw);
+  if (keyPath === undefined || out === undefined || !Number.isInteger(count) || count < 1) {
+    console.error(
+      'kullanım: keygen.mjs batch --key <özel-anahtar> --count 50 --out lisanslar.csv [--plan p] [--until YYYY-MM-DD]',
+    );
+    process.exit(2);
+  }
+  const until = argOf(argv, '--until');
+  if (until !== undefined && Number.isNaN(Date.parse(until))) {
+    console.error(`--until okunamadı: ${until}`);
+    process.exit(2);
+  }
+  const privateKeyPem = readFileSync(keyPath, 'utf8');
+  const publicKeyPem = readFileSync(
+    argOf(argv, '--pub') ?? keyPath.replace(/depsis-license.key$/u, 'license-key.pub'),
+    'utf8',
+  );
+
+  const rows = ['lisans_no,jeton'];
+  const seen = new Set();
+  for (let index = 0; index < count; index += 1) {
+    const id = licenseId();
+    // ÜRETİLEN HER JETON AYRI AYRI DOĞRULANIYOR ve numarası tekilliğe karşı sınanıyor. Elli
+    // jetonun içinde bozuk bir tanesini, ancak onu alan müşteri fark ederdi.
+    if (seen.has(id)) {
+      console.error('aynı lisans numarası iki kez üretildi; toplu üretim durduruldu');
+      process.exit(1);
+    }
+    seen.add(id);
+    const token = issue(privateKeyPem, {
+      id,
+      // Havuzdaki jetonlar HENÜZ KİMSEYE ait değil; kime verildiği satış anında kaydedilir.
+      to: argOf(argv, '--to') ?? '(atanmadı)',
+      plan: argOf(argv, '--plan'),
+      issued: new Date().toISOString(),
+      until: until === undefined ? undefined : new Date(`${until}T23:59:59Z`).toISOString(),
+      note: argOf(argv, '--note'),
+    });
+    const result = check(publicKeyPem, token);
+    if (!result.ok) {
+      console.error(`ÜRETİLEN JETON DOĞRULANAMADI (${id}): ${result.reason}`);
+      process.exit(1);
+    }
+    rows.push(`${id},${token}`);
+  }
+  writeFileSync(out, rows.join(String.fromCharCode(10)) + String.fromCharCode(10));
+  console.log(`${count} lisans üretildi ve hepsi doğrulandı: ${out}`);
+  console.log('Bu dosya BASILMIŞ lisanslardır; özel anahtar kadar olmasa da gizlidir.');
 }
 
 function cmdVerify(argv) {
@@ -205,10 +299,13 @@ switch (command) {
   case 'issue':
     cmdIssue(rest);
     break;
+  case 'batch':
+    cmdBatch(rest);
+    break;
   case 'verify':
     cmdVerify(rest);
     break;
   default:
-    console.error('kullanım: keygen.mjs init|issue|verify   (ayrıntı için dosyanın başı)');
+    console.error('kullanım: keygen.mjs init|issue|batch|verify   (ayrıntı için dosyanın başı)');
     process.exit(2);
 }
