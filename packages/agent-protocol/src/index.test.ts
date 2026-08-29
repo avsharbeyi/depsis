@@ -46,6 +46,12 @@ describe('the emitted agent schema', () => {
       // statement the caller can make correctly and "here is what changed" is one it would have to
       // reconstruct from a disk it cannot read.
       'apply_folder_acl',
+      // Kutunun kendini güncellemesi. Üçünün de OPERANDI YOK, ve `apply_update`in operandsız
+      // olması en önemlisi: hangi kodun kök yetkiyle kurulacağını istek değil, bir önceki
+      // `check_update` söylüyor. Böylece ekranda bir sürüm görüp onaylayan operatör tam onu
+      // kurmuş oluyor. Ajan indirmiyor — birimi `IPAddressDeny=any` taşıyor — yalnızca
+      // indirmeyi üstlenen ayrı systemd birimini başlatıyor.
+      'apply_update',
       // The fourth thing nobody was backing up. `identity.secret` cannot be recreated, and a
       // network id is welded to it — a new identity means the household permanently loses
       // remote access to its own appliance.
@@ -56,6 +62,7 @@ describe('the emitted agent schema', () => {
       // merely queueing. Both ends are under one root, so `copy_file_range(2)` inside the agent is
       // both safer and faster. One FILE: the API issues one `create_directory` per folder and one
       // of these per file, because a recursive copy is a blast radius the caller chose.
+      'check_update',
       'copy_file',
       'create_dataset',
       // ONE directory, never `mkdir -p`. Its absence was a hole under the product rather than a
@@ -195,6 +202,7 @@ describe('the emitted agent schema', () => {
       'snapshot_entries',
       'start_scrub',
       'sync_posix_identity',
+      'update_status',
       // ADR-0020's four, and the shape of them is the point. A general `ZeroTierRequest { path }`
       // proxy would have been the network form of the free-form command §2.2 forbids: one variant
       // through which every other endpoint of zerotier-one's local API becomes reachable. Instead
@@ -318,7 +326,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(26);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(27);
   });
 
   it('agrees with the number the agent actually reports', () => {

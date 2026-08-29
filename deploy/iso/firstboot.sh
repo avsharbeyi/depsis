@@ -146,6 +146,13 @@ if [ ! -f "$REPO/tools/install/install.sh" ]; then
   tar -xzf "$SRC/depsis-src.tar.gz" -C "$REPO"
 fi
 
+# Kaynağın hangi commit olduğu AĞACIN İÇİNE yazılıyor. ISO’nun yanındaki VERSION dosyası aynı
+# bilgiyi taşıyor ama kutuda kalıcı değil; güncelleyici ağacı değiştirdiğinde kimliğin ağaçla
+# birlikte değişmesi, geri alındığında da birlikte geri gelmesi gerekiyor.
+if [ -f "$SRC/VERSION" ] && [ ! -f "$REPO/.depsis-version" ]; then
+  cp "$SRC/VERSION" "$REPO/.depsis-version"
+fi
+
 # ── 7. asıl kurulum ──────────────────────────────────────────────────────────
 # `--unattended`: kurtarma anahtarını EKRANA BASMAZ — buradaki her satır journal'a yazılır ve
 # journal kalıcıdır; bir sırrın orada durması, hiç gösterilmemesinden kötüdür. Anahtarın yeri

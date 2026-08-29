@@ -2043,6 +2043,88 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Kutu hangi sürümde, ve bir güncelleme sürüyor mu
+         * @description Üç kaynağın birleşimi: kurulumun yazdığı sürüm, güncelleyicinin durum dosyası, ve
+         *     systemd'nin güncelleme birimleri hakkında söyledikleri. Sonuncusu olmadan olmaz —
+         *     güncelleyici durumu yazmaya fırsat bulamadan öldüyse (güç kesintisi) dosya sonsuza kadar
+         *     "installing" der, ve birimin gerçekten koşup koşmadığını yalnız systemd bilir.
+         *
+         *     Yalnız kurucu yönetici.
+         */
+        get: operations["updateStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/update/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Yeni bir sürüm var mı diye bak — indirmez, kurmaz
+         * @description Denetimi BAŞLATIR ve hemen döner: ağ beklemek, ajanın sıralı kontrol soketini kilitlemek
+         *     demek olurdu. Sonuç birkaç saniye içinde `GET /system/update` ile görülür.
+         *
+         *     Cihaz kendiliğinden sürüm denetimi yapmaz — ne zamanlayıcısı vardır ne de açılışta
+         *     çalışır. Bir NAS'ın sahibinin haberi olmadan dışarıya bağlanmaması, denetimin bir düğmeye
+         *     bağlı olmasının sebebidir.
+         *
+         *     Yalnız kurucu yönetici.
+         */
+        post: operations["checkUpdate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/update/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Denetimin bulduğu sürümü kur
+         * @description **Kutunun üzerindeki bütün DEPSIS yazılımını değiştirir** ve kurulum sırasında arayüz
+         *     birkaç kez kesilir. Kaynaktan derlendiği için yavaş kutularda saatler sürebilir.
+         *
+         *     HANGİ SÜRÜMÜN KURULACAĞINI BU İSTEK SEÇMEZ: kurulacak şey, son denetimin bulduğu
+         *     sürümdür. Ekranda bir sürüm görüp onaylayan yönetici tam onu kurmuş olur, ve o an ile
+         *     düğme arasında depoya giren bir commit onaylanmamış kod olarak kalır.
+         *
+         *     Kurulum düşerse cihaz eski sürüme geri alınır ve çalışır durumda bırakılır.
+         *
+         *     Parolayla yeniden kimlik doğrulama gerekir: bu işlem kök yetkiyle koşacak kodu değiştirir.
+         *     Yalnız kurucu yönetici.
+         */
+        post: operations["applyUpdate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/storage/pools": {
         parameters: {
             query?: never;
@@ -6655,6 +6737,62 @@ export interface components {
             /** @description wipefs'in sildiği imzaların dökümü. */
             detail: string | null;
         };
+        UpdateApplyRequest: {
+            /**
+             * @description Oturumdaki yöneticinin parolası. Yazılı onay sözcüğü YOK, ve bu bir gevşeme değil:
+             *     §8.1'in onay sözcüğü, geri alınamayan bir işlemin hangi NESNEYE uygulandığını
+             *     yazdırmak içindir (havuzun adı, diskin adı). Güncellemenin nesnesi yok, geri alması
+             *     var — ve tehlikesi yanlış şeyi seçmek değil, kök yetkiyle koşan kodu değiştirmek.
+             *     Ona karşı doğru kapı parola.
+             */
+            password: string;
+        };
+        UpdateCandidate: {
+            /**
+             * @description Commit kimliği. DEPSIS'in sürüm kavramı bu: kutuya kurulan şey deponun bir anıdır.
+             *     Etiketli ve imzalı bir sürüm akışı henüz yok — bkz. bilinen sınırlamalar §2.7.
+             */
+            commit: string;
+            /** @description Commit başlığının ilk satırı */
+            subject: string | null;
+            committedAt: string | null;
+        };
+        UpdateStatus: {
+            /**
+             * @description Kurulu commit. YOK olabilir: güncelleme yolundan önce kurulmuş bir kutu kendi
+             *     sürümünü bilmez. Yokluk "güncel" diye okunmaz — bilinmeyen bir sürüm, karşılaştırmayı
+             *     her zaman "farklı" yapar.
+             */
+            installed: string | null;
+            /** @description Son denetimin bulduğu sürüm. Hiç denetim yapılmadıysa yok. */
+            available: {
+                commit: string;
+                subject: string | null;
+                committedAt: string | null;
+            } | null;
+            /**
+             * @description Güncelleyicinin kendi yazdığı faz, yorumlanmadan: `idle`, `checking`,
+             *     `downloading`, `installing`, `rolling_back`, `done`, `failed`.
+             */
+            phase: string;
+            /**
+             * @description `phase` ile systemd'nin cevabının BİRLEŞİMİ. Tanınmayan bir faz KOŞUYOR sayılır:
+             *     bilinmezlikte doğru davranış, ikinci bir güncellemeye izin vermemektir.
+             */
+            inProgress: boolean;
+            /** @description Kurulu sürüm ile bulunan sürüm aynı mı. İkisinden biri bilinmiyorsa `false`. */
+            upToDate: boolean;
+            checkedAt: string | null;
+            startedAt: string | null;
+            finishedAt: string | null;
+            /**
+             * @description Son başarısızlığın cümlesi. `phase` `failed` değilken de dolu olabilir: geri alınmış
+             *     bir güncellemenin sebebi, kutu yeniden çalışır hâle geldikten sonra da okunmalıdır.
+             */
+            error: string | null;
+            /** @description Güncelleyicinin günlüğünün son satırları — uzun bir kurulumun "hâlâ yaşıyor" kanıtı. */
+            logTail: string[];
+        };
         CreatePoolRequest: {
             /**
              * @description Havuz adı. İçinde `/` OLAMAZ — o bir dataset yolu olurdu. Harfle başlamak zorunda:
@@ -7587,6 +7725,79 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DiskWipeResult"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            429: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    updateStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Güncellemenin bütün durumu */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateStatus"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    checkUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Denetim başladı; durum yanıtta */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateStatus"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    applyUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateApplyRequest"];
+            };
+        };
+        responses: {
+            /** @description Güncelleme başladı; durum yanıtta */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateStatus"];
                 };
             };
             400: components["responses"]["Problem"];

@@ -543,6 +543,24 @@ listesi CI'a eşitlendi; ders listenin kendisinde yazıyor.
 | Raporu okuyan kapı raporun yolunu bilmiyordu                           | O adıma hiç ulaşılmamıştı; iş her zaman daha önce düşüyordu.                                                     |
 | Keşif her telemetri poll'ünde aynı uyarıyı yazıyordu                   | ZFS'i olan bir kutuda hiç tetiklenmiyor.                                                                         |
 
+## Cihazı güncellemek
+
+Sistem ekranında **Yazılım sürümü** bölümü: kurulu sürüm, `Sürüm denetle`, ve bulunan sürüm için
+`Güncelle`. Terminal yok. Yalnız kurucu yönetici, parolayla yeniden kimlik doğrulama, ve ikisi de
+denetim kaydına yazılıyor.
+
+Cihaz KENDİLİĞİNDEN sürüm denetimi yapmaz — ne zamanlayıcısı vardır ne açılışta çalışır. Bir
+NAS’ın sahibinin haberi olmadan dışarıya bağlanmaması, denetimin bir düğmeye bağlı olmasının
+sebebidir.
+
+Kurulacak sürümü istek seçmez: kurulan şey bir önceki denetimin bulduğu sürümdür, yani ekranda
+gördüğünü onaylayan yönetici tam onu kurar. Kurulum düşerse cihaz eski sürüme geri alınır.
+İndirmeyi ajan yapmaz — birimi `IPAddressDeny=any` taşır; indiren ve kuran taraf ayrı bir systemd
+birimidir (`depsis-update.service`).
+
+Kalan sınır ve gerekçesi: `docs/bilinen-sinirlamalar.md` §2.7 — bugün güven HTTPS ve kaynağın
+adresinin betikte sabit olmasına dayanıyor; imzalı sürümler §21’in 13. teslimatı.
+
 Yerel kapılar hâlâ geçerli ve hâlâ ilk savunma hattı — CI'a itmeden önce:
 
 ```bash

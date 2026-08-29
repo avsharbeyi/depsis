@@ -2,6 +2,7 @@ import type { Snapshot } from './snapshot.js';
 import { formatBytes } from './Dashboard.js';
 import { Empty } from './ui.js';
 import { Ring, Spark } from './sky.js';
+import { UpdatePanel } from './Update.js';
 
 /**
  * Sistem penceresi — sahibin sözüyle "işlemci ram disk kullanımları sıcaklıkları... grafik ekran".
@@ -16,17 +17,32 @@ import { Ring, Spark } from './sky.js';
 export function System({
   snapshot,
   onProcesses,
+  notify,
 }: {
   snapshot: Snapshot | null;
+  /** Yazılım güncellemesi bu ekranda: kutunun kendisiyle ilgili her şey burada aranıyor.
+      Panel yetkiyi kendi soruyor ve yönetici değilse hiç çizilmiyor. */
+  notify?: ((kind: 'ok' | 'error', text: string) => void) | undefined;
   /** Görev yöneticisini aç — sahibi onu bu ekranın içinde arıyor, ayrı bir rıhtım simgesinde
       değil. Yalnız kurucu yöneticiye veriliyor; yoksa düğme hiç çizilmiyor. */
   onProcesses?: (() => void) | undefined;
 }): React.JSX.Element {
-  if (snapshot === null) return <p className="note">Sistem durumu okunuyor…</p>;
+  if (snapshot === null)
+    return (
+      <>
+        {notify !== undefined && <UpdatePanel notify={notify} />}
+        <p className="note">Sistem durumu okunuyor…</p>
+      </>
+    );
 
   const telemetry = snapshot.telemetry;
   if (telemetry === null) {
-    return <Empty glyph="📈" text={snapshot.telemetryNote ?? 'Sistem durumu okunamadı.'} />;
+    return (
+      <>
+        {notify !== undefined && <UpdatePanel notify={notify} />}
+        <Empty glyph="📈" text={snapshot.telemetryNote ?? 'Sistem durumu okunamadı.'} />
+      </>
+    );
   }
 
   const load = telemetry.cpu.loadAverage?.[0];
@@ -38,6 +54,8 @@ export function System({
 
   return (
     <>
+      {notify !== undefined && <UpdatePanel notify={notify} />}
+
       {onProcesses !== undefined && (
         <div className="netrow" style={{ marginBottom: 4 }}>
           <span className="lbl">Arka plan görevleri</span>

@@ -431,6 +431,15 @@ export type AgentRequest =
       pid: number;
     }
   | {
+      op: 'update_status';
+    }
+  | {
+      op: 'check_update';
+    }
+  | {
+      op: 'apply_update';
+    }
+  | {
       op: 'scrub_status';
       pool: SafeComponent;
     }
@@ -978,6 +987,44 @@ export type AgentResponse =
     }
   | {
       /**
+       * Son denetimin bulduğu sürüm. Hiç denetim yapılmadıysa yok.
+       */
+      available?: UpdateCandidate | null;
+      checked_at?: string | null;
+      /**
+       * Son başarısızlığın cümlesi. Faz `failed` değilken de dolu olabilir: geri alınmış bir
+       * güncellemenin sebebi, kutu yeniden çalışır hâle geldikten sonra da okunmalıdır.
+       */
+      error?: string | null;
+      finished_at?: string | null;
+      /**
+       * Şu anda bir şey koşuyor mu. `phase` ile systemd'nin cevabının BİRLEŞİMİ, ve tanınmayan
+       * bir faz koşuyor sayılır: bilinmezlikte doğru davranış, ikinci bir güncellemeye izin
+       * vermemektir.
+       */
+      in_progress: boolean;
+      /**
+       * Kurulu commit. `install.sh` yazmadıysa YOK — ve yokluk "güncel" diye okunmaz.
+       */
+      installed?: string | null;
+      /**
+       * Güncelleyicinin günlüğünün son satırları. Uzun bir kurulumun "hâlâ yaşıyor" kanıtı.
+       */
+      log_tail: string[];
+      /**
+       * Güncelleyicinin kendi yazdığı faz, yorumlanmadan. Bilinen değerler `idle`, `checking`,
+       * `downloading`, `building`, `installing`, `verifying`, `rolling_back`, `done`, `failed`.
+       */
+      phase: string;
+      started_at?: string | null;
+      status: 'update';
+      /**
+       * Kurulu sürüm ile bulunan sürüm aynı mı. İkisinden biri bilinmiyorsa `false`.
+       */
+      up_to_date: boolean;
+    }
+  | {
+      /**
        * `256 SHA256:… depsis-offsite (ED25519)`, as `ssh-keygen -l` prints it.
        */
       fingerprint?: string | null;
@@ -1266,17 +1313,33 @@ export interface ZeroTierMember {
   seen: boolean;
 }
 /**
- * One whole disk, as `ListDisks` found it.
- *
- * Partitions are not reported as disks. They appear only through `holds`, `mounted` and
- * `holds_system` — which is what a caller about to overwrite the device needs to know, and a
- * per-partition inventory is not.
  * One database dump on disk.
  */
 export interface DatabaseDump {
   created_unix: number;
   name: string;
   size_bytes: number;
+}
+/**
+ * One whole disk, as `ListDisks` found it.
+ *
+ * Partitions are not reported as disks. They appear only through `holds`, `mounted` and
+ * `holds_system` — which is what a caller about to overwrite the device needs to know, and a
+ * per-partition inventory is not.
+ * Kurulabilecek bir sürüm — DENETİMİN bulduğu, isteğin seçtiği değil.
+ */
+export interface UpdateCandidate {
+  /**
+   * Commit kimliği. DEPSIS'in sürüm kavramı bu: kutuya kurulan şey deponun bir anıdır, ve
+   * etiketlenmiş bir sürüm akışı henüz yok (§21'in 13. teslimatı).
+   */
+  commit: string;
+  committed_at?: string | null;
+  /**
+   * Commit başlığının ilk satırı. Operatörün "bu ne getiriyor" sorusuna verilebilecek tek
+   * dürüst cevap, ve yorumlanmadan taşınıyor.
+   */
+  subject?: string | null;
 }
 /**
  * One host key a destination offered, and the fingerprint a person compares.

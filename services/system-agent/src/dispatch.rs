@@ -45,6 +45,12 @@ pub mod bin {
     pub const PG_DUMP: &str = "/usr/bin/pg_dump";
     /// The ZeroTier identity archive. Absolute, for the reason every path here is.
     pub const TAR: &str = "/usr/bin/tar";
+    /// Güncelleme birimlerini başlatan ve durumlarını söyleyen araç.
+    ///
+    /// Ajanın kendisi güncelleme yapmaz — yapamaz da: birimi `IPAddressDeny=any` taşıyor ve
+    /// güncelleme ağdan indirmek demek. Yaptığı şey, indirmeyi ve kurmayı üstlenen AYRI bir birimi
+    /// başlatmak. Argümanlar `update` modülünde sabit; birim adı çağırandan gelmiyor.
+    pub const SYSTEMCTL: &str = "/usr/bin/systemctl";
 }
 
 /// Where staging files live inside a share.
@@ -710,6 +716,112 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             .runner
             .run(bin::WIPEFS, &["--all", "--", device.as_str()])?;
         Ok(Response::DiskWiped { detail: out })
+    }
+
+    /// Bir güncelleme biriminin systemd'ye göre durumu.
+    ///
+    /// HATA DA BİR CEVAP: `systemctl` yoksa ya da birim tanınmıyorsa boş dize dönüyor, ve boş dize
+    /// "çalışmıyor" diye okunuyor. Alternatif — durumu hataya çevirmek — geliştirme kutusunda ve
+    /// systemd'siz her ortamda güncelleme ekranını tamamen kapatırdı, oysa ekranın orada da
+    /// söyleyecek doğru bir şeyi var: kurulu sürüm.
+    fn unit_active_state(&self, unit: &str) -> String {
+        self.runner
+            .run(bin::SYSTEMCTL, &crate::update::active_state_argv(unit))
+            .unwrap_or_default()
+    }
+
+    /// Güncellemenin bütün durumu: kurulu sürüm, bulunan sürüm, faz, ve gerçekten koşuyor mu.
+    fn update_status(&self) -> Result<Response, SeamError> {
+        let installed = crate::update::installed_version(
+            &std::fs::read_to_string(crate::update::installed_version_file()).unwrap_or_default(),
+        );
+        let state = crate::update::parse_state(
+            &std::fs::read_to_string(crate::update::state_file()).unwrap_or_default(),
+        );
+        let log = std::fs::read_to_string(crate::update::log_file()).unwrap_or_default();
+
+        let phase = state.phase.unwrap_or_else(|| "idle".to_string());
+        // İKİ KAYNAĞIN BİRLEŞİMİ, ve tek başına hiçbiri yetmiyor. Durum dosyası, güncelleyici onu
+        // yazmaya fırsat bulamadan öldüyse (güç kesintisi, OOM) sonsuza kadar "installing" der —
+        // systemd o birimin bittiğini bilir. Tersi de doğru: birim `--no-block` ile daha yeni
+        // kuyruğa girmişken ActiveState bir an "inactive" olabilir, ve o an dosyadaki faz zaten
+        // koşuyor der.
+        let units_running =
+            crate::update::state_is_running(&self.unit_active_state(crate::update::APPLY_UNIT))
+                || crate::update::state_is_running(
+                    &self.unit_active_state(crate::update::CHECK_UNIT),
+                );
+        let in_progress = units_running || !crate::update::phase_is_terminal(&phase);
+
+        let available = state.available.map(|found| crate::op::UpdateCandidate {
+            commit: found.commit,
+            subject: found.subject,
+            committed_at: found.committed_at,
+        });
+        let up_to_date = crate::update::up_to_date(
+            installed.as_deref(),
+            available.as_ref().map(|found| found.commit.as_str()),
+        );
+
+        Ok(Response::Update {
+            installed,
+            available,
+            phase,
+            in_progress,
+            up_to_date,
+            checked_at: state.checked_at,
+            started_at: state.started_at,
+            finished_at: state.finished_at,
+            error: state.error,
+            log_tail: crate::update::tail(&log, crate::update::LOG_TAIL_LINES),
+        })
+    }
+
+    /// Bir güncelleme birimini başlat, ve önce ZATEN KOŞUYOR MU diye bak.
+    ///
+    /// İki güncelleme aynı anda koşarsa ikisi de aynı kaynak ağacını yazar; ortaya çıkan şey ne
+    /// eski ne yeni sürümdür. Reddetmek bunun tek ucuz savunması, ve buraya konuluyor — arayüzdeki
+    /// düğmenin gri olması bir savunma değil, bir nezakettir.
+    fn start_update_unit(&self, unit: &str) -> Result<Response, SeamError> {
+        if let Response::Update { in_progress, .. } = self.update_status()? {
+            if in_progress {
+                return Ok(Response::Refused {
+                    reason: "bir güncelleme işlemi zaten sürüyor; bitmesini bekleyin".to_string(),
+                });
+            }
+        }
+        self.runner
+            .run(bin::SYSTEMCTL, &crate::update::start_argv(unit))?;
+        self.update_status()
+    }
+
+    /// Denetimin bulduğu sürümü kur.
+    ///
+    /// İki ret, ve ikisi de çağıranın onayıyla geçilemez. Denetim yapılmamışsa kurulacak bir sürüm
+    /// YOKTUR — "en yenisini indir" diye bir işlem olsaydı, operatörün onayladığı sürüm ile kurulan
+    /// sürüm farklı olabilirdi. Kurulu sürüm zaten bulunan sürümse, kurulum kutuyu dakikalarca
+    /// meşgul edip hiçbir şey değiştirmezdi.
+    fn apply_update(&self) -> Result<Response, SeamError> {
+        let status = self.update_status()?;
+        if let Response::Update {
+            ref available,
+            up_to_date,
+            ..
+        } = status
+        {
+            if available.is_none() {
+                return Ok(Response::Refused {
+                    reason: "kurulacak bir sürüm bilinmiyor: önce güncelleme denetimi çalıştırın"
+                        .to_string(),
+                });
+            }
+            if up_to_date {
+                return Ok(Response::Refused {
+                    reason: "kurulu sürüm zaten bulunan sürümle aynı".to_string(),
+                });
+            }
+        }
+        self.start_update_unit(crate::update::APPLY_UNIT)
     }
 
     /// Arka planda ne koşuyor. Kural ve gerekçeler `procs` modülünde, tek yerde.
@@ -2192,6 +2304,9 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 disks,
             } => self.create_pool(pool.as_str(), *topology, disks),
             crate::op::Request::WipeDisk { disk } => self.wipe_disk(disk),
+            crate::op::Request::UpdateStatus {} => self.update_status(),
+            crate::op::Request::CheckUpdate {} => self.start_update_unit(crate::update::CHECK_UNIT),
+            crate::op::Request::ApplyUpdate {} => self.apply_update(),
             crate::op::Request::ListProcesses {} => self.list_processes(),
             crate::op::Request::KillProcess { pid, comm } => self.kill_process(*pid, comm),
 
@@ -2903,6 +3018,146 @@ mod tests {
             .last()
             .expect("path arg")
             .starts_with("/dev/disk/by-id/"));
+    }
+
+    /// Güncelleme dosyalarını OLMAYAN bir yere bakmaya zorlar.
+    ///
+    /// Testi koşturan makinede o dosyaların bulunmamasına bel bağlamak, bir gün bir geliştirme
+    /// kutusunda DEPSIS kurulu olduğunda anlaşılmaz biçimde düşen testler demek olurdu.
+    fn no_update_files() {
+        std::env::set_var(
+            crate::update::STATE_FILE_ENV,
+            "/nonexistent/depsis/state.json",
+        );
+        std::env::set_var(crate::update::LOG_FILE_ENV, "/nonexistent/depsis/log");
+        std::env::set_var(
+            crate::update::INSTALLED_VERSION_ENV,
+            "/nonexistent/depsis/version",
+        );
+    }
+
+    #[test]
+    fn a_running_update_refuses_a_second_one() {
+        // İki güncelleme aynı anda koşarsa ikisi de aynı kaynak ağacını yazar ve ortaya çıkan şey
+        // ne eski ne yeni sürümdür. Ret ARAYÜZDE DEĞİL BURADA: gri bir düğme bir savunma değil.
+        no_update_files();
+        let r = MockCommandRunner::with_responses(["active".into(), "inactive".into()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"check_update"}"#,
+            peer(API_UID),
+            "up1",
+            "operator asked for a check",
+        );
+        match resp {
+            Response::Refused { ref reason } => {
+                assert!(reason.contains("zaten sürüyor"), "{reason}")
+            }
+            other => panic!("koşan bir güncellemenin üstüne ikincisi kabul edildi: {other:?}"),
+        }
+        // Ve HİÇBİR birim başlatılmadı: ilk show'dan sonra durmuş olmalı.
+        for index in 0..8 {
+            if let Some(call) = r.call(index) {
+                assert_ne!(
+                    call.get(1).map(String::as_str),
+                    Some("start"),
+                    "başlatma oldu: {call:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checking_starts_the_check_unit_with_no_operand_from_the_caller() {
+        no_update_files();
+        let r = MockCommandRunner::with_responses([
+            "inactive".into(),
+            "inactive".into(),
+            String::new(),
+            "activating".into(),
+            "inactive".into(),
+        ]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"check_update"}"#,
+            peer(API_UID),
+            "up2",
+            "operator asked for a check",
+        );
+        assert!(matches!(resp, Response::Update { .. }), "{resp:?}");
+
+        let start = r.call(2).expect("üçüncü çağrı başlatma olmalı");
+        assert_eq!(start[0], bin::SYSTEMCTL);
+        assert_eq!(start[1], "start");
+        assert_eq!(start[2], "--no-block");
+        // Birim adı SABİT. Bu iddianın varlık sebebi, ileride bir "hangi birim" parametresinin
+        // sessizce eklenememesi.
+        assert_eq!(start[3], crate::update::CHECK_UNIT);
+        assert_eq!(start.len(), 4, "başlatma argümanı eklenmiş: {start:?}");
+    }
+
+    #[test]
+    fn applying_without_a_check_is_refused_because_no_version_was_confirmed() {
+        // ADR-0006 §2.2'nin buradaki biçimi: kurulacak kodu çağıran seçemez, bir önceki denetim
+        // seçer. Denetim yoksa onaylanmış bir sürüm de yoktur, ve "en yenisini getir" demek
+        // operatörün gördüğünden başka bir şeyi kurmak olurdu.
+        no_update_files();
+        let r = MockCommandRunner::with_responses(["inactive".into(), "inactive".into()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"apply_update"}"#,
+            peer(API_UID),
+            "up3",
+            "operator asked to update",
+        );
+        match resp {
+            Response::Refused { ref reason } => assert!(reason.contains("denetim"), "{reason}"),
+            other => panic!("denetimsiz güncelleme kabul edildi: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_status_reads_both_units_and_reports_an_unknown_box_honestly() {
+        // Sürümü bilinmeyen bir kutu GÜNCEL DEĞİLDİR. "Bilmiyorum"u "güncel" diye raporlamak,
+        // güncellemeyi hiç yapmamanın en sessiz yolu olurdu.
+        no_update_files();
+        let r = MockCommandRunner::with_responses(["inactive".into(), "inactive".into()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"update_status"}"#,
+            peer(API_UID),
+            "up4",
+            "reading update status",
+        );
+        match resp {
+            Response::Update {
+                installed,
+                available,
+                in_progress,
+                up_to_date,
+                ref phase,
+                ..
+            } => {
+                assert!(installed.is_none());
+                assert!(available.is_none());
+                assert!(!in_progress);
+                assert!(!up_to_date);
+                assert_eq!(phase, "idle");
+            }
+            other => panic!("{other:?}"),
+        }
+        let first = r.call(0).expect("ilk birim soruldu");
+        assert_eq!(first[0], bin::SYSTEMCTL);
+        assert_eq!(first[1], "show");
+        assert_eq!(first[4], "--value");
+        assert_eq!(first[5], crate::update::APPLY_UNIT);
+        let second = r.call(1).expect("ikinci birim soruldu");
+        assert_eq!(second[5], crate::update::CHECK_UNIT);
+        assert!(r.call(2).is_none(), "iki birimden fazlası soruldu");
     }
 
     /// Two disks, one of them carrying the running system.

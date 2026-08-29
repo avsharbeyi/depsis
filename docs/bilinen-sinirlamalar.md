@@ -129,19 +129,37 @@ bastırdığı için seri numarası yok. Kod tarafı — serinin opsiyonel olmas
 yönetici bunu doldurabilir; ucun cevabı 429 ve `Retry-After`, yani `EventSource` geri dönüyor —
 ama sınırın doğru sayı olduğu ölçülmedi.
 
-### 2.7 Düzeltilmiş bir hatanın cihaza ulaşacak terminalsiz yolu yok
+### 2.7 Cihazın kendini güncellemesi — ödendi, ve borç olarak kalan kısmı
 
-Ajanda güncelleme işlemi yok, arayüzde güncelleme ekranı yok. Depoda düzelen bir şey, sahadaki
-kutuya ancak ISO yeniden üretilip yeniden kurularak ya da kutuda bir kabuk açılarak gidiyor —
-ikincisi ürünün kabul ölçütüne aykırı, birincisi de verinin durduğu bir cihaz için makul değil.
+Bu başlık bir gün önce "düzeltilmiş bir hatanın cihaza ulaşacak terminalsiz yolu yok" diyordu.
+Borç teorik değildi: `lsblk` hatası ölçüldü, sistem diskini koruyan kapının hiç ateşlenmediği
+kanıtlandı, düzeltmesi `main`e girdi — ve sahadaki cihaz hâlâ hatalı sürümü koşuyordu.
 
-Bu borç bugüne kadar teorikti. `lsblk` hatası onu somutlaştırdı: sistem diskini koruyan kapının
-hiç ateşlenmediği ölçüldü, düzeltmesi `main`'e girdi, ve sahadaki cihaz hâlâ hatalı sürümü
-koşuyor. Bir güvenlik düzeltmesinin kullanıcıya ulaşamaması, düzeltmenin kendisinden daha büyük
-bir kusurdur.
+Artık Sistem ekranında bir **Yazılım sürümü** bölümü var: kurulu sürüm, "Sürüm denetle",
+ve bulunan sürüm için "Güncelle". Yalnız kurucu yönetici, parolayla yeniden kimlik
+doğrulaması, ve her ikisi de denetim kaydına yazılıyor.
 
-§21'in 13. teslimatı (imzalı build ve güncelleme üretim prosedürü) bunun kapsayan işi; sırası
-geldiğinde önce "kutu kendini güncelleyebiliyor mu" sorusu cevaplanmalı, imzalama ondan sonra.
+Tasarımın üç kararı, çünkü hepsinin bir alternatifi vardı ve o alternatif daha kötüydü:
+
+- **İndirmeyi ajan yapmıyor.** `depsis-agent.service` `IPAddressDeny=any` taşıyor: kök yetkili
+  bir daemon internete çıkmaz. Ajanın kapısını açmak yerine indirme ayrı bir birime alındı
+  (`depsis-update.service`); ajanın yaptığı, o birimi başlatmak ve durumunu okumak.
+- **Kurulacak sürümü istek seçmiyor.** `apply_update` işleminin OPERANDI YOK: kurulan şey, bir
+  önceki denetimin bulduğu sürümdür. Böylece ekranda bir sürüm görüp onaylayan yönetici tam onu
+  kurmuş olur, ve o an ile düğme arasında depoya giren bir commit onaylanmamış kod olarak kalır
+  — havuz sihirbazının WWN yeniden doğrulamasıyla aynı kalıp.
+- **Kurulum düşerse geri alınıyor.** Yeni kaynak yerine konmadan önce eskisi saklanıyor;
+  `install.sh` düşerse eski ağaç geri konup yeniden kuruluyor. Geri alması olmayan bir
+  güncelleme mekanizması, cihazı çalışmaz hâlde bırakabilecek tek düğmedir.
+
+**Borç olarak kalan kısım: imza.** İndirilen şey kök yetkiyle kurulacak koddur, ve bugün
+dayandığı tek şey HTTPS ile kaynağın adresinin güncelleyici betikte SABİT olması — depo adı bir
+istekten gelmiyor. Bu, aradaki ağı dışarıda tutar; kaynağın kendisini dışarıda tutmaz. Gerçek
+cevap imzalı sürümlerdir (§21’in 13. teslimatı) ve o gelene kadar bu sınır burada yazılı
+duruyor: bilinen bir sınır, bilinmeyen bir sınırdan iyidir.
+
+**İkinci kalan:** güncelleme kaynaktan derliyor (pnpm + cargo `--release`), yani yavaş bir
+kutuda saatler sürebilir. Önceden derlenmiş bir sürüm akışı da imzayla aynı teslimatın parçası.
 
 ---
 
