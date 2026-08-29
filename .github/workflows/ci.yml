@@ -806,7 +806,15 @@ jobs:
           # `scsi_debug`: udev'in gördüğü GERÇEK SCSI diskleri — kendi VPD sayfaları, yani kendi
           # WWN'leri ve /dev/disk/by-id bağlantılarıyla. ADR-0012'nin disk kimliği zinciri uzun
           # süre "fiziksel donanım ister" diye kapsam dışıydı; gereken tek şey bu modülmüş.
-          sudo modprobe scsi_debug dev_size_mb=1 num_tgts=1 && sudo rmmod scsi_debug
+          #
+          # Koşucunun çekirdeğinde varsayılan olarak YOK, ve `A && B` yazmak bunu SESSİZCE yutar:
+          # `set -e`, bir AND-OR listesinin SON komutu olmayan başarısızlığı yok sayar. İlk koşum
+          # tam böyle "hazır" deyip sıfır sahte disk buldu — adımın kendisi yalan söylüyordu.
+          if ! sudo modprobe scsi_debug dev_size_mb=1 num_tgts=1; then
+            sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
+            sudo modprobe scsi_debug dev_size_mb=1 num_tgts=1
+          fi
+          sudo rmmod scsi_debug
           echo 'scsi_debug hazır'
 
       - name: The appliance layer, for real
