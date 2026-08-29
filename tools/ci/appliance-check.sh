@@ -45,6 +45,7 @@ export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 POOL="${DEPSIS_CI_POOL:-depsisci}"
+ID_POOL="${DEPSIS_CI_ID_POOL:-depsisid}"
 SHARES_ROOT=/srv/depsis-ci
 IMAGES=/var/tmp/depsis-ci-disks
 SOCKET_DIR=/run/depsis
@@ -79,6 +80,10 @@ cleanup() {
   set +e
   [ -n "${AGENT_PID:-}" ] && kill "$AGENT_PID" 2>/dev/null
   zpool destroy "$POOL" 2>/dev/null
+  zpool destroy "$ID_POOL" 2>/dev/null
+  # Sahte SCSI diskleri: modul kaldirilmadan birakilirsa bir sonraki kosumun envanterinde
+  # beklenmedik diskler olarak durur.
+  rmmod scsi_debug 2>/dev/null
   rm -rf "$IMAGES" "$SOCKET_DIR"
 }
 trap cleanup EXIT
@@ -195,6 +200,79 @@ check 'yayınlandı ve DOĞRULANDI' \
 check 'smbd paylaşımı gerçekten sunuyor' \
   "$(smbclient -N -L //127.0.0.1 2>/dev/null)" 'belgeler'
 
+# ── 6b. DISK KIMLIGI ZINCIRI (ADR-0012, risk R1) ────────────────────────────
+#
+# Bu bolum uzun sure "fiziksel donanim ister" diye kapsam disinda birakildi, ve o iddia ZFS icin
+# soylenenle ayni cinstendi: yanlis. `scsi_debug` cekirdek modulu udev in gordugu GERCEK SCSI
+# diskleri uretiyor — kendi VPD sayfalariyla, yani kendi WWN leriyle ve kendi /dev/disk/by-id
+# baglantilariyla. Dosya vdev lerinin tasimadigi tek sey buydu.
+#
+# Burada sinanan sey ADR-0012 nin urune dusen yari: DEPSIS diski ADIYLA degil KIMLIGIYLE tanir,
+# ve havuz kurulurken kimligi ANINDA yeniden dogrular. Risk R1 in tek gercek azaltmasi bu ve
+# bugune kadar hicbir otomatik kapida kosmadi — cunku kosacak bir disk yoktu.
+say 'disk kimligi zinciri (ADR-0012)'
+modprobe scsi_debug dev_size_mb=128 num_tgts=2 2>/dev/null || true
+udevadm settle 2>/dev/null || sleep 2
+
+# Ajanin okudugu KOLONLARIN aynisi (`disks::COLUMNS`): kapinin urunle ayni yerden bakmasi sart,
+# yoksa "lsblk boyle diyor" ile "DEPSIS boyle goruyor" ayrisir ve kapi bir sey kanitlamaz.
+mapfile -t FAKE < <(lsblk -dn -o NAME,MODEL,ID-LINK,WWN | awk '$2 == "scsi_debug" { print $1 "\t" $3 "\t" $4 }')
+check 'iki sahte SCSI diski goruldu' "${#FAKE[@]}" '2'
+
+if [ "${#FAKE[@]}" -ge 2 ]; then
+  D1_NAME=$(printf '%s' "${FAKE[0]}" | cut -f1)
+  D1_BYID=$(printf '%s' "${FAKE[0]}" | cut -f2)
+  D1_WWN=$(printf '%s' "${FAKE[0]}" | cut -f3)
+  D2_BYID=$(printf '%s' "${FAKE[1]}" | cut -f2)
+  D2_WWN=$(printf '%s' "${FAKE[1]}" | cut -f3)
+
+  # ZINCIRIN BIRINCI HALKASI: kararli ad var, ve gercekten o aygiti gosteriyor.
+  check 'by-id baglantisi var ve aygiti gosteriyor' \
+    "$(readlink -f "/dev/disk/by-id/$D1_BYID" 2>/dev/null)" "/dev/$D1_NAME"
+  # IKINCI HALKA: WWN (VPD sayfa 0x83). ADR-0012 kimligi buna dayandiriyor, seriye degil.
+  check 'WWN okunuyor' "$D1_WWN" '0x'
+
+  # UCUNCU HALKA: URUN ayni seyi goruyor mu. lsblk in dogru cevap vermesi yetmez; ajanin
+  # envanteri ayni kimlikleri tasimali.
+  INVENTORY=$(ask disks '{"op":"list_disks"}')
+  check 'ajanin envanteri by-id yi tasiyor' "$INVENTORY" "$D1_BYID"
+  check 'ajanin envanteri WWN i tasiyor' "$INVENTORY" "$D1_WWN"
+
+  # SISTEM DISKI: kutunun kendi diski asla havuz adayi olamaz, ve bu bir diyalog meselesi degil.
+  # Kokun uzerinde durdugu DISK: bolum ustundeyse ust aygiti (PKNAME), degilse aygitin
+  # kendisi — WSL de kok dogrudan bir diskte duruyor ve PKNAME bos donuyor.
+  ROOT_SRC=$(findmnt -no SOURCE / 2>/dev/null | head -1)
+  ROOT_DISK=$(lsblk -no PKNAME "$ROOT_SRC" 2>/dev/null | head -1)
+  [ -n "$ROOT_DISK" ] || ROOT_DISK=$(basename "$ROOT_SRC")
+  # JSON u NODE ayristiriyor, grep degil: bir kapinin kendi olcumu kirilgan olmamali, ve
+  # "holds_system" i satir icinde aramak alanlarin sirasina bagli bir iddiadir.
+  check 'kutunun kendi diski sistem diski olarak isaretli' \
+    "$(printf '%s' "$INVENTORY" | node "$REPO/tools/ci/holds-system.mjs" "$ROOT_DISK")" \
+    'true'
+    '1'
+
+  # HAVUZ, GERCEK DISKLERLE ve DOGRU kimlikle: dosya vdev i buraya kadar gelemiyordu.
+  check 'dogru WWN ile havuz kuruldu' \
+    "$(ask pool "{\"op\":\"create_pool\",\"pool\":\"$ID_POOL\",\"topology\":\"mirror\",\"disks\":[{\"by_id\":\"$D1_BYID\",\"wwn\":\"$D1_WWN\"},{\"by_id\":\"$D2_BYID\",\"wwn\":\"$D2_WWN\"}]}")" \
+    '"status":"pool_created"'
+  check 've havuz gercekten var' "$(zpool list -H -o name "$ID_POOL" 2>&1)" "$ID_POOL"
+  zpool destroy "$ID_POOL" 2>/dev/null
+
+  # RISK R1 IN TEK GERCEK AZALTMASI: sihirbazin diski listeledigi an ile dugmeye basildigi an
+  # arasinda disk degistirilebilir, ve /dev/disk/by-id bir YUVAYI degil bir AYGITI adlandirir —
+  # yani ayni ad baska bir disk olabilir. Ajan envanteri KENDISI, tam o anda okuyup WWN i
+  # karsilastiriyor. Yanlis WWN ile ayni istek REDDEDILMELI.
+  check 'yanlis WWN ile ayni istek reddediliyor' \
+    "$(ask pool "{\"op\":\"create_pool\",\"pool\":\"$ID_POOL\",\"topology\":\"mirror\",\"disks\":[{\"by_id\":\"$D1_BYID\",\"wwn\":\"0xdeadbeefdeadbeef\"},{\"by_id\":\"$D2_BYID\",\"wwn\":\"$D2_WWN\"}]}")" \
+    'not the one that was confirmed'
+  check 've reddedilen havuz gercekten kurulmadi' "$(zpool list -H -o name "$ID_POOL" 2>&1)" 'no such pool'
+
+  # Diski silme de ayni kimlik kapisindan geciyor: yanlis WWN, silme icin de yeterli degil.
+  check 'yanlis WWN ile disk silme de reddediliyor' \
+    "$(ask wipe "{\"op\":\"wipe_disk\",\"disk\":{\"by_id\":\"$D1_BYID\",\"wwn\":\"0xdeadbeefdeadbeef\"}}")" \
+    'not the one that was confirmed'
+fi
+
 # ── 7. Sınırın iki yarısı: TypeScript istemci ↔ Rust ajan ──────────────────
 #
 # Migration işi bu dosyayı DIŞLIYOR (canlı soket yok). Kapsandığı tek yer burası.
@@ -216,6 +294,7 @@ check 've hiçbir testi atlamadı' \
 
 # ── sonuç ────────────────────────────────────────────────────────────────────
 printf '\n%d geçti, %d düştü\n' "$pass" "$fail"
-printf 'Kapsanmayan, ve hâlâ fiziksel donanım isteyen tek şey: ADR-0012 disk kimliği zinciri\n'
-printf '(/dev/disk/by-id, seri/WWN) — P0-A §1. Dosya vdev%s onu taşımıyor.\n' "'leri"
+printf 'Kapsanmayan tek sey: ADR-0000/0012 nin HYPER-V e ozgu olgusu — storvsc INQUIRY sayfa\n'
+printf '0x80 i bastirdigi icin orada seri numarasi YOK. Bu bir hipervizor davranisi, urun kodu\n'
+printf 'degil; kod tarafi (seri opsiyonel, kimlik WWN e dayali) yukarida sinaniyor.\n'
 [ "$fail" -eq 0 ]
