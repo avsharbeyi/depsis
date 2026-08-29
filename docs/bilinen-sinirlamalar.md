@@ -505,6 +505,17 @@ kutuda saatler sürebilir. Önceden derlenmiş bir sürüm akışı da imzayla a
 
 Bunları "yapılmadı" diye saymak yanıltıcı olur; yapılamıyorlar:
 
-- **iOS.** Mac, Apple geliştirici hesabı ve entitlement onayı gerekiyor. Spec'in kendisi "iOS,
-  entitlement doğrulamasından sonra" diyor (§3.3, Faz 3).
-- **Android'in derlenmesi.** SDK bu makinede kurulu değil; kod yazılabilir, üretilemez.
+- **YERLİ (native) mobil uygulamalar.** Bu maddeyi yanlış okumamak önemli: DEPSIS'in mobil hâli
+  YOK DEĞİL. Ürünün mobil teslimatı bir PWA — `apps/web/public/manifest.webmanifest` ile
+  kurulabilir, `display: standalone`, ve uygulama kabuğunu önbelleğe alan küçük bir service
+  worker'ı var. Telefondan ana ekrana ekleniyor ve cihazla birlikte geliyor: bir mağaza, bir
+  imza ve bir SDK gerektirmiyor.
+
+  Olmayan şey YERLİ bir uygulama, ve o gerçekten bu kutudan çıkmıyor: iOS için Mac, Apple
+  geliştirici hesabı ve entitlement onayı gerekiyor (spec'in kendisi "iOS, entitlement
+  doğrulamasından sonra" diyor — §3.3, Faz 3); Android için Android SDK, ve o bu makinede kurulu
+  değil.
+
+  Yerli bir uygulamanın PWA'nın üstüne koyacağı şeyler de bu yüzden yok: arka planda yükleme,
+  işletim sistemi düzeyinde paylaşım hedefi, ve iOS'ta tarayıcının depolamayı boşaltmasına karşı
+  dayanıklılık. Bunlar "yapılmadı" değil, "bu kutudan çıkmıyor".
