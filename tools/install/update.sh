@@ -214,6 +214,25 @@ cmd_check() {
   ')"
 }
 
+# ── imza ─────────────────────────────────────────────────────────────────────
+
+# Bir Ed25519 imzasını doğrular.
+#
+# `pkeyutl -rawin`, `dgst -sha256 -verify` DEĞİL, ve bu ayrım ölçüldü: Ed25519 "saf" bir imza
+# algoritması — özeti kendi içinde alıyor ve ona dışarıdan bir özet dayatmak openssl
+# tarafından reddediliyor ("Explicit digest not allowed with EdDSA operations"). İlk hâli tam
+# olarak bunu yapıyordu; kimse bir sürüm çıkarmayı denemediği için de görünmüyordu.
+#
+# KENDİ ALT KOMUTU OLMASININ SEBEBİ bu: `appliance` kapısı bu komutu ÜRÜNÜN kendi kodundan
+# çağırıyor. Kapının kendi kopyasını yazmış olsaydı, doğruladığı şey kendi kopyası olurdu.
+# İkinci faydası bir insana: indirdiği bir arşivi elle doğrulamak isteyen biri de bunu
+# çağırabilir.
+verify_signature() {
+  local pubkey="$1" file="$2" signature="$3"
+  openssl pkeyutl -verify -rawin -pubin -inkey "$pubkey" \
+    -sigfile "$signature" -in "$file" >/dev/null 2>&1
+}
+
 # ── kurulum ──────────────────────────────────────────────────────────────────
 
 # İmzalı bir sürümü indirir, DOĞRULAR, ve kurar.
@@ -241,8 +260,7 @@ apply_release() {
   fi
 
   phase verifying
-  if ! openssl dgst -sha256 -verify "$RELEASE_PUBKEY" \
-    -signature "$work/src.tar.gz.sig" "$work/src.tar.gz" >/dev/null 2>&1; then
+  if ! verify_signature "$RELEASE_PUBKEY" "$work/src.tar.gz" "$work/src.tar.gz.sig"; then
     rm -rf "$work"
     fail 'IMZA DOGRULANAMADI: bu arsiv bu cihazin guvendigi anahtarla imzalanmamis. Hicbir sey kurulmadi.'
   fi
@@ -360,6 +378,19 @@ cmd_apply() {
 case "${1:-}" in
   check) cmd_check ;;
   apply) cmd_apply ;;
+  # Kapının ve elle doğrulamak isteyen bir insanın kullandığı yol. Hiçbir şey değiştirmiyor.
+  verify)
+    [ $# -eq 4 ] || {
+      printf 'kullanim: update.sh verify <acik-anahtar> <dosya> <imza>\n' >&2
+      exit 2
+    }
+    if verify_signature "$2" "$3" "$4"; then
+      printf 'imza dogrulandi\n'
+    else
+      printf 'IMZA DOGRULANAMADI\n' >&2
+      exit 1
+    fi
+    ;;
   *)
     printf 'kullanım: update.sh check|apply\n' >&2
     exit 2
