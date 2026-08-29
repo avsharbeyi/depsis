@@ -262,9 +262,15 @@ if [ "${#FAKE[@]}" -ge 2 ]; then
 ' "$D1_BYID" "$D1_WWN" "$D2_BYID" "$D2_WWN"
   check 'iki sahte diskin kimlikleri farkli'     "$([ "$D1_BYID" != "$D2_BYID" ] && [ "$D1_WWN" != "$D2_WWN" ] && echo FARKLI || echo AYNI)"     'FARKLI'
 
-  # HAVUZ, GERCEK DISKLERLE ve DOGRU kimlikle: dosya vdev i buraya kadar gelemiyordu.
+  # HAVUZ, GERCEK BIR DISKLE ve DOGRU kimlikle: dosya vdev i buraya kadar gelemiyordu.
+  #
+  # TEK DISK, ve sebebi urun degil DUZENEK: scsi_debug in butun hedefleri AYNI ram deposunu
+  # paylasiyor — birine yazilan digerinden okunuyor (olculdu: ayni md5; per_host_store=1 ve
+  # ikinci bir host da degistirmedi). ZFS de haklı olarak "vdevs refer to the same device"
+  # diyor. Ayna yolu bu kapinin BASINDA zaten dosya vdev leriyle kuruluyor; burada sinanan sey
+  # topoloji degil KIMLIK, ve kimlik disk basina dogrulaniyor.
   check 'dogru WWN ile havuz kuruldu' \
-    "$(ask pool "{\"op\":\"create_pool\",\"pool\":\"$ID_POOL\",\"topology\":\"mirror\",\"disks\":[{\"by_id\":\"$D1_BYID\",\"wwn\":\"$D1_WWN\"},{\"by_id\":\"$D2_BYID\",\"wwn\":\"$D2_WWN\"}]}")" \
+    "$(ask pool "{\"op\":\"create_pool\",\"pool\":\"$ID_POOL\",\"topology\":\"single\",\"disks\":[{\"by_id\":\"$D1_BYID\",\"wwn\":\"$D1_WWN\"}]}")" \
     '"status":"pool_created"'
   check 've havuz gercekten var'     "$(zpool list -H -o name "$ID_POOL" 2>/dev/null || echo YOK-BOYLE-BIR-HAVUZ)" "$ID_POOL"
   zpool destroy "$ID_POOL" 2>/dev/null
@@ -274,7 +280,7 @@ if [ "${#FAKE[@]}" -ge 2 ]; then
   # yani ayni ad baska bir disk olabilir. Ajan envanteri KENDISI, tam o anda okuyup WWN i
   # karsilastiriyor. Yanlis WWN ile ayni istek REDDEDILMELI.
   check 'yanlis WWN ile ayni istek reddediliyor' \
-    "$(ask pool "{\"op\":\"create_pool\",\"pool\":\"$ID_POOL\",\"topology\":\"mirror\",\"disks\":[{\"by_id\":\"$D1_BYID\",\"wwn\":\"0xdeadbeefdeadbeef\"},{\"by_id\":\"$D2_BYID\",\"wwn\":\"$D2_WWN\"}]}")" \
+    "$(ask pool "{\"op\":\"create_pool\",\"pool\":\"$ID_POOL\",\"topology\":\"single\",\"disks\":[{\"by_id\":\"$D1_BYID\",\"wwn\":\"0xdeadbeefdeadbeef\"}]}")" \
     'not the one that was confirmed'
   # `2>&1` DEGIL: zpool un "cannot open 'depsisid': no such pool" hatasi havuzun ADINI iceriyor,
   # yani alt dizge araması havuz VARKEN de YOKKEN de geciyordu. Yokluk kendi sozcugunu almali.
