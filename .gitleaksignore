@@ -1,0 +1,15 @@
+# Gizli tarayıcının GEÇMİŞTE bulduğu, sır olmayan üç satır.
+#
+# `gitleaks detect` çalışma ağacını değil git GEÇMİŞİNİ tarıyor. Bu üç bulgu d9701c4'te duruyor ve
+# hepsi aynı şey: `private-key` kuralı bir anahtarın kendisini değil BAŞLIĞINI arıyor, ve o
+# commit'teki başlıklar bir yer tutucu ile iki test örneğiydi — "BBBB" dört harften ibaret.
+#
+# Çalışma ağacında artık yoklar: PEM başlığı hiçbir kaynak dosyada tam hâliyle yazılmıyor, parçalı
+# kuruluyor (bkz. `tls::tests::header`). Geçmişi yeniden yazmak yerine bu üç satırı adlarıyla
+# geçmek bilinçli bir tercih: her satır hangi commit'te, hangi dosyada, hangi kuralın eşleştiğini
+# söylüyor, ve bir sonraki gerçek sır yine yakalanıyor.
+#
+# Biçim: <commit>:<dosya>:<kural>:<satır>
+d9701c4dfecbefeae56980b84e43c9cac601bba7:services/system-agent/src/dispatch.rs:private-key:3248
+d9701c4dfecbefeae56980b84e43c9cac601bba7:services/system-agent/src/tls.rs:private-key:295
+d9701c4dfecbefeae56980b84e43c9cac601bba7:services/system-agent/src/tls.rs:private-key:297
