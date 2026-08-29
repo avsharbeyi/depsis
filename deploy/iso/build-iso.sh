@@ -65,7 +65,11 @@ if [ -z "$SRC_ISO" ]; then
 fi
 [ -f "$SRC_ISO" ] || { echo "ISO yok: $SRC_ISO" >&2; exit 1; }
 
+# İKİ BİÇİM, ve ikisinin işi ayrı. Kısası ISO dosyasının adında — insan okur. TAMI kutuya
+# yazılır, çünkü güncelleme denetimi onu GitHub’ın verdiği kırk haneli kimlikle karşılaştırır
+# ve kısaltılmış bir kimlik o karşılaştırmayı sessizce hep "farklı" yapardı.
 VERSION="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo dev)"
+VERSION_FULL="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo dev)"
 [ -n "$OUT_ISO" ] || OUT_ISO="$REPO/deploy/iso/depsis-installer-$VERSION.iso"
 
 # ── 2. yük: /depsis dizini ────────────────────────────────────────────────────
@@ -81,7 +85,7 @@ chmod 0755 "$PAY/firstboot.sh"
 # sızmaz, ve ISO'nun içeriği tek bir commit'le adlandırılabilir.
 echo "→ kaynak paketleniyor (HEAD = $VERSION)"
 git -C "$REPO" archive --format=tar.gz -o "$PAY/depsis-src.tar.gz" HEAD
-printf '%s\n' "$VERSION" > "$PAY/VERSION"
+printf '%s\n' "$VERSION_FULL" > "$PAY/VERSION"
 
 # ── 3. önyükleme menüleri ────────────────────────────────────────────────────
 #

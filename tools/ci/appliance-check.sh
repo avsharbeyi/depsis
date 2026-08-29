@@ -126,11 +126,19 @@ check 'smbd 445 dinliyor' "$(ss -tln 2>/dev/null | grep ':445' | head -1)" ':445
 # ÜRETİMDEKİ yollar, çünkü probe istemcisi (tools/poc/agent-client.mjs) onları biliyor.
 say 'ayrıcalıklı ajan'
 install -d -m 0755 "$SOCKET_DIR"
+# Guncelleme dosyalarinin yolu ORTAMDAN (samba yapilandirmasiyla ayni gerekce): kapi boylece
+# kutunun gercek /etc ve /var/lib ine dokunmadan surum mantigini ucdan uca olcebiliyor.
+UPDATE_DIR="$IMAGES/update"
+install -d -m 0700 "$UPDATE_DIR"
 DEPSIS_API_UID="$API_UID" DEPSIS_SHARES_ROOT="$SHARES_ROOT" DEPSIS_ZFS_POOLS="$POOL" \
+  DEPSIS_UPDATE_STATE="$UPDATE_DIR/state.json" \
+  DEPSIS_UPDATE_LOG="$UPDATE_DIR/log" \
+  DEPSIS_INSTALLED_VERSION="$UPDATE_DIR/version" \
   systemd-socket-activate \
   -l "$SOCKET_DIR/agent.sock" --fdname=control \
   -l "$SOCKET_DIR/agent-data.sock" --fdname=data \
   -E DEPSIS_API_UID -E DEPSIS_SHARES_ROOT -E DEPSIS_ZFS_POOLS \
+  -E DEPSIS_UPDATE_STATE -E DEPSIS_UPDATE_LOG -E DEPSIS_INSTALLED_VERSION \
   "$AGENT_BIN" --serve >"$LOG" 2>&1 &
 AGENT_PID=$!
 
@@ -291,6 +299,40 @@ if [ "${#FAKE[@]}" -ge 2 ]; then
     "$(ask wipe "{\"op\":\"wipe_disk\",\"disk\":{\"by_id\":\"$D1_BYID\",\"wwn\":\"0xdeadbeefdeadbeef\"}}")" \
     'not the one that was confirmed'
 fi
+
+# ── 6c. GUNCELLEME YOLU ─────────────────────────────────────────────────────
+#
+# Kutunun kendini guncelleyebilmesi. Burada sinanan sey INDIRME degil — o ayri bir systemd
+# birimidir ve agi gerektirir — AJANIN KARARLARI: hangi durumda ne reddediliyor.
+#
+# En onemlisi ikinci iddia. Guncelleme isteginin OPERANDI YOK: hangi kodun kok yetkiyle
+# kurulacagini cagiran secemez, bir onceki DENETIM secer. Denetim yapilmamissa onaylanmis bir
+# surum de yoktur ve istek reddedilmelidir. Urunun en tehlikeli dugmesinin en ucuz savunmasi bu,
+# ve gercek bir kutuda hic kosmamisti.
+say 'guncelleme yolu'
+
+check 'guncelleme durumu okunuyor' "$(ask update '{"op":"update_status"}')" '"status":"update"'
+check 'surumu bilinmeyen kutu GUNCEL sayilmiyor' \
+  "$(ask update '{"op":"update_status"}')" '"up_to_date":false'
+check 'denetimsiz guncelleme reddediliyor' \
+  "$(ask update '{"op":"apply_update"}')" 'bilinmiyor'
+
+# Kurulu surum ile bulunan surum AYNI iken de reddediliyor: bir guncelleme kutuyu dakikalarca
+# mesgul edip hicbir sey degistirmemeli.
+printf '%s\n' 'ffffffffffffffffffffffffffffffffffffffff' >"$UPDATE_DIR/version"
+printf '%s\n' '{"phase":"idle","available":{"commit":"ffffffffffffffffffffffffffffffffffffffff"}}' \
+  >"$UPDATE_DIR/state.json"
+check 'kurulu surum bulunan surumle ayniysa reddediliyor' \
+  "$(ask update '{"op":"apply_update"}')" 'zaten bulunan'
+check 've ajan kurulu surumu bildiriyor' \
+  "$(ask update '{"op":"update_status"}')" '"up_to_date":true'
+
+# Yarim kalmis bir durum dosyasi: guc kesintisi guncelleyicinin yazma anina denk gelirse boyle
+# kalir. Ekranin o durumda soylemesi gereken sey "bir sey bozuldu", "her sey yolunda" degil.
+printf '%s' '{"phase":"instal' >"$UPDATE_DIR/state.json"
+check 'bozuk durum dosyasi hata olarak bildiriliyor' \
+  "$(ask update '{"op":"update_status"}')" '"phase":"failed"'
+rm -f "$UPDATE_DIR/state.json" "$UPDATE_DIR/version"
 
 # ── 7. Sınırın iki yarısı: TypeScript istemci ↔ Rust ajan ──────────────────
 #

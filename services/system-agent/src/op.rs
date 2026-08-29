@@ -1466,6 +1466,38 @@ pub enum Request {
     #[serde(rename = "kill_process")]
     KillProcess { pid: u32, comm: String },
 
+    /// Kutu hangi sürümde, ve bir güncelleme koşuyor mu.
+    ///
+    /// Üç kaynağı birleştiriyor: `/etc/depsis/version` (kurulumun yazdığı commit), güncelleyicinin
+    /// `state.json`'u, ve `systemctl`'in iki birim hakkında söylediği. Üçüncüsü olmadan olmazdı —
+    /// durum dosyası, güncelleyici onu yazmaya fırsat bulamadan öldüyse (OOM, güç kesintisi)
+    /// sonsuza kadar "installing" der; birimin gerçekten çalışıp çalışmadığını yalnız systemd
+    /// bilir.
+    #[serde(rename = "update_status")]
+    UpdateStatus {},
+
+    /// Yeni bir sürüm var mı diye BAK. Kurmaz.
+    ///
+    /// Ajan ağa çıkmaz (`IPAddressDeny=any`); bu işlem yalnızca `depsis-update-check.service`'i
+    /// başlatır ve o birim indirmeyi kendi sanal alanında yapar. Cevap hemen dönmez — denetim
+    /// birkaç saniye sürer ve sonucu `update_status` gösterir. Bunu senkron yapmak, ağı bekleyen
+    /// bir çağrının SIRALI kontrol soketini kilitlemesi demek olurdu.
+    #[serde(rename = "check_update")]
+    CheckUpdate {},
+
+    /// DENETİMİN BULDUĞU sürümü kur.
+    ///
+    /// OPERANDI YOK, ve bu bir eksiklik değil tasarımın kendisi. Hangi kodun kök yetkiyle kurulacağı
+    /// sorusunu çağıran cevaplayamaz; cevabı bir önceki denetim `state.json`'a yazmıştır. Böylece
+    /// ekranda bir commit görüp onaylayan operatör tam onu kurmuş olur, ve o an ile düğmeye basma
+    /// anı arasında depoya giren bir commit onaylanmamış kod olarak kalır — havuz sihirbazının WWN
+    /// yeniden doğrulamasıyla aynı kalıp, aynı gerekçe.
+    ///
+    /// Kurulum dakikalarca sürer ve bu işlem onu BEKLEMEZ: `systemctl start --no-block` ile birimi
+    /// başlatıp döner. Süreci `update_status` izler.
+    #[serde(rename = "apply_update")]
+    ApplyUpdate {},
+
     /// What `zpool status` says about scrubbing this pool.
     ///
     /// The visibility half, and the half that was missing. Debian's `zfsutils-linux` already puts
@@ -1850,6 +1882,19 @@ pub const MAX_LISTING: usize = 5_000;
 /// Partitions are not reported as disks. They appear only through `holds`, `mounted` and
 /// `holds_system` — which is what a caller about to overwrite the device needs to know, and a
 /// per-partition inventory is not.
+/// Kurulabilecek bir sürüm — DENETİMİN bulduğu, isteğin seçtiği değil.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateCandidate {
+    /// Commit kimliği. DEPSIS'in sürüm kavramı bu: kutuya kurulan şey deponun bir anıdır, ve
+    /// etiketlenmiş bir sürüm akışı henüz yok (§21'in 13. teslimatı).
+    pub commit: String,
+    /// Commit başlığının ilk satırı. Operatörün "bu ne getiriyor" sorusuna verilebilecek tek
+    /// dürüst cevap, ve yorumlanmadan taşınıyor.
+    pub subject: Option<String>,
+    pub committed_at: Option<String>,
+}
+
 /// One database dump on disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -2257,6 +2302,32 @@ pub enum Response {
         full_name: String,
     },
 
+    /// Güncellemenin bütün durumu, tek yanıtta.
+    #[serde(rename = "update")]
+    Update {
+        /// Kurulu commit. `install.sh` yazmadıysa YOK — ve yokluk "güncel" diye okunmaz.
+        installed: Option<String>,
+        /// Son denetimin bulduğu sürüm. Hiç denetim yapılmadıysa yok.
+        available: Option<UpdateCandidate>,
+        /// Güncelleyicinin kendi yazdığı faz, yorumlanmadan. Bilinen değerler `idle`, `checking`,
+        /// `downloading`, `building`, `installing`, `verifying`, `rolling_back`, `done`, `failed`.
+        phase: String,
+        /// Şu anda bir şey koşuyor mu. `phase` ile systemd'nin cevabının BİRLEŞİMİ, ve tanınmayan
+        /// bir faz koşuyor sayılır: bilinmezlikte doğru davranış, ikinci bir güncellemeye izin
+        /// vermemektir.
+        in_progress: bool,
+        /// Kurulu sürüm ile bulunan sürüm aynı mı. İkisinden biri bilinmiyorsa `false`.
+        up_to_date: bool,
+        checked_at: Option<String>,
+        started_at: Option<String>,
+        finished_at: Option<String>,
+        /// Son başarısızlığın cümlesi. Faz `failed` değilken de dolu olabilir: geri alınmış bir
+        /// güncellemenin sebebi, kutu yeniden çalışır hâle geldikten sonra da okunmalıdır.
+        error: Option<String>,
+        /// Güncelleyicinin günlüğünün son satırları. Uzun bir kurulumun "hâlâ yaşıyor" kanıtı.
+        log_tail: Vec<String>,
+    },
+
     /// The off-site identity and the destinations this appliance trusts.
     #[serde(rename = "offsite")]
     Offsite {
@@ -2610,7 +2681,12 @@ pub enum ZeroTierNetworkStatus {
 /// enforcing, and a share would look restricted while SMB let everyone in.
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
-pub const SCHEMA_VERSION: u32 = 26;
+///
+/// 27, güncelleme işlemleriyle: `update_status`, `check_update`, `apply_update` ve `Response::Update`.
+/// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
+/// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
+/// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
+pub const SCHEMA_VERSION: u32 = 27;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

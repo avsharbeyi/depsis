@@ -306,6 +306,9 @@ accounts() {
   # 0700 root: sertifikanın özel anahtarı burada. Dizinin kendisi de kapalı olmalı, çünkü 0400 bir
   # dosya, listelenebilir bir dizinde en azından adını söyler.
   install -d -m 0700 "$TLS_DIR"
+  # Güncelleyicinin durumu ve günlüğü. 0700: içindeki günlük bir kurulumun tam çıktısı ve
+  # kurulum çıktısı, kutunun yapılandırmasını satır satır anlatır.
+  install -d -m 0700 "$VAR/update"
   ok "dizinler: $PREFIX, $ETC, $TLS_DIR, $VAR, $SHARES_ROOT"
 }
 
@@ -418,6 +421,11 @@ payload() {
     install -m 0755 "$REPO/target/release/$bin" "$PREFIX/$bin"
   done
   ok "ajan ve konsol ikilileri $PREFIX altında"
+
+  # Güncelleyici. $PREFIX altında, ÇÜNKÜ kaynak ağacı (/opt/depsis) güncelleme sırasında
+  # yerinden oynuyor — betiğin altındaki zemin, o betik koşarken kaybolmamalı.
+  install -m 0755 "$REPO/tools/install/update.sh" "$PREFIX/update.sh"
+  ok "güncelleyici $PREFIX/update.sh"
 
   # `pnpm deploy --prod` bir SELF-CONTAINED dizin üretiyor: düz bir node_modules ve dist/.
   # Çalışma alanını kopyalamak işe yaramıyor, çünkü pnpm'in paket başına node_modules'ü depo
@@ -730,6 +738,92 @@ units() {
   ok 'API ve worker başlatıldı; ajan ve konsol yeni ikiliye çevrildi'
 }
 
+# ─── 9b. sürüm ve kurulum argümanları ─────────────────────────────────────────
+#
+# İkisi de GÜNCELLEME İÇİN var, ve ikisi de olmadan güncelleme yapılamaz.
+#
+# `/etc/depsis/version` kutunun hangi kaynaktan kurulduğunu söyler. Onsuz "yeni sürüm var mı"
+# sorusunun karşılaştıracak bir şeyi olmaz; DEPSIS'in sürüm kavramı bir commit kimliğidir, çünkü
+# kutuya kurulan şey deponun bir anıdır (etiketli sürüm akışı §21'in 13. teslimatı).
+#
+# `/etc/depsis/install.args` bu kurulumun ETKİN argümanlarıdır, satır başına bir tane.
+# Güncelleyici kurulumu tekrar koşarken onları AYNEN tekrarlar — çünkü bir güncellemenin
+# yapmaması gereken tek şey, kutunun yapılandırmasını sessizce değiştirmektir: farklı bir
+# `--shares-root` ile koşan bir kurulum, paylaşımları bulunmayan bir yere taşırdı.
+
+version_and_args() {
+  step 'sürüm ve kurulum argümanları'
+
+  # Sırayla: güncelleyicinin ağaca yazdığı kimlik, git çalışma ağacı, ISO'nun yazdığı dosya.
+  # Hiçbiri yoksa DOSYA YAZILMAZ — "bilinmiyor" diye bir sürüm yazmak, güncelleme ekranına
+  # karşılaştırılabilir görünen bir değer verirdi.
+  local version=''
+  if [ -f "$REPO/.depsis-version" ]; then
+    version="$(head -1 "$REPO/.depsis-version" | tr -d '[:space:]')"
+  elif git -C "$REPO" rev-parse HEAD >/dev/null 2>&1; then
+    version="$(git -C "$REPO" rev-parse HEAD)"
+  elif [ -f /opt/depsis-install/VERSION ]; then
+    version="$(head -1 /opt/depsis-install/VERSION | tr -d '[:space:]')"
+  fi
+  if [ -n "$version" ]; then
+    printf '%s
+' "$version" > "$ETC/version"
+    ok "kurulu sürüm: $version"
+  else
+    warn 'kurulan kaynağın sürümü belirlenemedi; güncelleme denetimi karşılaştırma yapamayacak'
+  fi
+
+  # ETKİN değerler, verilen argümanlar değil: `--hostname` verilmediyse burada `hostname`in
+  # cevabı yazılı olur, ve güncelleme o adı korur. Verilmemiş bir argümanı yazmamak, bir sonraki
+  # kurulumun başka bir cevap bulmasına ve kutunun adının kendiliğinden değişmesine yol açardı.
+  {
+    printf -- '--hostname
+%s
+' "$HOSTNAME_WANTED"
+    printf -- '--server-name
+%s
+' "$SERVER_NAME"
+    printf -- '--api-port
+%s
+' "$API_PORT"
+    printf -- '--db-name
+%s
+' "$DB_NAME"
+    printf -- '--db-host
+%s
+' "$DB_HOST"
+    printf -- '--db-port
+%s
+' "$DB_PORT"
+    printf -- '--db-superuser
+%s
+' "$DB_SUPERUSER"
+    printf -- '--shares-root
+%s
+' "$SHARES_ROOT"
+    # `if`, `[ … ] && …` DEĞİL. `set -e` altında bir AND-OR listesinin son çalışan komutunun
+    # düşmesi betiği sonlandırır, ve bu dört testin düşmesi olağan hâl: çoğu kutuda ayrı bir üst
+    # veri kümesi, elle verilmiş havuz listesi ya da HSTS yok. Kısa biçim, kurulumu tam da bu
+    # dosyanın `payload` bölümünde yorumlanan tuzağa düşürürdü.
+    if [ -n "$SHARE_PARENT_DATASET" ]; then printf -- '--share-parent-dataset
+%s
+' "$SHARE_PARENT_DATASET"; fi
+    if [ -n "$ZFS_POOLS" ]; then printf -- '--zfs-pools
+%s
+' "$ZFS_POOLS"; fi
+    if [ -n "$SMART_DISKS" ]; then printf -- '--smart-disks
+%s
+' "$SMART_DISKS"; fi
+    if [ "$WANT_HSTS" = yes ]; then printf -- '--hsts
+'; fi
+    # Güncelleme HER ZAMAN gözetimsizdir: ekranda duran kimse yok.
+    printf -- '--unattended
+'
+  } > "$ETC/install.args"
+  chmod 0600 "$ETC/install.args"
+  ok 'kurulum argümanları güncelleme için kaydedildi'
+}
+
 # ─── 10. sağlık ───────────────────────────────────────────────────────────────
 
 verify() {
@@ -858,5 +952,6 @@ tls
 reverse_proxy
 samba_conf
 units
+version_and_args
 verify
 finish

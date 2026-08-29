@@ -1,0 +1,43 @@
+# DEPSIS'i, DENETİMİN BULDUĞU sürüme günceller.
+#
+# Kaynağı indirir, eskisini saklar, `install.sh`i koşturur, düşerse eskisine geri döner.
+# Ayrıntılar ve gerekçeler `/usr/local/lib/depsis/update.sh` başındaki yorumda.
+#
+# NEDEN AYRI BİR BİRİM. Kurulum, API'yi, worker'ı, nginx'i ve AJANI yeniden başlatıyor. Bu iş
+# ajanın içinden yürütülseydi, ajan kendi yeniden başlatılışını beklerken ölürdü ve güncelleme
+# yarıda kalırdı — kurulumun en kötü anında, ikili dosyalar değişmişken. Ayrı bir birim olarak
+# systemd onu kimsenin yeniden başlatmadığı bir süreç olarak taşıyor.
+
+[Unit]
+Description=DEPSIS güncellemesi
+Documentation=file:///usr/share/doc/depsis/adr/0006-system-agent.md
+After=network-online.target
+Wants=network-online.target
+Conflicts=depsis-update-check.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/depsis/update.sh apply
+
+# ÜÇ SAAT. Abartı değil: kurulum kaynaktan derliyor (pnpm + cargo --release) ve bu ürünün
+# hedeflediği kutular arasında 2009 model iki çekirdekli makineler var. `infinity` DEĞİL ama —
+# sonsuz bir zaman aşımı, asılı kalmış bir güncellemeyi normal görünen bir duruma çevirir.
+TimeoutStartSec=10800
+
+# Kurulum sırasında sistem yavaşlamalı ama durmamalı: bu iş, kullanıcının o an dosyalarına
+# erişmesinden daha az acildir.
+Nice=10
+IOSchedulingClass=idle
+
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=depsis-update
+
+# [Install] BİLEREK YOK: bu birim boot'ta değil, düğmeye basılınca çalışır.

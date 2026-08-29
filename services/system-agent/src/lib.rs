@@ -56,6 +56,7 @@ pub mod smart;
 pub mod snapshots;
 pub mod sweep;
 pub mod transfer;
+pub mod update;
 pub mod zerotier;
 pub mod ztcontroller;
 pub mod ztstate;

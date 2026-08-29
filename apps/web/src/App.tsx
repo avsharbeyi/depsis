@@ -952,6 +952,7 @@ function PaneBody({
         <System
           snapshot={snapshot}
           onProcesses={isAdmin ? () => onOpenPane('processes') : undefined}
+          notify={notify}
         />
       );
     case 'account':

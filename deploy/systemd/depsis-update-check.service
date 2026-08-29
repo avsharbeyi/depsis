@@ -1,0 +1,38 @@
+# Yeni bir DEPSIS sürümü var mı diye bakar. İNDİRMEZ, KURMAZ.
+#
+# Kendi birimi olmasının sebebi ajanın birimi: `depsis-agent.service` `IPAddressDeny=any` taşıyor
+# ve tek deliği localhost — kök yetkili bir daemon'ın internete çıkmaması bilinçli bir karar.
+# Güncelleme ise ağdan bir şey okumak. Ajanın kapısını açmak yerine, ağa çıkan iş buraya alındı:
+# ajan yalnızca bu birimi başlatır ve sonucunu durum dosyasından okur.
+#
+# Kendiliğinden koşmaz: ne timer'ı var ne de [Install] bölümü. Bir cihazın kendi kendine sürüm
+# denetimi yapması, sahibinin haberi olmadan dışarıya bağlanması demektir; denetim, ekrandaki
+# düğmeye basılınca olur.
+
+[Unit]
+Description=DEPSIS güncelleme denetimi
+Documentation=file:///usr/share/doc/depsis/adr/0006-system-agent.md
+After=network-online.target
+Wants=network-online.target
+# İkisi aynı anda koşmamalı: denetim, kurulumun okuduğu "kurulacak sürüm" alanını yazıyor.
+Conflicts=depsis-update.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/depsis/update.sh check
+# Ağ yavaşsa bile bir denetim iki dakikadan uzun sürmemeli; sürüyorsa cevap gelmeyecek demektir.
+TimeoutStartSec=180
+
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYSLOG CAP_SYS_TIME CAP_WAKE_ALARM
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=depsis-update
+
+# [Install] BİLEREK YOK. Bu birim elle etkinleştirilecek bir şey değil; onu ajan başlatır.

@@ -919,6 +919,48 @@
       ]
     },
     {
+      "description": "Kutu hangi sürümde, ve bir güncelleme koşuyor mu.\n\nÜç kaynağı birleştiriyor: `/etc/depsis/version` (kurulumun yazdığı commit), güncelleyicinin\n`state.json`'u, ve `systemctl`'in iki birim hakkında söylediği. Üçüncüsü olmadan olmazdı —\ndurum dosyası, güncelleyici onu yazmaya fırsat bulamadan öldüyse (OOM, güç kesintisi)\nsonsuza kadar \"installing\" der; birimin gerçekten çalışıp çalışmadığını yalnız systemd\nbilir.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "update_status"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "Yeni bir sürüm var mı diye BAK. Kurmaz.\n\nAjan ağa çıkmaz (`IPAddressDeny=any`); bu işlem yalnızca `depsis-update-check.service`'i\nbaşlatır ve o birim indirmeyi kendi sanal alanında yapar. Cevap hemen dönmez — denetim\nbirkaç saniye sürer ve sonucu `update_status` gösterir. Bunu senkron yapmak, ağı bekleyen\nbir çağrının SIRALI kontrol soketini kilitlemesi demek olurdu.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "check_update"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
+      "description": "DENETİMİN BULDUĞU sürümü kur.\n\nOPERANDI YOK, ve bu bir eksiklik değil tasarımın kendisi. Hangi kodun kök yetkiyle kurulacağı\nsorusunu çağıran cevaplayamaz; cevabı bir önceki denetim `state.json`'a yazmıştır. Böylece\nekranda bir commit görüp onaylayan operatör tam onu kurmuş olur, ve o an ile düğmeye basma\nanı arasında depoya giren bir commit onaylanmamış kod olarak kalır — havuz sihirbazının WWN\nyeniden doğrulamasıyla aynı kalıp, aynı gerekçe.\n\nKurulum dakikalarca sürer ve bu işlem onu BEKLEMEZ: `systemctl start --no-block` ile birimi\nbaşlatıp döner. Süreci `update_status` izler.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "apply_update"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
       "description": "What `zpool status` says about scrubbing this pool.\n\nThe visibility half, and the half that was missing. Debian's `zfsutils-linux` already puts\na monthly scrub in `/etc/cron.d`, so on an ordinary appliance scrubs ARE happening — and\nnothing in DEPSIS said whether they had run, what they found, or whether one is running\nnow. A scrub whose findings nobody sees is only more expensive than no scrub at all.",
       "type": "object",
       "properties": {
@@ -1887,6 +1929,85 @@
       ]
     },
     {
+      "description": "Güncellemenin bütün durumu, tek yanıtta.",
+      "type": "object",
+      "properties": {
+        "available": {
+          "description": "Son denetimin bulduğu sürüm. Hiç denetim yapılmadıysa yok.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpdateCandidate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checked_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "description": "Son başarısızlığın cümlesi. Faz `failed` değilken de dolu olabilir: geri alınmış bir\ngüncellemenin sebebi, kutu yeniden çalışır hâle geldikten sonra da okunmalıdır.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "in_progress": {
+          "description": "Şu anda bir şey koşuyor mu. `phase` ile systemd'nin cevabının BİRLEŞİMİ, ve tanınmayan\nbir faz koşuyor sayılır: bilinmezlikte doğru davranış, ikinci bir güncellemeye izin\nvermemektir.",
+          "type": "boolean"
+        },
+        "installed": {
+          "description": "Kurulu commit. `install.sh` yazmadıysa YOK — ve yokluk \"güncel\" diye okunmaz.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "log_tail": {
+          "description": "Güncelleyicinin günlüğünün son satırları. Uzun bir kurulumun \"hâlâ yaşıyor\" kanıtı.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "phase": {
+          "description": "Güncelleyicinin kendi yazdığı faz, yorumlanmadan. Bilinen değerler `idle`, `checking`,\n`downloading`, `building`, `installing`, `verifying`, `rolling_back`, `done`, `failed`.",
+          "type": "string"
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "const": "update"
+        },
+        "up_to_date": {
+          "description": "Kurulu sürüm ile bulunan sürüm aynı mı. İkisinden biri bilinmiyorsa `false`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status",
+        "phase",
+        "in_progress",
+        "up_to_date",
+        "log_tail"
+      ]
+    },
+    {
       "description": "The off-site identity and the destinations this appliance trusts.",
       "type": "object",
       "properties": {
@@ -2691,7 +2812,7 @@
   ],
   "$defs": {
     "DatabaseDump": {
-      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.\nOne database dump on disk.",
+      "description": "One database dump on disk.",
       "type": "object",
       "properties": {
         "created_unix": {
@@ -2921,6 +3042,33 @@
         "name",
         "used_bytes",
         "created_at"
+      ]
+    },
+    "UpdateCandidate": {
+      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.\nKurulabilecek bir sürüm — DENETİMİN bulduğu, isteğin seçtiği değil.",
+      "type": "object",
+      "properties": {
+        "commit": {
+          "description": "Commit kimliği. DEPSIS'in sürüm kavramı bu: kutuya kurulan şey deponun bir anıdır, ve\netiketlenmiş bir sürüm akışı henüz yok (§21'in 13. teslimatı).",
+          "type": "string"
+        },
+        "committed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subject": {
+          "description": "Commit başlığının ilk satırı. Operatörün \"bu ne getiriyor\" sorusuna verilebilecek tek\ndürüst cevap, ve yorumlanmadan taşınıyor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "commit"
       ]
     },
     "ZeroTierControlledNetwork": {
