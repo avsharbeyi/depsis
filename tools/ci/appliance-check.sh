@@ -254,7 +254,6 @@ if [ "${#FAKE[@]}" -ge 2 ]; then
   check 'kutunun kendi diski sistem diski olarak isaretli' \
     "$(printf '%s' "$INVENTORY" | node "$REPO/tools/ci/holds-system.mjs" "$ROOT_DISK")" \
     'true'
-    '1'
 
   # HAVUZ, GERCEK DISKLERLE ve DOGRU kimlikle: dosya vdev i buraya kadar gelemiyordu.
   check 'dogru WWN ile havuz kuruldu' \
