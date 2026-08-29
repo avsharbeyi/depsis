@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DEPSIS tasarım sistemi</title>
+
+    <!--
+      ÜRÜNÜN KENDİ STİL DOSYASI, bir kopyası değil.
+
+      Bu sayfanın var olma sebebi §21'in 12. teslimatı ("Storybook / tasarım sistemi"), ve
+      Storybook'un kendisi bilerek kurulmadı: kırk paketlik bir bağımlılık ağacı ve ayrı bir derleme
+      hattı, tek bir uygulamanın otuz kadar ekranı için ödenecek bedel değil — hele görsel doğrunun
+      kaynağı zaten sabitken (docs/arayuz-v5-taslak.html).
+
+      Storybook'un burada gerçekten verdiği şey iki taneydi: jetonların tek yerde görülmesi, ve
+      bileşen sözlüğünün uygulamanın tamamını çalıştırmadan bakılabilmesi. İkisi de bu dosyada var.
+
+      Sayfa stil dosyasını KOPYALAMIYOR, İÇE AKTARIYOR. Bir kopya ilk gün doğru, ikinci ay yanlıştır
+      ve yanlış olduğunu kimseye söylemez. Sınıf adlarının gerçekten var olduğu ise ayrı bir kapıda
+      ölçülüyor: tools/ci/design-system-check.mjs.
+    -->
+    <link rel="stylesheet" href="../apps/web/src/styles.css" />
+    <style>
+      /* Yalnız BU sayfanın iskeleti. Ürünün sözlüğüne giren hiçbir şey burada tanımlanmıyor —
+         tanımlansaydı, sayfa ürünün sahip olmadığı bir görünümü belgeliyor olurdu. */
+      body {
+        background: #02040a;
+        color: var(--ink);
+        font-family: var(--sans);
+        margin: 0;
+        padding: 32px clamp(16px, 4vw, 56px) 96px;
+      }
+      h1 {
+        font-size: 22px;
+        font-weight: 600;
+        margin: 0 0 4px;
+      }
+      h2 {
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--mut);
+        margin: 40px 0 12px;
+        border-bottom: 1px solid var(--edge);
+        padding-bottom: 8px;
+      }
+      .lead {
+        color: var(--ink2);
+        max-width: 68ch;
+        line-height: 1.6;
+        font-size: 13.5px;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        margin: 12px 0;
+      }
+      .swatches {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 12px;
+      }
+      .swatch {
+        border: 1px solid var(--edge);
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--glass);
+      }
+      .swatch b {
+        display: block;
+        height: 44px;
+      }
+      .swatch span {
+        display: block;
+        padding: 7px 9px;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--ink2);
+      }
+      .why {
+        color: var(--mut);
+        font-size: 12.5px;
+        line-height: 1.6;
+        max-width: 72ch;
+        margin: 6px 0 0;
+      }
+      code {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--cool);
+      }
+    </style>
+  </head>
+  <body>
+    <h1>DEPSIS tasarım sistemi</h1>
+    <p class="lead">
+      Görsel doğrunun kaynağı <code>docs/arayuz-v5-taslak.html</code>; uygulanmış hâli
+      <code>apps/web/src/styles.css</code>. Bu sayfa üçüncü bir doğru üretmiyor — o stil dosyasını
+      içe aktarıp sözlüğü gösteriyor, yani burada gördüğünüz şey ürünün gerçekten çizdiği şey.
+    </p>
+
+    <h2>Renk jetonları</h2>
+    <div class="swatches">
+      <div class="swatch"><b style="background: var(--ink)"></b><span>--ink</span></div>
+      <div class="swatch"><b style="background: var(--ink2)"></b><span>--ink2</span></div>
+      <div class="swatch"><b style="background: var(--mut)"></b><span>--mut</span></div>
+      <div class="swatch"><b style="background: var(--dim)"></b><span>--dim</span></div>
+      <div class="swatch"><b style="background: var(--live)"></b><span>--live</span></div>
+      <div class="swatch"><b style="background: var(--cool)"></b><span>--cool</span></div>
+      <div class="swatch"><b style="background: var(--iris)"></b><span>--iris</span></div>
+      <div class="swatch"><b style="background: var(--warn)"></b><span>--warn</span></div>
+      <div class="swatch"><b style="background: var(--rose)"></b><span>--rose</span></div>
+      <div class="swatch"><b style="background: var(--glass)"></b><span>--glass</span></div>
+      <div class="swatch"><b style="background: var(--glass2)"></b><span>--glass2</span></div>
+      <div class="swatch"><b style="background: var(--edge)"></b><span>--edge</span></div>
+    </div>
+    <p class="why">
+      Dört durum rengi ve dördü de bir ANLAM taşıyor: <code>--live</code> çalışıyor,
+      <code>--cool</code> bilgi, <code>--warn</code> dikkat, <code>--rose</code> bozuk. Bir rengin
+      "daha güzel durduğu" için seçilmesi, ekrandaki bütün rozetlerin anlamını aynı anda siler.
+    </p>
+
+    <h2>Durum rozetleri</h2>
+    <div class="row">
+      <span class="pill"><i></i>ONLINE</span>
+      <span class="pill warn"><i></i>yarım</span>
+      <span class="pill bad"><i></i>DEGRADED</span>
+      <span class="pill dim">denetlenmedi</span>
+    </div>
+    <p class="why">
+      <code>.pill.dim</code> "bilinmiyor" demek, "hayır" değil — ikisini aynı görünüme koymak,
+      sorulamamış bir soruyu olumsuz bir cevaba çevirir. Ürün boyunca en sık tekrarlanan karar bu.
+    </p>
+
+    <h2>Düğmeler</h2>
+    <div class="row">
+      <button type="button" class="b">Birincil eylem</button>
+      <button type="button" class="b ghost">İkincil</button>
+      <button type="button" class="b" disabled>Yapılamaz</button>
+    </div>
+
+    <h2>Satır ve etiket</h2>
+    <div class="netrow">
+      <span class="lbl">Kurulu</span>
+      <span class="val" style="font-family: var(--mono)">a1b2c3d</span>
+      <span class="pill">güncel</span>
+    </div>
+    <div class="netrow">
+      <span class="lbl">Parmak izi</span>
+      <span class="note" style="font-family: var(--mono)">AB:CD:EF:01:23:45</span>
+    </div>
+    <p class="why">
+      Her sayı <code>--mono</code> ile ve tablo rakamlarıyla diziliyor. Bir parmak izini ya da bir
+      boyutu orantılı bir yazıyla göstermek, karşılaştırılması gereken şeyi karşılaştırılamaz yapar.
+    </p>
+
+    <h2>Uyarı kutusu</h2>
+    <div class="warn">
+      <span class="ic" aria-hidden="true">⚠</span>
+      <span class="tx">
+        <b>Havuz var, paylaşım ağacı yok.</b>
+        Bu kutunun tarif ettiği durum bir sonraki adımı da söylemeli; söylemiyorsa uyarı değil
+        şikâyettir.
+      </span>
+    </div>
+
+    <h2>Tablo</h2>
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th>Disk</th>
+          <th>Boyut</th>
+          <th>Üstünde ne var</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>WDC WD40EFRX</td>
+          <td class="m">3,6 TB</td>
+          <td><span class="pill">boş</span></td>
+        </tr>
+        <tr>
+          <td>Virtual Disk</td>
+          <td class="m">150 GB</td>
+          <td><span class="pill bad">sistem diski</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Boş durum</h2>
+    <div class="empty">
+      <div class="gl">💽</div>
+      <p>Havuz yapılandırılmadı</p>
+    </div>
+    <p class="why">
+      Boş bir liste ile okunamamış bir liste AYRI ekranlar. İkisini aynı boşlukla göstermek, en
+      pahalı yanlış anlamaların kaynağı: kullanıcı olmayan bir sorunu çözmeye çalışır.
+    </p>
+
+    <h2>Not</h2>
+    <p class="note">
+      Açıklama metni <code>.note</code> ile ve küçük puntoyla. Ekranın söylediği her cümle, o an
+      yapılabilecek bir şeyi ya da bilinmesi gereken bir olguyu taşımalı.
+    </p>
+  </body>
+</html>
