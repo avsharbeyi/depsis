@@ -69,7 +69,13 @@ fi
 # yazılır, çünkü güncelleme denetimi onu GitHub’ın verdiği kırk haneli kimlikle karşılaştırır
 # ve kısaltılmış bir kimlik o karşılaştırmayı sessizce hep "farklı" yapardı.
 VERSION="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo dev)"
-VERSION_FULL="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo dev)"
+# ETIKETLI BIR COMMIT ISE ETIKET, degilse commit kimligi.
+#
+# Sebebi guncelleme denetimi: imzali kipte cihaz YAYINLANMIS SURUMLERE bakiyor ve onlarin adi
+# `v0.1.0` gibi bir etiket. ISO commit kimligi yazsaydi, o ISOdan kurulan kutu daha ilk gun
+# "yeni surum var" derdi — zaten kurulu olan surumu isaret ederek.
+VERSION_FULL="$(git -C "$REPO" describe --exact-match --tags HEAD 2>/dev/null \
+  || git -C "$REPO" rev-parse HEAD 2>/dev/null || echo dev)"
 [ -n "$OUT_ISO" ] || OUT_ISO="$REPO/deploy/iso/depsis-installer-$VERSION.iso"
 
 # ── 2. yük: /depsis dizini ────────────────────────────────────────────────────
