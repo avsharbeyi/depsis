@@ -3,6 +3,7 @@ import { formatBytes } from './Dashboard.js';
 import { Empty } from './ui.js';
 import { Ring, Spark } from './sky.js';
 import { CertificatePanel } from './Certificate.js';
+import { LicensePanel } from './License.js';
 import { UpdatePanel } from './Update.js';
 
 /**
@@ -19,11 +20,14 @@ export function System({
   snapshot,
   onProcesses,
   notify,
+  isAdmin = false,
 }: {
   snapshot: Snapshot | null;
   /** Yazılım güncellemesi bu ekranda: kutunun kendisiyle ilgili her şey burada aranıyor.
       Panel yetkiyi kendi soruyor ve yönetici değilse hiç çizilmiyor. */
   notify?: ((kind: 'ok' | 'error', text: string) => void) | undefined;
+  /** Lisansı OKUMAK herkese açık; KURMAK kurucu yöneticinin işi. */
+  isAdmin?: boolean;
   /** Görev yöneticisini aç — sahibi onu bu ekranın içinde arıyor, ayrı bir rıhtım simgesinde
       değil. Yalnız kurucu yöneticiye veriliyor; yoksa düğme hiç çizilmiyor. */
   onProcesses?: (() => void) | undefined;
@@ -33,6 +37,7 @@ export function System({
       <>
         {notify !== undefined && <UpdatePanel notify={notify} />}
         {notify !== undefined && <CertificatePanel notify={notify} />}
+        {notify !== undefined && <LicensePanel notify={notify} isAdmin={isAdmin} />}
         <p className="note">Sistem durumu okunuyor…</p>
       </>
     );
@@ -43,6 +48,7 @@ export function System({
       <>
         {notify !== undefined && <UpdatePanel notify={notify} />}
         {notify !== undefined && <CertificatePanel notify={notify} />}
+        {notify !== undefined && <LicensePanel notify={notify} isAdmin={isAdmin} />}
         <Empty glyph="📈" text={snapshot.telemetryNote ?? 'Sistem durumu okunamadı.'} />
       </>
     );
@@ -59,6 +65,7 @@ export function System({
     <>
       {notify !== undefined && <UpdatePanel notify={notify} />}
       {notify !== undefined && <CertificatePanel notify={notify} />}
+      {notify !== undefined && <LicensePanel notify={notify} isAdmin={isAdmin} />}
 
       {onProcesses !== undefined && (
         <div className="netrow" style={{ marginBottom: 4 }}>

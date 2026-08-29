@@ -2125,6 +2125,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/license": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Cihazın lisansı
+         * @description Kime, hangi plan, kaç yuva ve ne zamana kadar. Oturum açmış herkes okuyabilir: bir
+         *     cihazın ne zaman desteksiz kalacağı, onu kullanan herkesin görebilmesi gereken bir olgu.
+         *
+         *     Lisans anahtarı İMZALI bir veridir ve cihaz onu **internete çıkmadan** doğrular. Her
+         *     okumada imza yeniden doğrulanır: veritabanına yazabilen biri kendine lisans uyduramasın.
+         */
+        get: operations["licenseStatus"];
+        put?: never;
+        /**
+         * Lisans anahtarını kur
+         * @description Satıcıdan alınan anahtar yapıştırılır. İmza tutmuyorsa istek reddedilir ve hiçbir şey
+         *     saklanmaz.
+         *
+         *     Parola sorulmaz: lisans kurmak yıkıcı değil, geri alınabilir, ve yanlış bir anahtar
+         *     zaten imza doğrulamasında düşer. Yalnız kurucu yönetici.
+         */
+        post: operations["installLicense"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/system/tls": {
         parameters: {
             query?: never;
@@ -6882,6 +6914,31 @@ export interface components {
              */
             signed: boolean;
         };
+        LicenseInstallRequest: {
+            /** @description Satıcıdan alınan lisans anahtarı: `DEPSIS-1.<içerik>.<imza>`. */
+            key: string;
+        };
+        LicenseStatus: {
+            /**
+             * @description DÖRT DURUM DEĞİL BEŞ, ve hepsi ayrı: `valid` geçerli, `expired` süresi dolmuş,
+             *     `absent` hiç kurulmamış, `invalid` kurulu ama doğrulanamıyor (kurcalanmış satır),
+             *     `unconfigured` bu cihazda doğrulama anahtarı yok. Sonuncu ikisini `absent` ile
+             *     birleştirmek, kurcalanmış bir satırı hiç kurulmamış bir lisanstan ayırt edilemez
+             *     yapardı.
+             * @enum {string}
+             */
+            state: "valid" | "expired" | "absent" | "invalid" | "unconfigured";
+            licensedTo: string | null;
+            licenseId: string | null;
+            plan: string | null;
+            seats: number | null;
+            issuedAt: string | null;
+            /** @description `null` SÜRESİZ demek. Hiç dolmayacak bir tarih yazmak, o tarihe gelindiğinde açıklanamayan bir arıza üretir. */
+            expiresAt: string | null;
+            installedAt: string | null;
+            /** @description Doğrulamanın kendi cümlesi. `invalid` ve `unconfigured` dışında boş. */
+            detail: string | null;
+        };
         TlsStatus: {
             subject: string;
             issuer: string;
@@ -7930,6 +7987,52 @@ export interface operations {
             403: components["responses"]["Problem"];
             429: components["responses"]["Problem"];
             503: components["responses"]["Problem"];
+        };
+    };
+    licenseStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Lisansın durumu */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseStatus"];
+                };
+            };
+        };
+    };
+    installLicense: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LicenseInstallRequest"];
+            };
+        };
+        responses: {
+            /** @description Lisans kuruldu; yanıt yeni durum */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseStatus"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
         };
     };
     tlsStatus: {

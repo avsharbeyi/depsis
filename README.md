@@ -555,6 +555,30 @@ tam onu ölçüyor ve `pnpm check`in içinde koşuyor.
 
 Storybook bilerek kurulmadı; gerekçesi `docs/bilinen-sinirlamalar.md` §21 madde 12’de.
 
+## Lisans
+
+Sistem ekranında **Lisans** bölümü: kime, hangi plan, kaç yuva, ne zamana kadar. Okumak oturum
+açmış herkese açık (bir cihazın ne zaman desteksiz kalacağı sır değil), kurmak kurucu yöneticiye.
+
+Lisans anahtarı **imzalı bir veridir** ve cihaz onu **internete çıkmadan** doğrular; elindeki tek
+şey açık anahtardır (`/etc/depsis/license-key.pub`). Klasik `XXXX-XXXX-XXXX` anahtarlar bunu
+yapamaz: o kadar kısa bir dizgeye imza sığmadığı için ya sunucuya sormak gerekir — bir NAS’ın
+interneti olmayabilir, ve müşterinin cihazının satıcıya rapor vermesi bu ürünün duruşuna aykırı —
+ya da kırılabilir bir algoritma kullanılır.
+
+**Süresi dolmuş bir lisans kimseyi kendi dosyalarından kilitlemez.** Ekranda söylenir, o kadar.
+Bir yedekleme cihazını bir takvim gününde kullanılamaz hâle getirmek, verinin kendisini rehin
+almaktır. Zorlama istenirse bu ayrı ve bilinçli bir karardır; varsayılan olarak alınmadı.
+
+Satıcı tarafı `tools/license/keygen.mjs`:
+
+```bash
+node tools/license/keygen.mjs issue --key ~/depsis-anahtarlar/depsis-license.key --to “Ad Soyad” --plan ev --seats 5 --until 2027-12-31
+```
+
+Anahtar çiftini bir kez `keygen.mjs init <dizin>` üretir. **Özel anahtar depoya girmez**; depoda
+duran `deploy/release/license-key.pub` yalnızca açık anahtardır ve cihazlara o gider.
+
 ## Sertifika ve alan adı
 
 Sistem ekranında **Sertifika** bölümü: kutunun sunduğu sertifikanın kimliği, geçerli adresleri,

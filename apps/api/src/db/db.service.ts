@@ -49,6 +49,11 @@ export type UntenantedJustification =
   // tenant context would return nothing, which would silently deny the administrator rather than
   // fail. The query is a count against a supplied user id and reads no tenant-scoped table.
   | 'system-admin-check'
+  // Cihazin lisansi. KIRACIYA BAGLI DEGIL ve olamaz: lisans KUTUYU kapsiyor, bir organizasyonu
+  // degil — kutuyu satin alan taraf kutunun sahibi, ve icindeki organizasyonlar onun kendi duzeni.
+  // Bir kiracı baglamında okunsaydi hicbir satir donmezdi, yani lisansli bir cihaz lisanssiz
+  // gorunurdu. Tablo tek satirli ve kimlik tasimiyor.
+  | 'device-license'
   // Counts rows in user_totp_secrets by key_version and reads no secret. Untenanted because the
   // question is about the WHOLE estate — "is any secret still stored in the clear" — and asking it
   // per tenant would answer a different, less useful question at startup, before any tenant is

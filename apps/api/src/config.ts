@@ -32,6 +32,9 @@ export const PODMAN_SOCKET_DEFAULT = '/run/podman/podman.sock';
  */
 export const CONSOLE_SOCKET_DEFAULT = '/run/depsis/console.sock';
 
+/** Lisans acik anahtarinin varsayilan yolu; `install.sh` onu buraya koyuyor. */
+export const LICENSE_KEY_FILE_DEFAULT = '/etc/depsis/license-key.pub';
+
 /**
  * The server name in the `\\server\share` address DEPSIS shows for an SMB share.
  *
@@ -145,6 +148,11 @@ const schema = z.object({
     .trim()
     .optional()
     .transform((value) => (value === undefined || value === '' ? null : value)),
+
+  // Lisans anahtarlarını doğrulayan AÇIK anahtarın yolu. Gizli değil — gizli olan, satıcının
+  // elindeki özel anahtar. Dosya yoksa lisans "yapılandırılmamış" diye raporlanıyor;
+  // "lisanssız" DEĞİL, çünkü ikisi ayrı şeyler ve ekranın söyleyeceği cümle de ayrı.
+  DEPSIS_LICENSE_KEY_FILE: z.string().trim().min(1).default(LICENSE_KEY_FILE_DEFAULT),
 
   // The podman socket the application catalogue talks to (ADR-0019).
   //
@@ -335,6 +343,14 @@ export interface AppConfig {
   smbHost?: string;
   zfsPools: readonly string[];
   smartDisks: readonly string[];
+  /**
+   * Lisans anahtarlarını doğrulayan açık anahtarın yolu.
+   *
+   * Arayüzde OPSIYONEL, ustundeki uc alanla ayni gerekceyle: yoksa kullanilabilir bir cevabi var
+   * (LICENSE_KEY_FILE_DEFAULT), ve baska bir sey icin AppConfig sabiti kuran bir testin cihazin
+   * buyudukce kazandigi her ayari adlandirmasi gerekmemeli.
+   */
+  licenseKeyFile?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -362,6 +378,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     smbHost: parsed.data.DEPSIS_SMB_HOST,
     zfsPools: parsed.data.DEPSIS_ZFS_POOLS,
     smartDisks: parsed.data.DEPSIS_SMART_DISKS,
+    licenseKeyFile: parsed.data.DEPSIS_LICENSE_KEY_FILE,
   };
 }
 
