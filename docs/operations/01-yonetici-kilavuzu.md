@@ -478,11 +478,11 @@ veri kümesi ayrı bir şey, ve sihirbazdaki **"Paylaşım ağacını da kur"** 
 `<havuz>/depsis`'i açıp `DEPSIS_SHARES_ROOT`'a bağlıyor.
 
 Bunu atlarsanız havuz kurulur ama **paylaşım açılamaz** — DEPSIS paylaşımları hangi veri kümesinin
-altında açacağını bilmez ve `POST /shares` 503 verir. Sonradan kabuktan:
+altında açacağını bilmez ve `POST /shares` 503 verir.
 
-```bash
-zfs create -o mountpoint=/srv/depsis -o acltype=posixacl -o xattr=sa tank/depsis
-```
+Sonradan **Depolama ekranından**: havuz varken ağaç yoksa ekranın başında bir uyarı ve
+**“Paylaşım ağacını kur”** düğmesi çıkıyor. Burada bir zamanlar bir `zfs create` komutu yazılıydı;
+bir kabuk komutu ürünün parçası değil, ürünün eksiğidir.
 
 Bağlanacak yer **çağıranın seçtiği bir şey değil**: ajanın kendi `DEPSIS_SHARES_ROOT`'u, ve veri
 kümesi adı havuzdan türetiliyor. Ajan, oraya zaten bir veri kümesi bağlıysa ya da **dizin boş
