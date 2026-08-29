@@ -160,6 +160,13 @@ imzalı sürümler kuruluyor ve imza tutmazsa kurulum düşüyor — “imzasız
 yedek yol bilerek yok, çünkü o yol tam olarak saldırganın kullanacağı yoldur. Arayüz hangi kipte
 olduğunu söylüyor (“imzalı sürüm” / “imzasız kaynak”).
 
+İmzalama ve doğrulama komutları artık `appliance` kapısında her push’ta koşuyor: gerçek bir
+Ed25519 anahtarı üretiliyor, `release.yml`in imzalama komutuyla imzalanıyor, ve **ürünün kendi**
+`update.sh verify`i doğruluyor — kurcalanmış bir arşiv ile yabancı bir anahtarla imzalanmış arşiv
+de reddediliyor. Bunun bedeli ödendi: yol yazıldığında hiç koşmamıştı, ve ilk koşturmada ilk komut
+düştü — `openssl dgst -sha256 -sign` Ed25519 ile çalışmıyor. Yani sahibinin ilk `git push --tags`i
+düşecek, ve bunu ancak o an öğrenecekti.
+
 **Sahibine düşen tek adım, ve bilerek ona bırakıldı:** özel anahtarı üretmek ve saklamak. Bir
 üretim imza anahtarını üreten taraf cihazın sahibi olmalı; bu depo onu üretmez, taşımaz ve
 göremez. Komutlar `deploy/release/README.md`de, ve o adım atılana kadar cihaz imzasız kipte

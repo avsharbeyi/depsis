@@ -49,6 +49,16 @@ gh secret set DEPSIS_RELEASE_KEY < depsis-release.key
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
+İmza `openssl pkeyutl -rawin` ile üretiliyor, `dgst -sha256` ile değil: Ed25519 saf bir imza
+algoritması, özeti kendi alıyor, ve ona dışarıdan bir özet dayatmak openssl tarafından
+reddediliyor. İndirdiğiniz bir arşivi elle doğrulamak isterseniz cihaz da aynı komutu
+kullanıyor:
+
+```bash
+sudo /usr/local/lib/depsis/update.sh verify \
+  /usr/local/lib/depsis/release-key.pub depsis-v0.1.0.tar.gz depsis-v0.1.0.tar.gz.sig
+```
+
 `release.yml` şunları üretir: kaynak arşivi, `sha256` dosyası ve **imza**. İş akışı imzayı
 ürettiği yerde doğrular ve depodaki açık anahtarla karşılaştırır — uyuşmazsa sürümü yayınlamaz,
 çünkü o sürümü hiçbir cihaz kuramazdı.

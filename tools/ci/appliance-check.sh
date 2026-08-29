@@ -407,6 +407,53 @@ FP_AFTER=$(ask tls '{"op":"tls_status"}' | node -e '
 # okunamadigi kosumda yesil verdi. Yokluk kendi sozcugunu aliyor.
 check 'eski sertifika geri kondu' "${FP_AFTER:-SONRA-BOS}" "${FP_BEFORE:-ONCE-BOS}"
 
+# ── 6e. SURUM IMZASI ────────────────────────────────────────────────────────
+#
+# Bu bolumun var olma sebebi olculmus bir hata. Imzali surum yolu yazildi ve HIC KOSMADI:
+# hicbir etiket itilmemisti, yani release.yml hicbir zaman calismamisti. Kosturunca ilk komut
+# dustu — `openssl dgst -sha256 -sign` Ed25519 ile CALISMIYOR ("Explicit digest not allowed
+# with EdDSA operations"), cunku Ed25519 saf bir imza algoritmasi ve ozeti kendi aliyor.
+#
+# Yani sahibinin ilk `git push --tags` i dusecekti, ve bunu ancak o an ogrenecekti.
+#
+# Imzalama komutu release.yml in AYNISI; dogrulama ise URUNUN KENDI KODU (`update.sh verify`).
+# Kapinin kendi dogrulama kopyasini yazmasi, dogruladigi seyin kendi kopyasi olmasi demek olurdu.
+say 'surum imzasi'
+
+SIGN_DIR="$IMAGES/sign"
+install -d -m 0700 "$SIGN_DIR"
+openssl genpkey -algorithm ed25519 -out "$SIGN_DIR/k.pem" 2>/dev/null
+openssl pkey -in "$SIGN_DIR/k.pem" -pubout -out "$SIGN_DIR/k.pub" 2>/dev/null
+printf 'ornek surum arsivi\n' >"$SIGN_DIR/arsiv.tar.gz"
+
+# release.yml in imzalama komutunun aynisi.
+openssl pkeyutl -sign -rawin -inkey "$SIGN_DIR/k.pem" \
+  -in "$SIGN_DIR/arsiv.tar.gz" -out "$SIGN_DIR/arsiv.sig" 2>/dev/null || true
+check 'release.yml in imzalama komutu calisiyor' \
+  "$([ -s "$SIGN_DIR/arsiv.sig" ] && echo IMZALANDI || echo DUSTU)" 'IMZALANDI'
+
+check 'urun kendi imzasini dogruluyor' \
+  "$(bash "$REPO/tools/install/update.sh" verify \
+    "$SIGN_DIR/k.pub" "$SIGN_DIR/arsiv.tar.gz" "$SIGN_DIR/arsiv.sig" 2>&1 || true)" \
+  'imza dogrulandi'
+
+# KURCALANMIS ARSIV. Imzanin var olma sebebi bu tek satir.
+cp "$SIGN_DIR/arsiv.tar.gz" "$SIGN_DIR/bozuk.tar.gz"
+printf 'X' >>"$SIGN_DIR/bozuk.tar.gz"
+check 'kurcalanmis arsiv reddediliyor' \
+  "$(bash "$REPO/tools/install/update.sh" verify \
+    "$SIGN_DIR/k.pub" "$SIGN_DIR/bozuk.tar.gz" "$SIGN_DIR/arsiv.sig" 2>&1 || true)" \
+  'DOGRULANAMADI'
+
+# BASKA BIR ANAHTARLA imzalanmis arsiv: deposu ele gecirilmis bir saldirganin uretebilecegi sey.
+openssl genpkey -algorithm ed25519 -out "$SIGN_DIR/yabanci.pem" 2>/dev/null
+openssl pkeyutl -sign -rawin -inkey "$SIGN_DIR/yabanci.pem" \
+  -in "$SIGN_DIR/arsiv.tar.gz" -out "$SIGN_DIR/yabanci.sig" 2>/dev/null || true
+check 'yabanci anahtarla imzalanmis arsiv reddediliyor' \
+  "$(bash "$REPO/tools/install/update.sh" verify \
+    "$SIGN_DIR/k.pub" "$SIGN_DIR/arsiv.tar.gz" "$SIGN_DIR/yabanci.sig" 2>&1 || true)" \
+  'DOGRULANAMADI'
+
 # ── 7. Sınırın iki yarısı: TypeScript istemci ↔ Rust ajan ──────────────────
 #
 # Migration işi bu dosyayı DIŞLIYOR (canlı soket yok). Kapsandığı tek yer burası.

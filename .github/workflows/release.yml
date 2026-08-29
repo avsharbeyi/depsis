@@ -83,12 +83,16 @@ jobs:
           umask 077
           printf '%s\n' "$RELEASE_KEY" > signing.pem
           openssl pkey -in signing.pem -pubout -out release-key.pub
-          openssl dgst -sha256 -sign signing.pem \
-            -out "depsis-$TAG.tar.gz.sig" "depsis-$TAG.tar.gz"
+          # `pkeyutl -rawin`, `dgst -sha256 -sign` DEĞİL. Ed25519 "saf" bir imza algoritması:
+          # özeti kendi içinde alıyor, ve ona dışarıdan bir özet dayatmak openssl tarafından
+          # reddediliyor — "Explicit digest not allowed with EdDSA operations". İlk hâli tam
+          # olarak bunu yapıyordu, yani ilk `git push --tags` de düşecekti.
+          openssl pkeyutl -sign -rawin -inkey signing.pem \
+            -in "depsis-$TAG.tar.gz" -out "depsis-$TAG.tar.gz.sig"
           # HEMEN DOĞRULA. Bir imza, üretildiği yerde doğrulanmazsa ancak cihazda — yani
           # güncelleme yarıda kaldığında — yanlış olduğu anlaşılır.
-          openssl dgst -sha256 -verify release-key.pub \
-            -signature "depsis-$TAG.tar.gz.sig" "depsis-$TAG.tar.gz"
+          openssl pkeyutl -verify -rawin -pubin -inkey release-key.pub \
+            -sigfile "depsis-$TAG.tar.gz.sig" -in "depsis-$TAG.tar.gz"
           # Depodaki açık anahtarla AYNI mı: cihazlar onu taşıyor, ve farklıysa üretilen sürümü
           # hiçbir kutu kuramaz.
           if [ -f deploy/release/release-key.pub ]; then
