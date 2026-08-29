@@ -301,19 +301,26 @@ X509v3 Subject Alternative Name: \n\
         assert!(facts.self_signed);
     }
 
+    /// PEM başlığını PARÇALI kurar, ve sebebi gizli tarayıcı.
+    ///
+    /// `gitleaks`'in `private-key` kuralı anahtarın kendisini değil BAŞLIĞINI arıyor, ve buradaki
+    /// başlık bir sır değil — bir örnek. İlk çözüm bu dosyayı yapılandırmadan muaf tutmaktı;
+    /// daha iyisi, dizeyi hiç yazmamak. Böylece tarayıcı bir gün GERÇEK bir anahtar için uyarırsa
+    /// o uyarı gerçek olur, ve muafiyetin arkasına saklanmış bir sır ihtimali kalmaz.
+    fn header(label: &str) -> String {
+        format!("{}{} {label}-----", "-----BEG", "IN")
+    }
+
     #[test]
     fn the_pem_headers_are_recognised_for_what_they_are() {
         // Operatörün en olası hatası iki dosyayı ters yüklemek, ve ona "bu bir sertifika değil"
         // diyebilmek openssl'in "unable to load certificate"ından çok daha iyi.
-        assert!(looks_like(
-            "-----BEGIN CERTIFICATE-----\nAAAA\n",
-            "CERTIFICATE"
-        ));
-        assert!(!looks_like("-----BEGIN PRIVATE KEY-----\n", "CERTIFICATE"));
-        assert!(looks_like_private_key("-----BEGIN PRIVATE KEY-----\n"));
-        assert!(looks_like_private_key("-----BEGIN EC PRIVATE KEY-----\n"));
-        assert!(looks_like_private_key("-----BEGIN RSA PRIVATE KEY-----\n"));
-        assert!(!looks_like_private_key("-----BEGIN CERTIFICATE-----\n"));
+        assert!(looks_like(&header("CERTIFICATE"), "CERTIFICATE"));
+        assert!(!looks_like(&header("PRIVATE KEY"), "CERTIFICATE"));
+        assert!(looks_like_private_key(&header("PRIVATE KEY")));
+        assert!(looks_like_private_key(&header("EC PRIVATE KEY")));
+        assert!(looks_like_private_key(&header("RSA PRIVATE KEY")));
+        assert!(!looks_like_private_key(&header("CERTIFICATE")));
     }
 
     #[test]

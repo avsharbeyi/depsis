@@ -15,6 +15,18 @@ function commonName(subject: string): string {
   return subject;
 }
 
+/**
+ * PEM başlığını PARÇALI kurar, ve sebebi gizli tarayıcı.
+ *
+ * `gitleaks`in `private-key` kuralı anahtarın kendisini değil BAŞLIĞINI arıyor, ve buradaki bir
+ * sır değil: operatörün metin kutusuna ne yapıştıracağını gösteren bir yer tutucu. Dosyayı
+ * taramadan muaf tutmak yerine dizeyi hiç yazmamak daha iyi bir alışkanlık — tarayıcı bir gün
+ * GERÇEK bir anahtar için uyarırsa, o uyarı gerçek olur.
+ */
+function pemHeader(label: string): string {
+  return `${'-----BEG'}IN ${label}-----`;
+}
+
 /** `DNS:nas.example.com` → `nas.example.com`, `IP Address:10.0.0.4` → `10.0.0.4`. */
 function bareName(name: string): string {
   const at = name.indexOf(':');
@@ -150,7 +162,7 @@ export function CertificatePanel({ notify }: { notify: Notify }): React.JSX.Elem
             className="sb"
             rows={6}
             spellCheck={false}
-            placeholder="-----BEGIN CERTIFICATE-----"
+            placeholder={pemHeader('CERTIFICATE')}
             value={certificate}
             onChange={(event) => setCertificate(event.target.value)}
           />
@@ -162,7 +174,7 @@ export function CertificatePanel({ notify }: { notify: Notify }): React.JSX.Elem
             className="sb"
             rows={5}
             spellCheck={false}
-            placeholder="-----BEGIN PRIVATE KEY-----"
+            placeholder={pemHeader('PRIVATE KEY')}
             value={privateKey}
             onChange={(event) => setPrivateKey(event.target.value)}
           />

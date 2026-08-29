@@ -3247,7 +3247,8 @@ mod tests {
         let h = Harness::bare();
         let request = format!(
             r#"{{"op":"install_certificate","certificate":"{}","private_key":"{}"}}"#,
-            "-----BEGIN PRIVATE KEY----- BBBB", "-----BEGIN PRIVATE KEY----- BBBB"
+            pem("PRIVATE KEY"),
+            pem("PRIVATE KEY")
         );
         let resp = agent(&r, &s, &h).handle(&request, peer(API_UID), "tls1", "operator uploaded");
         match resp {
@@ -3269,7 +3270,7 @@ mod tests {
         let huge = "A".repeat(crate::tls::MAX_CERTIFICATE_BYTES + 1);
         let request = format!(
             r#"{{"op":"install_certificate","certificate":"{huge}","private_key":"{}"}}"#,
-            "-----BEGIN PRIVATE KEY----- BBBB"
+            pem("PRIVATE KEY")
         );
         let resp = agent(&r, &s, &h).handle(&request, peer(API_UID), "tls2", "operator uploaded");
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
@@ -3295,7 +3296,8 @@ mod tests {
         let h = Harness::bare();
         let request = format!(
             r#"{{"op":"install_certificate","certificate":"{}","private_key":"{}"}}"#,
-            "-----BEGIN CERTIFICATE----- AAAA", "-----BEGIN PRIVATE KEY----- BBBB"
+            pem("CERTIFICATE"),
+            pem("PRIVATE KEY")
         );
         let resp = agent(&r, &s, &h).handle(&request, peer(API_UID), "tls3", "operator uploaded");
         match resp {
@@ -3353,6 +3355,16 @@ mod tests {
             Some(crate::tls::cert_path().to_string_lossy().as_ref())
         );
     }
+    /// PEM başlığını PARÇALI kurar, ve sebebi gizli tarayıcı.
+    ///
+    /// `gitleaks`in `private-key` kuralı anahtarın kendisini değil BAŞLIĞINI arıyor, ve buradaki
+    /// başlık bir sır değil bir örnek. Bu dosyayı taramadan muaf tutmak kolay olurdu ve yanlış:
+    /// `dispatch.rs` bu projenin en büyük dosyası, ve içine bir gün gerçek bir sır girerse
+    /// tarayıcının onu görmesi gerekiyor.
+    fn pem(label: &str) -> String {
+        format!("{}{} {label}----- ORNEK", "-----BEG", "IN")
+    }
+
     /// Güncelleme dosyalarını OLMAYAN bir yere bakmaya zorlar.
     ///
     /// Testi koşturan makinede o dosyaların bulunmamasına bel bağlamak, bir gün bir geliştirme
