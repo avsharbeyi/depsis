@@ -245,6 +245,8 @@ if [ "${#FAKE[@]}" -ge 2 ]; then
   # Kokun uzerinde durdugu DISK: bolum ustundeyse ust aygiti (PKNAME), degilse aygitin
   # kendisi — WSL de kok dogrudan bir diskte duruyor ve PKNAME bos donuyor.
   ROOT_SRC=$(findmnt -no SOURCE / 2>/dev/null | head -1)
+  printf '    (kök: %s)
+' "$ROOT_SRC"
   ROOT_DISK=$(lsblk -no PKNAME "$ROOT_SRC" 2>/dev/null | head -1)
   [ -n "$ROOT_DISK" ] || ROOT_DISK=$(basename "$ROOT_SRC")
   # JSON u NODE ayristiriyor, grep degil: bir kapinin kendi olcumu kirilgan olmamali, ve
