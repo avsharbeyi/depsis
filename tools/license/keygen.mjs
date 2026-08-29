@@ -70,6 +70,23 @@ function payloadBytes(payloadB64) {
  * elli lisansın hepsi aynı numarada. Numara bir gün iptal listesinde adlandıracağımız şey; iki
  * müşterinin aynı numarayı taşıması, o listeyi kullanılamaz yapardı.
  */
+/**
+ * Cihaz kodunu kabul edilebilir tek biçime getirir.
+ *
+ * Müşteri kodu telefonda okur, e-postaya yapıştırır, küçük harfle yazar. Buradaki tolerans
+ * onun içindir — ama SESSİZ DEĞİL: tanınmayan bir kod hata veriyor, çünkü yanlış bir koda
+ * bağlanmış bir lisansı ancak müşteri fark eder, ve ancak kuramadığı zaman.
+ */
+function normaliseDevice(value) {
+  if (value === undefined) return undefined;
+  const clean = value.toUpperCase().replace(/[^A-Z0-9]/gu, '');
+  if (clean.length !== 12) {
+    console.error(`--device okunamadı: ${value} (beklenen: XXXX-XXXX-XXXX)`);
+    process.exit(2);
+  }
+  return `${clean.slice(0, 4)}-${clean.slice(4, 8)}-${clean.slice(8, 12)}`;
+}
+
 function licenseId() {
   return `L-${randomBytes(5).toString('hex').toUpperCase()}`;
 }
@@ -84,6 +101,9 @@ function issue(privateKeyPem, fields) {
     issued: fields.issued,
     until: fields.until ?? null,
     note: fields.note ?? null,
+    // Bağlı lisanslarda cihazın kodu. Bağsızlarda ALAN HİÇ YOK — `null` yazmak, eski
+    // sürümlerin göremeyeceği bir fark üretmez ama jetonu gereksizce uzatır.
+    ...(fields.device === undefined ? {} : { dev: fields.device }),
   };
   const payloadB64 = b64url(JSON.stringify(payload));
   const signature = sign(null, payloadBytes(payloadB64), createPrivateKey(privateKeyPem));
@@ -173,6 +193,7 @@ function cmdIssue(argv) {
     issued: new Date().toISOString(),
     until: until === undefined ? undefined : new Date(`${until}T23:59:59Z`).toISOString(),
     note: argOf(argv, '--note'),
+    device: normaliseDevice(argOf(argv, '--device')),
   });
 
   // ÜRETTİĞİNİ HEMEN DOĞRULA: bir imza, üretildiği yerde doğrulanmazsa ancak müşterinin

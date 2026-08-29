@@ -24,6 +24,7 @@ const KEYGEN = join(process.cwd(), '..', '..', 'tools', 'license', 'keygen.mjs')
 let dir: string;
 let publicKeyPath: string;
 let privateKeyPath: string;
+let machineId: string;
 
 function issue(...args: string[]): string {
   return execFileSync(
@@ -33,9 +34,9 @@ function issue(...args: string[]): string {
   ).trim();
 }
 
-function service(keyPath = publicKeyPath): LicenseService {
+function service(keyPath = publicKeyPath, machineIdPath = machineId): LicenseService {
   // `check` veritabanına hiç dokunmuyor; buraya bir sahte koymak, dokunmadığını da kanıtlıyor.
-  return new LicenseService(null as unknown as DbService, keyPath);
+  return new LicenseService(null as unknown as DbService, keyPath, machineIdPath);
 }
 
 beforeAll(() => {
@@ -43,6 +44,10 @@ beforeAll(() => {
   execFileSync(process.execPath, [KEYGEN, 'init', dir], { encoding: 'utf8' });
   publicKeyPath = join(dir, 'license-key.pub');
   privateKeyPath = join(dir, 'depsis-license.key');
+  // Sahte bir makine kimligi: cihaz kodu ondan TURETILIYOR, yani testin kendi kutusunun
+  // kimligine bagli olmadan tekrarlanabilir.
+  machineId = join(dir, 'machine-id');
+  writeFileSync(machineId, 'af04e5981b2c4d5e8f9a0b1c2d3e4f50');
 });
 
 describe('LicenseService.check', () => {
@@ -116,6 +121,57 @@ describe('LicenseService.check', () => {
     const broken = join(dir, 'bozuk.pub');
     writeFileSync(broken, 'bu bir anahtar değil');
     expect(service(broken).check(issue()).ok).toBe(false);
+  });
+
+  it('cihaz kodu KURULUMDAN turetiliyor ve kararli', () => {
+    // Ayni makine kimligi -> ayni kod, her zaman. Farkli kimlik -> farkli kod.
+    const mine = service().deviceId();
+    expect(mine).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/u);
+    expect(service().deviceId()).toBe(mine);
+
+    const other = join(dir, 'machine-id-2');
+    writeFileSync(other, 'ffffffffffffffffffffffffffffffff');
+    expect(service(publicKeyPath, other).deviceId()).not.toBe(mine);
+  });
+
+  it('cihaz kodu makine kimliginin KENDISI degil', () => {
+    // Makine kimligi sistem genelinde bir parmak izi; oldugu gibi paylasilmamali.
+    const raw = readFileSync(machineId, 'utf8').trim();
+    expect(service().deviceId()).not.toContain(raw.slice(0, 8));
+  });
+
+  it('BU cihaza bagli lisansi kabul eder', () => {
+    const code = service().deviceId();
+    const token = issue('--device', code ?? '');
+    expect(service().check(token).ok).toBe(true);
+  });
+
+  it('BASKA bir cihaza bagli lisansi reddeder ve iki kodu da soyler', () => {
+    // Bagin var olma sebebi bu tek iddia.
+    const token = issue('--device', 'AAAA-BBBB-CCCC');
+    const result = service().check(token);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('AAAA-BBBB-CCCC');
+      expect(result.reason).toContain(service().deviceId() ?? '');
+    }
+  });
+
+  it('bagsiz lisans her cihazda gecerli', () => {
+    // Toplu havuzdan cikan jetonlar boyle: bag, uretilirken konur.
+    const token = issue();
+    const other = join(dir, 'machine-id-3');
+    writeFileSync(other, '11111111111111111111111111111111');
+    expect(service(publicKeyPath, other).check(token).ok).toBe(true);
+  });
+
+  it('cihaz kimligi okunamiyorsa BAGLI bir lisans reddedilir', () => {
+    // Guvenli yon: "okuyamadim" ile "uyuyor" arasinda gecis yapmak bagi anlamsiz kilardi.
+    const code = service().deviceId();
+    const token = issue('--device', code ?? '');
+    const result = service(publicKeyPath, join(dir, 'olmayan-machine-id')).check(token);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain('okunamıyor');
   });
 
   it('depodaki açık anahtar gerçek bir açık anahtar', () => {
