@@ -18,6 +18,7 @@ import { ReplicationController } from './replication.controller.js';
 import { DiskWipeController } from './disk-wipe.controller.js';
 import { ProcessesController } from './processes.controller.js';
 import { SystemController } from './system.controller.js';
+import { ShareTreeController } from './share-tree.controller.js';
 import { SystemService } from './system.service.js';
 import { UpdateController } from './update.controller.js';
 
@@ -34,6 +35,7 @@ import { UpdateController } from './update.controller.js';
     DiskWipeController,
     ProcessesController,
     UpdateController,
+    ShareTreeController,
   ],
   providers: [
     {

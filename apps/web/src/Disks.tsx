@@ -1,7 +1,7 @@
 import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
-import { api } from './api.js';
+import { api, problemMessage } from './api.js';
 import { CreatePool } from './CreatePool.js';
 import { formatBytes } from './Dashboard.js';
 import type { Snapshot as SystemSnapshot } from './snapshot.js';
@@ -18,7 +18,7 @@ interface Props {
 }
 
 /**
- * Disks — GET /system/disks.
+ * Depolama ekranı — kenar çubuğundaki Depolama kutusuna tıklayınca açılan yer.
  *
  * Deliberately not part of the storage card in the side panel, and not merged into telemetry. Those
  * answer "how are the disks I was told about"; this answers "what is in the box", and the two come
@@ -32,6 +32,11 @@ interface Props {
  *
  * The `holds` column is the one to read. Empty means the disk carries nothing DEPSIS could find;
  * anything else means using it destroys something.
+ *
+ * EKRAN ÖNCE DURUMU SÖYLER, sonra envanteri gösterir. Eskiden doğrudan ham aygıtların tablosuyla
+ * açılıyordu, ve sahibin ilk sorusu — "depolamam hazır mı, değilse ne yapmam gerekiyor" —
+ * hiçbir yerde cevaplanmıyordu: cevabın parçaları kenar çubuğunda, Sistem ekranında ve bu
+ * tablonun altındaki bir uyarıda dağınık duruyordu.
  */
 export function Disks({ notify, snapshot }: Props): React.JSX.Element {
   const [inventory, setInventory] = useState<Inventory | null>(null);
@@ -49,6 +54,22 @@ export function Disks({ notify, snapshot }: Props): React.JSX.Element {
   const [reloadKey, setReloadKey] = useState(0);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
+  const [preparing, setPreparing] = useState(false);
+
+  /** Paylaşım ağacını var olan bir havuzda kurar. Yıkıcı değil: ajan dolu bir kökü reddediyor. */
+  async function prepareTree(): Promise<void> {
+    const pool = storage?.pools[0];
+    if (pool === undefined) return;
+    setPreparing(true);
+    const { data, error } = await api.POST('/storage/share-tree', { body: { pool } });
+    setPreparing(false);
+    if (data === undefined) {
+      notify('error', problemMessage(error, 'Paylaşım ağacı kurulamadı.'));
+      return;
+    }
+    notify('ok', `Paylaşım ağacı kuruldu: ${data.dataset}. Artık paylaşım açabilirsiniz.`);
+    reload();
+  }
 
   useEffect(() => {
     let alive = true;
@@ -113,12 +134,25 @@ export function Disks({ notify, snapshot }: Props): React.JSX.Element {
   }
 
   const disks = inventory.disks;
+  const pools = storage?.pools ?? [];
+  // ÜÇ DURUM, ve üçünün de yapılacak farklı bir şeyi var. `storage === null` dördüncüsü:
+  // depolama durumu okunamadı, ve o zaman hiçbir iddiada bulunulmuyor.
+  const needsTree = storage !== null && pools.length > 0 && storage.parentDataset === undefined;
+  const ready = storage !== null && pools.length > 0 && storage.parentDataset !== undefined;
   const smart = snapshot.telemetry?.disks ?? [];
   /** SMART health by `/dev/disk/by-id`, so the two lists join on the id and not on position. */
   const health = new Map(smart.map((entry) => [entry.id, entry]));
 
   return (
     <>
+      <StorageState
+        ready={ready}
+        needsTree={needsTree}
+        pools={pools}
+        unknown={storage === null}
+        snapshot={snapshot}
+      />
+
       {!inventory.complete && (
         <div className="warn">
           <span className="ic" aria-hidden>
@@ -161,25 +195,111 @@ export function Disks({ notify, snapshot }: Props): React.JSX.Element {
       {/* The wizard renders inside the inventory rather than in a window of its own: §8.1 wants the
           analysis in front of the operator while they confirm, and a dialogue that covers the table
           it was opened from takes it away at exactly the wrong moment. */}
-      {storage !== null && storage.parentDataset === undefined && storage.pools.length > 0 && (
+      {/* Havuz var, ağaç yok: ürünün en sinsi ara durumu. Kutu tamamen sağlıklı görünür ve tek
+          bir dosya sunamaz. Buradaki tavsiye bir KABUK KOMUTUYDU (`zfs create -o mountpoint=…`)
+          ve bu, ürünün kabul ölçütüne aykırıydı: cihazın sahibi olağan hiçbir iş için terminale
+          girmemeli. Artık bir düğme. */}
+      {needsTree && (
         <div className="warn">
           <span className="ic" aria-hidden>
             ⚠
           </span>
           <span className="tx">
-            <b>Bu kutuda havuz var ama paylaşım ağacı yok.</b>
+            <b>Havuz var, paylaşım ağacı yok.</b>
             DEPSIS paylaşımları hangi veri kümesinin altında açacağını bilmiyor, o yüzden yeni
-            paylaşım açılamıyor. Aşağıdaki sihirbaz yeni bir havuzla birlikte kurabilir; var olan
-            bir havuz için kabuktan:{' '}
-            <code>
-              zfs create -o mountpoint={storage.shareRoot.path ?? '/srv/depsis'} -o acltype=posixacl
-              -o xattr=sa {storage.pools[0]}/depsis
-            </code>
+            paylaşım açılamıyor. Aşağıdaki düğme onu {pools[0]} havuzunda kurar; hiçbir şey silmez.{' '}
+            <button
+              type="button"
+              className="b"
+              disabled={preparing}
+              onClick={() => void prepareTree()}
+            >
+              {preparing ? 'Kuruluyor…' : 'Paylaşım ağacını kur'}
+            </button>
           </span>
         </div>
       )}
 
-      <CreatePool disks={disks} storage={storage} notify={notify} onCreated={reload} />
+      {/* Sihirbaz: gereken durumda AÇIK, gerekmeyen durumda katlanmış. Depolaması hazır bir
+          kutuda ekranın diskleri silen bir sihirbazla bitmesi, en nadir eylemi en görünür yere
+          koymak olurdu. */}
+      {ready ? (
+        <details>
+          <summary className="note">Yeni bir havuz kur</summary>
+          <CreatePool disks={disks} storage={storage} notify={notify} onCreated={reload} />
+        </details>
+      ) : (
+        <CreatePool disks={disks} storage={storage} notify={notify} onCreated={reload} />
+      )}
+    </>
+  );
+}
+
+/**
+ * Ekranın ilk satırı: depolama hangi durumda, ve sıradaki adım ne.
+ *
+ * ÜÇ DURUM VE HER BİRİNİN BİR CÜMLESİ VAR, çünkü bu ekranın cevaplaması gereken ilk soru
+ * "kutuda hangi diskler var" değil — o ikinci soru. İlki, sahibin gerçekten sorduğu şey:
+ * depolamam çalışıyor mu, çalışmıyorsa ne yapmam gerekiyor.
+ */
+function StorageState({
+  ready,
+  needsTree,
+  pools,
+  unknown,
+  snapshot,
+}: {
+  ready: boolean;
+  needsTree: boolean;
+  pools: string[];
+  unknown: boolean;
+  snapshot: SystemSnapshot;
+}): React.JSX.Element {
+  const live = snapshot.telemetry?.pools ?? [];
+  const used = live.reduce((sum, pool) => sum + pool.used, 0);
+  const total = live.reduce((sum, pool) => sum + pool.used + pool.available, 0);
+  const sick = live.filter((pool) => pool.health !== 'ONLINE');
+
+  // BİLİNMİYOR, "kurulmadı" DEĞİL. İkisi bir ekranda aynı görünürse, sorulamayan bir soru
+  // olumsuz bir cevap gibi okunur ve sahibi olmayan bir sorunu çözmeye çalışır.
+  if (unknown) {
+    return (
+      <div className="netrow">
+        <span className="lbl">Depolama</span>
+        <span className="pill dim">durum okunamadı</span>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="netrow">
+        <span className="lbl">Depolama</span>
+        {pools.length === 0 ? (
+          <span className="pill warn">kurulmadı</span>
+        ) : needsTree ? (
+          <span className="pill warn">yarım</span>
+        ) : sick.length > 0 ? (
+          <span className="pill bad">{sick[0]?.health ?? 'sorunlu'}</span>
+        ) : (
+          <span className="pill">hazır</span>
+        )}
+        {pools.length > 0 && (
+          <span className="note">
+            {pools.join(', ')}
+            {total > 0 && ` · ${formatBytes(used)} / ${formatBytes(total)}`}
+          </span>
+        )}
+      </div>
+      <p className="note">
+        {pools.length === 0
+          ? 'Bu kutuda henüz havuz yok. Aşağıdaki listeden diskleri seçip bir havuz kurun; havuz kurulduğunda paylaşım ağacı da birlikte kurulur.'
+          : needsTree
+            ? 'Havuz kurulu ama paylaşımların açılacağı ağaç yok. Aşağıdaki düğme onu kurar.'
+            : ready
+              ? 'Paylaşım açılabilir. Aşağıdaki liste kutudaki bütün diskleri gösterir — havuzda olmayanlar da dahil.'
+              : ''}
+      </p>
     </>
   );
 }

@@ -1327,6 +1327,35 @@ paths:
         '429': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /storage/share-tree:
+    post:
+      operationId: prepareShareTree
+      tags: [system]
+      summary: Var olan bir havuzun üstünde paylaşım ağacını kur
+      description: |
+        Havuzu olan ama paylaşım ağacı olmayan bir kutu, tamamen sağlıklı görünür ve TEK BİR
+        dosya sunamaz: DEPSIS yeni paylaşımları hangi veri kümesinin altında açacağını bilmez.
+        Havuz sihirbazı bu işi zaten yapıyor, ama yalnız havuzu kendisi kurduğunda.
+
+        Bu uç, o boşluğu terminale gitmeden kapatır. YIKICI DEĞİLDİR: ajan, kökte bağlı bir veri
+        kümesi ya da boş olmayan bir dizin varsa reddeder, yani var olan bir şeyin üstüne yazma
+        yolu burada yoktur. Bu yüzden parola sorulmaz; kurucu yönetici kapısı durur.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ShareTreeRequest' }
+      responses:
+        '200':
+          description: Paylaşım ağacı kuruldu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareTreeResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
   /storage/pools:
     post:
       tags: [system]
@@ -5006,6 +5035,23 @@ components:
           type: array
           items: { type: string }
           description: Güncelleyicinin günlüğünün son satırları — uzun bir kurulumun "hâlâ yaşıyor" kanıtı.
+
+    ShareTreeRequest:
+      type: object
+      required: [pool]
+      properties:
+        pool:
+          type: string
+          pattern: '^[A-Za-z][A-Za-z0-9_.:-]{0,62}$'
+          description: Ağacın kurulacağı havuz. Kutuda olmayan bir ad 400 ile döner.
+
+    ShareTreeResult:
+      type: object
+      required: [dataset]
+      properties:
+        dataset:
+          type: string
+          description: Yeni paylaşımların altında açılacağı veri kümesi.
 
     CreatePoolRequest:
       type: object

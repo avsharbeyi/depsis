@@ -2125,6 +2125,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/storage/share-tree": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Var olan bir havuzun üstünde paylaşım ağacını kur
+         * @description Havuzu olan ama paylaşım ağacı olmayan bir kutu, tamamen sağlıklı görünür ve TEK BİR
+         *     dosya sunamaz: DEPSIS yeni paylaşımları hangi veri kümesinin altında açacağını bilmez.
+         *     Havuz sihirbazı bu işi zaten yapıyor, ama yalnız havuzu kendisi kurduğunda.
+         *
+         *     Bu uç, o boşluğu terminale gitmeden kapatır. YIKICI DEĞİLDİR: ajan, kökte bağlı bir veri
+         *     kümesi ya da boş olmayan bir dizin varsa reddeder, yani var olan bir şeyin üstüne yazma
+         *     yolu burada yoktur. Bu yüzden parola sorulmaz; kurucu yönetici kapısı durur.
+         */
+        post: operations["prepareShareTree"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/storage/pools": {
         parameters: {
             query?: never;
@@ -6793,6 +6819,14 @@ export interface components {
             /** @description Güncelleyicinin günlüğünün son satırları — uzun bir kurulumun "hâlâ yaşıyor" kanıtı. */
             logTail: string[];
         };
+        ShareTreeRequest: {
+            /** @description Ağacın kurulacağı havuz. Kutuda olmayan bir ad 400 ile döner. */
+            pool: string;
+        };
+        ShareTreeResult: {
+            /** @description Yeni paylaşımların altında açılacağı veri kümesi. */
+            dataset: string;
+        };
         CreatePoolRequest: {
             /**
              * @description Havuz adı. İçinde `/` OLAMAZ — o bir dataset yolu olurdu. Harfle başlamak zorunda:
@@ -7803,6 +7837,34 @@ export interface operations {
             400: components["responses"]["Problem"];
             403: components["responses"]["Problem"];
             429: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    prepareShareTree: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ShareTreeRequest"];
+            };
+        };
+        responses: {
+            /** @description Paylaşım ağacı kuruldu */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareTreeResult"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
             503: components["responses"]["Problem"];
         };
     };

@@ -170,9 +170,13 @@ const PANES: Record<PaneId, PaneMeta> = {
     // Admin-only, matching `GET /system/disks`. The endpoint reports every disk's model, serial
     // and what is stored on it; none of that is a member's business, and a dock entry that only
     // ever produces a 403 is a button that lies about what the appliance can do for them.
+    // Etiket DEPOLAMA, cunku kenar cubugundaki Depolama kutusu bu ekrani aciyor ve bir seyin
+    // iki adi olmasi tam da sahibin "anlasilir degil" dedigi seydi. Slug DEGISMEDI: adres
+    // cubugundaki /diskler bir yer imi olabilir, ve bir etiketi duzeltmek icin baglantilari
+    // bozmak gerekmiyor.
     slug: 'diskler',
-    label: 'Diskler',
-    glyph: '🖴',
+    label: 'Depolama',
+    glyph: '💽',
     tone: 'cool',
     wide: false,
     adminOnly: true,
