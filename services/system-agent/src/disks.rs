@@ -54,7 +54,16 @@ pub const BY_ID_DIR: &str = "/dev/disk/by-id";
 /// never fires. This shipped, and every unit test below passed throughout, because the fixtures
 /// were written with `children` — they encoded what lsblk produces WITH NAME, not what this argv
 /// asked for. Measured on util-linux 2.39.3 and 2.41. Remove the column and the tree goes with it.
-pub const COLUMNS: &str = "NAME,KNAME,TYPE,SIZE,MODEL,SERIAL,WWN,ROTA,RM,TRAN,FSTYPE,PTTYPE,                           MOUNTPOINT,MOUNTPOINTS,ID-LINK";
+///
+/// `concat!` AND NOT A BACKSLASH CONTINUATION. Written as one literal split over two lines with a
+/// trailing `\`, rustfmt joined the lines back and left the indentation INSIDE the string; lsblk
+/// then answered `unknown column: <spaces>MOUNTPOINT,...` and the whole inventory failed. No unit
+/// test could see it — the constant only means anything to the real command — so the invariant is
+/// asserted directly below instead.
+pub const COLUMNS: &str = concat!(
+    "NAME,KNAME,TYPE,SIZE,MODEL,SERIAL,WWN,ROTA,RM,TRAN,",
+    "FSTYPE,PTTYPE,MOUNTPOINT,MOUNTPOINTS,ID-LINK"
+);
 
 pub fn argv() -> [&'static str; 4] {
     ["--json", "--bytes", "--output", COLUMNS]
@@ -484,6 +493,27 @@ mod tests {
         {"kname":"loop0","type":"loop","size":12345,"children":[]}
       ]
     }"#;
+
+    #[test]
+    fn the_column_list_is_a_column_list_and_not_prose() {
+        // lsblk takes `--output` as ONE argument and matches each name exactly: a stray space
+        // makes the whole call fail with `unknown column`, and the box reports no disks at all.
+        // This is not hypothetical — a rustfmt-joined line continuation put twenty-seven spaces in
+        // the middle of the constant, and nothing in this file could tell until lsblk ran.
+        assert!(
+            !COLUMNS.contains(char::is_whitespace),
+            "no whitespace anywhere in an --output list: {COLUMNS}"
+        );
+        for column in COLUMNS.split(',') {
+            assert!(
+                !column.is_empty()
+                    && column
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c == '-' || c.is_ascii_digit()),
+                "not a column name: {column:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_columns_keep_the_one_that_makes_lsblk_nest() {
