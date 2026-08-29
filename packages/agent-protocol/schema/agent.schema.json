@@ -2070,6 +2070,10 @@
           "description": "Güncelleyicinin kendi yazdığı faz, yorumlanmadan. Bilinen değerler `idle`, `checking`,\n`downloading`, `building`, `installing`, `verifying`, `rolling_back`, `done`, `failed`.",
           "type": "string"
         },
+        "signed": {
+          "description": "Kutu İMZALI kipte mi: yalnız yayınlanmış ve imzalanmış sürümleri mi kuruyor.\n\nKipi belirleyen şey kutudaki açık anahtarın varlığı. Bilinmiyorsa `false` — güvenin\nkaynağı hakkında ekranda duran bir yalan, hiç bilgi vermemekten kötüdür.",
+          "type": "boolean"
+        },
         "started_at": {
           "type": [
             "string",
@@ -2090,7 +2094,8 @@
         "phase",
         "in_progress",
         "up_to_date",
-        "log_tail"
+        "log_tail",
+        "signed"
       ]
     },
     {

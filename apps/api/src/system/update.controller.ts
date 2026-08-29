@@ -41,6 +41,7 @@ interface AgentUpdate {
   finished_at?: string | null;
   error?: string | null;
   log_tail?: string[];
+  signed?: boolean;
 }
 
 /**
@@ -211,6 +212,7 @@ export class UpdateController {
       finishedAt: response.finished_at ?? null,
       error: response.error ?? null,
       logTail: response.log_tail ?? [],
+      signed: response.signed ?? false,
     };
   }
 }

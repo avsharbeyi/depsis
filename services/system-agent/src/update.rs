@@ -110,6 +110,13 @@ pub struct State {
     pub finished_at: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Bulunan sürüm İMZALI bir yayın mı.
+    ///
+    /// `Option`, çünkü bu alanı tanımayan bir güncelleyiciden gelen durum dosyası da okunabilmeli
+    /// — ve o durumda cevap HAYIR olmalı: bilinmezken "imzalı" demek, güvenin kaynağı hakkında
+    /// ekranda duran bir yalan olurdu.
+    #[serde(default)]
+    pub signed: Option<bool>,
 }
 
 /// Bitmiş fazlar. Listelenen ŞUNLAR, ve tanınmayan bir faz BİTMEMİŞ sayılır.

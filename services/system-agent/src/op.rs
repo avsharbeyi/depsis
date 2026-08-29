@@ -2373,6 +2373,11 @@ pub enum Response {
         error: Option<String>,
         /// Güncelleyicinin günlüğünün son satırları. Uzun bir kurulumun "hâlâ yaşıyor" kanıtı.
         log_tail: Vec<String>,
+        /// Kutu İMZALI kipte mi: yalnız yayınlanmış ve imzalanmış sürümleri mi kuruyor.
+        ///
+        /// Kipi belirleyen şey kutudaki açık anahtarın varlığı. Bilinmiyorsa `false` — güvenin
+        /// kaynağı hakkında ekranda duran bir yalan, hiç bilgi vermemekten kötüdür.
+        signed: bool,
     },
 
     /// The off-site identity and the destinations this appliance trusts.
@@ -2729,13 +2734,15 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 29, `Response::Update`in `signed` alanıyla: kutu imzalı sürüm kipinde mi.
+///
 /// 28, TLS işlemleriyle: `tls_status`, `install_certificate` ve `Response::Tls`.
 ///
 /// 27, güncelleme işlemleriyle: `update_status`, `check_update`, `apply_update` ve `Response::Update`.
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 28;
+pub const SCHEMA_VERSION: u32 = 29;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

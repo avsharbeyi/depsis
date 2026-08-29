@@ -152,7 +152,20 @@ Tasarımın üç kararı, çünkü hepsinin bir alternatifi vardı ve o alternat
   `install.sh` düşerse eski ağaç geri konup yeniden kuruluyor. Geri alması olmayan bir
   güncelleme mekanizması, cihazı çalışmaz hâlde bırakabilecek tek düğmedir.
 
-**Borç olarak kalan kısım: imza.** İndirilen şey kök yetkiyle kurulacak koddur, ve bugün
+**İmza — ödendi.** `deploy/release/` bir imzalama prosedürü ve `release.yml` bir sürüm iş akışı
+taşıyor: etiketlenen bir sürümün kaynak arşivi imzalanıyor, imza üretildiği yerde doğrulanıyor, ve
+depodaki açık anahtarla karşılaştırılıyor — uyuşmazsa sürüm yayınlanmıyor, çünkü onu hiçbir cihaz
+kuramazdı. Cihaz tarafında kipi belirleyen tek şey `release-key.pub`ın varlığı: varsa yalnız
+imzalı sürümler kuruluyor ve imza tutmazsa kurulum düşüyor — “imzasız devam edelim” diyen bir
+yedek yol bilerek yok, çünkü o yol tam olarak saldırganın kullanacağı yoldur. Arayüz hangi kipte
+olduğunu söylüyor (“imzalı sürüm” / “imzasız kaynak”).
+
+**Sahibine düşen tek adım, ve bilerek ona bırakıldı:** özel anahtarı üretmek ve saklamak. Bir
+üretim imza anahtarını üreten taraf cihazın sahibi olmalı; bu depo onu üretmez, taşımaz ve
+göremez. Komutlar `deploy/release/README.md`de, ve o adım atılana kadar cihaz imzasız kipte
+kalıyor — eskisi gibi, ama artık bunu söyleyerek.
+
+**Eski kayıt, neden yeterli olmadığıyla birlikte:** İndirilen şey kök yetkiyle kurulacak koddur, ve bugün
 dayandığı tek şey HTTPS ile kaynağın adresinin güncelleyici betikte SABİT olması — depo adı bir
 istekten gelmiyor. Bu, aradaki ağı dışarıda tutar; kaynağın kendisini dışarıda tutmaz. Gerçek
 cevap imzalı sürümlerdir (§21’in 13. teslimatı) ve o gelene kadar bu sınır burada yazılı
@@ -476,7 +489,8 @@ kutuda saatler sürebilir. Önceden derlenmiş bir sürüm akışı da imzayla a
 ### §21'in kalan teslimatları
 
 12. **Storybook / tasarım sistemi.**
-13. **İmzalı build ve güncelleme üretim prosedürü.**
+13. ~~**İmzalı build ve güncelleme üretim prosedürü.**~~ — §2.7. Prosedür ve iş akışı yerinde;
+    geriye sahibinin özel anahtarı üretmesi kaldı (`deploy/release/README.md`).
 
 ---
 
