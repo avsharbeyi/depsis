@@ -16,9 +16,10 @@
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "lint": "turbo run lint",
     "lint:workflows": "bash tools/ci/workflow-gate.sh",
+    "lint:design": "node tools/ci/design-system-check.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "pnpm format:check && pnpm lint && pnpm lint:workflows && pnpm typecheck && pnpm generate:check && pnpm test:unit",
+    "check": "pnpm format:check && pnpm lint && pnpm lint:workflows && pnpm lint:design && pnpm typecheck && pnpm generate:check && pnpm test:unit",
     "generate": "turbo run generate",
     "generate:check": "turbo run generate:check"
   },

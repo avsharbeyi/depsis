@@ -543,6 +543,18 @@ listesi CI'a eşitlendi; ders listenin kendisinde yazıyor.
 | Raporu okuyan kapı raporun yolunu bilmiyordu                           | O adıma hiç ulaşılmamıştı; iş her zaman daha önce düşüyordu.                                                     |
 | Keşif her telemetri poll'ünde aynı uyarıyı yazıyordu                   | ZFS'i olan bir kutuda hiç tetiklenmiyor.                                                                         |
 
+## Tasarım sistemi
+
+`docs/tasarim-sistemi.html` — tarayıcıda doğrudan açılır. Renk jetonları ve bileşen sözlüğü
+(rozetler, düğmeler, satırlar, uyarı kutusu, tablo, boş durum) tek sayfada.
+
+Sayfa `apps/web/src/styles.css`i **kopyalamıyor, içe aktarıyor**: bir kopya ilk gün doğru, ikinci
+ay yanlıştır ve yanlış olduğunu kimseye söylemez. Kopyalanamayan tek şey sınıf adları — bir sınıf
+stil dosyasından silindiğinde sayfa hiçbir şey söylemeden çizmeye devam ederdi. `pnpm lint:design`
+tam onu ölçüyor ve `pnpm check`in içinde koşuyor.
+
+Storybook bilerek kurulmadı; gerekçesi `docs/bilinen-sinirlamalar.md` §21 madde 12’de.
+
 ## Sertifika ve alan adı
 
 Sistem ekranında **Sertifika** bölümü: kutunun sunduğu sertifikanın kimliği, geçerli adresleri,

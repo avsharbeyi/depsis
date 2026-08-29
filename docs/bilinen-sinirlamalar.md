@@ -488,7 +488,14 @@ kutuda saatler sürebilir. Önceden derlenmiş bir sürüm akışı da imzayla a
 
 ### §21'in kalan teslimatları
 
-12. **Storybook / tasarım sistemi.**
+12. ~~**Storybook / tasarım sistemi.**~~ — `docs/tasarim-sistemi.html`. Storybook’un KENDİSİ
+    bilerek kurulmadı: kırk paketlik bir bağımlılık ağacı ve ayrı bir derleme hattı, tek bir
+    uygulamanın otuz kadar ekranı için ödenecek bedel değil — hele görsel doğrunun kaynağı zaten
+    sabitken (`docs/arayuz-v5-taslak.html`). Onun burada gerçekten verdiği iki şey alındı:
+    jetonların tek yerde görülmesi ve bileşen sözlüğüne uygulamayı çalıştırmadan bakılabilmesi.
+    Sayfa stil dosyasını KOPYALAMIYOR, içe aktarıyor — bir kopya ilk gün doğru, ikinci ay
+    yanlıştır ve yanlış olduğunu kimseye söylemez. Kopyalanamayan tek şey sınıf adları, ve onlar
+    `pnpm lint:design` ile ölçülüyor: sayfada geçen her sınıf stil dosyasında tanımlı olmalı.
 13. ~~**İmzalı build ve güncelleme üretim prosedürü.**~~ — §2.7. Prosedür ve iş akışı yerinde;
     geriye sahibinin özel anahtarı üretmesi kaldı (`deploy/release/README.md`).
 
