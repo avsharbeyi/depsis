@@ -470,6 +470,15 @@ impl SafePath for Openat2SafePath {
         ))
     }
 
+    fn owner_of(&self, relative: &[&str]) -> Result<u32, SeamError> {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = self.open_dir(relative)?;
+        let meta = dir
+            .metadata()
+            .map_err(|e| SeamError::Io(format!("stat {}: {e}", relative.join("/"))))?;
+        Ok(meta.uid())
+    }
+
     fn publish(
         &self,
         from_dir: &[&str],

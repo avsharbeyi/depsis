@@ -293,6 +293,25 @@ impl SafePath for MockSafePath {
         Ok(())
     }
 
+    /// Sahte kök gerçek bir dizin ağacı tuttuğu için sahibi de gerçekten okunuyor: testler bir
+    /// dosya sistemi kurup ona soruyor, uydurulmuş bir sayıya değil. Unix dışında (yalnız derleme
+    /// denetimi) sıfır: o hedefte hiçbir test koşmuyor.
+    fn owner_of(&self, relative: &[&str]) -> Result<u32, SeamError> {
+        let _dir = self.open_dir(relative)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let meta = _dir
+                .metadata()
+                .map_err(|e| SeamError::Io(format!("stat {}: {e}", relative.join("/"))))?;
+            Ok(meta.uid())
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(0)
+        }
+    }
+
     fn set_owner(&self, _file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError> {
         self.owners
             .lock()

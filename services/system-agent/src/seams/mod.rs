@@ -232,6 +232,15 @@ pub trait SafePath {
     /// who uploaded it cannot read it back over SMB or through the API. That presents as "uploads
     /// are broken", and the fastest-looking repair is to widen the mode — which is exactly the
     /// cross-tenant read the threat model exists to prevent. Ownership is the correct axis.
+    /// Bir dizinin sahibinin uid'i.
+    ///
+    /// SEAM'DE, çünkü `dispatch` platformdan bağımsız kalmak zorunda (ADR-0006) ve `MetadataExt`
+    /// Unix'e ait. İlk hâli `prepare_app_data_dir` içinde doğrudan `std::os::unix`'i çağırıyordu;
+    /// Windows çapraz denetimi onu yakaladı — `identity.rs`'in aynı ihlalini yakaladığı gibi.
+    /// Sahiplik testi burada yapılamaz: çağıran onu bir REDDE çeviriyor, ve reddin gerekçesi
+    /// (uid) cümlenin içinde geçiyor.
+    fn owner_of(&self, relative: &[&str]) -> Result<u32, SeamError>;
+
     fn set_owner(&self, file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError>;
 
     /// Set the mode of an already-open directory.

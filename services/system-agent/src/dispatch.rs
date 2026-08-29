@@ -738,23 +738,15 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         if let Err(reason) = crate::procs::check_kill(std::path::Path::new("/proc"), pid, comm) {
             return Ok(Response::Refused { reason });
         }
-        // check_kill ile kill arasında da pid el değiştirebilir; pencere artık milisaniyeler ve
-        // rustix'in pidfd'siz kill'i bundan iyisini veremez. SIGTERM: süreç kendini toplasın.
-        let Ok(raw) = i32::try_from(pid) else {
-            return Ok(Response::Refused {
-                reason: format!("pid {pid} bir işletim sistemi pid'i değil"),
-            });
-        };
-        match rustix::process::kill_process(
-            rustix::process::Pid::from_raw(raw)
-                .ok_or_else(|| SeamError::Io(format!("pid {pid} sıfır ya da negatif olamaz")))?,
-            rustix::process::Signal::TERM,
-        ) {
-            Ok(()) => Ok(Response::ProcessKilled {}),
-            Err(rustix::io::Errno::SRCH) => Ok(Response::Refused {
+        // check_kill ile sinyal arasında da pid el değiştirebilir; pencere artık milisaniyeler ve
+        // pidfd'siz bir kill bundan iyisini veremez. Sinyalin kendisi `procs::terminate`'te:
+        // `rustix::process` Windows'ta yok ve dağıtıcı platformdan bağımsız derlenmek zorunda.
+        match crate::procs::terminate(pid) {
+            Ok(crate::procs::Terminated::Sent) => Ok(Response::ProcessKilled {}),
+            Ok(crate::procs::Terminated::Gone) => Ok(Response::Refused {
                 reason: format!("pid {pid} yok — süreç zaten bitmiş"),
             }),
-            Err(e) => Err(SeamError::Io(format!("kill {pid}: {e}"))),
+            Err(reason) => Err(SeamError::Io(reason)),
         }
     }
 
@@ -1456,20 +1448,15 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 // to fix, and chowning a folder a person may have filled moves their files out
                 // from under their own permissions. So it is refused, with the fact in the
                 // sentence.
-                use std::os::unix::fs::MetadataExt as _;
-                let dir = paths.open_dir(&[share, directory])?;
-                let meta = dir
-                    .metadata()
-                    .map_err(|e| SeamError::Io(format!("stat {share}/{directory}: {e}")))?;
-                if meta.uid() == uid {
+                let owner = paths.owner_of(&[share, directory])?;
+                if owner == uid {
                     Ok(Response::AppDataDirReady { created: false })
                 } else {
                     Ok(Response::Refused {
                         reason: format!(
-                            "{share}/{directory} already exists and is not the application's: \
-                             it is owned by uid {}, not {uid}. Rename it in the file manager (the \
-                             application will make a fresh one), or pick another share",
-                            meta.uid()
+                            "{share}/{directory} zaten var ve uygulamanın değil: sahibi uid {owner}, {uid} \
+                             değil. Dosya yöneticisinden adını değiştirin (uygulama yenisini \
+                             açar) ya da başka bir paylaşım seçin"
                         ),
                     })
                 }

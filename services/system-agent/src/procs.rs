@@ -208,6 +208,42 @@ pub fn check_kill(proc_root: &Path, pid: u32, expected_comm: &str) -> Result<(),
     Ok(())
 }
 
+/// Sonlandırma sonucu — `dispatch` bunu cevaba çeviriyor, sinyali kendisi atmıyor.
+pub enum Terminated {
+    Sent,
+    /// Süreç aradaki milisaniyede kendiliğinden bitmiş. Ret değil, olağan bir yarış.
+    Gone,
+}
+
+/// SIGTERM gönder.
+///
+/// BURADA, `dispatch`'te DEĞİL, ve sebebi ADR-0006'nın çekirdek iddiası: dağıtıcı platformdan
+/// bağımsız derlenebilmeli. `rustix::process` Windows'ta yok, ve ilk hâli doğrudan dağıtıcının
+/// içindeydi — CI'ın Windows çapraz denetimi onu yakaladı, `identity.rs`'in aynı ihlalini
+/// yakaladığı gibi. Süreçlerin bilgisi zaten bu modülde; sinyalin de burada olması doğru yer.
+///
+/// SIGTERM, SIGKILL DEĞİL: süreç kendini toplasın. Yarıda kesilen bir yazma bırakmanın düğmesi
+/// olmaz — inat eden süreç için kullanıcı ikinci kez basar.
+#[cfg(unix)]
+pub fn terminate(pid: u32) -> Result<Terminated, String> {
+    let raw =
+        i32::try_from(pid).map_err(|_| format!("pid {pid} bir işletim sistemi pid'i değil"))?;
+    let handle = rustix::process::Pid::from_raw(raw)
+        .ok_or_else(|| format!("pid {pid} sıfır ya da negatif olamaz"))?;
+    match rustix::process::kill_process(handle, rustix::process::Signal::TERM) {
+        Ok(()) => Ok(Terminated::Sent),
+        Err(rustix::io::Errno::SRCH) => Ok(Terminated::Gone),
+        Err(e) => Err(format!("kill {pid}: {e}")),
+    }
+}
+
+/// Unix dışı hedeflerde YALNIZ DERLEME İÇİN. Ajan orada koşmuyor; bu dal, çapraz denetimin
+/// (ADR-0006) geçmesi için var ve çağrıldığında dürüstçe reddediyor.
+#[cfg(not(unix))]
+pub fn terminate(_pid: u32) -> Result<Terminated, String> {
+    Err("süreç kapatma yalnız Unix'te".to_string())
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

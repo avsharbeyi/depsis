@@ -22,4 +22,16 @@ run fmt --all -- --check
 run clippy --locked --all-targets -- -D warnings
 run test --locked --all
 
-printf '\nRust kapısı geçti (fmt · clippy --all-targets · test).\n'
+# Windows çapraz denetimi de BU kapıda, ayrı bir betikte değil — ve bunun kendi bedeli ödendi:
+# ayrı durduğu için koşulmuyordu, ve dispatch.rs'e giren iki doğrudan Unix çağrısı (bir
+# MetadataExt, bir rustix::process) ancak CI'da yakalandı. ADR-0006'nın çekirdek iddiası bu:
+# dağıtıcı platformdan bağımsız derlenebilmeli, çünkü platforma bağlı olan her şey seam'in
+# arkasında durmalı. Bir kapı, iddiayı sınayan adımı dışarıda bırakırsa iddiayı korumaz.
+printf '
+-> cargo check --target x86_64-pc-windows-msvc
+'
+bash "$(dirname "${BASH_SOURCE[0]}")/../wsl-cargo-windows-check.sh"
+
+printf '
+Rust kapisi gecti (fmt - clippy --all-targets - test - Windows caprazi).
+'
