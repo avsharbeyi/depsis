@@ -130,15 +130,29 @@ install -d -m 0755 "$SOCKET_DIR"
 # kutunun gercek /etc ve /var/lib ine dokunmadan surum mantigini ucdan uca olcebiliyor.
 UPDATE_DIR="$IMAGES/update"
 install -d -m 0700 "$UPDATE_DIR"
+TLS_DIR="$IMAGES/tls"
+install -d -m 0700 "$TLS_DIR"
+# GERCEK bir sertifika, gercek openssl ile. Bu bolumun butun degeri bu: cift eslesme kontrolu
+# ve sure kontrolu, sahte bir kosucuyla hicbir sey kanitlamaz.
+openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -days 30 -subj "/CN=depsis-kapi" -keyout "$TLS_DIR/depsis.key" -out "$TLS_DIR/depsis.crt" \
+  >/dev/null 2>&1
+# Ikinci, tamamen ayri bir cift: eslesmeyen anahtarin reddedildigini gostermek icin.
+openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -days 30 -subj "/CN=baska" -keyout "$TLS_DIR/baska.key" -out "$TLS_DIR/baska.crt" \
+  >/dev/null 2>&1
 DEPSIS_API_UID="$API_UID" DEPSIS_SHARES_ROOT="$SHARES_ROOT" DEPSIS_ZFS_POOLS="$POOL" \
   DEPSIS_UPDATE_STATE="$UPDATE_DIR/state.json" \
   DEPSIS_UPDATE_LOG="$UPDATE_DIR/log" \
   DEPSIS_INSTALLED_VERSION="$UPDATE_DIR/version" \
+  DEPSIS_TLS_CERT="$TLS_DIR/depsis.crt" \
+  DEPSIS_TLS_KEY="$TLS_DIR/depsis.key" \
   systemd-socket-activate \
   -l "$SOCKET_DIR/agent.sock" --fdname=control \
   -l "$SOCKET_DIR/agent-data.sock" --fdname=data \
   -E DEPSIS_API_UID -E DEPSIS_SHARES_ROOT -E DEPSIS_ZFS_POOLS \
   -E DEPSIS_UPDATE_STATE -E DEPSIS_UPDATE_LOG -E DEPSIS_INSTALLED_VERSION \
+  -E DEPSIS_TLS_CERT -E DEPSIS_TLS_KEY \
   "$AGENT_BIN" --serve >"$LOG" 2>&1 &
 AGENT_PID=$!
 
@@ -333,6 +347,63 @@ printf '%s' '{"phase":"instal' >"$UPDATE_DIR/state.json"
 check 'bozuk durum dosyasi hata olarak bildiriliyor' \
   "$(ask update '{"op":"update_status"}')" '"phase":"failed"'
 rm -f "$UPDATE_DIR/state.json" "$UPDATE_DIR/version"
+
+# ── 6d. SERTIFIKA ───────────────────────────────────────────────────────────
+#
+# Kutunun HTTPS kimligi. Burada sinanan sey OPENSSL degil, ajanin kararlari — ve o kararlar
+# ancak gercek bir sertifikayla anlamli: "ozel anahtar bu sertifikaya ait degil" iddiasi, sahte
+# bir kosucuyla hicbir sey kanitlamaz.
+#
+# En degerli iddia sonuncusu: nginx yeni sertifikayi kabul etmezse ESKISI GERI GELMELI. Bir
+# sertifika kurulumunun asla uretmemesi gereken sonuc, HTTPS sunamayan bir kutudur — ve bu
+# kapidaki kosucuda nginx hic kurulu degil, yani o yol her kosumda gercekten yurutuluyor.
+say 'sertifika'
+
+TLS_STATUS=$(ask tls '{"op":"tls_status"}')
+check 'sertifika okunuyor' "$TLS_STATUS" '"status":"tls"'
+check 'kendinden imzali oldugu soyleniyor' "$TLS_STATUS" '"self_signed":true'
+FP_BEFORE=$(printf '%s' "$TLS_STATUS" | node -e '
+  let raw = "";
+  process.stdin.on("data", (chunk) => (raw += chunk));
+  process.stdin.on("end", () => {
+    try { process.stdout.write(String(JSON.parse(raw).fingerprint ?? "")); } catch { process.stdout.write(""); }
+  });
+')
+check 'parmak izi okunuyor' "${FP_BEFORE:-yok}" ':'
+
+# Bir sertifika, BASKA bir ciftin anahtariyla. Bu kontrol olmadan birbirine ait olmayan iki
+# dosya kutuya konabilir ve nginx yeniden yuklenene kadar hicbir sey yanlis gorunmez.
+MISMATCHED=$(node -e '
+  const fs = require("node:fs");
+  process.stdout.write(JSON.stringify({
+    op: "install_certificate",
+    certificate: fs.readFileSync(process.argv[1], "utf8"),
+    private_key: fs.readFileSync(process.argv[2], "utf8"),
+  }));
+' "$TLS_DIR/baska.crt" "$TLS_DIR/depsis.key")
+check 'eslesmeyen anahtar reddediliyor' "$(ask tls "$MISMATCHED")" 'ait de'
+
+# Eslesen bir cift: cift kontrolunu ve sure kontrolunu GECIYOR, sonra nginx e takiliyor —
+# cunku bu kosucuda nginx yok. Beklenen sey tam da bu: ret, VE eski sertifikanin geri gelmesi.
+MATCHING=$(node -e '
+  const fs = require("node:fs");
+  process.stdout.write(JSON.stringify({
+    op: "install_certificate",
+    certificate: fs.readFileSync(process.argv[1], "utf8"),
+    private_key: fs.readFileSync(process.argv[2], "utf8"),
+  }));
+' "$TLS_DIR/baska.crt" "$TLS_DIR/baska.key")
+check 'nginx kabul etmezse kurulum reddediliyor' "$(ask tls "$MATCHING")" 'geri kondu'
+
+# VE GERI ALMA GERCEKTEN OLDU: parmak izi degismemis olmali.
+FP_AFTER=$(ask tls '{"op":"tls_status"}' | node -e '
+  let raw = "";
+  process.stdin.on("data", (chunk) => (raw += chunk));
+  process.stdin.on("end", () => {
+    try { process.stdout.write(String(JSON.parse(raw).fingerprint ?? "")); } catch { process.stdout.write(""); }
+  });
+')
+check 'eski sertifika geri kondu' "$FP_AFTER" "$FP_BEFORE"
 
 # ── 7. Sınırın iki yarısı: TypeScript istemci ↔ Rust ajan ──────────────────
 #

@@ -20,6 +20,7 @@ import { ProcessesController } from './processes.controller.js';
 import { SystemController } from './system.controller.js';
 import { ShareTreeController } from './share-tree.controller.js';
 import { SystemService } from './system.service.js';
+import { TlsController } from './tls.controller.js';
 import { UpdateController } from './update.controller.js';
 
 @Module({
@@ -36,6 +37,7 @@ import { UpdateController } from './update.controller.js';
     ProcessesController,
     UpdateController,
     ShareTreeController,
+    TlsController,
   ],
   providers: [
     {

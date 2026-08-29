@@ -1327,6 +1327,61 @@ paths:
         '429': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /system/tls:
+    get:
+      operationId: tlsStatus
+      tags: [system]
+      summary: Cihazın sunduğu sertifika ne
+      description: |
+        Kurulum kendinden imzalı bir sertifika üretiyor ve tarayıcı haklı olarak uyarıyor: bir
+        NAS’a ilk kez bağlanan tarayıcının o sertifikayı doğrulamasının yolu yok. O uyarı
+        ekranında karşılaştırılacak tek şey PARMAK İZİ, ve bugüne kadar onu görmenin tek yolu
+        kurulum çıktısına bakmaktı — yani cihazı kuran kişinin o anki terminali.
+
+        Yalnız kurucu yönetici.
+      responses:
+        '200':
+          description: Sertifikanın anlatısı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TlsStatus' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
+  /system/tls/certificate:
+    post:
+      operationId: installCertificate
+      tags: [system]
+      summary: Kendi sertifikanı kur
+      description: |
+        Kendi alan adı için aldığı sertifikayı kutuya koymanın yolu bir kabuk olmamalı: iki
+        dosyayı `scp` ile kopyalayıp nginx’i yeniden yüklemek, ürünün kabul ölçütünün dışında.
+
+        DOĞRULAMA ÜÇ ŞEY: sertifika ayrıştırılabilmeli, özel anahtar O sertifikaya ait olmalı,
+        ve süresi dolmamış olmalı. Zincir doğrulaması YOK ve olmamalı — hangi CA’nın güvenilir
+        olduğu tarayıcının kararı, ve kendi CA’sını kuran bir ev ağı da meşru.
+
+        nginx önce sınanır sonra yeniden yüklenir, ve herhangi bir adım düşerse eski sertifika
+        geri konur: bir sertifika kurulumunun asla üretmemesi gereken sonuç, HTTPS sunamayan
+        bir kutudur.
+
+        Parolayla yeniden kimlik doğrulama gerekir. Yalnız kurucu yönetici.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TlsCertificateRequest' }
+      responses:
+        '200':
+          description: Sertifika kuruldu; yanıt yeni sertifikanın anlatısı
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TlsStatus' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
   /storage/share-tree:
     post:
       operationId: prepareShareTree
@@ -5035,6 +5090,47 @@ components:
           type: array
           items: { type: string }
           description: Güncelleyicinin günlüğünün son satırları — uzun bir kurulumun "hâlâ yaşıyor" kanıtı.
+
+    TlsStatus:
+      type: object
+      required: [subject, issuer, notBefore, notAfter, fingerprint, names, selfSigned]
+      properties:
+        subject: { type: string }
+        issuer: { type: string }
+        notBefore: { type: string }
+        notAfter: { type: string }
+        fingerprint:
+          type: string
+          description: |
+            SHA-256, iki nokta ile ayrılmış. Kendinden imzalı bir sertifikada tarayıcının uyarı
+            ekranında karşılaştırılacak TEK şey bu.
+        names:
+          type: array
+          items: { type: string }
+          description: 'SAN listesi, openssl’in yazdığı gibi: `DNS:nas.example.com`, `IP Address:192.168.1.10`.'
+        selfSigned:
+          type: boolean
+          description: Konu ile veren aynı. Tarayıcı uyarısının sebebi bu.
+
+    TlsCertificateRequest:
+      type: object
+      required: [certificate, privateKey, password]
+      properties:
+        certificate:
+          type: string
+          maxLength: 65536
+          description: |
+            PEM. Zincir de olabilir — ara sertifikalar sunulmazsa bazı istemciler bağlanamaz, ve
+            operatörün elindeki dosya çoğunlukla zaten zincirdir.
+        privateKey:
+          type: string
+          maxLength: 16384
+          description: |
+            PEM. ŞİFRELİ BİR ANAHTAR KABUL EDİLMİYOR: parolayı da istemek, o parolanın kutuda
+            bir yerde durması demek olurdu, ve dosyanın kendisi zaten 0400 kök.
+        password:
+          type: string
+          description: Oturumdaki yöneticinin parolası.
 
     ShareTreeRequest:
       type: object

@@ -543,6 +543,27 @@ listesi CI'a eşitlendi; ders listenin kendisinde yazıyor.
 | Raporu okuyan kapı raporun yolunu bilmiyordu                           | O adıma hiç ulaşılmamıştı; iş her zaman daha önce düşüyordu.                                                     |
 | Keşif her telemetri poll'ünde aynı uyarıyı yazıyordu                   | ZFS'i olan bir kutuda hiç tetiklenmiyor.                                                                         |
 
+## Sertifika ve alan adı
+
+Sistem ekranında **Sertifika** bölümü: kutunun sunduğu sertifikanın kimliği, geçerli adresleri,
+bitiş tarihi ve **parmak izi**. Sonuncusu önemli — kendinden imzalı bir sertifikada tarayıcının
+uyarı ekranında karşılaştırılacak tek şey odur, ve onu görmenin tek yolu bugüne kadar kurulum
+çıktısına bakmaktı: bir daha açılmayan bir pencere.
+
+Kendi alan adınız varsa, sağlayıcınızdan aldığınız sertifikayı (zincir olabilir) ve özel anahtarı
+aynı ekrandan yapıştırıp kurabilirsiniz. Ajan üç şeye bakar: sertifika ayrıştırılabiliyor mu,
+anahtar O sertifikaya mı ait, ve süresi dolmuş mu. Zincir doğrulaması bilerek YOK — hangi CA’nın
+güvenilir olduğu tarayıcının kararı, ve kendi CA’sını kuran bir ev ağı da meşru.
+
+nginx önce sınanır, sonra yeniden yüklenir, ve **herhangi bir adım düşerse eski sertifika geri
+konur**: bir sertifika kurulumunun asla üretmemesi gereken sonuç, HTTPS sunamayan bir kutudur.
+Bu geri alma yolu her push’ta `appliance` işinde gerçekten yürütülüyor — o koşucuda nginx kurulu
+değil, yani kurulum orada her seferinde düşüyor ve her seferinde geri alınıyor.
+
+Sertifikayı DEPSIS **almaz**: Let’s Encrypt’in HTTP-01 doğrulaması kutuya internetten 80
+portuyla ulaşılmasını, DNS-01 ise alan adı sağlayıcınızın API anahtarını ister — ikisi de bir ev
+cihazında güvenilemeyecek varsayımlar.
+
 ## Cihazı güncellemek
 
 Sistem ekranında **Yazılım sürümü** bölümü: kurulu sürüm, `Sürüm denetle`, ve bulunan sürüm için

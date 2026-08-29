@@ -2125,6 +2125,62 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/tls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Cihazın sunduğu sertifika ne
+         * @description Kurulum kendinden imzalı bir sertifika üretiyor ve tarayıcı haklı olarak uyarıyor: bir
+         *     NAS’a ilk kez bağlanan tarayıcının o sertifikayı doğrulamasının yolu yok. O uyarı
+         *     ekranında karşılaştırılacak tek şey PARMAK İZİ, ve bugüne kadar onu görmenin tek yolu
+         *     kurulum çıktısına bakmaktı — yani cihazı kuran kişinin o anki terminali.
+         *
+         *     Yalnız kurucu yönetici.
+         */
+        get: operations["tlsStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/tls/certificate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Kendi sertifikanı kur
+         * @description Kendi alan adı için aldığı sertifikayı kutuya koymanın yolu bir kabuk olmamalı: iki
+         *     dosyayı `scp` ile kopyalayıp nginx’i yeniden yüklemek, ürünün kabul ölçütünün dışında.
+         *
+         *     DOĞRULAMA ÜÇ ŞEY: sertifika ayrıştırılabilmeli, özel anahtar O sertifikaya ait olmalı,
+         *     ve süresi dolmamış olmalı. Zincir doğrulaması YOK ve olmamalı — hangi CA’nın güvenilir
+         *     olduğu tarayıcının kararı, ve kendi CA’sını kuran bir ev ağı da meşru.
+         *
+         *     nginx önce sınanır sonra yeniden yüklenir, ve herhangi bir adım düşerse eski sertifika
+         *     geri konur: bir sertifika kurulumunun asla üretmemesi gereken sonuç, HTTPS sunamayan
+         *     bir kutudur.
+         *
+         *     Parolayla yeniden kimlik doğrulama gerekir. Yalnız kurucu yönetici.
+         */
+        post: operations["installCertificate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/storage/share-tree": {
         parameters: {
             query?: never;
@@ -6819,6 +6875,35 @@ export interface components {
             /** @description Güncelleyicinin günlüğünün son satırları — uzun bir kurulumun "hâlâ yaşıyor" kanıtı. */
             logTail: string[];
         };
+        TlsStatus: {
+            subject: string;
+            issuer: string;
+            notBefore: string;
+            notAfter: string;
+            /**
+             * @description SHA-256, iki nokta ile ayrılmış. Kendinden imzalı bir sertifikada tarayıcının uyarı
+             *     ekranında karşılaştırılacak TEK şey bu.
+             */
+            fingerprint: string;
+            /** @description SAN listesi, openssl’in yazdığı gibi: `DNS:nas.example.com`, `IP Address:192.168.1.10`. */
+            names: string[];
+            /** @description Konu ile veren aynı. Tarayıcı uyarısının sebebi bu. */
+            selfSigned: boolean;
+        };
+        TlsCertificateRequest: {
+            /**
+             * @description PEM. Zincir de olabilir — ara sertifikalar sunulmazsa bazı istemciler bağlanamaz, ve
+             *     operatörün elindeki dosya çoğunlukla zaten zincirdir.
+             */
+            certificate: string;
+            /**
+             * @description PEM. ŞİFRELİ BİR ANAHTAR KABUL EDİLMİYOR: parolayı da istemek, o parolanın kutuda
+             *     bir yerde durması demek olurdu, ve dosyanın kendisi zaten 0400 kök.
+             */
+            privateKey: string;
+            /** @description Oturumdaki yöneticinin parolası. */
+            password: string;
+        };
         ShareTreeRequest: {
             /** @description Ağacın kurulacağı havuz. Kutuda olmayan bir ad 400 ile döner. */
             pool: string;
@@ -7832,6 +7917,56 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UpdateStatus"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            429: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    tlsStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sertifikanın anlatısı */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TlsStatus"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    installCertificate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TlsCertificateRequest"];
+            };
+        };
+        responses: {
+            /** @description Sertifika kuruldu; yanıt yeni sertifikanın anlatısı */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TlsStatus"];
                 };
             };
             400: components["responses"]["Problem"];

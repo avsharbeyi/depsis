@@ -1497,6 +1497,37 @@ pub enum Request {
     /// başlatıp döner. Süreci `update_status` izler.
     #[serde(rename = "apply_update")]
     ApplyUpdate {},
+    /// Kutunun sunduğu sertifika ne.
+    ///
+    /// Kurulum kendinden imzalı bir sertifika üretiyor ve tarayıcı haklı olarak uyarıyor. O uyarı
+    /// ekranında karşılaştırılacak tek şey PARMAK İZİ, ve bugüne kadar onu görmenin tek yolu
+    /// kurulum çıktısına bakmaktı — yani cihazı kuran kişinin o anki terminaliydi.
+    #[serde(rename = "tls_status")]
+    TlsStatus {},
+
+    /// Sahibinin kendi sertifikasını kur.
+    ///
+    /// ÖZEL ANAHTAR BU İSTEKTE, ve bu, işlem kümesi hakkında söylenen bir şeyi değiştiriyor —
+    /// `audit` modülünün notu buna göre düzeltildi. Denetim kaydına giren şey değişmiyor: kayıt
+    /// yalnız işlem adını taşıyor, isteğin kendisini değil.
+    ///
+    /// DOĞRULAMA ÜÇ ŞEY: sertifika ayrıştırılabilmeli, anahtar O sertifikaya ait olmalı, ve süresi
+    /// dolmamış olmalı. Zincir doğrulaması YOK ve olmamalı — hangi CA nın güvenilir olduğu
+    /// tarayıcının kararı, ve kendi CA sını kuran bir ev ağı da meşru.
+    ///
+    /// nginx ÖNCE SINANIR sonra yeniden yüklenir: bozuk bir yapılandırmayla `reload`, çalışan
+    /// nginx i olduğu gibi bırakıp sessizce başarısız oluyor. Herhangi bir adım düşerse eski
+    /// sertifika geri konuyor — kutunun HTTPS sunamaz hâle gelmesi, kabul edilebilir bir sonuç
+    /// değil.
+    #[serde(rename = "install_certificate")]
+    InstallCertificate {
+        /// PEM. Zincir de olabilir: ara sertifikalar sunucu tarafından sunulmazsa bazı istemciler
+        /// bağlanamaz, ve operatörün elindeki dosya çoğunlukla zaten zincirdir.
+        certificate: String,
+        /// PEM. Şifreli bir anahtar KABUL EDİLMİYOR: parolayı da istemek, o parolanın kutuda bir
+        /// yerde durması demek olurdu, ve dosyanın kendisi zaten 0400 kök.
+        private_key: String,
+    },
 
     /// What `zpool status` says about scrubbing this pool.
     ///
@@ -2302,6 +2333,22 @@ pub enum Response {
         full_name: String,
     },
 
+    /// Kutunun sunduğu sertifika.
+    #[serde(rename = "tls")]
+    Tls {
+        /// Sertifikanın konusu, `openssl`in yazdığı gibi.
+        subject: String,
+        issuer: String,
+        not_before: String,
+        not_after: String,
+        /// SHA-256, iki nokta ile ayrılmış. Tarayıcının uyarı ekranında karşılaştırılan şey.
+        fingerprint: String,
+        /// SAN listesi: `DNS:nas.example.com`, `IP Address:192.168.1.10`.
+        names: Vec<String>,
+        /// Konu ile veren aynı. Tarayıcı uyarısının sebebi, ve ekranda söylenmesi gereken şey.
+        self_signed: bool,
+    },
+
     /// Güncellemenin bütün durumu, tek yanıtta.
     #[serde(rename = "update")]
     Update {
@@ -2682,11 +2729,13 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 28, TLS işlemleriyle: `tls_status`, `install_certificate` ve `Response::Tls`.
+///
 /// 27, güncelleme işlemleriyle: `update_status`, `check_update`, `apply_update` ve `Response::Update`.
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 27;
+pub const SCHEMA_VERSION: u32 = 28;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

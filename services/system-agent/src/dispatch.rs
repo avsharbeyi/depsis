@@ -718,6 +718,217 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         Ok(Response::DiskWiped { detail: out })
     }
 
+    /// Kutunun sunduğu sertifika ne.
+    ///
+    /// Okunamaması BİR CEVAP: ilk kurulum tamamlanmadan sertifika yok, ve o kutuda ekranın
+    /// söylemesi gereken şey "sertifika yok", bir hata değil.
+    fn tls_status(&self) -> Result<Response, SeamError> {
+        let path = crate::tls::cert_path();
+        let Some(path) = path.to_str() else {
+            return Ok(Response::Refused {
+                reason: "sertifika yolu okunamıyor".to_string(),
+            });
+        };
+        match self
+            .runner
+            .run(crate::tls::OPENSSL, &crate::tls::describe_argv(path))
+        {
+            Ok(output) => Ok(Self::tls_response(&crate::tls::parse_facts(&output))),
+            Err(error) => Ok(Response::Refused {
+                reason: format!("sertifika okunamadı: {error}"),
+            }),
+        }
+    }
+
+    fn tls_response(facts: &crate::tls::Facts) -> Response {
+        Response::Tls {
+            subject: facts.subject.clone(),
+            issuer: facts.issuer.clone(),
+            not_before: facts.not_before.clone(),
+            not_after: facts.not_after.clone(),
+            fingerprint: facts.fingerprint.clone(),
+            names: facts.names.clone(),
+            self_signed: facts.self_signed,
+        }
+    }
+
+    /// Sahibinin kendi sertifikasını kur.
+    ///
+    /// SIRA ÖNEMLİ ve her adımın geri dönüşü var. Yeni dosyalar önce YANLARINA yazılıyor,
+    /// doğrulama onların üstünde koşuyor, ve ancak her şey geçtikten sonra yerlerine konuyorlar.
+    /// nginx bundan sonra bile düşebilir — o zaman eskisi geri geliyor. Bir sertifika kurulumunun
+    /// asla üretmemesi gereken sonuç, HTTPS sunamayan bir kutu.
+    fn install_certificate(
+        &self,
+        certificate: &str,
+        private_key: &str,
+    ) -> Result<Response, SeamError> {
+        if certificate.len() > crate::tls::MAX_CERTIFICATE_BYTES {
+            return Ok(Response::Refused {
+                reason: "sertifika fazla büyük".to_string(),
+            });
+        }
+        if private_key.len() > crate::tls::MAX_KEY_BYTES {
+            return Ok(Response::Refused {
+                reason: "özel anahtar fazla büyük".to_string(),
+            });
+        }
+        // Operatörün en olası hatası iki dosyayı ters yüklemek, ve ona bunu söylemek openssl'in
+        // "unable to load certificate"ından çok daha iyi.
+        if !crate::tls::looks_like(certificate, "CERTIFICATE") {
+            return Ok(Response::Refused {
+                reason: "sertifika alanı bir PEM sertifikası değil (BEGIN CERTIFICATE bekleniyor)"
+                    .to_string(),
+            });
+        }
+        if !crate::tls::looks_like_private_key(private_key) {
+            return Ok(Response::Refused {
+                reason: "anahtar alanı bir PEM özel anahtarı değil (BEGIN PRIVATE KEY bekleniyor)"
+                    .to_string(),
+            });
+        }
+
+        let cert_path = crate::tls::cert_path();
+        let key_path = crate::tls::key_path();
+        let staged_cert = cert_path.with_extension("new");
+        let staged_key = key_path.with_extension("new");
+
+        // 0400 ve 0444: anahtarı yalnız kök okur, sertifika herkese açık — nginx'in kök olmayan
+        // işçileri onu okuyor.
+        if let Err(reason) = crate::tls::write_file(&staged_cert, certificate, 0o444) {
+            return Ok(Response::Refused { reason });
+        }
+        if let Err(reason) = crate::tls::write_file(&staged_key, private_key, 0o400) {
+            let _ = std::fs::remove_file(&staged_cert);
+            return Ok(Response::Refused { reason });
+        }
+
+        let cleanup = || {
+            let _ = std::fs::remove_file(&staged_cert);
+            let _ = std::fs::remove_file(&staged_key);
+        };
+        let (Some(staged_cert_str), Some(staged_key_str)) =
+            (staged_cert.to_str(), staged_key.to_str())
+        else {
+            cleanup();
+            return Ok(Response::Refused {
+                reason: "sertifika yolu okunamıyor".to_string(),
+            });
+        };
+
+        // ÇİFT GERÇEKTEN ÇİFT Mİ. Bu kontrol olmadan birbirine ait olmayan iki dosya kutuya
+        // konabilir ve nginx yeniden yüklenene kadar hiçbir şey yanlış görünmez.
+        let cert_pub = self.runner.run(
+            crate::tls::OPENSSL,
+            &crate::tls::cert_pubkey_argv(staged_cert_str),
+        );
+        let key_pub = self.runner.run(
+            crate::tls::OPENSSL,
+            &crate::tls::key_pubkey_argv(staged_key_str),
+        );
+        match (cert_pub, key_pub) {
+            (Ok(from_cert), Ok(from_key)) if from_cert.trim() == from_key.trim() => {}
+            (Ok(_), Ok(_)) => {
+                cleanup();
+                return Ok(Response::Refused {
+                    reason: "özel anahtar bu sertifikaya ait değil".to_string(),
+                });
+            }
+            (Err(error), _) => {
+                cleanup();
+                return Ok(Response::Refused {
+                    reason: format!("sertifika okunamadı: {error}"),
+                });
+            }
+            (_, Err(error)) => {
+                cleanup();
+                return Ok(Response::Refused {
+                    reason: format!("özel anahtar okunamadı: {error}"),
+                });
+            }
+        }
+
+        // SÜRESİ DOLMUŞ BİR SERTİFİKA KURULMAZ. Kurulsaydı sonuç, tarayıcının kutuya hiç
+        // bağlanmaması olurdu — ve bunu geri almanın yolu yine tarayıcıdan geçiyor.
+        if let Err(error) = self.runner.run(
+            crate::tls::OPENSSL,
+            &crate::tls::checkend_argv(staged_cert_str),
+        ) {
+            cleanup();
+            return Ok(Response::Refused {
+                reason: format!("sertifikanın süresi dolmuş ya da henüz geçerli değil: {error}"),
+            });
+        }
+
+        let cert_backup = crate::tls::backup(&cert_path, "previous");
+        let key_backup = crate::tls::backup(&key_path, "previous-key");
+
+        if let Err(reason) = crate::tls::replace(&staged_cert, &cert_path) {
+            cleanup();
+            return Ok(Response::Refused { reason });
+        }
+        if let Err(reason) = crate::tls::replace(&staged_key, &key_path) {
+            Self::restore_tls(cert_backup.as_deref(), &cert_path, None, &key_path);
+            cleanup();
+            return Ok(Response::Refused { reason });
+        }
+
+        // nginx ÖNCE SINANIR. Bozuk bir yapılandırmayla `reload`, çalışan nginx'i olduğu gibi
+        // bırakıp sessizce başarısız oluyor — yani "sertifika kuruldu" derken tarayıcıya hâlâ
+        // eskisi sunulurdu.
+        if let Err(error) = self
+            .runner
+            .run(crate::tls::NGINX, &crate::tls::nginx_test_argv())
+        {
+            Self::restore_tls(
+                cert_backup.as_deref(),
+                &cert_path,
+                key_backup.as_deref(),
+                &key_path,
+            );
+            return Ok(Response::Refused {
+                reason: format!("nginx bu sertifikayı kabul etmedi, eskisi geri kondu: {error}"),
+            });
+        }
+        if let Err(error) = self.runner.run(bin::SYSTEMCTL, &["reload", "nginx"]) {
+            Self::restore_tls(
+                cert_backup.as_deref(),
+                &cert_path,
+                key_backup.as_deref(),
+                &key_path,
+            );
+            return Ok(Response::Refused {
+                reason: format!("nginx yeniden yüklenemedi, eski sertifika geri kondu: {error}"),
+            });
+        }
+
+        // Yedekler artık yük: içlerinde bir TLS özel anahtarı var ve kutuda durmalarının bir
+        // sebebi kalmadı.
+        if let Some(path) = cert_backup {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Some(path) = key_backup {
+            let _ = std::fs::remove_file(path);
+        }
+
+        self.tls_status()
+    }
+
+    /// Eskiyi geri koy. Yedek yoksa hiçbir şey yapmaz — ilk kurulumda sertifika olmayabilir.
+    fn restore_tls(
+        cert_backup: Option<&std::path::Path>,
+        cert_path: &std::path::Path,
+        key_backup: Option<&std::path::Path>,
+        key_path: &std::path::Path,
+    ) {
+        if let Some(backup) = cert_backup {
+            let _ = std::fs::rename(backup, cert_path);
+        }
+        if let Some(backup) = key_backup {
+            let _ = std::fs::rename(backup, key_path);
+        }
+    }
+
     /// Bir güncelleme biriminin systemd'ye göre durumu.
     ///
     /// HATA DA BİR CEVAP: `systemctl` yoksa ya da birim tanınmıyorsa boş dize dönüyor, ve boş dize
@@ -2304,6 +2515,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 disks,
             } => self.create_pool(pool.as_str(), *topology, disks),
             crate::op::Request::WipeDisk { disk } => self.wipe_disk(disk),
+            crate::op::Request::TlsStatus {} => self.tls_status(),
+            crate::op::Request::InstallCertificate {
+                certificate,
+                private_key,
+            } => self.install_certificate(certificate, private_key),
             crate::op::Request::UpdateStatus {} => self.update_status(),
             crate::op::Request::CheckUpdate {} => self.start_update_unit(crate::update::CHECK_UNIT),
             crate::op::Request::ApplyUpdate {} => self.apply_update(),
@@ -3020,6 +3236,117 @@ mod tests {
             .starts_with("/dev/disk/by-id/"));
     }
 
+    #[test]
+    fn a_key_pasted_into_the_certificate_box_is_named_for_what_it_is() {
+        // Operatörün en olası hatası iki dosyayı ters yüklemek. Ona bunu söylemek, openssl’in
+        // "unable to load certificate"ından çok daha iyi — ve hiçbir dosya yazılmadan söyleniyor.
+        let r = MockCommandRunner::with_responses([]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let request = format!(
+            r#"{{"op":"install_certificate","certificate":"{}","private_key":"{}"}}"#,
+            "-----BEGIN PRIVATE KEY----- BBBB", "-----BEGIN PRIVATE KEY----- BBBB"
+        );
+        let resp = agent(&r, &s, &h).handle(&request, peer(API_UID), "tls1", "operator uploaded");
+        match resp {
+            Response::Refused { ref reason } => {
+                assert!(reason.contains("BEGIN CERTIFICATE"), "{reason}");
+            }
+            other => panic!("anahtar sertifika diye kabul edildi: {other:?}"),
+        }
+        assert!(r.call(0).is_none(), "hiçbir komut çalışmamalıydı");
+    }
+
+    #[test]
+    fn an_oversized_certificate_is_refused_before_anything_is_written() {
+        // Sınır, bir istek alanının sınırsız olmamasını sağlıyor. Reddin dosya yazmadan ÖNCE
+        // gelmesi de ayrı bir iddia: bir sınır aşımı, diskte artık bırakmamalı.
+        let r = MockCommandRunner::with_responses([]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let huge = "A".repeat(crate::tls::MAX_CERTIFICATE_BYTES + 1);
+        let request = format!(
+            r#"{{"op":"install_certificate","certificate":"{huge}","private_key":"{}"}}"#,
+            "-----BEGIN PRIVATE KEY----- BBBB"
+        );
+        let resp = agent(&r, &s, &h).handle(&request, peer(API_UID), "tls2", "operator uploaded");
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        assert!(r.call(0).is_none());
+    }
+
+    #[test]
+    fn a_mismatched_pair_never_reaches_nginx_and_leaves_nothing_behind() {
+        // BU KONTROL OLMADAN birbirine ait olmayan iki dosya kutuya konabilir ve nginx yeniden
+        // yüklenene kadar hiçbir şey yanlış görünmez — sonra da kutu HTTPS sunamaz olur.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cert = dir.path().join("depsis.crt");
+        let key = dir.path().join("depsis.key");
+        std::env::set_var(crate::tls::CERT_PATH_ENV, &cert);
+        std::env::set_var(crate::tls::KEY_PATH_ENV, &key);
+
+        // İki FARKLI açık anahtar: biri sertifikadan, biri anahtardan.
+        let r = MockCommandRunner::with_responses([
+            "-----BEGIN PUBLIC KEY-----\nSERTIFIKADAN\n".into(),
+            "-----BEGIN PUBLIC KEY-----\nANAHTARDAN\n".into(),
+        ]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let request = format!(
+            r#"{{"op":"install_certificate","certificate":"{}","private_key":"{}"}}"#,
+            "-----BEGIN CERTIFICATE----- AAAA", "-----BEGIN PRIVATE KEY----- BBBB"
+        );
+        let resp = agent(&r, &s, &h).handle(&request, peer(API_UID), "tls3", "operator uploaded");
+        match resp {
+            Response::Refused { ref reason } => assert!(reason.contains("ait değil"), "{reason}"),
+            other => panic!("eşleşmeyen çift kabul edildi: {other:?}"),
+        }
+
+        // nginx HİÇ çağrılmadı: iki openssl çağrısından sonra durulmuş olmalı.
+        assert!(
+            r.call(2).is_none(),
+            "eşleşmeyen çiftten sonra komut çalıştı"
+        );
+        // Ve geride hiçbir şey kalmadı: ne yeni dosyalar, ne yarım bir kurulum.
+        assert!(
+            !cert.with_extension("new").exists(),
+            "staged sertifika kaldı"
+        );
+        assert!(!key.with_extension("new").exists(), "staged anahtar kaldı");
+        assert!(!cert.exists(), "var olmayan sertifika yerine bir şey kondu");
+
+        std::env::remove_var(crate::tls::CERT_PATH_ENV);
+        std::env::remove_var(crate::tls::KEY_PATH_ENV);
+    }
+
+    #[test]
+    fn reading_the_certificate_asks_openssl_and_ends_option_parsing() {
+        let r = MockCommandRunner::with_responses([
+            "subject=CN=depsis\nissuer=CN=depsis\nsha256 Fingerprint=AA:BB\n".into(),
+        ]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"tls_status"}"#,
+            peer(API_UID),
+            "tls4",
+            "reading the certificate",
+        );
+        match resp {
+            Response::Tls {
+                ref fingerprint,
+                self_signed,
+                ..
+            } => {
+                assert_eq!(fingerprint, "AA:BB");
+                assert!(self_signed, "konu ile veren aynı");
+            }
+            other => panic!("{other:?}"),
+        }
+        let call = r.call(0).expect("openssl çalıştı");
+        assert_eq!(call[0], crate::tls::OPENSSL);
+        assert_eq!(call[1], "x509");
+        assert_eq!(call[call.len() - 2], "--");
+    }
     /// Güncelleme dosyalarını OLMAYAN bir yere bakmaya zorlar.
     ///
     /// Testi koşturan makinede o dosyaların bulunmamasına bel bağlamak, bir gün bir geliştirme

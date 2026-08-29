@@ -440,6 +440,22 @@ export type AgentRequest =
       op: 'apply_update';
     }
   | {
+      op: 'tls_status';
+    }
+  | {
+      /**
+       * PEM. Zincir de olabilir: ara sertifikalar sunucu tarafından sunulmazsa bazı istemciler
+       * bağlanamaz, ve operatörün elindeki dosya çoğunlukla zaten zincirdir.
+       */
+      certificate: string;
+      op: 'install_certificate';
+      /**
+       * PEM. Şifreli bir anahtar KABUL EDİLMİYOR: parolayı da istemek, o parolanın kutuda bir
+       * yerde durması demek olurdu, ve dosyanın kendisi zaten 0400 kök.
+       */
+      private_key: string;
+    }
+  | {
       op: 'scrub_status';
       pool: SafeComponent;
     }
@@ -984,6 +1000,28 @@ export type AgentResponse =
   | {
       full_name: string;
       status: 'snapshot_destroyed';
+    }
+  | {
+      /**
+       * SHA-256, iki nokta ile ayrılmış. Tarayıcının uyarı ekranında karşılaştırılan şey.
+       */
+      fingerprint: string;
+      issuer: string;
+      /**
+       * SAN listesi: `DNS:nas.example.com`, `IP Address:192.168.1.10`.
+       */
+      names: string[];
+      not_after: string;
+      not_before: string;
+      /**
+       * Konu ile veren aynı. Tarayıcı uyarısının sebebi, ve ekranda söylenmesi gereken şey.
+       */
+      self_signed: boolean;
+      status: 'tls';
+      /**
+       * Sertifikanın konusu, `openssl`in yazdığı gibi.
+       */
+      subject: string;
     }
   | {
       /**

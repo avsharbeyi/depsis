@@ -1,8 +1,13 @@
 //! Append-only audit of every privileged request.
 //!
 //! Master prompt §16: the audit trail must never contain passwords, tokens, secrets or file
-//! contents. That is easy to honour here because the operation surface has no field that can
-//! carry one — which is another reason the enum is closed and typed.
+//! contents. What makes that true here is the ENTRY: it carries the operation NAME and never the
+//! request.
+//!
+//! It used to be true for a second reason as well — the operation surface had no field that could
+//! carry a secret — and that stopped being true with `install_certificate`, which carries a TLS
+//! private key. The stronger guarantee is the one that survives: whatever a request holds, the
+//! journal gets a name and a reason.
 //!
 //! Every entry carries the correlation id the API generated, so one user action can be followed
 //! from the HTTP request through the agent call and into the journal.
@@ -67,6 +72,8 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::UpdateStatus {} => "update_status",
         Request::CheckUpdate {} => "check_update",
         Request::ApplyUpdate {} => "apply_update",
+        Request::TlsStatus {} => "tls_status",
+        Request::InstallCertificate { .. } => "install_certificate",
         Request::ListPools {} => "list_pools",
         Request::ShareRootStatus {} => "share_root_status",
         Request::PrepareShareRoot { .. } => "prepare_share_root",

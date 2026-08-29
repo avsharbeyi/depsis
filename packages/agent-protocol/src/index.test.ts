@@ -103,6 +103,10 @@ describe('the emitted agent schema', () => {
       // a directory read under RESOLVE_BENEATH plus an fstatat per entry. Without it a file
       // written over SMB — which is what a NAS is for — was invisible to the web interface, to
       // search and to the permission walk.
+      // Sahibinin kendi sertifikasini koyabilmesi. OZEL ANAHTAR BU ISTEKTE, ve bu, yuzey
+      // hakkinda soylenen bir seyi degistirdi: audit modulunun notu buna gore duzeltildi.
+      // Denetim kaydina giren sey degismiyor — kayit yalniz islem adini tasiyor.
+      'install_certificate',
       // Görev yöneticisi: sistem süreci hiçbir onayla kapatılamaz, kural ajanda tek yerde.
       'kill_process',
       'list_database_dumps',
@@ -202,6 +206,7 @@ describe('the emitted agent schema', () => {
       'snapshot_entries',
       'start_scrub',
       'sync_posix_identity',
+      'tls_status',
       'update_status',
       // ADR-0020's four, and the shape of them is the point. A general `ZeroTierRequest { path }`
       // proxy would have been the network form of the free-form command §2.2 forbids: one variant
@@ -326,7 +331,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(27);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(28);
   });
 
   it('agrees with the number the agent actually reports', () => {
