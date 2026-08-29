@@ -110,7 +110,9 @@ install -d -m 0755 /etc/samba
 grep -q 'include = /etc/samba/depsis.conf' /etc/samba/smb.conf 2>/dev/null ||
   printf '\ninclude = /etc/samba/depsis.conf\n' >>/etc/samba/smb.conf
 systemctl restart smbd 2>/dev/null || smbd -D
-check 'smbd 445 dinliyor' "$(ss -tln 2>/dev/null | grep -c ':445')" '1'
+# Sayı DEĞİL varlık: smbd hem IPv4 hem IPv6 dinliyor, yani sayı 2 — ve ilk hâli "1" bekleyip
+# düşmüştü. Bir kapının kendi iddiası yanlışsa, ölçtüğü şey hakkında hiçbir şey söylemez.
+check 'smbd 445 dinliyor' "$(ss -tln 2>/dev/null | grep ':445' | head -1)" ':445'
 
 # ── 3. Ajan: üretimdeki gibi, systemd'nin devrettiği soketlerle ─────────────
 #

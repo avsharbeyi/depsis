@@ -141,6 +141,11 @@ jobs:
         # frontend bundle, an API response, or a log.
         uses: gitleaks/gitleaks-action@v2
         env:
+          # PULL REQUEST'te ZORUNLU. Bu depo bugüne kadar yalnız main'e push aldı ve eksikliği hiç
+          # görünmedi; ilk PR'da iş "GITHUB_TOKEN is now required to scan pull requests" ile düştü.
+          # Kendiliğinden üretilen jeton yeter — ek bir sır gerekmiyor.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        env:
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   migrations:
