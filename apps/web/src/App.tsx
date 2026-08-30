@@ -792,7 +792,7 @@ function Desktop({
           toggleDock();
         }}
       >
-        <span className="mark">D</span>
+        <span className="mark" aria-hidden />
         <span className="nm">DEPSIS</span>
         <span className="ar" aria-hidden>
           <svg viewBox="0 0 12 12">

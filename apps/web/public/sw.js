@@ -22,8 +22,20 @@
  * appliance has ever served, which is why `ASSET_BUDGET` exists below.
  */
 
-const SHELL = 'depsis-shell-v1';
-const SHELL_URLS = ['/', '/index.html', '/icon.svg', '/manifest.webmanifest'];
+// v2: kabuk listesi degisti (icon.svg gitti, logo dosyalari geldi). Ad degismezse eski onbellek
+// oldugu gibi kalir ve tarayici hala olmayan bir dosyayi tutuyor olur.
+const SHELL = 'depsis-shell-v2';
+// `addAll` ATOMIK: listedeki tek bir URL 404 verirse TAMAMI reddedilir ve kabuk hic onbellege
+// alinmaz. icon.svg silindiginde bu liste guncellenmeseydi, uygulama cevrimdisi hic acilmazdi —
+// ve bunun hicbir belirtisi olmazdi, cunku cevrimicide her sey calisiyor gorunur.
+const SHELL_URLS = [
+  '/',
+  '/index.html',
+  '/manifest.webmanifest',
+  '/logo-32.png',
+  '/logo-64.png',
+  '/logo-192.png',
+];
 
 /**
  * How many hashed assets to keep.

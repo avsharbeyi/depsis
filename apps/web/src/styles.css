@@ -1187,17 +1187,13 @@ canvas.spark {
   border-color: var(--edge2);
   background: rgba(14, 22, 34, 0.8);
 }
+/* Markanin kendisi. Onceki hali bir gradyan kare icinde "D" harfiydi — yer tutucuydu, cunku
+   logo yoktu. Logo dairesel ve koseleri SAYDAM (olculdu), o yuzden ne kirpma ne kose yuvarlatma
+   gerekiyor; `contain` ile de hicbir yerinden kesilmiyor. */
 .brandbox .mark {
   width: 26px;
   height: 26px;
-  border-radius: 9px;
-  background: linear-gradient(150deg, #5bc8f5, #8fa6ff);
-  display: grid;
-  place-items: center;
-  font-size: 12px;
-  font-weight: 800;
-  color: #06202b;
-  font-family: var(--mono);
+  background: url('/logo-64.png') center / contain no-repeat;
   flex: none;
 }
 .brandbox .nm {
