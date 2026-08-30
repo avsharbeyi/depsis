@@ -449,6 +449,25 @@ export type AgentRequest =
       to: SafeComponent[];
     }
   | {
+      /**
+       * Yedek ağacındaki yol (`Dosyalar/...` ya da `DEPSIS-YEDEK/silinenler/...`).
+       */
+      from: SafeComponent[];
+      max_bytes: number;
+      offset: number;
+      op: 'restore_file_from_backup';
+      /**
+       * A single path component under a share root — never a path, never absolute.
+       *
+       * ADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access
+       * to `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle
+       * `/` or `..` through, so this type refuses them rather than sanitising.
+       */
+      share: string;
+      staging_name: SafeComponent;
+      to: SafeComponent[];
+    }
+  | {
       op: 'backup_list_directory';
       path: SafeComponent[];
     }

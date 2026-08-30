@@ -1005,6 +1005,56 @@
       ]
     },
     {
+      "description": "Bir dosyayı YEDEK ağacından CANLI ağaca geri getirir, dilim dilim.\n\n`CopyFileToBackup`in aynadaki eşi: aynı dilimleme, aynı ara alan, aynı atomik yayımlama —\nyalnız yön ters. İki ayrı işlem olmaları ve yönün işlemin ADINDA sabit olması, `realm`\ndiye bir operandın hiç var olmamasının sebebi: tek bir alan değeriyle yanlış yöne\nkopyalayan bir çağrı, yedeği canlı veriyle ezerdi.\n\nHEDEFTE BİR DOSYA VARSA ÜSTÜNE YAZILMIYOR. Geri getirme, kullanıcının hâlâ üzerinde\nçalıştığı bir dosyayı sessizce eski hâliyle değiştirmemeli — o, geri getirmenin çözmeye\nçalıştığı kaybın bir başkasını üretmek olurdu.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "Yedek ağacındaki yol (`Dosyalar/...` ya da `DEPSIS-YEDEK/silinenler/...`).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "offset": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "op": {
+          "type": "string",
+          "const": "restore_file_from_backup"
+        },
+        "share": {
+          "description": "Canlı ağaçtaki paylaşım ve onun içindeki yol.",
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "staging_name": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "to": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "from",
+        "share",
+        "to",
+        "staging_name",
+        "offset",
+        "max_bytes"
+      ]
+    },
+    {
       "description": "Yedek ağacında bir dizini listeler.\n\n── KÖK, ÇAĞIRANIN SEÇTİĞİ BİR ŞEY DEĞİL ─────────────────────────────────────────────\n\n`ListDirectory` canlı paylaşımları, bu ise yedek diskini okuyor. İki AYRI işlem\nolmalarının sebebi ADR-0006: çağıran taraf bir yol adlandıramadığı gibi bir KÖK de\nadlandıramamalı. Tek bir işleme `realm: Live | Backup` diye bir alan koymak, tek bir\nalan değeriyle canlı ağacı hedefleyen bir yedek çağrısı yaratırdı — ve o alanın doğru\ndolduğunu ajan değil çağıran taraf garanti ederdi.\n\nYedek ağacının kendi düzeni var ve ilk bileşen onu söylüyor: `Dosyalar/` gecikmeli\nayna, `DEPSIS-YEDEK/` defter ve günlükler.",
       "type": "object",
       "properties": {

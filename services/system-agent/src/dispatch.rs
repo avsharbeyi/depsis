@@ -1852,6 +1852,143 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
+    /// Bir dosyayı YEDEK ağacından CANLI ağaca geri getirir.
+    ///
+    /// `copy_file_to_backup`in aynadaki eşi ve yön ters: kaynak yedek kökünden, hedef canlı
+    /// kökten. Ara alan CANLI tarafta — yayımlama hedefle aynı dosya sisteminde olmak zorunda,
+    /// yoksa `renameat2` iki farklı bağlama noktası arasında `EXDEV` ile düşer.
+    ///
+    /// HEDEFİN ÜSTÜNE YAZILMIYOR. Geri getirme, kullanıcının hâlâ üzerinde çalıştığı bir dosyayı
+    /// sessizce eski hâliyle değiştirmemeli: o, geri getirmenin çözmeye çalıştığı kaybın bir
+    /// başkasını üretmek olurdu. Çakışma `Conflict` ile geri geliyor ve kararı kullanıcı veriyor.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "her operand ayrı bir karar; gruplamak hangisinin hangi köke ait olduğunu gizlerdi"
+    )]
+    fn restore_file_from_backup(
+        &self,
+        from: &[&str],
+        share: &str,
+        to: &[&str],
+        staging_name: &str,
+        offset: u64,
+        max_bytes: u64,
+    ) -> Result<Response, SeamError> {
+        let Some(live) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+        let Some(backup) = self.backup_root() else {
+            return Ok(Self::backup_unavailable());
+        };
+        let Some((to_name, to_dirs)) = to.split_last() else {
+            return Ok(Response::Refused {
+                reason: "boş hedef yolu paylaşımın kökünün kendisidir".to_string(),
+            });
+        };
+        // Ajanın kendi ağacına geri getirme YOK: ara alan yarım kalmış yüklemelerin yeri, ve
+        // oraya yazılan bir dosya süpürücünün sildiği bir dosya olurdu.
+        if Self::touches_agent_state(to) {
+            return Ok(Response::Refused {
+                reason: format!("{}/ ajanın kendi ağacı", STAGING_DIR[0]),
+            });
+        }
+
+        let source_file = match backup.open(from, OpenIntent::Read) {
+            Ok(file) => file,
+            Err(SeamError::NotFound(what)) => {
+                return Ok(Response::NotFound {
+                    reason: format!("{what}: yedekte yok"),
+                })
+            }
+            Err(SeamError::PathEscape(what)) => {
+                return Ok(Response::Refused {
+                    reason: format!("{what}: yol sınırı reddetti"),
+                })
+            }
+            Err(other) => return Err(other),
+        };
+        let total = source_file
+            .metadata()
+            .map_err(|e| SeamError::Io(format!("stat source: {e}")))?
+            .len();
+
+        // ARA ALAN CANLI TARAFTA. Yayımlama `renameat2` ile yapılıyor ve o, iki farklı dosya
+        // sistemi arasında `EXDEV` ile düşer — yedek diski ayrı bir havuz, yani ayrı bir dosya
+        // sistemi. Ara alanın hedefle aynı tarafta olması bir tercih değil, bir zorunluluk.
+        let staged = [share, STAGING_DIR[0], STAGING_DIR[1], staging_name];
+        let mut staging_file = live.open(&staged, OpenIntent::Append)?;
+        let staged_len = staging_file
+            .metadata()
+            .map_err(|e| SeamError::Io(format!("stat staging file: {e}")))?
+            .len();
+        if staged_len != offset {
+            return Ok(Response::Conflict {
+                reason: format!("ara dosya {staged_len} bayt, çağıran {offset} bekliyordu"),
+            });
+        }
+
+        let slice = max_bytes.min(crate::op::MAX_COPY_SLICE);
+        let mut reader = &source_file;
+        std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(offset))
+            .map_err(|e| SeamError::Io(format!("seek source to {offset}: {e}")))?;
+        let mut window = std::io::Read::take(reader, slice);
+
+        let copied = match std::io::copy(&mut window, &mut staging_file) {
+            Ok(n) => n,
+            Err(e)
+                if matches!(
+                    crate::data::classify(&e),
+                    crate::data::FailureKind::OutOfSpace
+                ) =>
+            {
+                return Ok(Response::OutOfSpace {
+                    reason: format!("geri getirilecek yer yok: {e}"),
+                });
+            }
+            Err(e) => return Err(SeamError::Io(format!("copy slice into staging: {e}"))),
+        };
+
+        let now = offset.saturating_add(copied);
+        if now < total {
+            return Ok(Response::Copied {
+                offset: now,
+                done: false,
+            });
+        }
+
+        if let Err(e) = staging_file.sync_all() {
+            if matches!(
+                crate::data::classify(&e),
+                crate::data::FailureKind::OutOfSpace
+            ) {
+                return Ok(Response::OutOfSpace {
+                    reason: format!("geri getirmeyi diske yazarken yer kalmadı: {e}"),
+                });
+            }
+            return Err(SeamError::Io(format!("fsync restore before publish: {e}")));
+        }
+
+        let mut dest_dir: Vec<&str> = vec![share];
+        dest_dir.extend_from_slice(to_dirs);
+        let staging_dir = [share, STAGING_DIR[0], STAGING_DIR[1]];
+
+        match live.publish(&staging_dir, staging_name, &dest_dir, to_name) {
+            Ok(()) => Ok(Response::Copied {
+                offset: now,
+                done: true,
+            }),
+            Err(SeamError::NotFound(what)) => Ok(Response::NotFound {
+                reason: format!("{what}: hedef dizin yok"),
+            }),
+            Err(SeamError::AlreadyExists(what)) => Ok(Response::Conflict {
+                reason: format!("{what}: bu adla bir dosya zaten var"),
+            }),
+            Err(other) => Err(other),
+        }
+    }
+
     /// Yedek ağacındaki mühürlü kök, ya da onun neden olmadığını söyleyen bir red.
     ///
     /// `None`un iki sebebi var ve ikisi de kullanıcıya farklı bir cümle borçlu: disk hiç yok, ya
@@ -2942,6 +3079,25 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 self.copy_file_to_backup(
                     share.as_str(),
                     &f,
+                    &t,
+                    staging_name.as_str(),
+                    *offset,
+                    *max_bytes,
+                )
+            }
+            Request::RestoreFileFromBackup {
+                from,
+                share,
+                to,
+                staging_name,
+                offset,
+                max_bytes,
+            } => {
+                let f: Vec<&str> = from.iter().map(SafeComponent::as_str).collect();
+                let t: Vec<&str> = to.iter().map(SafeComponent::as_str).collect();
+                self.restore_file_from_backup(
+                    &f,
+                    share.as_str(),
                     &t,
                     staging_name.as_str(),
                     *offset,
@@ -4407,6 +4563,96 @@ mod tests {
             "ajan agaci",
         );
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+    }
+
+    /// Silinmiş bir dosya yedekten geri geliyor — yedeğin var olma sebebi.
+    #[test]
+    fn silinmis_bir_dosya_yedekten_geri_geliyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        let backup = h.backup_path();
+        std::fs::create_dir_all(backup.join("DEPSIS-YEDEK/silinenler/2026-08-30")).expect("mkdir");
+        std::fs::write(
+            backup.join("DEPSIS-YEDEK/silinenler/2026-08-30/vergi.pdf"),
+            b"kayip-dosya",
+        )
+        .expect("write");
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"restore_file_from_backup",
+                "from":["DEPSIS-YEDEK","silinenler","2026-08-30","vergi.pdf"],
+                "share":"belgeler","to":["vergi.pdf"],"staging_name":"g1","offset":0,
+                "max_bytes":1048576}"#,
+            peer(API_UID),
+            "gg1",
+            "yedekten geri getirme",
+        );
+        assert!(
+            matches!(resp, Response::Copied { done: true, .. }),
+            "{resp:?}"
+        );
+        assert_eq!(
+            std::fs::read(h.root_path().join("belgeler/vergi.pdf")).expect("geri gelmeli"),
+            b"kayip-dosya"
+        );
+        // Yedekteki kopya YERİNDE KALIYOR: geri getirme taşımak değil kopyalamak.
+        assert!(backup
+            .join("DEPSIS-YEDEK/silinenler/2026-08-30/vergi.pdf")
+            .exists());
+    }
+
+    /// Geri getirme, ÜZERİNDE ÇALIŞILAN bir dosyayı sessizce eskisiyle değiştirmiyor.
+    ///
+    /// Bu, geri getirmenin çözmeye çalıştığı kaybın bir başkasını üretmek olurdu: kullanıcı bir
+    /// dosyayı yedekten çağırıyor ve o sırada aynı adla yeni bir çalışması varsa, yenisini
+    /// kaybediyor.
+    #[test]
+    fn geri_getirme_var_olan_dosyanin_ustune_yazmiyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        std::fs::write(h.root_path().join("belgeler/a.txt"), b"uzerinde-calisilan").expect("write");
+        let backup = h.backup_path();
+        std::fs::create_dir_all(backup.join("Dosyalar")).expect("mkdir");
+        std::fs::write(backup.join("Dosyalar/a.txt"), b"eski").expect("write");
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"restore_file_from_backup","from":["Dosyalar","a.txt"],
+                "share":"belgeler","to":["a.txt"],"staging_name":"g2","offset":0,
+                "max_bytes":1048576}"#,
+            peer(API_UID),
+            "gg2",
+            "cakisan geri getirme",
+        );
+        assert!(matches!(resp, Response::Conflict { .. }), "{resp:?}");
+        assert_eq!(
+            std::fs::read(h.root_path().join("belgeler/a.txt")).expect("okunmali"),
+            b"uzerinde-calisilan",
+            "üzerinde çalışılan dosya yerinde kalmalı"
+        );
+    }
+
+    /// Yedek diski yokken geri getirme SEBEBİYLE reddediyor.
+    #[test]
+    fn yedek_yokken_geri_getirme_reddediliyor() {
+        let h = Harness::with_share("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"restore_file_from_backup","from":["Dosyalar","a.txt"],
+                "share":"belgeler","to":["a.txt"],"staging_name":"g3","offset":0,
+                "max_bytes":1024}"#,
+            peer(API_UID),
+            "gg3",
+            "yedek yok",
+        );
+        match resp {
+            Response::Refused { reason } => assert!(reason.contains("yedek diski"), "{reason}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// İKİ KÖK KARIŞMIYOR — bu dosyadaki en önemli yedekleme testi.

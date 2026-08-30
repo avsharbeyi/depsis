@@ -1574,6 +1574,28 @@ pub enum Request {
         max_bytes: u64,
     },
 
+    /// Bir dosyayı YEDEK ağacından CANLI ağaca geri getirir, dilim dilim.
+    ///
+    /// `CopyFileToBackup`in aynadaki eşi: aynı dilimleme, aynı ara alan, aynı atomik yayımlama —
+    /// yalnız yön ters. İki ayrı işlem olmaları ve yönün işlemin ADINDA sabit olması, `realm`
+    /// diye bir operandın hiç var olmamasının sebebi: tek bir alan değeriyle yanlış yöne
+    /// kopyalayan bir çağrı, yedeği canlı veriyle ezerdi.
+    ///
+    /// HEDEFTE BİR DOSYA VARSA ÜSTÜNE YAZILMIYOR. Geri getirme, kullanıcının hâlâ üzerinde
+    /// çalıştığı bir dosyayı sessizce eski hâliyle değiştirmemeli — o, geri getirmenin çözmeye
+    /// çalıştığı kaybın bir başkasını üretmek olurdu.
+    #[serde(rename = "restore_file_from_backup")]
+    RestoreFileFromBackup {
+        /// Yedek ağacındaki yol (`Dosyalar/...` ya da `DEPSIS-YEDEK/silinenler/...`).
+        from: Vec<SafeComponent>,
+        /// Canlı ağaçtaki paylaşım ve onun içindeki yol.
+        share: SafeComponent,
+        to: Vec<SafeComponent>,
+        staging_name: SafeComponent,
+        offset: u64,
+        max_bytes: u64,
+    },
+
     /// Yedek ağacında bir dizini listeler.
     ///
     /// ── KÖK, ÇAĞIRANIN SEÇTİĞİ BİR ŞEY DEĞİL ─────────────────────────────────────────────
@@ -2956,6 +2978,9 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 34, `restore_file_from_backup` ile: yedekten canlı ağaca geri getirme. Yön işlemin adında
+/// sabit; tek bir operand değeriyle yanlış yöne kopyalayan bir çağrı yedeği canlı veriyle ezerdi.
+///
 /// 33, `copy_file_to_backup` ile: canlı ağaçtan yedek ağacına dilimli kopyalama. İki kökü de
 /// işlemin gövdesi seçiyor, çağıran değil.
 ///
@@ -2980,7 +3005,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 33;
+pub const SCHEMA_VERSION: u32 = 34;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///
