@@ -644,12 +644,51 @@ impl SafePath for Openat2SafePath {
             .map_err(|e| SeamError::Io(format!("fchmod to {mode:o}: {e}")))
     }
 
-    fn list_dirs(&self, relative: &[&str]) -> Result<Vec<String>, SeamError> {
-        self.entries(
-            relative,
-            |kind| kind == rustix::fs::FileType::Directory,
-            None,
-        )
+    /// The shares, read from the root descriptor rather than through `open_dir(&[])`.
+    ///
+    /// The old shape took a `relative` slice and its only caller passed `&[]`, which this file
+    /// refuses: `openat2` takes the first component as the SHARE NAME. So the sweeper failed on
+    /// its first line on every real box, every ten minutes, while its four tests — all against
+    /// the mock, which resolves an empty slice to the temp root — stayed green.
+    ///
+    /// `root_is_empty` above says why the fix is not to special-case the empty slice inside
+    /// `open_dir`: `remove_file`, `remove_dir` and `create_dir` resolve their parent through that
+    /// same method, and the shares root must not become a deletable parent in a process running
+    /// as root.
+    fn list_share_dirs(&self) -> Result<Vec<String>, SeamError> {
+        let root = std::fs::File::from(self.root_fd()?);
+        let mut reader = rustix::fs::Dir::read_from(&root)
+            .map_err(|e| SeamError::Io(format!("open directory stream: {e}")))?;
+        let mut names = Vec::new();
+
+        while let Some(entry) = reader.read() {
+            let entry = entry.map_err(|e| SeamError::Io(format!("readdir: {e}")))?;
+            let raw = entry.file_name();
+            if raw.to_bytes() == b"." || raw.to_bytes() == b".." {
+                continue;
+            }
+            // `SYMLINK_NOFOLLOW`, and it is the load-bearing flag here rather than a precaution:
+            // a symlink in the share root pointing at `/` would otherwise be reported as a share,
+            // and the sweeper walks what this returns deleting stale files as root.
+            let stat = match rustix::fs::statat(&root, raw, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                // Raced with a removal between the readdir and the stat. Not an error: the next
+                // sweep sees the same absence.
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(e) => return Err(SeamError::Io(format!("stat entry: {e}"))),
+            };
+            if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory
+            {
+                continue;
+            }
+            let Ok(name) = raw.to_str() else {
+                // Not addressable as a `SafeComponent`, so nothing downstream could name it.
+                continue;
+            };
+            names.push(name.to_string());
+        }
+        names.sort();
+        Ok(names)
     }
 
     /// One `getdents` pass plus one `fstatat` per entry, all against a confined descriptor.
@@ -1911,6 +1950,42 @@ mod tests {
         assert!(
             !paths.root_is_empty().expect("answers"),
             "a symlink is something; mounting a dataset over it would hide where it points"
+        );
+    }
+
+    /// The sweeper's first line, against a real kernel.
+    ///
+    /// This is the same defect as `root_is_empty`'s and it survived the first fix: `sweep_once`
+    /// asked `list_dirs(&[])`, the mock answered by listing the temp root, and `openat2` refused
+    /// it. On a real appliance the storage sweeper therefore failed on its first line every ten
+    /// minutes — abandoned upload fragments under `<share>/.depsis/staging` were never removed,
+    /// while counting against the user's quota and being invisible to them over SMB.
+    ///
+    /// The symlink half is not decoration. What this returns is walked by a root process that
+    /// deletes stale files inside each name; a symlink to `/` reported as a share is how that
+    /// becomes a delete of somewhere else.
+    #[test]
+    fn the_shares_are_listed_from_the_root_and_a_symlink_is_not_one_of_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The stand-in for somewhere off the appliance's share tree — outside the root, so that
+        // the symlink below genuinely points out of it.
+        let outside = dir.path().join("disarisi");
+        std::fs::create_dir(&outside).expect("mkdir");
+
+        let root = dir.path().join("paylasimlar");
+        std::fs::create_dir(&root).expect("mkdir");
+        std::fs::create_dir(root.join("belgeler")).expect("share");
+        std::fs::create_dir(root.join("yedek")).expect("share");
+        std::fs::write(root.join("not.txt"), b"x").expect("file");
+        std::os::unix::fs::symlink(&outside, root.join("kacis")).expect("symlink");
+
+        let paths = Openat2SafePath::open_root(&root).expect("root");
+        let shares = paths.list_share_dirs().expect("the shares are listable");
+
+        assert_eq!(
+            shares,
+            vec!["belgeler".to_string(), "yedek".to_string()],
+            "only real directories are shares: a file is not one, and a symlink must not be one"
         );
     }
 

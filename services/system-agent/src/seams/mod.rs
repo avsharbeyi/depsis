@@ -261,12 +261,24 @@ pub trait SafePath {
     /// recomputes the mask correctly — narrowing in the gap, which is the safe direction.
     fn set_mode(&self, file: &std::fs::File, mode: u32) -> Result<(), SeamError>;
 
-    /// The names of the directories directly under `relative`.
+    /// The names of the SHARE DIRECTORIES — everything that is a directory in the shares root.
     ///
-    /// For finding the shares. Symlinks are NOT followed and do not appear: a symlink in the share
-    /// root pointing at `/` would otherwise turn the sweeper below into a recursive delete of the
-    /// whole filesystem, which is the single worst thing a root daemon can be talked into.
-    fn list_dirs(&self, relative: &[&str]) -> Result<Vec<String>, SeamError>;
+    /// Symlinks are NOT followed and do not appear: a symlink in the share root pointing at `/`
+    /// would otherwise turn the sweeper below into a recursive delete of the whole filesystem,
+    /// which is the single worst thing a root daemon can be talked into.
+    ///
+    /// ── NEDEN OPERANDSIZ ─────────────────────────────────────────────────────────────────
+    ///
+    /// Bunun eski hâli `list_dirs(relative: &[&str])` idi ve TEK çağıranı `&[]` geçiyordu — yani
+    /// operand hiçbir zaman bir şey seçmiyor, yalnızca yanlış yazılabiliyordu. Ve yanlış yazıldı:
+    /// gerçek mühür boş bileşen listesini `Io("empty path")` ile reddediyor (ilk bileşen
+    /// PAYLAŞIMIN ADI, çünkü her paylaşım kendi veri kümesi), sahte mühür ise geçici kökün
+    /// kendisini listeleyip başarıyla dönüyordu. Süpürücünün dört testi de yeşildi ve süpürücü
+    /// gerçek bir cihazda İLK SATIRINDA, her turda düşüyordu.
+    ///
+    /// Aynı hata `share_root_status` ve `prepare_share_root`'ta da vardı ve `root_is_empty` ile
+    /// düzeltildi. Bu metot onun kardeşi: soruyu operandsız sorduğu için yanlış sorulamıyor.
+    fn list_share_dirs(&self) -> Result<Vec<String>, SeamError>;
 
     /// Everything directly under `relative`: name, kind and size.
     ///
