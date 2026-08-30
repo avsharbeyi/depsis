@@ -112,6 +112,18 @@ fn serve() -> std::process::ExitCode {
         }
     };
 
+    // YEDEK DISKININ AGACI, ikinci bir muhurlu kok.
+    //
+    // `/yedek`, yedek havuzunun sifreli veri kumesinin baglama noktasi (`backup::DATA_MOUNTPOINT`).
+    // Dizin YOKSA ya da disk KILITLIYSE `None` kaliyor ve yedek islemleri sebebiyle reddediyor —
+    // acilista bir hata satiri BASILMIYOR, cunku kilitli bir yedek diski bir ariza degil, her
+    // yeniden baslatmadan sonraki olagan hal: parola hicbir yere yazilmiyor.
+    //
+    // Ajan burada BAGLAMIYOR ve baglamamali: baglamak anahtari ister, anahtar parolayi ister, ve
+    // parola yalniz kullanicinin bir ekrana girdigi anda var oluyor. Burasi yalniz "bagliysa
+    // uzerinde calisabilirim" diyor.
+    let backup = unix::Openat2SafePath::open_root(depsis_agent::backup::DATA_MOUNTPOINT).ok();
+
     let transfers = std::sync::Mutex::new(TransferRegistry::new());
     let tokens = unix::KernelTokens;
 
@@ -120,6 +132,7 @@ fn serve() -> std::process::ExitCode {
         &runner,
         &audit,
         shares.as_ref(),
+        backup.as_ref(),
         &tokens,
         &transfers,
         unix::write_private,

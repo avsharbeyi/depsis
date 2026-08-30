@@ -957,6 +957,101 @@
       ]
     },
     {
+      "description": "Yedek ağacında bir dizini listeler.\n\n── KÖK, ÇAĞIRANIN SEÇTİĞİ BİR ŞEY DEĞİL ─────────────────────────────────────────────\n\n`ListDirectory` canlı paylaşımları, bu ise yedek diskini okuyor. İki AYRI işlem\nolmalarının sebebi ADR-0006: çağıran taraf bir yol adlandıramadığı gibi bir KÖK de\nadlandıramamalı. Tek bir işleme `realm: Live | Backup` diye bir alan koymak, tek bir\nalan değeriyle canlı ağacı hedefleyen bir yedek çağrısı yaratırdı — ve o alanın doğru\ndolduğunu ajan değil çağıran taraf garanti ederdi.\n\nYedek ağacının kendi düzeni var ve ilk bileşen onu söylüyor: `Dosyalar/` gecikmeli\nayna, `DEPSIS-YEDEK/` defter ve günlükler.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "backup_list_directory"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "path"
+      ]
+    },
+    {
+      "description": "Yedek ağacında bir dizin açar.\n\nÖZYİNELEME YOK — bir çağrı bir dizin. `mkdir -p` yok, çünkü ağacın hangi kısmının\noluşturulacağını bilen taraf ağacı yürüyen taraftır, ve o taraf API. Eksik bir ara\nbileşen `NotFound` ile geri geliyor, yani çağıran hangi adımda olduğunu biliyor.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "backup_create_directory"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "path"
+      ]
+    },
+    {
+      "description": "Yedek ağacının İÇİNDE bir düğümü taşır.\n\nİKİ İŞİN DE TEK ARACI, ve ikisi de sıfır bayt kopyalıyor:\n\nSİLİNENLERE TAŞIMA. Ana depolamadan silinen bir dosya yedekten hemen silinmiyor;\nbugünün tarihini taşıyan bir klasöre taşınıyor. Gecikmeli silmenin defteri budur — bir\nveritabanı değil, dizinin ADI. Sistem diski yandığında o bilgi diskle birlikte duruyor.\n\nYENİDEN ADLANDIRMA. Kırk bin fotoğraflı bir klasörün adı değiştiğinde ZFS için olan şey\ntek bir nesnenin üst bağının değişmesi. Yedek tarafında da tek bir taşıma olmalı;\n\"eskisi silindi + yenisi eklendi\" diye işlemek bütün klasörü silinenlere atıp baştan\nkopyalamak demekti.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "op": {
+          "type": "string",
+          "const": "backup_move_entry"
+        },
+        "to": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "from",
+        "to"
+      ]
+    },
+    {
+      "description": "Yedek ağacından bir düğümü siler — süresi dolan gün klasörlerinin temizliği.\n\nÖZYİNELEME YOK, ve bu bir emniyet: dolu bir dizin `NotEmpty` ile geri geliyor, ağacı\nçağıran taraf yürüyor. Kök yetkiyle koşan bir süreçte `rm -r`nin karşılığı olan bir\nişlem, tek bir yanlış operandla bütün yedeği silerdi.",
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "boolean"
+        },
+        "op": {
+          "type": "string",
+          "const": "backup_remove_entry"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "path",
+        "directory"
+      ]
+    },
+    {
       "description": "Erase everything on ONE disk so the pool wizard can accept it. DESTRUCTIVE.\n\nThe owner's principle forced this into the product: \"a disk with something on it cannot\njoin a pool\" is the right refusal, but when the only way to empty that disk was a shell,\nthe refusal pointed the owner at a terminal — and this appliance's owner does not use one.\nSo the cleaning is an operation with the same ceremony as pool creation (§8.1: analysis,\nwritten confirmation, re-authentication) and the same TOCTOU defence: the operand is a\n`DiskRef`, and the WWN the caller confirmed is re-checked against a fresh inventory taken\nimmediately before the wipe — a disk swapped mid-dialog is refused, not erased.\n\nTWO REFUSALS NO CONFIRMATION CAN PASS, the same two that guard pool creation: a disk\ncarrying `/`, `/boot` or the ESP, and a disk with anything MOUNTED. What it deliberately\ndoes NOT refuse is content — content is the reason it exists — and removability: wiping a\nUSB stick is an ordinary wish, it is JOINING one to a pool that stays forbidden.\n\nThe erase is `wipefs --all` on the whole device: partition table (GPT primary AND backup,\nprotective MBR) and every filesystem signature wipefs can see at the device level. Inner\nsuperblocks of former partitions may survive as unreachable bytes; with no table naming\nthem, nothing enumerates or mounts them, and `zpool create` labels over them.",
       "type": "object",
       "properties": {

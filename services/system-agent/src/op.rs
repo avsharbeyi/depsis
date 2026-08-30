@@ -1552,6 +1552,58 @@ pub enum Request {
     #[serde(rename = "unload_backup_key")]
     UnloadBackupKey { pool: SafeComponent },
 
+    /// Yedek ağacında bir dizini listeler.
+    ///
+    /// ── KÖK, ÇAĞIRANIN SEÇTİĞİ BİR ŞEY DEĞİL ─────────────────────────────────────────────
+    ///
+    /// `ListDirectory` canlı paylaşımları, bu ise yedek diskini okuyor. İki AYRI işlem
+    /// olmalarının sebebi ADR-0006: çağıran taraf bir yol adlandıramadığı gibi bir KÖK de
+    /// adlandıramamalı. Tek bir işleme `realm: Live | Backup` diye bir alan koymak, tek bir
+    /// alan değeriyle canlı ağacı hedefleyen bir yedek çağrısı yaratırdı — ve o alanın doğru
+    /// dolduğunu ajan değil çağıran taraf garanti ederdi.
+    ///
+    /// Yedek ağacının kendi düzeni var ve ilk bileşen onu söylüyor: `Dosyalar/` gecikmeli
+    /// ayna, `DEPSIS-YEDEK/` defter ve günlükler.
+    #[serde(rename = "backup_list_directory")]
+    BackupListDirectory { path: Vec<SafeComponent> },
+
+    /// Yedek ağacında bir dizin açar.
+    ///
+    /// ÖZYİNELEME YOK — bir çağrı bir dizin. `mkdir -p` yok, çünkü ağacın hangi kısmının
+    /// oluşturulacağını bilen taraf ağacı yürüyen taraftır, ve o taraf API. Eksik bir ara
+    /// bileşen `NotFound` ile geri geliyor, yani çağıran hangi adımda olduğunu biliyor.
+    #[serde(rename = "backup_create_directory")]
+    BackupCreateDirectory { path: Vec<SafeComponent> },
+
+    /// Yedek ağacının İÇİNDE bir düğümü taşır.
+    ///
+    /// İKİ İŞİN DE TEK ARACI, ve ikisi de sıfır bayt kopyalıyor:
+    ///
+    /// SİLİNENLERE TAŞIMA. Ana depolamadan silinen bir dosya yedekten hemen silinmiyor;
+    /// bugünün tarihini taşıyan bir klasöre taşınıyor. Gecikmeli silmenin defteri budur — bir
+    /// veritabanı değil, dizinin ADI. Sistem diski yandığında o bilgi diskle birlikte duruyor.
+    ///
+    /// YENİDEN ADLANDIRMA. Kırk bin fotoğraflı bir klasörün adı değiştiğinde ZFS için olan şey
+    /// tek bir nesnenin üst bağının değişmesi. Yedek tarafında da tek bir taşıma olmalı;
+    /// "eskisi silindi + yenisi eklendi" diye işlemek bütün klasörü silinenlere atıp baştan
+    /// kopyalamak demekti.
+    #[serde(rename = "backup_move_entry")]
+    BackupMoveEntry {
+        from: Vec<SafeComponent>,
+        to: Vec<SafeComponent>,
+    },
+
+    /// Yedek ağacından bir düğümü siler — süresi dolan gün klasörlerinin temizliği.
+    ///
+    /// ÖZYİNELEME YOK, ve bu bir emniyet: dolu bir dizin `NotEmpty` ile geri geliyor, ağacı
+    /// çağıran taraf yürüyor. Kök yetkiyle koşan bir süreçte `rm -r`nin karşılığı olan bir
+    /// işlem, tek bir yanlış operandla bütün yedeği silerdi.
+    #[serde(rename = "backup_remove_entry")]
+    BackupRemoveEntry {
+        path: Vec<SafeComponent>,
+        directory: bool,
+    },
+
     /// Erase everything on ONE disk so the pool wizard can accept it. DESTRUCTIVE.
     ///
     /// The owner's principle forced this into the product: "a disk with something on it cannot
@@ -2882,6 +2934,10 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 32, yedek AĞACININ işlemleriyle: `backup_list_directory`, `backup_create_directory`,
+/// `backup_move_entry`, `backup_remove_entry`. Yedek ağacı ikinci bir mühürlü kök; hangi köke
+/// dokunulacağı işlemin ADINDA sabit, çağıranın seçtiği bir alanda değil.
+///
 /// 31, yedek diski işlemleriyle: `prepare_backup_root`, `backup_root_status`, `load_backup_key`,
 /// `unload_backup_key` ve `Response::BackupRoot`. Eski bir ajanla konuşan yeni bir API, yedek
 /// diskinin durumunu hiç soramaz ve ekran "yedek diski yok" der — oysa disk takılı ve doludur.
@@ -2899,7 +2955,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 31;
+pub const SCHEMA_VERSION: u32 = 32;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///
