@@ -21,6 +21,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
 import type { ResolvedSession } from '../auth/session.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import { BackupRunService } from './backup-run.service.js';
 import {
   BackupAgentRefusedError,
   BackupTargetService,
@@ -82,6 +83,7 @@ const patchBody = z
 export class BackupTargetController {
   constructor(
     private readonly targets: BackupTargetService,
+    private readonly runs: BackupRunService,
     private readonly system: SystemService,
     private readonly audit: AuditService,
   ) {}
@@ -159,6 +161,24 @@ export class BackupTargetController {
       summary: `Yedek diski kilitlendi; açılana kadar yedekleme duruyor.`,
     });
     return view;
+  }
+
+  /**
+   * "Simdi yedek al" — kullanicinin bastigi dugme.
+   *
+   * IS KUYRUGA KONUYOR, burada kosturulmuyor. Bir tur saatler surebilir ve bir HTTP istegi o
+   * kadar beklemez; beklese bile tarayici vazgectiginde tur yarim kalirdi. Cevap "kuyruga
+   * alindi"; ne oldugunu tur gecmisi soyluyor.
+   */
+  @Post('run')
+  @HttpCode(202)
+  async run(@Req() request: AuthenticatedRequest): Promise<{ queued: true }> {
+    const session = await this.requireAdmin(request);
+    requireSameOrigin(request);
+    const target = await this.targets.row(session.organizationId);
+    if (target === null) throw new BadRequestException('bu cihazda yedek diski kurulu degil');
+    await this.runs.runNow(session.organizationId);
+    return { queued: true };
   }
 
   @Patch()

@@ -7,6 +7,8 @@ import {
   AclApplyService,
   AgentModule,
   AgentService,
+  BackupRunModule,
+  BackupRunService,
   BackupSchedulesModule,
   BackupSchedulesService,
   IdentitySyncService,
@@ -57,6 +59,7 @@ import { WorkerService } from './worker.service.js';
     IndexerModule,
     OrganizationsModule,
     NotificationsModule,
+    BackupRunModule,
     BackupSchedulesModule,
   ],
 })
@@ -85,6 +88,7 @@ async function bootstrap(): Promise<void> {
     indexer: app.get(IndexerService),
     notifications: app.get(NotificationsService),
     schedules: app.get(BackupSchedulesService),
+    backupRuns: app.get(BackupRunService),
   });
   // ADR-0011 Layer 1. Started after the handlers so an event that arrives immediately has a
   // consumer registered; the reader only writes to `index_queue`, so the ordering is a courtesy

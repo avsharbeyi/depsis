@@ -36,6 +36,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       retention: {} as unknown as TrashRetentionService,
       indexer: {} as unknown as IndexerService,
       notifications: {} as unknown as NotificationsService,
+      backupRuns: {} as never,
       schedules: {} as unknown as BackupSchedulesService,
     });
     expect(worker.kinds.sort()).toEqual([
@@ -47,6 +48,12 @@ describe('the worker consumes every kind the API enqueues', () => {
       'identity.sync',
       'permissions.apply',
       'storage.backup-tick',
+      // Yedek diski turu ve elle baslatilan tur. IKI AYRI TUR, ve ayri olmalari zorunlu:
+      // zincirin tekilligini koruyan kismi indeks — ayni anda yalniz bir zamanlanmis tur
+      // kuyrukta olabilir — tek tur olsaydi kullanicinin "Simdi yedek al" dugmesini de
+      // engellerdi, ve dugme hicbir zaman is kuyruga koyamazdi.
+      'storage.backup.run',
+      'storage.backup.run.now',
       'storage.pool.create',
       'storage.replicate',
       'storage.replicate-offsite',

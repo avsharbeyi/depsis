@@ -1,6 +1,7 @@
 import type {
   AclApplyService,
   AgentService,
+  BackupRunService,
   BackupSchedulesService,
   CopyService,
   IdentitySyncService,
@@ -12,6 +13,12 @@ import type {
 
 import type { WorkerService } from '../worker.service.js';
 import { applyAclHandler, APPLY_ACL_KIND } from './apply-acl.handler.js';
+import {
+  backupRunHandler,
+  backupRunNowHandler,
+  BACKUP_RUN_KIND,
+  BACKUP_RUN_NOW_KIND,
+} from './backup-run.handler.js';
 import { backupTickHandler, BACKUP_TICK_KIND } from './backup-tick.handler.js';
 import { copyHandler, COPY_KIND } from './copy.handler.js';
 import { createPoolHandler, CREATE_POOL_KIND } from './create-pool.handler.js';
@@ -46,6 +53,7 @@ export function registerHandlers(
     indexer: IndexerService;
     notifications: NotificationsService;
     schedules: BackupSchedulesService;
+    backupRuns: BackupRunService;
   },
 ): void {
   worker.register(SNAPSHOT_KIND, snapshotHandler(services.agent));
@@ -89,4 +97,9 @@ export function registerHandlers(
   // Zamanlanmış yedekler. Kendi kendini zamanlayan altıncı zincir, ve sessiz kalması en pahalı
   // olan: eksik olan şey bir yedeğin yokluğu, ve o ancak ihtiyaç duyulduğu gün aranıyor.
   worker.register(BACKUP_TICK_KIND, backupTickHandler(services.schedules));
+  // Yedek diski turu: sahibinin tarif ettigi alti saatlik dongu. Zincir kendi ardilini kuyruga
+  // aliyor; elle baslatilan tur AYRI bir tur, cunku zincirin tekilligini koruyan indeks aksi
+  // halde dugmeyi de engellerdi.
+  worker.register(BACKUP_RUN_KIND, backupRunHandler(services.backupRuns));
+  worker.register(BACKUP_RUN_NOW_KIND, backupRunNowHandler(services.backupRuns));
 }
