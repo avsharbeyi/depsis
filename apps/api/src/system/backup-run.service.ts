@@ -369,6 +369,118 @@ export class BackupRunService {
   }
 
   /**
+   * Süresi dolan gün klasörlerini kalıcı olarak siler.
+   *
+   * ── SİLME KARARINI DİZİNİN ADI VERİYOR, BU TABLO DEĞİL ───────────────────────────────────
+   *
+   * `silinenler/2026-08-30/` — dizinin adı silinme tarihi, ve saklama süresi o addan
+   * hesaplanıyor. Veritabanındaki satırlar bir ÖNBELLEK; otorite diskin üstünde. Sistem diski
+   * yandığında bile hangi klasörün ne zaman silineceği diskle birlikte duruyor.
+   *
+   * ── ÖZYİNELEME BURADA, AJANDA DEĞİL ──────────────────────────────────────────────────────
+   *
+   * Ajanın silme işlemi tek bir düğüm siliyor ve dolu bir dizini reddediyor. Kök yetkiyle koşan
+   * bir süreçte `rm -r`nin karşılığı olan bir işlem, tek bir yanlış operandla bütün yedeği
+   * silerdi. Ağacı yürüyen taraf, ne sildiğini bilen taraf.
+   *
+   * ── ADI TARİH OLMAYAN KLASÖRE DOKUNULMUYOR ───────────────────────────────────────────────
+   *
+   * Elle konmuş, yarıda kalmış ya da başka bir sürümün bıraktığı bir klasörün ne zaman
+   * silineceği bilinmiyor. Bilinmeyen bir tarihi "çok eski" saymak, silinmemesi gerekeni
+   * silmenin en kolay yolu.
+   */
+  async purgeExpired(organizationId: string): Promise<number> {
+    const correlationId = randomUUID();
+    const target = await this.targets.row(organizationId);
+    if (target === null || !target.enabled || target.recoveryOnly) return 0;
+
+    const status = expectStatus(
+      await this.agent.call(
+        { op: 'backup_root_status', pool: target.pool },
+        'temizlik: diskin durumu',
+        correlationId,
+      ),
+      'backup_root',
+    );
+    if (!status.prepared || !status.key_loaded || !status.mounted) return 0;
+
+    const listed = await this.agent.call(
+      { op: 'backup_list_directory', path: [LEDGER, DELETED] },
+      'temizlik: silinenler klasörü',
+      correlationId,
+    );
+    // Hiç silinmiş dosya olmamış: dizin de yok. Olağan.
+    if (listed.status === 'not_found' || listed.status === 'refused') return 0;
+    const days = expectStatus(listed, 'listing');
+
+    const cutoff = new Date(Date.now() - target.retainDays * 86_400_000).toISOString().slice(0, 10);
+
+    let purged = 0;
+    for (const day of days.entries) {
+      if (!day.directory) continue;
+      // YYYY-AA-GG, ve başka hiçbir şey. Sözlük sırası tarih sırasıyla aynı olduğu için
+      // karşılaştırma metin üzerinde yapılabiliyor.
+      if (!/^\d{4}-\d{2}-\d{2}$/u.test(day.name)) continue;
+      if (day.name >= cutoff) continue;
+      purged += await this.removeTree([LEDGER, DELETED, day.name], correlationId);
+    }
+    if (purged > 0) {
+      this.logger.log(`temizlik: ${purged} dosya kalıcı olarak silindi`);
+    }
+    return purged;
+  }
+
+  /** Bir ağacı yaprakları önce silerek kaldırır. Silinen DOSYA sayısını döndürür. */
+  private async removeTree(path: string[], correlationId: string): Promise<number> {
+    const listed = await this.agent.call(
+      { op: 'backup_list_directory', path },
+      'temizlik: dizin',
+      correlationId,
+    );
+    if (listed.status === 'not_found') return 0;
+    const listing = expectStatus(listed, 'listing');
+    if (listing.truncated) {
+      // Kesilmiş bir listeleme: dizinin tamamı silinemez, ve YARIM SİLMEK yerine hiç dokunmamak
+      // doğru. Bir sonraki temizlik turu aynı dizini yeniden deniyor.
+      this.logger.warn(`temizlik: '${path.join('/')}' tek listelemeye sığmadı, atlandı`);
+      return 0;
+    }
+
+    let removed = 0;
+    for (const entry of listing.entries) {
+      const child = [...path, entry.name];
+      if (entry.directory) {
+        removed += await this.removeTree(child, correlationId);
+      } else {
+        await this.agent.call(
+          { op: 'backup_remove_entry', path: child, directory: false },
+          'temizlik: dosya',
+          correlationId,
+        );
+        removed += 1;
+      }
+    }
+    await this.agent.call(
+      { op: 'backup_remove_entry', path, directory: true },
+      'temizlik: dizin',
+      correlationId,
+    );
+    return removed;
+  }
+
+  /** Temizlik turunu kuyruğa alır — saatte bir. */
+  async schedulePurge(organizationId: string, runAfter: Date): Promise<void> {
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `INSERT INTO public.job_queue (organization_id, kind, payload, run_after, max_attempts)
+         VALUES ($1, 'storage.backup.purge', '{}'::jsonb, $2, 3)
+         ON CONFLICT DO NOTHING`,
+        [organizationId, runAfter],
+      ),
+    );
+  }
+
+  /**
    * Zinciri tohumla — açılışta bir kez, yedek diski olan her kiracı için.
    *
    * `setInterval` DEĞİL. Yalnız o süreç ayaktayken çalışan ve yeniden başlatmada kaybolan bir
@@ -387,6 +499,7 @@ export class BackupRunService {
       );
       for (const row of rows) {
         await this.scheduleNext(row.id, new Date());
+        await this.schedulePurge(row.id, new Date());
       }
       if (rows.length > 0) {
         this.logger.log(`yedek turu ${rows.length} kiracı için tohumlandı`);

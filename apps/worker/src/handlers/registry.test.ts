@@ -52,6 +52,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       // zincirin tekilligini koruyan kismi indeks — ayni anda yalniz bir zamanlanmis tur
       // kuyrukta olabilir — tek tur olsaydi kullanicinin "Simdi yedek al" dugmesini de
       // engellerdi, ve dugme hicbir zaman is kuyruga koyamazdi.
+      'storage.backup.purge',
       'storage.backup.run',
       'storage.backup.run.now',
       'storage.pool.create',

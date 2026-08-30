@@ -14,8 +14,10 @@ import type {
 import type { WorkerService } from '../worker.service.js';
 import { applyAclHandler, APPLY_ACL_KIND } from './apply-acl.handler.js';
 import {
+  backupPurgeHandler,
   backupRunHandler,
   backupRunNowHandler,
+  BACKUP_PURGE_KIND,
   BACKUP_RUN_KIND,
   BACKUP_RUN_NOW_KIND,
 } from './backup-run.handler.js';
@@ -102,4 +104,7 @@ export function registerHandlers(
   // halde dugmeyi de engellerdi.
   worker.register(BACKUP_RUN_KIND, backupRunHandler(services.backupRuns));
   worker.register(BACKUP_RUN_NOW_KIND, backupRunNowHandler(services.backupRuns));
+  // Temizlik AYRI bir zincir: turun icine konsaydi, kilitli bir diskte duran tur temizligi de
+  // durdururdu — ve o, saklama suresi dolan dosyalarin sonsuza kadar durmasi demekti.
+  worker.register(BACKUP_PURGE_KIND, backupPurgeHandler(services.backupRuns));
 }
