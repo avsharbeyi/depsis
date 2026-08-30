@@ -165,14 +165,20 @@ export function UpdatePanel({ notify }: { notify: Notify }): React.JSX.Element |
         </p>
       )}
 
-      {status !== null && status.inProgress && status.logTail.length > 0 && (
-        <pre
-          className="term"
-          style={{ minHeight: 0, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' }}
-        >
-          {status.logTail.join('\n')}
-        </pre>
-      )}
+      {/* GÜNCELLEME DÜŞTÜĞÜNDE DE GÖRÜNÜYOR, ve bu bir düzeltme: ilk hâli günlüğü yalnız
+          `inProgress` iken çiziyordu, yani kurulum düşer düşmez ekrandan kayboluyordu. Günlüğe en
+          çok ihtiyaç duyulan an tam olarak o an — sahada ilk başarısız güncellemede elde yalnız
+          tek cümlelik hata kaldı ve neyin düştüğü görülemedi. */}
+      {status !== null &&
+        (status.inProgress || status.phase === 'failed') &&
+        status.logTail.length > 0 && (
+          <pre
+            className="term"
+            style={{ minHeight: 0, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' }}
+          >
+            {status.logTail.join('\n')}
+          </pre>
+        )}
 
       {asking ? (
         <div className="netrow">
