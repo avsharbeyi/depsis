@@ -32,9 +32,7 @@ type Step = 'password' | 'second-factor' | 'reset';
 export function BrandMark(): React.JSX.Element {
   return (
     <div className="brandbox">
-      <span className="mark" aria-hidden>
-        D
-      </span>
+      <span className="mark" aria-hidden />
       <span className="nm">DEPSIS</span>
     </div>
   );
