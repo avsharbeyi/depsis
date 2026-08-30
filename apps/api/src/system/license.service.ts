@@ -113,12 +113,31 @@ export class LicenseService {
     if (key === null) {
       return { ok: false, reason: 'bu cihazda lisans açık anahtarı kurulu değil' };
     }
-    const parts = token.trim().split('.');
-    if (parts.length !== 3 || parts[0] !== `${PREFIX}-${VERSION}`) {
+    // YAPISTIRILAN METIN, JETONUN KENDISINDEN FAZLASINI TASIYABILIR — ve bu bir kullanici hatasi
+    // degil, konsolun davranisi. cmd.exe uzun bir satiri sardiginda, secip kopyalayan kisi sarma
+    // noktalarindaki SATIR SONLARINI da kopyalar; secim bazen ustteki cerceve cizgisinin bir
+    // parcasini da kapar. Ilk surum bunlarin hepsinde "bicimi taninmadi" diyordu, ve sahadaki ilk
+    // gercek lisans denemesi tam bu yuzden dustu: jetonun kendisi gecerliydi.
+    //
+    // Once BUTUN bosluklar atiliyor (satir sonlari dahil), sonra jeton metnin icinden ARANIYOR.
+    // Gevsetilen sey yalniz TASIMA; imza ve icerik aynen dogrulaniyor.
+    const compact = token.replace(/\s+/gu, '');
+    const found = new RegExp(
+      String.raw`${PREFIX}-(\d+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)`,
+      'u',
+    ).exec(compact);
+    if (found === null) {
       return { ok: false, reason: 'lisans anahtarının biçimi tanınmadı' };
     }
-    const payloadB64 = parts[1] ?? '';
-    const signatureB64 = parts[2] ?? '';
+    const [, version, payloadB64 = '', signatureB64 = ''] = found;
+    if (Number(version) !== VERSION) {
+      // AYRI CEVAP: gelecekte bir bicim degisikligi olursa, eski bir cihaz "taninmadi" demek
+      // yerine ne oldugunu soylesin.
+      return {
+        ok: false,
+        reason: `bu cihaz ${VERSION}. sürüm lisans anahtarlarını tanıyor; gelen anahtar ${version}. sürüm`,
+      };
+    }
 
     let valid: boolean;
     try {
