@@ -4442,6 +4442,220 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/backups/target": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Yedek diskinin durumu
+         * @description Kurulu hedef VE diskin o anki hali, tek cevapta.
+         *
+         *     `unlocked` bir veritabani alani DEGIL, her okumada ZFS'e soruluyor. Parola hicbir yere
+         *     yazilmiyor, yani cihaz her acildiginda disk kilitli oluyor; saklanan bir bayrak, yeniden
+         *     baslatmadan sonra "acik" diyen ve kilitli olan bir kayit uretirdi.
+         *
+         *     `configured: false` bir HATA DEGIL, cihazin olagan ilk hali — ekranin diyecegi cumle
+         *     "yedek diski kurun".
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Durum */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BackupTargetStatus"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        /**
+         * Bir havuzu sifreli yedek diski yap
+         * @description HAVUZU BU UC KURMUYOR. Diskleri silen toren (SS8.1: analiz, adi yazarak onay, yeniden
+         *     kimlik dogrulama) havuz kurma akisinda zaten var; buraya gelen havuz, kullanicinin o
+         *     toreni gecerek kurdugu havuz. Toreni ikinci kez burada yapmak onu bir formaliteye
+         *     cevirirdi.
+         *
+         *     Havuzun altina iki veri kumesi kuruluyor: `aciklama` SIFRESIZ (diskin kendini anlattigi
+         *     yari — yeni bir cihaza takildiginda parola sormadan okunuyor) ve `veri` SIFRELI.
+         *
+         *     PAROLA HICBIR YERE YAZILMIYOR: bu istegin govdesinde geliyor, ajana stdin'den veriliyor
+         *     ve orada bitiyor. Denetim kaydina da girmiyor.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PrepareBackupTargetRequest"];
+                };
+            };
+            responses: {
+                /** @description Kuruldu */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BackupTarget"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Ritim ve saklama suresi
+         * @description `cadenceHours` kac saatte bir tur donecegi (varsayilan 6), `retainDays` silinen bir
+         *     dosyanin yedekte kac gun duracagi (varsayilan 30 — sistemin onerisi, karari kullanicinin).
+         *
+         *     SIFIR GUN KABUL EDILMIYOR: silinen dosyanin ayni turda yedekten de gitmesi demek, yani
+         *     yanlislikla silmeye karsi hicbir koruma birakmayan bir ayna. Bunu bir ayar olarak sunmak,
+         *     kullaniciya kendi korumasini kapatmanin kolay yolunu vermek olurdu.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateBackupTargetRequest"];
+                };
+            };
+            responses: {
+                /** @description Guncellendi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BackupTarget"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+            };
+        };
+        trace?: never;
+    };
+    "/backups/target/unlock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Yedek diskinin kilidini ac
+         * @description Parola ZFS'in kendi anahtari. Dogruysa sifreli veri kumesi aciliyor ve baglaniyor.
+         *
+         *     Yanlis parola ile "disk bozuk" AYNI cumleyle soylenmiyor: buradaki karsi taraf cihazin
+         *     sahibi, bir saldirgan degil.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UnlockBackupTargetRequest"];
+                };
+            };
+            responses: {
+                /** @description Acildi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BackupTarget"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backups/target/lock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Yedek diskini kilitle
+         * @description Anahtar dusuruluyor: dosyalar okunamaz hale geliyor ve yedekleme turu duruyor. Kilitli
+         *     bir disk bir ariza degil — parola hicbir yere yazilmadigi icin cihaz her acildiginda
+         *     zaten bu halde oluyor.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Kilitlendi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BackupTarget"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/backups": {
         parameters: {
             query?: never;
@@ -6979,6 +7193,76 @@ export interface components {
         ShareTreeRequest: {
             /** @description Ağacın kurulacağı havuz. Kutuda olmayan bir ad 400 ile döner. */
             pool: string;
+        };
+        BackupTarget: {
+            /** Format: uuid */
+            id: string;
+            /** @description Yedek havuzunun adi. Altindaki iki veri kumesinin adlari ajanda sabit. */
+            pool: string;
+            /**
+             * @description Kullanicinin verdigi ad — "Ev", "Ofis yedegi". Diskin sifresiz yarisinda da duruyor,
+             *     cunku yanmis cihaz senaryosunda ekranda gorunecek tek insan sozcugu bu.
+             */
+            label: string;
+            cadenceHours: number;
+            retainDays: number;
+            /**
+             * @description KURTARMA KIPI. Disk baska bir cihazin yedegi: yalniz okunuyor, ustune yazilmiyor ve
+             *     hicbir sey silinmiyor. Yeni bir cihaza takilan bir disk bu kipte aciliyor — aksi
+             *     halde ilk tur, yeni cihazda henuz olmayan her seyi "silinmis" sayip saklama sayacina
+             *     koyardi ve yedegin tamami bir fitile baglanirdi.
+             */
+            recoveryOnly: boolean;
+            /** @description Diskin sifresiz yarisinda yazan cihaz kimligi. */
+            deviceId?: string | null;
+            enabled: boolean;
+            /** @description Iki veri kumesi de yerinde mi. */
+            prepared: boolean;
+            /**
+             * @description Sifreli yari acik ve bagli mi. HER OKUMADA ZFS'e soruluyor, saklanmiyor: parola
+             *     hicbir yere yazilmadigi icin cihaz her acildiginda disk kilitli oluyor.
+             */
+            unlocked: boolean;
+            /** Format: int64 */
+            availableBytes: number;
+            /** Format: int64 */
+            usedBytes: number;
+        };
+        BackupTargetStatus: {
+            /** @description Yedek diski kurulu mu. `false` bir hata degil, cihazin olagan ilk hali. */
+            configured: boolean;
+            target?: components["schemas"]["BackupTarget"] | null;
+        };
+        PrepareBackupTargetRequest: {
+            /**
+             * @description Yedek diskinin havuzu. Icinde egik cizgi OLAMAZ — o bir veri kumesi yolu olurdu; bir
+             *     tire ile baslayan ad `zpool` tarafindan secenek olarak okunur (P0-E).
+             */
+            pool: string;
+            label: string;
+            /**
+             * @description Diskin parolasi, ZFS'in kendi anahtari olarak. Hicbir yere yazilmiyor: bu istegin
+             *     govdesinde geliyor, ajana stdin'den veriliyor ve orada bitiyor.
+             *
+             *     Sekiz bayt ZFS'in kendi alt siniri. Satir sonu iceremez — parola ajana bir SATIR
+             *     olarak veriliyor, ve icinde satir sonu olan bir parola kurulurken kabul edilip
+             *     acilirken tutmazdi.
+             */
+            passphrase: string;
+        };
+        UnlockBackupTargetRequest: {
+            passphrase: string;
+        };
+        /** @description En az bir alan verilmeli. */
+        UpdateBackupTargetRequest: {
+            label?: string;
+            cadenceHours?: number;
+            /**
+             * @description Silinen bir dosya yedekte kac gun duruyor. SIFIR YOK: silinen dosyanin ayni turda
+             *     yedekten de gitmesi demek olurdu.
+             */
+            retainDays?: number;
+            enabled?: boolean;
         };
         ShareTreeResult: {
             /** @description Yeni paylaşımların altında açılacağı veri kümesi. */
