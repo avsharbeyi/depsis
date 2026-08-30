@@ -489,6 +489,12 @@ export class SharesService {
       throw new ShareListNotDeviceWideError();
     }
 
+    // ÖNCE BEKLEYEN SATIRLARI SAHİPLEN. Havuzdan önce açılmış bir paylaşım satırı çıplak bir ad
+    // taşıyor, ve ajan onu `zfs get mountpoint <ad>` ile sorduğunda yayının TAMAMI düşüyor — tek
+    // bozuk satır yüzünden kutudaki hiçbir paylaşım sunulmuyor. Sahada görülen buydu, ve
+    // kullanıcının elindeki tek düğme zaten bu: "Yeniden yayımla".
+    await this.adoptPendingShares(organizationId, correlationId);
+
     const rows = await this.rows(organizationId);
     for (const row of rows) {
       if (RESERVED_SECTIONS.some((reserved) => reserved.toLowerCase() === row.name.toLowerCase())) {
@@ -641,6 +647,77 @@ export class SharesService {
       else list.push(principal);
     }
     return byShare;
+  }
+
+  /**
+   * Veri kümesi olmayan paylaşım satırlarını, depolama gerçek olur olmaz SAHİPLENİR.
+   *
+   * ── HAYALET SATIR NEREDEN ÇIKIYOR ────────────────────────────────────────────────────────
+   *
+   * `FilesService`, bir kuruluşun ilk paylaşımını dosya yöneticisi ilk açıldığında TEMBEL olarak
+   * yaratıyor. O an cihazda havuz yoksa yazacak bir veri kümesi adı da yok, ve satır çıplak adla
+   * (`ev`) yazılıyor. Bu, ZFS'siz kutularda (geliştirme, e2e) doğru davranış — orada paylaşımlar
+   * düz dizin ve satır böyle çalışıyor.
+   *
+   * Ama gerçek bir cihazda o satır KALICI OLARAK BOZUK kalıyordu, ve sahadaki ilk kurulumda tam
+   * bu oldu: sahibi sihirbazı bitirmeden dosya yöneticisini açtı (06:12), havuzu yedi dakika
+   * sonra kurdu (06:19), ve aradaki satır cihazı şu hâle getirdi —
+   *
+   *   yükleme  → ajan reddediyor: `no such file: ev`
+   *   yayımlama → `zfs get mountpoint ev` → `dataset does not exist`, ve YAYININ TAMAMI düşüyor,
+   *               yani tek bozuk satır yüzünden kutudaki hiçbir paylaşım sunulmuyor.
+   *
+   * Arayüzden çıkış yolu yoktu: paylaşımı silmek de, veri kümesini sonradan kurmak da mümkün
+   * değildi. Kodun kendi yorumu bu pencereyi "kurulumun ilk dakikalarıyla sınırlı" diye kabul
+   * ediyordu; sınırlı olması, içine düşen cihazın kurtulabildiği anlamına gelmiyor.
+   *
+   * ── ÇÖZÜM: BEKLEYEN SATIR, BOZUK SATIR DEĞİL ─────────────────────────────────────────────
+   *
+   * Depolama gerçek olduğu anda o satırlar gerçek oluyor. Veri kümesi kuruluyor, satır
+   * güncelleniyor, ve paylaşım hiçbir şey kaybetmeden — adı, izinleri ve kimliği aynı kalarak —
+   * çalışır hâle geliyor.
+   *
+   * ZFS'SİZ KUTUYU BOZMUYOR, ve koruma tek satır: `parentDataset` orada `null` döner (paylaşım
+   * kökünde bağlı bir veri kümesi yok), ve bu işlev hiçbir şey yapmadan çıkar. Yani çıplak adı
+   * doğru olan kutularda hiç çalışmıyor.
+   *
+   * ── NEDEN KANCASI `publish` ──────────────────────────────────────────────────────────────
+   *
+   * Doğal an paylaşım ağacının kurulduğu an gibi görünüyor, ama `ShareTreeController` bunu
+   * çağıramaz: `SharesModule` zaten `SystemModule`'ü içeri alıyor (yeni veri kümelerinin nereye
+   * gideceğini ona soruyor), ve ters yön bir çevrim olurdu. `publish` hem çevrim yaratmıyor hem
+   * de kullanıcının o an bastığı düğme: bozuk satırın belirtisi zaten "yayımlanmadı".
+   */
+  async adoptPendingShares(organizationId: string, correlationId: string): Promise<number> {
+    const parent = await this.parentDataset(correlationId);
+    if (parent === null) return 0;
+
+    const rows = await this.rows(organizationId);
+    // Bir veri kümesi adı her zaman `havuz/…/ad` — eğik çizgisi olmayan bir değer bir veri kümesi
+    // adı değil, yazıldığı gün ebeveyn bilinmediği için kalan çıplak paylaşım adıdır.
+    const pending = rows.filter((row) => !row.dataset.includes('/'));
+    if (pending.length === 0) return 0;
+
+    for (const row of pending) {
+      const dataset = `${parent}/${row.name}`;
+      const made = await this.agent.call(
+        { op: 'create_dataset', dataset, acltype: 'posixacl', refquota_bytes: null },
+        `adopt the pending share '${row.name}' onto ${dataset}`,
+        correlationId,
+      );
+      // `conflict` — veri kümesi zaten var. Satırın işaret etmesi gereken yer tam orası, yani
+      // bu bir hata değil sahiplenmenin yarısının önceden yapılmış olması.
+      if (made.status !== 'conflict') expectStatus(made, 'created');
+
+      await this.db.withTenant(organizationId, (q) =>
+        q.query(`UPDATE public.shares SET dataset = $1, updated_at = now() WHERE id = $2::uuid`, [
+          dataset,
+          row.id,
+        ]),
+      );
+      this.logger.log(`adopted the pending share '${row.name}' onto ${dataset}`);
+    }
+    return pending.length;
   }
 
   private async rows(organizationId: string): Promise<ShareRow[]> {
