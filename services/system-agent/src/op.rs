@@ -24,6 +24,8 @@ pub enum ValidationError {
     Empty,
     #[error("too long: {len} > {max}")]
     TooLong { len: usize, max: usize },
+    #[error("too short: {len} < {min}")]
+    TooShort { len: usize, min: usize },
     #[error("starts with '-', which a command-line tool would read as a flag")]
     LeadingDash,
     #[error("contains a NUL byte")]
@@ -152,6 +154,88 @@ impl TryFrom<String> for SafeComponent {
 
 impl From<SafeComponent> for String {
     fn from(v: SafeComponent) -> Self {
+        v.0
+    }
+}
+
+/// Yedek diskinin parolası — ZFS'in kendi anahtarı olarak.
+///
+/// ── NEDEN AYRI BİR TİP ───────────────────────────────────────────────────────────────────────
+///
+/// Bu, ajanın gördüğü tek KULLANICI SIRRIDIR ve `String` olarak taşınamaz. Üç sebep, üçü de bir
+/// `String`in kendiliğinden yaptığı şeyler:
+///
+/// BİR — `Debug`. Bu depoda hemen her tip `#[derive(Debug)]` taşıyor ve istekler hata
+/// mesajlarında, `unexpected request` dallarında ve panik yollarında basılıyor. Bir `String`
+/// parola, ilk beklenmedik istekte journald'a düz metin olarak düşerdi. Buradaki `Debug`
+/// elle yazılmış ve içeriği ASLA basmıyor.
+///
+/// İKİ — SATIR SONU. Parola `zfs load-key`e stdin'den, bir satır olarak veriliyor. İçinde satır
+/// sonu olan bir parola, ZFS'e parolanın yalnız ilk parçasını verirdi: disk kurulurken kabul
+/// edilen değerle sonra açarken verilen değer birbirini tutmazdı, ve kullanıcı "parolam doğru
+/// ama açılmıyor" derdi. Reddetmek, sessizce kesmekten iyi.
+///
+/// ÜÇ — UZUNLUK. Alt sınır ZFS'in kendi kuralı (`keyformat=passphrase` en az sekiz bayt ister);
+/// üst sınır kontrol soketinin istek satırına sığmak için. İkisi de burada reddediliyor ki
+/// kullanıcı hatayı diski kurarken görsün, kurduktan sonra değil.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct Passphrase(String);
+
+impl Passphrase {
+    /// ZFS'in `keyformat=passphrase` için alt sınırı.
+    pub const MIN: usize = 8;
+    /// İstek satırı sınırının (`MAX_REQUEST_BYTES`) çok altında bir tavan.
+    pub const MAX: usize = 512;
+
+    pub fn parse(raw: impl Into<String>) -> Result<Self, ValidationError> {
+        let s: String = raw.into();
+        if s.len() < Self::MIN {
+            return Err(ValidationError::TooShort {
+                len: s.len(),
+                min: Self::MIN,
+            });
+        }
+        if s.len() > Self::MAX {
+            return Err(ValidationError::TooLong {
+                len: s.len(),
+                max: Self::MAX,
+            });
+        }
+        if s.contains('\0') {
+            return Err(ValidationError::ContainsNul);
+        }
+        // Satır sonu, stdin'e bir satır olarak yazılan bir değerde bir sonlandırıcıdır.
+        if let Some(bad) = s.chars().find(|c| *c == '\n' || *c == '\r') {
+            return Err(ValidationError::IllegalChar(bad));
+        }
+        Ok(Self(s))
+    }
+
+    /// Yalnız `zfs`in stdin'ine yazan yer okur.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+/// İçeriği ASLA basmıyor — bu tipin var olma sebeplerinden biri.
+impl std::fmt::Debug for Passphrase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Uzunluk bile yazılmıyor: kısa bir parolanın kısa olduğunu söylemek, kaba kuvvet
+        // denemesini daraltan bir bilgidir.
+        f.write_str("Passphrase(<gizli>)")
+    }
+}
+
+impl TryFrom<String> for Passphrase {
+    type Error = ValidationError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<Passphrase> for String {
+    fn from(v: Passphrase) -> Self {
         v.0
     }
 }
@@ -1434,6 +1518,40 @@ pub enum Request {
     #[serde(rename = "start_scrub")]
     StartScrub { pool: SafeComponent },
 
+    /// Bir havuzu YEDEK DİSKİ hâline getirir: iki veri kümesi, biri şifresiz biri şifreli.
+    ///
+    /// Havuzun kendisini bu işlem KURMUYOR — onu `CreatePool` kuruyor, ve diskleri silen tören
+    /// (§8.1: analiz, adı yazarak onay, yeniden kimlik doğrulama) orada zaten var. Bu işlem
+    /// yalnız kurulmuş bir havuzun üstüne düzeni koyuyor, yani yıkıcı değil: var olan bir veri
+    /// kümesinin üstüne yazmıyor, `zfs create` çakışmayı kendisi reddediyor.
+    ///
+    /// PAROLA ARGV'DE DEĞİL, stdin'de. `/proc/<pid>/cmdline` bu kutudaki her kullanıcıya
+    /// okunabilir; argv'den geçen bir parola, komut koştuğu sürece `ps` çıktısında durur.
+    #[serde(rename = "prepare_backup_root")]
+    PrepareBackupRoot {
+        pool: SafeComponent,
+        passphrase: Passphrase,
+    },
+
+    /// Yedek diski hazır mı, kilitli mi, ne kadar yeri var.
+    ///
+    /// Yedekleme turunun İLK sorusu. Anahtar yüklü değilse tur koşmuyor — ve bu bir hata değil,
+    /// yeniden başlatmadan sonraki olağan hâl: parola hiçbir yere yazılmıyor, yani cihaz her
+    /// açıldığında disk kilitli oluyor.
+    #[serde(rename = "backup_root_status")]
+    BackupRootStatus { pool: SafeComponent },
+
+    /// Şifreli yarının anahtarını yükler ve bağlar.
+    #[serde(rename = "load_backup_key")]
+    LoadBackupKey {
+        pool: SafeComponent,
+        passphrase: Passphrase,
+    },
+
+    /// Anahtarı düşürür: disk kilitlenir, dosyalar okunamaz hâle gelir.
+    #[serde(rename = "unload_backup_key")]
+    UnloadBackupKey { pool: SafeComponent },
+
     /// Erase everything on ONE disk so the pool wizard can accept it. DESTRUCTIVE.
     ///
     /// The owner's principle forced this into the product: "a disk with something on it cannot
@@ -2566,6 +2684,24 @@ pub enum Response {
     /// if it is not there, the caller's view of the tree disagrees with the disk, and answering
     /// "done" would hide that. That case is `NotFound`.
     Removed {},
+
+    /// Yedek diskinin durumu.
+    ///
+    /// `prepared` ile `key_loaded` AYRI, ve ayrı olmaları ekranın söyleyeceği cümleyi belirliyor:
+    /// hazırlanmamış bir disk "yedek diski kurun" der, kilitli bir disk "parolanızı girin" der.
+    /// İkisini tek bir bayrakta birleştirmek, kullanıcıya yapacağı şeyin tersini söyletirdi.
+    #[serde(rename = "backup_root")]
+    BackupRoot {
+        /// İki veri kümesi de yerinde mi.
+        prepared: bool,
+        /// Şifreli yarının anahtarı yüklü mü.
+        key_loaded: bool,
+        /// Şifreli yarı bağlı mı — yani dosyalar okunabiliyor mu.
+        mounted: bool,
+        /// Şifreli yarıya daha ne kadar yazılabilir. Kilitliyken 0 dönebilir.
+        available_bytes: u64,
+        used_bytes: u64,
+    },
     /// The directory is on disk, owned by the uid and gid the caller named, and the entry has been
     /// made durable by an `fsync` of its parent.
     ///
@@ -2746,6 +2882,10 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 31, yedek diski işlemleriyle: `prepare_backup_root`, `backup_root_status`, `load_backup_key`,
+/// `unload_backup_key` ve `Response::BackupRoot`. Eski bir ajanla konuşan yeni bir API, yedek
+/// diskinin durumunu hiç soramaz ve ekran "yedek diski yok" der — oysa disk takılı ve doludur.
+///
 /// 30, `Response::Diff` ayrıştırılmış hâle geçtiğiyle: ham `lines: Vec<String>` yerine tipli
 /// `entries` ve bir `truncated`. Buradaki uyuşmazlığın bedeli sessiz olurdu — eski bir ajanla
 /// konuşan yeni bir API, yedeklenecek dosyaların listesini boş okur ve HİÇBİR ŞEY DEĞİŞMEMİŞ
@@ -2759,7 +2899,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 30;
+pub const SCHEMA_VERSION: u32 = 31;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

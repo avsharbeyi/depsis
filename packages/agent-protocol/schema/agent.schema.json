@@ -877,6 +877,86 @@
       ]
     },
     {
+      "description": "Bir havuzu YEDEK DİSKİ hâline getirir: iki veri kümesi, biri şifresiz biri şifreli.\n\nHavuzun kendisini bu işlem KURMUYOR — onu `CreatePool` kuruyor, ve diskleri silen tören\n(§8.1: analiz, adı yazarak onay, yeniden kimlik doğrulama) orada zaten var. Bu işlem\nyalnız kurulmuş bir havuzun üstüne düzeni koyuyor, yani yıkıcı değil: var olan bir veri\nkümesinin üstüne yazmıyor, `zfs create` çakışmayı kendisi reddediyor.\n\nPAROLA ARGV'DE DEĞİL, stdin'de. `/proc/<pid>/cmdline` bu kutudaki her kullanıcıya\nokunabilir; argv'den geçen bir parola, komut koştuğu sürece `ps` çıktısında durur.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "prepare_backup_root"
+        },
+        "passphrase": {
+          "$ref": "#/$defs/Passphrase"
+        },
+        "pool": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "pool",
+        "passphrase"
+      ]
+    },
+    {
+      "description": "Yedek diski hazır mı, kilitli mi, ne kadar yeri var.\n\nYedekleme turunun İLK sorusu. Anahtar yüklü değilse tur koşmuyor — ve bu bir hata değil,\nyeniden başlatmadan sonraki olağan hâl: parola hiçbir yere yazılmıyor, yani cihaz her\naçıldığında disk kilitli oluyor.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "backup_root_status"
+        },
+        "pool": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "pool"
+      ]
+    },
+    {
+      "description": "Şifreli yarının anahtarını yükler ve bağlar.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "load_backup_key"
+        },
+        "passphrase": {
+          "$ref": "#/$defs/Passphrase"
+        },
+        "pool": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "pool",
+        "passphrase"
+      ]
+    },
+    {
+      "description": "Anahtarı düşürür: disk kilitlenir, dosyalar okunamaz hâle gelir.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "unload_backup_key"
+        },
+        "pool": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "pool"
+      ]
+    },
+    {
       "description": "Erase everything on ONE disk so the pool wizard can accept it. DESTRUCTIVE.\n\nThe owner's principle forced this into the product: \"a disk with something on it cannot\njoin a pool\" is the right refusal, but when the only way to empty that disk was a shell,\nthe refusal pointed the owner at a terminal — and this appliance's owner does not use one.\nSo the cleaning is an operation with the same ceremony as pool creation (§8.1: analysis,\nwritten confirmation, re-authentication) and the same TOCTOU defence: the operand is a\n`DiskRef`, and the WWN the caller confirmed is re-checked against a fresh inventory taken\nimmediately before the wipe — a disk swapped mid-dialog is refused, not erased.\n\nTWO REFUSALS NO CONFIRMATION CAN PASS, the same two that guard pool creation: a disk\ncarrying `/`, `/boot` or the ESP, and a disk with anything MOUNTED. What it deliberately\ndoes NOT refuse is content — content is the reason it exists — and removability: wiping a\nUSB stick is an ordinary wish, it is JOINING one to a pool that stays forbidden.\n\nThe erase is `wipefs --all` on the whole device: partition table (GPT primary AND backup,\nprotective MBR) and every filesystem signature wipefs can see at the device level. Inner\nsuperblocks of former partitions may survive as unreachable bytes; with no table naming\nthem, nothing enumerates or mounts them, and `zpool create` labels over them.",
       "type": "object",
       "properties": {
@@ -1474,6 +1554,10 @@
     },
     "NtHash": {
       "description": "An NTLM password hash — `MD4(UTF-16LE(password))`, uppercase hex.\n\nA TYPE rather than a `String`, because the failure it prevents is silent. The smbpasswd import\nformat is fixed-width: a lowercase or short field produces a line `pdbedit` accepts and a user\nwho cannot log in, with no error anywhere. `tools/poc/p2-b-smb-password.sh` measured that shape\nof failure from the other direction with the `LCT` field.\n\nThe agent never computes this and never sees a password. The API computes it — see\n`apps/api/src/auth/nt-hash.ts`, which carries its own MD4 because OpenSSL 3 moved MD4 to the\nlegacy provider and Node cannot reach it. What crosses the boundary is password-EQUIVALENT for\none protocol, which is worse than nothing and much better than the user's actual password.",
+      "type": "string"
+    },
+    "Passphrase": {
+      "description": "Yedek diskinin parolası — ZFS'in kendi anahtarı olarak.\n\n── NEDEN AYRI BİR TİP ───────────────────────────────────────────────────────────────────────\n\nBu, ajanın gördüğü tek KULLANICI SIRRIDIR ve `String` olarak taşınamaz. Üç sebep, üçü de bir\n`String`in kendiliğinden yaptığı şeyler:\n\nBİR — `Debug`. Bu depoda hemen her tip `#[derive(Debug)]` taşıyor ve istekler hata\nmesajlarında, `unexpected request` dallarında ve panik yollarında basılıyor. Bir `String`\nparola, ilk beklenmedik istekte journald'a düz metin olarak düşerdi. Buradaki `Debug`\nelle yazılmış ve içeriği ASLA basmıyor.\n\nİKİ — SATIR SONU. Parola `zfs load-key`e stdin'den, bir satır olarak veriliyor. İçinde satır\nsonu olan bir parola, ZFS'e parolanın yalnız ilk parçasını verirdi: disk kurulurken kabul\nedilen değerle sonra açarken verilen değer birbirini tutmazdı, ve kullanıcı \"parolam doğru\nama açılmıyor\" derdi. Reddetmek, sessizce kesmekten iyi.\n\nÜÇ — UZUNLUK. Alt sınır ZFS'in kendi kuralı (`keyformat=passphrase` en az sekiz bayt ister);\nüst sınır kontrol soketinin istek satırına sığmak için. İkisi de burada reddediliyor ki\nkullanıcı hatayı diski kurarken görsün, kurduktan sonra değil.",
       "type": "string"
     },
     "PoolTopology": {
@@ -2610,6 +2694,47 @@
       },
       "required": [
         "status"
+      ]
+    },
+    {
+      "description": "Yedek diskinin durumu.\n\n`prepared` ile `key_loaded` AYRI, ve ayrı olmaları ekranın söyleyeceği cümleyi belirliyor:\nhazırlanmamış bir disk \"yedek diski kurun\" der, kilitli bir disk \"parolanızı girin\" der.\nİkisini tek bir bayrakta birleştirmek, kullanıcıya yapacağı şeyin tersini söyletirdi.",
+      "type": "object",
+      "properties": {
+        "available_bytes": {
+          "description": "Şifreli yarıya daha ne kadar yazılabilir. Kilitliyken 0 dönebilir.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "key_loaded": {
+          "description": "Şifreli yarının anahtarı yüklü mü.",
+          "type": "boolean"
+        },
+        "mounted": {
+          "description": "Şifreli yarı bağlı mı — yani dosyalar okunabiliyor mu.",
+          "type": "boolean"
+        },
+        "prepared": {
+          "description": "İki veri kümesi de yerinde mi.",
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "const": "backup_root"
+        },
+        "used_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "status",
+        "prepared",
+        "key_loaded",
+        "mounted",
+        "available_bytes",
+        "used_bytes"
       ]
     },
     {

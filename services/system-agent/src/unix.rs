@@ -996,6 +996,72 @@ impl CommandRunner for ExecRunner {
         }
     }
 
+    /// Bir sırrı stdin'den geçirerek koşar — `zfs load-key` ve `zfs create -o keyformat=passphrase`.
+    ///
+    /// Sır ARGV'YE KONMUYOR ve DOSYAYA YAZILMIYOR, gerekçesi seam'in belgesinde. Buradaki iş
+    /// yalnız onu doğru yazmak, ve iki tuzağı var.
+    ///
+    /// SATIR SONU ŞART. `zfs`, parolayı bir SATIR olarak okuyor; sonlandırıcı gelmezse okuma
+    /// tamamlanmaz ve süreç stdin kapanana kadar bekler. `Passphrase` içinde satır sonu
+    /// bulundurmuyor (o da bu yüzden), yani burada eklenen tek satır sonu sonlandırıcının
+    /// kendisi.
+    ///
+    /// STDIN'İ KAPATMAK DA ŞART. `zfs create -o keyformat=passphrase` parolayı İKİ KEZ okuyor
+    /// (giriş ve doğrulama); kapanmayan bir stdin, ikinci okumanın sonsuza kadar beklemesi
+    /// demek — yani bu yüzden değer iki kez yazılıp tanıtıcı bırakılıyor.
+    fn run_with_stdin(
+        &self,
+        program: &str,
+        args: &[&str],
+        stdin: &str,
+    ) -> Result<String, SeamError> {
+        use std::io::Write as _;
+        debug_assert!(program.starts_with('/'), "program path must be absolute");
+
+        let mut child = Self::hardened(program, args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| SeamError::Io(format!("spawn {program}: {e}")))?;
+
+        {
+            let mut pipe = child
+                .stdin
+                .take()
+                .ok_or_else(|| SeamError::Io(format!("{program} stdin alınamadı")))?;
+            // İKİ KEZ. `zfs create -o keyformat=passphrase` doğrulama için ikinci kez okuyor;
+            // `zfs load-key` ikinciyi hiç okumadan çıkıyor ve fazlalık kimseye ulaşmıyor.
+            let written = pipe
+                .write_all(stdin.as_bytes())
+                .and_then(|()| pipe.write_all(b"\n"))
+                .and_then(|()| pipe.write_all(stdin.as_bytes()))
+                .and_then(|()| pipe.write_all(b"\n"));
+            // EPIPE bir hata DEĞİL: `load-key` ilk satırı okuyup çıkabilir. Yazamamanın gerçek
+            // sonucu aşağıdaki çıkış durumunda görünür, ve orada `zfs`in kendi cümlesi var.
+            if let Err(e) = written {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(SeamError::Io(format!("{program} stdin yazılamadı: {e}")));
+                }
+            }
+            // `pipe` burada düşüyor: EOF olmadan ikinci okuma sonsuza kadar beklerdi.
+        }
+
+        let out = child
+            .wait_with_output()
+            .map_err(|e| SeamError::Io(format!("wait {program}: {e}")))?;
+
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else {
+            Err(SeamError::Command {
+                program: program.to_string(),
+                status: out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            })
+        }
+    }
+
     fn run_piped(
         &self,
         writer: &str,

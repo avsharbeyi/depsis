@@ -39,6 +39,7 @@ pub mod acl;
 pub mod apps_engine;
 pub mod audit;
 pub mod authz;
+pub mod backup;
 pub mod data;
 pub mod dbdump;
 pub mod diff;

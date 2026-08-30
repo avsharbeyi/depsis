@@ -56,6 +56,11 @@ describe('the emitted agent schema', () => {
       // network id is welded to it — a new identity means the household permanently loses
       // remote access to its own appliance.
       'backup_node_identity',
+      // Yedek diski: sifreli havuzun kurulmasi, kilidinin acilmasi ve kapanmasi. Parola
+      // `prepare_backup_root` ve `load_backup_key` isteklerinde geciyor ve argv'ye HIC konmuyor —
+      // `/proc/<pid>/cmdline` bu kutudaki her kullaniciya okunabilir. Denetim kaydina giren sey
+      // yalniz islem adi.
+      'backup_root_status',
       // A copy the bytes never leave the agent for. The obvious shape — the API reading over the
       // data channel and writing back — holds TWO of the sixteen rendezvous-served data
       // connections at once, and that many concurrent copies deadlock the whole socket rather than
@@ -126,6 +131,7 @@ describe('the emitted agent schema', () => {
       'list_pools',
       'list_processes',
       'list_snapshots',
+      'load_backup_key',
       'move_entry',
       // ADR-0006's closed set, five entries wider. `offsite_scan_host` and `offsite_trust_host`
       // are TWO operations and not one on purpose: scanning trusts nothing, and merging them
@@ -159,6 +165,7 @@ describe('the emitted agent schema', () => {
       // it onto the engine account or its subordinate range and can express nothing else — no
       // host uid is an operand, so this cannot own a folder to root or to a person.
       'prepare_app_data_dir',
+      'prepare_backup_root',
       'prepare_share_root',
       'publish_samba_config',
       'publish_transfer',
@@ -207,6 +214,7 @@ describe('the emitted agent schema', () => {
       'start_scrub',
       'sync_posix_identity',
       'tls_status',
+      'unload_backup_key',
       'update_status',
       // ADR-0020's four, and the shape of them is the point. A general `ZeroTierRequest { path }`
       // proxy would have been the network form of the free-form command §2.2 forbids: one variant
@@ -331,7 +339,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(30);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(31);
   });
 
   it('agrees with the number the agent actually reports', () => {
