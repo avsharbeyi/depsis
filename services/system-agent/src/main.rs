@@ -123,6 +123,9 @@ fn serve() -> std::process::ExitCode {
     // parola yalniz kullanicinin bir ekrana girdigi anda var oluyor. Burasi yalniz "bagliysa
     // uzerinde calisabilirim" diyor.
     let backup = unix::Openat2SafePath::open_root(depsis_agent::backup::DATA_MOUNTPOINT).ok();
+    // Diskin SIFRESIZ yarisi. Sifreli yari kilitliyken bile bagli kaliyor, cunku onu okuyan sey
+    // kurulum sihirbazi ve o an henuz kimse parola girmemis oluyor.
+    let backup_meta = unix::Openat2SafePath::open_root(depsis_agent::backup::META_MOUNTPOINT).ok();
 
     let transfers = std::sync::Mutex::new(TransferRegistry::new());
     let tokens = unix::KernelTokens;
@@ -133,6 +136,7 @@ fn serve() -> std::process::ExitCode {
         &audit,
         shares.as_ref(),
         backup.as_ref(),
+        backup_meta.as_ref(),
         &tokens,
         &transfers,
         unix::write_private,

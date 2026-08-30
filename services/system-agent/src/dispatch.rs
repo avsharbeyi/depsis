@@ -190,6 +190,15 @@ pub struct Agent<'a, R: CommandRunner, S: Sink, P: SafePath> {
     /// bagslama noktasi bos bir dizin oldugu icin ornek KURULABILIR ama uzerinde bir sey
     /// bulunmaz; bu yuzden yedek islemleri ayrica `BackupRootStatus`a bakmak zorunda.
     pub backup: Option<&'a P>,
+    /// Diskin ŞİFRESİZ yarısı — `/yedek-bilgi`.
+    ///
+    /// ÜÇÜNCÜ KÖK, ve varlığı diskin kendini anlatabilmesinin ta kendisi. Şifreli yarı kilitliyken
+    /// bile bağlı kalıyor, çünkü onu okuyan şey kurulum sihirbazı ve o an henüz kimse parola
+    /// girmemiş oluyor.
+    ///
+    /// Ayrı bir kök olması, `backup`ın ayrı olmasıyla aynı gerekçe: hangi köke dokunulduğu
+    /// işlemin ADINDA sabit, çağıranın seçtiği bir alanda değil.
+    pub backup_meta: Option<&'a P>,
     /// Deliberately NOT `+ Sync`, unlike `Sink`.
     ///
     /// The design review recommended making every one of `Agent`'s shared types `Sync` so the whole
@@ -231,6 +240,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         audit: &'a S,
         paths: Option<&'a P>,
         backup: Option<&'a P>,
+        backup_meta: Option<&'a P>,
         tokens: &'a dyn TokenSource,
         transfers: &'a Mutex<TransferRegistry>,
         private_writer: crate::identity::PrivateWriter,
@@ -241,6 +251,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             audit,
             paths,
             backup,
+            backup_meta,
             tokens,
             transfers,
             private_writer,
@@ -1989,6 +2000,47 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
+    /// Diskin şifresiz yarısına küçük bir metin dosyası yazar.
+    ///
+    /// KÖKTEKİ TEK BİR DOSYA. Alt yol yok, dizin açma yok: o yarı iki dosya taşıyor ve bir ağaca
+    /// açılması, şifresiz kalan alanın büyümesi demek olurdu.
+    ///
+    /// ÜSTÜNE YAZILIYOR, ve burada doğru olan bu — `OKUBENI.txt` ile `disk.json` her hazırlıkta
+    /// ve her turdan sonra tazeleniyor; "son yedek" tarihi eskimiş bir diskte yanlış bir cümle
+    /// olurdu. Ara alan ve atomik geçiş kullanılıyor: yarıda kesilen bir yazma, yarım bir
+    /// `disk.json` bırakmıyor — ve yarım bir JSON, sihirbazın diski hiç tanıyamaması demek.
+    fn backup_write_meta(&self, name: &str, content: &str) -> Result<Response, SeamError> {
+        let Some(meta) = self.backup_meta else {
+            return Ok(Response::Refused {
+                reason: "yedek diskinin açıklama bölümü bağlı değil".to_string(),
+            });
+        };
+        if content.len() > crate::op::MAX_META_BYTES {
+            return Ok(Response::Refused {
+                reason: format!(
+                    "açıklama dosyası {} bayt; en fazla {} bayt yazılabilir",
+                    content.len(),
+                    crate::op::MAX_META_BYTES
+                ),
+            });
+        }
+
+        // Geçici ad, sonra atomik geçiş. `RENAME_NOREPLACE` üstüne yazmayı reddettiği için önce
+        // eskisi kaldırılıyor — bu iki dosyanın tek yazarı bu işlem, yani yarışacak kimse yok.
+        let staged = format!(".{name}.yeni");
+        // Gecici ad her yazmadan once temizleniyor: `CreateNew` var olan bir dosyada duser, ve
+        // yarida kesilmis bir onceki yazma o adi geride birakmis olabilir.
+        let _ = meta.remove_file(&[], &staged);
+        let mut file = meta.open(&[&staged], OpenIntent::CreateNew)?;
+        std::io::Write::write_all(&mut file, content.as_bytes())
+            .map_err(|e| SeamError::Io(format!("write meta: {e}")))?;
+        file.sync_all()
+            .map_err(|e| SeamError::Io(format!("fsync meta: {e}")))?;
+        let _ = meta.remove_file(&[], name);
+        meta.publish(&[], &staged, &[], name)?;
+        Ok(Response::Written {})
+    }
+
     /// Yedek ağacındaki mühürlü kök, ya da onun neden olmadığını söyleyen bir red.
     ///
     /// `None`un iki sebebi var ve ikisi de kullanıcıya farklı bir cümle borçlu: disk hiç yok, ya
@@ -3104,6 +3156,9 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     *max_bytes,
                 )
             }
+            Request::BackupWriteMeta { name, content } => {
+                self.backup_write_meta(name.as_str(), content)
+            }
             Request::BackupListDirectory { path } => {
                 let parts: Vec<&str> = path.iter().map(SafeComponent::as_str).collect();
                 self.backup_list_directory(&parts)
@@ -3719,6 +3774,9 @@ mod tests {
         /// yolu, gercekten iki ayri dizin olmasi.
         backup_root: Option<tempfile::TempDir>,
         backup: Option<MockSafePath>,
+        /// Diskin şifresiz yarısı — üçüncü ve ayrı bir geçici kök.
+        meta_root: Option<tempfile::TempDir>,
+        backup_meta: Option<MockSafePath>,
     }
 
     impl Harness {
@@ -3732,6 +3790,8 @@ mod tests {
                 paths: None,
                 backup_root: None,
                 backup: None,
+                meta_root: None,
+                backup_meta: None,
             }
         }
 
@@ -3747,6 +3807,8 @@ mod tests {
                 paths,
                 backup_root: None,
                 backup: None,
+                meta_root: None,
+                backup_meta: None,
             }
         }
 
@@ -3763,7 +3825,18 @@ mod tests {
             let backup_root = tempfile::tempdir().expect("tempdir");
             harness.backup = Some(MockSafePath::new(backup_root.path()));
             harness.backup_root = Some(backup_root);
+            let meta_root = tempfile::tempdir().expect("tempdir");
+            harness.backup_meta = Some(MockSafePath::new(meta_root.path()));
+            harness.meta_root = Some(meta_root);
             harness
+        }
+
+        fn meta_path(&self) -> std::path::PathBuf {
+            self.meta_root
+                .as_ref()
+                .expect("açıklama kökü kurulmalı")
+                .path()
+                .to_path_buf()
         }
 
         fn backup_path(&self) -> std::path::PathBuf {
@@ -3791,6 +3864,8 @@ mod tests {
                 paths,
                 backup_root: None,
                 backup: None,
+                meta_root: None,
+                backup_meta: None,
             }
         }
 
@@ -3813,6 +3888,7 @@ mod tests {
                 sink,
                 self.paths.as_ref(),
                 self.backup.as_ref(),
+                self.backup_meta.as_ref(),
                 &self.tokens,
                 &self.transfers,
                 // Portable, because these tests run on every developer box. The mode is the Unix
@@ -4563,6 +4639,77 @@ mod tests {
             "ajan agaci",
         );
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+    }
+
+    /// Diskin şifresiz yarısı gerçekten yazılıyor — "kendini anlatan disk"in karşılığı.
+    ///
+    /// O yarı bir sürüm boyunca BOŞTU: veri kümesi kuruluyor ve içine hiçbir şey yazılmıyordu,
+    /// yani diski başka bir makineye takan insan hiçbir şey okuyamazdı. Şifreli yarıyı şifresiz
+    /// yarıdan ayırmanın tek gerekçesi tam olarak bu okunabilirlikti.
+    #[test]
+    fn diskin_sifresiz_yarisi_yaziliyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"backup_write_meta","name":"OKUBENI.txt",
+                "content":"BU BIR DEPSIS YEDEK DISKIDIR."}"#,
+            peer(API_UID),
+            "am1",
+            "aciklama yaziliyor",
+        );
+        assert!(matches!(resp, Response::Written {}), "{resp:?}");
+        assert_eq!(
+            std::fs::read_to_string(h.meta_path().join("OKUBENI.txt")).expect("yazilmali"),
+            "BU BIR DEPSIS YEDEK DISKIDIR."
+        );
+        // ŞİFRELİ tarafa DEĞİL: iki kök ayrı, ve hangisine yazıldığı işlemin adında sabit.
+        assert!(!h.backup_path().join("OKUBENI.txt").exists());
+    }
+
+    /// Tazeleniyor: "son yedek" tarihi eskimiş bir diskte yanlış bir cümle olurdu.
+    #[test]
+    fn aciklama_dosyasi_uzerine_yazilabiliyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        for content in ["eski", "yeni-icerik"] {
+            let resp = agent(&r, &s, &h).handle(
+                &format!(
+                    r#"{{"op":"backup_write_meta","name":"disk.json","content":"{content}"}}"#
+                ),
+                peer(API_UID),
+                "am2",
+                "aciklama tazeleniyor",
+            );
+            assert!(matches!(resp, Response::Written {}), "{resp:?}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(h.meta_path().join("disk.json")).expect("okunmali"),
+            "yeni-icerik"
+        );
+    }
+
+    /// Şifresiz yarı BÜYÜYEMEZ: sınır, oraya bir ağaç ya da arşiv yazılamamasını sağlıyor.
+    ///
+    /// Şifresiz kalan bir alanın büyümesi, şifrelemenin kapsadığı alanın küçülmesi demek.
+    #[test]
+    fn cok_buyuk_bir_aciklama_reddediliyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let big = "x".repeat(crate::op::MAX_META_BYTES + 1);
+
+        let resp = agent(&r, &s, &h).handle(
+            &format!(r#"{{"op":"backup_write_meta","name":"buyuk.txt","content":"{big}"}}"#),
+            peer(API_UID),
+            "am3",
+            "cok buyuk aciklama",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        assert!(!h.meta_path().join("buyuk.txt").exists());
     }
 
     /// Silinmiş bir dosya yedekten geri geliyor — yedeğin var olma sebebi.

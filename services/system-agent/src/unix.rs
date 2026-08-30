@@ -3241,6 +3241,7 @@ mod tests {
             sink,
             None,
             None,
+            None,
             &fixtures.tokens,
             &fixtures.transfers,
             write_private,

@@ -1055,6 +1055,28 @@
       ]
     },
     {
+      "description": "Diskin ŞİFRESİZ yarısına küçük bir metin dosyası yazar.\n\n── DİSKİN KENDİNİ ANLATAN YARISI ────────────────────────────────────────────────────\n\nYedek havuzunun altında iki veri kümesi var: `veri` şifreli, `aciklama` şifresiz. İkincisi\ntam olarak bunun için: diski başka bir makineye takan insan, PAROLA OLMADAN, bunun ne\nolduğunu okuyabilsin.\n\nO yarı BUGÜNE KADAR BOŞTU. Veri kümesi kuruluyordu ve içine hiçbir şey yazılmıyordu, yani\n\"kendini anlatan yarı\" bir iddiaydı ve karşılığı yoktu. Bu işlem onu karşılıyor.\n\n── NE YAZILABİLİR, NE YAZILAMAZ ─────────────────────────────────────────────────────\n\nYalnız kökteki bir dosya adı — dizin yok, alt yol yok. Şifresiz taraf birkaç yüz kilobayt\nve iki dosya taşıyor; oraya bir ağaç yazma imkânı, o yarıyı ikinci bir depolamaya çevirir\nve şifresiz kalmasının bedelini büyütürdü.\n\nBoyut de sınırlı: bu dosyaları OKUYAN şey bir insan ve bir kurulum sihirbazı, ve ikisi de\nbirkaç kilobayttan fazlasını okumuyor.\n\n── İÇİNDE KİMLİK BİLGİSİ OLMAMALI ───────────────────────────────────────────────────\n\nBu dosyalar parola olmadan okunuyor, yani diski eline geçiren HERKES okuyor. Kullanıcı\nadı, kuruluş adı, paylaşım adı oraya yazılmamalı — ajan içeriği denetlemiyor, ve bu kural\nçağıran tarafın uyması gereken bir kural; sözleşmede de yazılı.",
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "op": {
+          "type": "string",
+          "const": "backup_write_meta"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "name",
+        "content"
+      ]
+    },
+    {
       "description": "Yedek ağacında bir dizini listeler.\n\n── KÖK, ÇAĞIRANIN SEÇTİĞİ BİR ŞEY DEĞİL ─────────────────────────────────────────────\n\n`ListDirectory` canlı paylaşımları, bu ise yedek diskini okuyor. İki AYRI işlem\nolmalarının sebebi ADR-0006: çağıran taraf bir yol adlandıramadığı gibi bir KÖK de\nadlandıramamalı. Tek bir işleme `realm: Live | Backup` diye bir alan koymak, tek bir\nalan değeriyle canlı ağacı hedefleyen bir yedek çağrısı yaratırdı — ve o alanın doğru\ndolduğunu ajan değil çağıran taraf garanti ederdi.\n\nYedek ağacının kendi düzeni var ve ilk bileşen onu söylüyor: `Dosyalar/` gecikmeli\nayna, `DEPSIS-YEDEK/` defter ve günlükler.",
       "type": "object",
       "properties": {
@@ -2883,6 +2905,19 @@
         "status": {
           "type": "string",
           "const": "removed"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    {
+      "description": "Diskin şifresiz yarısına bir açıklama dosyası yazıldı.\n\nYankı YOK: yazılan içerik geri gönderilmiyor. Bu dosyalar parola olmadan okunabilen tek\nyer, ve içeriklerinin denetim kaydına ya da bir yanıta girmesi için hiçbir sebep yok.",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "written"
         }
       },
       "required": [

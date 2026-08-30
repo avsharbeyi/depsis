@@ -75,6 +75,7 @@ describe('the emitted agent schema', () => {
       // `/proc/<pid>/cmdline` bu kutudaki her kullaniciya okunabilir. Denetim kaydina giren sey
       // yalniz islem adi.
       'backup_root_status',
+      'backup_write_meta',
       // A copy the bytes never leave the agent for. The obvious shape — the API reading over the
       // data channel and writing back — holds TWO of the sixteen rendezvous-served data
       // connections at once, and that many concurrent copies deadlock the whole socket rather than
@@ -355,7 +356,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(34);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(35);
   });
 
   it('agrees with the number the agent actually reports', () => {

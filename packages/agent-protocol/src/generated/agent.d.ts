@@ -468,6 +468,11 @@ export type AgentRequest =
       to: SafeComponent[];
     }
   | {
+      content: string;
+      name: SafeComponent;
+      op: 'backup_write_meta';
+    }
+  | {
       op: 'backup_list_directory';
       path: SafeComponent[];
     }
@@ -1320,6 +1325,9 @@ export type AgentResponse =
     }
   | {
       status: 'removed';
+    }
+  | {
+      status: 'written';
     }
   | {
       /**
