@@ -72,6 +72,20 @@ fn depsis_agent_max_pending() -> usize {
 /// olurdu, ve o ekranın tek işi orada olmaması gereken satırı göstermek.
 const MAX_CONTROLLER_MEMBERS: usize = 256;
 
+/// Uzun sürmesi MEŞRU olan tek komut için tavan: `zfs diff`.
+///
+/// Ortak tavan iki dakika ve orada kalıyor — bir `zpool` çağrısının askıya alınmış bir havuzda
+/// asılması, sıralı kontrol soketi yüzünden bütün cihazı durdurur, ve o emniyet gevşetilemez.
+///
+/// `zfs diff` o gerekçenin dışında: asılmıyor, ÇALIŞIYOR. Değişen her nesne numarasını bir yola
+/// çevirmek zorunda, yani süresi delta'nın büyüklüğüyle artıyor. Yedekleme turunun ona en çok
+/// ihtiyaç duyduğu an — çok şey değiştiği an — tam da iki dakikayı aştığı an, ve orada kesilmek
+/// bir emniyet değil, düzenli bir arıza olurdu.
+///
+/// On beş dakika: bir ev cihazının altı saatlik penceresinde biriken bir delta için fazlasıyla
+/// yeterli, ve gerçekten asılmış bir komutu sonsuza bırakmayacak kadar kısa.
+const LONG_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+
 /// Controller'ın ağ kaydını arayüzün okuduğu şekle indir.
 fn describe_network(record: &crate::ztcontroller::NetworkRecord) -> ZeroTierControlledNetwork {
     ZeroTierControlledNetwork {
@@ -2502,10 +2516,18 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 let b = format!("{}@{}", dataset.as_str(), to.as_str());
                 // -H tab-separated, -F include file type. R lines carry both paths, which is
                 // what lets reconciliation see a rename as a rename (ADR-0011, P0-D).
-                let out = self.runner.run(bin::ZFS, &["diff", "-H", "-F", &a, &b])?;
-                Ok(Response::Diff {
-                    lines: out.lines().map(str::to_string).collect(),
-                })
+                //
+                // KENDİ ZAMAN AŞIMI, ve tek istisna olması bilinçli. `zfs diff` değişen her nesne
+                // numarasını bir yola çevirmek zorunda; büyük bir delta'da dakikalar sürüyor.
+                // Ortak 120 saniyelik tavan burada bir emniyet değil, tam da yedeklemenin ihtiyaç
+                // duyduğu anda — çok şey değiştiğinde — kesilme sebebi.
+                let out = self.runner.run_with_timeout(
+                    bin::ZFS,
+                    &crate::diff::argv(&a, &b),
+                    LONG_COMMAND_TIMEOUT,
+                )?;
+                let (entries, truncated) = crate::diff::parse(&out)?;
+                Ok(Response::Diff { entries, truncated })
             }
 
             Request::ListDisks {} => {

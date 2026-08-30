@@ -906,8 +906,9 @@ export type AgentResponse =
       status: 'snapshot';
     }
   | {
-      lines: string[];
+      entries: DiffEntry[];
       status: 'diff';
+      truncated: boolean;
     }
   | {
       api_version: number;
@@ -1301,6 +1302,20 @@ export type AgentResponse =
       status: 'failed';
     };
 /**
+ * Bir nesneye ne olduğu.
+ */
+export type DiffChange = 'added' | 'modified' | 'removed' | 'renamed';
+/**
+ * Nesnenin ne olduğu.
+ *
+ * `zfs diff -F`'in tip sütunu dokuz değer üretebiliyor; yedekleme yalnız ikisini taşıyabiliyor
+ * (dosya ve dizin) ve geri kalan her şey `Other`. Soket, fifo ve aygıt düğümü için DEPSIS'in bir
+ * satır biçimi yok — `entries_of` da onları aynı gerekçeyle atıyor — ama burada ATILMIYORLAR:
+ * silinmiş bir fifo'nun yedekten kaldırılması gereken bir karşılığı olabilir, ve çağıran tarafın
+ * "bu neydi" sorusuna cevap verebilmesi gerekiyor.
+ */
+export type DiffKind = 'file' | 'directory' | 'other';
+/**
  * A joined network's membership state, as ZeroTier reports it.
  */
 export type ZeroTierNetworkStatus =
@@ -1308,6 +1323,21 @@ export type ZeroTierNetworkStatus =
   | 'ACCESS_DENIED'
   | 'UNKNOWN';
 
+/**
+ * Tek bir değişiklik.
+ */
+export interface DiffEntry {
+  change: DiffChange;
+  kind: DiffKind;
+  /**
+   * Yalnız `Renamed` için dolu: eski yol. Diğerlerinde `None`.
+   */
+  old_path?: string | null;
+  /**
+   * Veri kümesinin bağlama noktasına göre MUTLAK yol, kaçışları çözülmüş hâlde.
+   */
+  path: string;
+}
 /**
  * A network this appliance controls, as the interface reads it.
  */

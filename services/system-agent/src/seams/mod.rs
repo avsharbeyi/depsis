@@ -432,6 +432,31 @@ pub trait TokenSource {
 pub trait CommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, SeamError>;
 
+    /// `run`, ama bu ÇAĞRI için ayrı bir zaman aşımıyla.
+    ///
+    /// ── neden var ────────────────────────────────────────────────────────────────────────
+    ///
+    /// Ortak tavan (`ExecRunner::RUN_TIMEOUT`, 120 saniye) bir emniyet kemeri: askıya alınmış bir
+    /// havuza yapılan bir `zpool` çağrısı sonsuza kadar bekleyebilir ve ajan sıralı olduğu için
+    /// bütün cihazı durdurur. O gerekçe hâlâ geçerli ve varsayılan değişmiyor.
+    ///
+    /// Bir komut o gerekçenin dışında kalıyor: `zfs diff`. Değişen her nesne numarasını bir yola
+    /// çevirmek zorunda, yani süresi delta'nın büyüklüğüyle artıyor — ve tam da çok şey
+    /// değiştiğinde, yani yedeklemenin ona en çok ihtiyaç duyduğu turda, 120 saniyeyi aşıyor.
+    /// Orada 120 saniye bir emniyet değil, düzenli bir kesilme sebebi.
+    ///
+    /// VARSAYILAN `run`A DÜŞÜYOR ve bu bilinçli: bu özelliğin ölçüldüğü tek yer gerçek çekirdek,
+    /// ve test ikizlerinin duvar saatiyle bir işi yok. Sahte bir koşucunun zaman aşımını taklit
+    /// etmesi, ölçmediği bir şeyi ölçüyormuş gibi görünmesi olurdu.
+    fn run_with_timeout(
+        &self,
+        program: &str,
+        args: &[&str],
+        _timeout: std::time::Duration,
+    ) -> Result<String, SeamError> {
+        self.run(program, args)
+    }
+
     /// Run two programs with the first's stdout wired to the second's stdin.
     ///
     /// NO SHELL, and that is the entire reason this is a seam method rather than one `run` call
