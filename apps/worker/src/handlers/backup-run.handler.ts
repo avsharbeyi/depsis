@@ -5,6 +5,10 @@ import type { JobHandler } from '../worker.service.js';
 
 export const BACKUP_RUN_KIND = 'storage.backup.run';
 export const BACKUP_RUN_NOW_KIND = 'storage.backup.run.now';
+export const BACKUP_PURGE_KIND = 'storage.backup.purge';
+
+/** Temizlik turu saatte bir dönüyor: bir gün klasörünün süresi gün içinde de dolabilir. */
+const PURGE_INTERVAL_MS = 3_600_000;
 
 /**
  * Altı saatlik yedekleme turu.
@@ -79,6 +83,38 @@ export function backupRunNowHandler(runs: BackupRunService): JobHandler {
       `elle yedek turu (${outcome.state}): ${outcome.copiedFiles} dosya kopyalandı, ` +
         `${outcome.movedFiles} dosya silinenlere taşındı`,
     );
+    await report(1);
+  };
+}
+
+/**
+ * Süresi dolan gün klasörlerini kalıcı olarak siler.
+ *
+ * AYRI BİR ZİNCİR, tur zincirinden bağımsız. Temizliği turun içine koymak, kilitli bir diskte
+ * duran turun temizliği de durdurması demekti — ve saklama süresi kısaltılmış bir cihazda o,
+ * kullanıcının beklediği şeyin hiç olmaması olurdu.
+ *
+ * ARDIL ÖNCE, iş sonra: aynı gerekçe, ve burada daha sinsi — duran bir temizlik hiçbir belirti
+ * üretmiyor, yalnız disk yavaşça doluyor.
+ */
+export function backupPurgeHandler(runs: BackupRunService): JobHandler {
+  const logger = new Logger('BackupPurgeHandler');
+
+  return async ({ job, report }) => {
+    const organizationId = job.organizationId;
+    if (organizationId === null) {
+      throw new Error('bir storage.backup.purge işi bir kuruluşa ait olmalı');
+    }
+    if (!(await report(0.05))) return;
+
+    await runs.schedulePurge(organizationId, new Date(Date.now() + PURGE_INTERVAL_MS));
+
+    const purged = await runs.purgeExpired(organizationId);
+    // Sessiz bir tur olağan ve çoğunluk: süresi dolan bir gün klasörü yoksa yazacak bir şey yok.
+    // Her saat "0 silindi" satırı, günlüğü okunmaz yapan şeyin ta kendisi.
+    if (purged > 0) {
+      logger.log(`${purged} dosya saklama süresi dolduğu için kalıcı olarak silindi`);
+    }
     await report(1);
   };
 }
