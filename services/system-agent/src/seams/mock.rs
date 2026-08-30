@@ -328,8 +328,13 @@ impl SafePath for MockSafePath {
         Ok(())
     }
 
-    fn list_dirs(&self, relative: &[&str]) -> Result<Vec<String>, SeamError> {
-        let path = self.join(relative)?;
+    /// The shares under the temp root.
+    ///
+    /// Operandsız, gerçeğiyle aynı biçimde. Eski hâli bir `relative` dilimi alıyordu ve boş dilim
+    /// için `join` geçici kökün kendisini döndürüp BAŞARIYLA cevap veriyordu — gerçek mühür ise
+    /// aynı çağrıyı reddediyordu. Süpürücünün bütün testleri bu farkın üstünde duruyordu.
+    fn list_share_dirs(&self) -> Result<Vec<String>, SeamError> {
+        let path = self.root.clone();
         let mut names = Vec::new();
         for entry in std::fs::read_dir(&path)
             .map_err(|e| SeamError::Io(format!("{}: {e}", path.display())))?

@@ -104,7 +104,11 @@ pub fn sweep_once<P: SafePath, S: Sink>(
 ) -> SweepReport {
     let mut report = SweepReport::default();
 
-    let shares = match paths.list_dirs(&[]) {
+    // OPERANDSIZ, ve bu bir düzeltme. Eskiden `list_dirs(&[])` idi: gerçek mühür boş bileşen
+    // listesini reddediyor, sahte mühür kabul ediyordu, ve bu işlev gerçek bir cihazda tam
+    // burada — ilk satırında, her turda — düşüyordu. Aşağıdaki dört test yeşil kalmaya devam
+    // ediyordu çünkü hepsi sahte mühre karşı koşuyor.
+    let shares = match paths.list_share_dirs() {
         Ok(shares) => shares,
         Err(e) => {
             eprintln!("depsis-agent: sweep could not list the share root: {e}");
