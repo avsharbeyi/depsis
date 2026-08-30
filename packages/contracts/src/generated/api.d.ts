@@ -4612,6 +4612,118 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/backups/target/entries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Yedek agacinda gezinme
+         * @description Yedek diski bir arsiv degil, gezilebilen ikinci bir depolama — ve ona paylasimlarin
+         *     gezgininden degil, YEDEKLEME ekranindan giriliyor.
+         *
+         *     Kok iki klasor gosteriyor ve ikisi de gorunuyor: `Dosyalar/` gecikmeli ayna,
+         *     `DEPSIS-YEDEK/` ise defterin kendisi. Defteri gizlemek, silinme tarihlerini yalniz urunun
+         *     okuyabildigi bir bilgiye cevirirdi — oysa onun diski baska bir bilgisayara takan insana da
+         *     gorunmesi, bu tasarimin amaci.
+         *
+         *     `path` bos ya da eksikse kokun kendisi listeleniyor; bu bir hata degil, gezginin baslangic
+         *     noktasi.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Egik cizgiyle ayrilmis yol. Bos ise yedek agacinin koku. */
+                    path?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Dizin */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BackupListing"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backups/target/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Yedekteki bir dosyayi geri getir
+         * @description Yedegin var olma sebebi. Dosya yedekten okunup bir paylasima yaziliyor; yedekteki kopya
+         *     YERINDE KALIYOR — geri getirme tasimak degil kopyalamak, ve silinenler klasorunden alinan
+         *     bir dosya saklama suresi dolana kadar orada duruyor.
+         *
+         *     HEDEFTE BIR DOSYA VARSA USTUNE YAZILMIYOR. Kullanicinin hala uzerinde calistigi bir
+         *     dosyayi sessizce eski haliyle degistirmek, geri getirmenin cozmeye calistigi kaybin bir
+         *     baskasini uretmek olurdu; cakisma 400 ile ve ajanin kendi cumlesiyle geri geliyor.
+         *
+         *     ISTEK BEKLIYOR, kuyruga alinmiyor: tek bir dosya saniyeler suruyor ve kullanici sonucu
+         *     hemen gormek istiyor.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RestoreFromBackupRequest"];
+                };
+            };
+            responses: {
+                /** @description Geri getirildi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: int64 */
+                            restoredBytes: number;
+                        };
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/backups/target/run": {
         parameters: {
             query?: never;
@@ -7244,6 +7356,30 @@ export interface components {
         ShareTreeRequest: {
             /** @description Ağacın kurulacağı havuz. Kutuda olmayan bir ad 400 ile döner. */
             pool: string;
+        };
+        BackupListing: {
+            entries: components["schemas"]["BackupEntry"][];
+            /**
+             * @description Dizin tek listelemeye sigmadi. Ekran bunu SOYLEMEK zorunda: kesilmis bir liste, eksik
+             *     olanin var olmadigi gibi okunur.
+             */
+            truncated: boolean;
+        };
+        BackupEntry: {
+            name: string;
+            directory: boolean;
+            /** Format: int64 */
+            sizeBytes: number;
+            /** Format: date-time */
+            modifiedAt: string;
+        };
+        RestoreFromBackupRequest: {
+            /** @description Yedek agacindaki yol, bilesen bilesen. */
+            from: string[];
+            /** @description Geri getirilecegi paylasim. */
+            share: string;
+            /** @description Paylasim icindeki hedef yol, bilesen bilesen. */
+            to: string[];
         };
         BackupTarget: {
             /** Format: uuid */
