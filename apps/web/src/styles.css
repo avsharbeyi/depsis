@@ -2856,6 +2856,40 @@ label textarea,
   color: var(--cool);
 }
 
+/* güncelleme günlüğü — KENDİ SINIFI, ve ayrı olması bir düzeltme.
+
+   Önce `.term`i ödünç alıyordu, ama o sınıf xterm.js'in çizdiği konsol için yazılmış: `flex: 1`
+   ve `min-height: 260px` bir ESNEK KUTUNUN İÇİNDE anlamlı, Sistem ekranının akışında değil. Orada
+   `flex` hiçbir şeye tutunmuyor, ve satır içi bir `maxHeight: 220` ile birlikte geriye ince bir
+   şerit kalıyordu: cihaz sahibinin güncellemenin neden düştüğünü okuyacağı tek yer, okunamayacak
+   kadar dar.
+
+   Ölçüler o işe göre: bir kurulum günlüğü uzun satırlar üretiyor (yollar, `zfs` komutları), ve
+   sarılan satırlar 11.5px'te birbirine giriyor. `resize: vertical` de bilinçli — düşen bir
+   güncellemede okunacak metnin miktarı önceden bilinemez, ve pencereyi büyütme kararı ekranı
+   yazanın değil, ona bakanın. */
+.updlog {
+  display: block;
+  min-height: 220px;
+  max-height: 46vh;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 12px 14px;
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #b6f0d3;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  resize: vertical;
+  /* Kurulum ilerledikçe alt uca yapışsın: canlı bir günlükte okunan yer son satır, ve her
+     yoklamada elle aşağı kaydırmak gerekmemeli. */
+  scroll-behavior: smooth;
+}
+
 /* transfers — GET /transfers; one row per job, the bar underneath rather than beside, because a
    filename and a percentage competing for the same line means one of them gets truncated. */
 .trrow {
