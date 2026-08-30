@@ -62,6 +62,17 @@ describe('LicenseService.check', () => {
     expect(result.payload.until).not.toBeNull();
   });
 
+  it('ADSIZ bir lisans da geçerli', () => {
+    // İki soruya inen araç adı hiç sormuyor, ve havuzdan çıkan jetonlarda da ad yok. Ad hiçbir
+    // şeyle karşılaştırılmıyordu; mekanik olarak iş yapan alanlar imza ve cihaz kodu.
+    const token = execFileSync(process.execPath, [KEYGEN, 'issue', '--key', privateKeyPath], {
+      encoding: 'utf8',
+    }).trim();
+    const result = service().check(token);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.payload.to).toBeNull();
+  });
+
   it('süresiz lisansta `until` NULL, bir tarih değil', () => {
     // "Hiç dolmayacak" bir tarih yazmak, o tarihe gelindiğinde açıklanamayan bir arıza üretir.
     const result = service().check(issue());

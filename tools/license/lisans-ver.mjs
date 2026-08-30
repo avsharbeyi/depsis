@@ -8,14 +8,20 @@
 // satış anında, müşterinin yanında, o komutu doğru yazmak gereksiz bir risk — yanlış yazılan bir
 // `--until` ya da eksik bir `--device`, ancak müşteri lisansı kuramadığında fark edilir.
 //
-// Bu betik aynı işi yapıyor, soruları sorarak. Anahtarı kendisi buluyor, cevapları doğruluyor,
-// ürettiği jetonu doğruluyor, ve KİME NE VERİLDİĞİNİ bir deftere yazıyor.
+// Bu betik aynı işi yapıyor, İKİ SORU sorarak. Anahtarı kendisi buluyor, cevapları doğruluyor,
+// ürettiği jetonu doğruluyor, ve ne verdiğini bir deftere yazıyor.
+//
+// İKİ SORU, çünkü mekanik olarak iş yapan alan iki tane: İMZA (jetonun satıcıdan geldiğini
+// kanıtlıyor) ve CİHAZ KODU (bu kutuya mı verilmiş). Müşteri adı ve plan hiçbir şeyle
+// karşılaştırılmıyordu — yalnız ekranda görünüyorlardı. `keygen.mjs` onları hâlâ kabul
+// ediyor (`--to`, `--plan`); sorulmuyorlar.
 //
 // ── defter ───────────────────────────────────────────────────────────────────
 //
-// `lisans-defteri.csv`, anahtarın yanında. Bugüne kadar hiçbir yerde tutulmuyordu: bir müşteri
-// "lisansımı kaybettim" dediğinde ya da bir lisansın hangi cihaza bağlandığı sorulduğunda
-// bakılacak tek yer burası. Satırlar EKLENİR, hiç silinmez.
+// `lisans-defteri.csv`, anahtarın yanında. Bugüne kadar hiçbir yerde tutulmuyordu: bir lisansın
+// hangi cihaza ve ne zaman verildiği sorulduğunda bakılacak tek yer burası. Kimliği taşıyan
+// alan CİHAZ KODU — müşteri adından farklı olarak, o gerçekten bir kutuyu adlandırıyor.
+// Satırlar EKLENİR, hiç silinmez.
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
@@ -98,9 +104,6 @@ console.log('  DEPSIS — lisans ver');
 console.log(`  anahtar: ${keyPath}`);
 console.log('');
 
-const to = await ask(rl, '  Müşteri adı            : ', { required: true });
-
-console.log('');
 console.log('  Cihaz kodu, kutunun Sistem ekranındaki Lisans bölümünde yazıyor.');
 console.log('  Boş bırakırsanız lisans HER cihazda çalışır (deneme/bayi için).');
 const device = await ask(rl, '  Cihaz kodu (XXXX-XXXX-XXXX, boş=serbest) : ', {
@@ -111,7 +114,6 @@ const device = await ask(rl, '  Cihaz kodu (XXXX-XXXX-XXXX, boş=serbest) : ', {
 });
 
 console.log('');
-const plan = await ask(rl, '  Plan (boş geçilebilir) : ');
 const until = await ask(rl, '  Bitiş tarihi (YYYY-AA-GG, boş=süresiz) : ', {
   check: (value) =>
     /^\d{4}-\d{2}-\d{2}$/u.test(value) && !Number.isNaN(Date.parse(value))
@@ -121,9 +123,8 @@ const until = await ask(rl, '  Bitiş tarihi (YYYY-AA-GG, boş=süresiz) : ', {
 
 rl.close();
 
-const args = [KEYGEN, 'issue', '--key', keyPath, '--to', to];
+const args = [KEYGEN, 'issue', '--key', keyPath];
 if (device !== '') args.push('--device', device);
-if (plan !== '') args.push('--plan', plan);
 if (until !== '') args.push('--until', until);
 
 let token;
@@ -139,16 +140,14 @@ try {
 // DEFTERE YAZ. Bir müşteri "lisansımı kaybettim" dediğinde bakılacak tek yer burası.
 const ledger = join(dirname(keyPath), 'lisans-defteri.csv');
 if (!existsSync(ledger)) {
-  appendFileSync(ledger, 'tarih,musteri,cihaz,plan,bitis,jeton\n');
+  appendFileSync(ledger, 'tarih,cihaz,bitis,jeton\n');
 }
 const cell = (value) => `"${String(value).replaceAll('"', '""')}"`;
 appendFileSync(
   ledger,
   [
     cell(new Date().toISOString()),
-    cell(to),
     cell(device === '' ? '(serbest)' : device),
-    cell(plan),
     cell(until === '' ? '(süresiz)' : until),
     cell(token),
   ].join(',') + '\n',
