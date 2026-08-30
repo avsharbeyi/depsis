@@ -161,6 +161,12 @@ export class BackupRunService {
     }
 
     await this.record(organizationId, target.id, trigger, total);
+    // DİSKİN "SON YEDEK" TARİHİ TAZELENİYOR. O tarih diskin ŞİFRESİZ yarısında duruyor ve yanmış
+    // bir cihazın diskini takan kişinin ekranda göreceği ilk şey o — eskimiş bir tarih, yedeğin
+    // ne kadar güncel olduğu konusunda yanlış bir cümle olurdu.
+    if (total.state === 'bitti' || total.state === 'devam') {
+      await this.targets.writeDiskDescription(organizationId, correlationId, new Date());
+    }
     return total;
   }
 

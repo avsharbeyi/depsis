@@ -1596,6 +1596,37 @@ pub enum Request {
         max_bytes: u64,
     },
 
+    /// Diskin ŞİFRESİZ yarısına küçük bir metin dosyası yazar.
+    ///
+    /// ── DİSKİN KENDİNİ ANLATAN YARISI ────────────────────────────────────────────────────
+    ///
+    /// Yedek havuzunun altında iki veri kümesi var: `veri` şifreli, `aciklama` şifresiz. İkincisi
+    /// tam olarak bunun için: diski başka bir makineye takan insan, PAROLA OLMADAN, bunun ne
+    /// olduğunu okuyabilsin.
+    ///
+    /// O yarı BUGÜNE KADAR BOŞTU. Veri kümesi kuruluyordu ve içine hiçbir şey yazılmıyordu, yani
+    /// "kendini anlatan yarı" bir iddiaydı ve karşılığı yoktu. Bu işlem onu karşılıyor.
+    ///
+    /// ── NE YAZILABİLİR, NE YAZILAMAZ ─────────────────────────────────────────────────────
+    ///
+    /// Yalnız kökteki bir dosya adı — dizin yok, alt yol yok. Şifresiz taraf birkaç yüz kilobayt
+    /// ve iki dosya taşıyor; oraya bir ağaç yazma imkânı, o yarıyı ikinci bir depolamaya çevirir
+    /// ve şifresiz kalmasının bedelini büyütürdü.
+    ///
+    /// Boyut de sınırlı: bu dosyaları OKUYAN şey bir insan ve bir kurulum sihirbazı, ve ikisi de
+    /// birkaç kilobayttan fazlasını okumuyor.
+    ///
+    /// ── İÇİNDE KİMLİK BİLGİSİ OLMAMALI ───────────────────────────────────────────────────
+    ///
+    /// Bu dosyalar parola olmadan okunuyor, yani diski eline geçiren HERKES okuyor. Kullanıcı
+    /// adı, kuruluş adı, paylaşım adı oraya yazılmamalı — ajan içeriği denetlemiyor, ve bu kural
+    /// çağıran tarafın uyması gereken bir kural; sözleşmede de yazılı.
+    #[serde(rename = "backup_write_meta")]
+    BackupWriteMeta {
+        name: SafeComponent,
+        content: String,
+    },
+
     /// Yedek ağacında bir dizini listeler.
     ///
     /// ── KÖK, ÇAĞIRANIN SEÇTİĞİ BİR ŞEY DEĞİL ─────────────────────────────────────────────
@@ -2402,6 +2433,13 @@ pub const MAX_POOL_DISKS: usize = 24;
 /// presenting something other than disks.
 pub const MAX_DISKS: usize = 256;
 
+/// Diskin şifresiz yarısına yazılabilecek en büyük dosya.
+///
+/// O yarı birkaç yüz kilobayt ve iki dosya taşıyor: düz Türkçe bir `OKUBENI.txt` ve küçük bir
+/// `disk.json`. Sınır, oraya bir ağaç ya da bir arşiv yazılamamasını sağlıyor — şifresiz kalan
+/// bir alanın büyümesi, şifrelemenin kapsadığı alanın küçülmesi demek.
+pub const MAX_META_BYTES: usize = 64 * 1024;
+
 /// One POSIX ACL entry: a GROUP and the three permission bits.
 ///
 /// There is no `uid` field and there must not be one. ADR-0004 chose the grant model, and this
@@ -2781,6 +2819,13 @@ pub enum Response {
     /// "done" would hide that. That case is `NotFound`.
     Removed {},
 
+    /// Diskin şifresiz yarısına bir açıklama dosyası yazıldı.
+    ///
+    /// Yankı YOK: yazılan içerik geri gönderilmiyor. Bu dosyalar parola olmadan okunabilen tek
+    /// yer, ve içeriklerinin denetim kaydına ya da bir yanıta girmesi için hiçbir sebep yok.
+    #[serde(rename = "written")]
+    Written {},
+
     /// Yedek diskinin durumu.
     ///
     /// `prepared` ile `key_loaded` AYRI, ve ayrı olmaları ekranın söyleyeceği cümleyi belirliyor:
@@ -2978,6 +3023,9 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 35, `backup_write_meta` ile: diskin şifresiz yarısına yazma. O yarı vardı ve BOŞTU — yani
+/// "kendini anlatan disk" bir iddiaydı ve karşılığı yoktu.
+///
 /// 34, `restore_file_from_backup` ile: yedekten canlı ağaca geri getirme. Yön işlemin adında
 /// sabit; tek bir operand değeriyle yanlış yöne kopyalayan bir çağrı yedeği canlı veriyle ezerdi.
 ///
@@ -3005,7 +3053,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 34;
+pub const SCHEMA_VERSION: u32 = 35;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

@@ -13,6 +13,54 @@ import { DbService } from '../db/db.service.js';
  */
 const RESTORE_SLICE = 32 * 1024 * 1024;
 
+/**
+ * Diskin şifresiz yarısına konan düz Türkçe metin.
+ *
+ * ── BU METNİN VAR OLMA SEBEBİ ────────────────────────────────────────────────────────────────
+ *
+ * Cihazın sahibinin şartı: *"sistem diski ve depolama diski yansa bile yedek diski eğer şifre
+ * biliniyorsa kullanılabilir olmalı."* Ürünün yolu terminalsiz ve dört tık; ama o yolun
+ * çalışmasına bağlı OLMAYAN bir kaçış kapısı da olmalı — elinde hiç DEPSIS cihazı olmayan biri
+ * için.
+ *
+ * Metin ŞİFRESİZ tarafta duruyor, yani diski herhangi bir bilgisayara takan herkes okuyor. Bu
+ * yüzden içinde kullanıcı adı, kuruluş adı ya da paylaşım adı YOK: yalnız diskin ne olduğu ve
+ * nasıl açılacağı.
+ */
+function okubeni(label: string): string {
+  return [
+    'BU BIR DEPSIS YEDEK DISKIDIR.',
+    '',
+    `Cihaz etiketi : ${label}`,
+    '',
+    'Dosyalariniz bu diskte SIFRELI bir ZFS veri kumesinde duruyor. Acmak icin sifreyi',
+    'bilmeniz gerekiyor; DEPSIS onu hicbir yerde saklamiyor.',
+    '',
+    'EN KOLAY YOL',
+    '  Diski bir DEPSIS cihazina takin ve tarayicidan cihazin adresine gidin. Ekran diski',
+    '  taniyacak ve sifreyi soracak.',
+    '',
+    'DEPSIS CIHAZINIZ YOKSA',
+    '  ZFS kurulu herhangi bir Linux bilgisayarda (ZFS 2.1 ve ustu):',
+    '',
+    '    sudo zpool import -f <havuz-adi>',
+    '    sudo zfs load-key <havuz-adi>/veri',
+    '    sudo zfs mount <havuz-adi>/veri',
+    '',
+    '  Havuz adini bu diskteki disk.json dosyasinda bulabilirsiniz. Ikinci komut sifrenizi',
+    '  soracak.',
+    '',
+    'ICERIDE NE VAR',
+    '  Dosyalar/<paylasim>/...              yedeklenen dosyalariniz',
+    '  DEPSIS-YEDEK/silinenler/<tarih>/...  sildikleriniz, silindikleri gune gore',
+    '  DEPSIS-YEDEK/gunluk/...              her yedekleme turunun ne yaptigi',
+    '',
+    'SIFRENIZI KAYBETTIYSENIZ bu diskteki hicbir dosya geri getirilemez. Bu bir kusur degil,',
+    'diskin calinmasi durumunda dosyalarinizi koruyan seyin ta kendisi.',
+    '',
+  ].join('\n');
+}
+
 /** Yedek diski kurulmamış. */
 export class NoBackupTargetError extends Error {
   constructor() {
@@ -164,6 +212,9 @@ export class BackupTargetService {
       ),
     );
     this.logger.log(`yedek diski kuruldu: ${input.pool} (${input.label})`);
+    // DİSKİN KENDİNİ ANLATAN YARISI, kurulumun parçası olarak. Sonraya bırakmak, ilk turdan
+    // önce sökülen bir diskin hiçbir şey söyleyememesi demekti.
+    await this.writeDiskDescription(organizationId, correlationId);
 
     const row = await this.row(organizationId);
     if (row === null) throw new Error('yedek hedefi yazıldı ama geri okunamadı');
@@ -266,6 +317,56 @@ export class BackupTargetService {
     const updated = await this.row(organizationId);
     if (updated === null) throw new Error('yedek hedefi güncellendi ama geri okunamadı');
     return updated;
+  }
+
+  /**
+   * Diskin kendini anlatan yarısını yazar ya da tazeler.
+   *
+   * İKİ DOSYA, ve ikisi de PAROLA OLMADAN okunuyor:
+   *
+   *   `OKUBENI.txt`  düz Türkçe: bu disk nedir, nasıl açılır, içinde ne var.
+   *   `disk.json`    etiket, havuz adı ve son yedek tarihi — kurulum sihirbazının okuduğu.
+   *
+   * İÇİNDE KİMLİK BİLGİSİ YOK. Kullanıcı adı, kuruluş adı, paylaşım adı yazılmıyor: bu dosyaları
+   * diski eline geçiren herkes okuyor, ve sihirbazın parola sormadan gösterdiği kart da
+   * buradan besleniyor.
+   *
+   * HER TURDAN SONRA TAZELENİYOR. "Son yedek" tarihi eskimiş bir diskte yanlış bir cümle olurdu,
+   * ve yanmış bir cihazın diskini takan kişinin ekranda göreceği ilk şey o tarih.
+   */
+  async writeDiskDescription(
+    organizationId: string,
+    correlationId: string,
+    lastBackupAt?: Date,
+  ): Promise<void> {
+    const row = await this.row(organizationId);
+    if (row === null) return;
+
+    const description = {
+      depsis: 1,
+      etiket: row.label,
+      havuz: row.pool,
+      cihazId: row.deviceId,
+      sonYedek: (lastBackupAt ?? new Date()).toISOString(),
+    };
+
+    for (const [name, content] of [
+      ['OKUBENI.txt', okubeni(row.label)],
+      ['disk.json', `${JSON.stringify(description, null, 2)}\n`],
+    ] as const) {
+      const response = await this.agent.call(
+        { op: 'backup_write_meta', name, content },
+        `yedek diskinin açıklaması: ${name}`,
+        correlationId,
+      );
+      // AÇIKLAMA YAZILAMAZSA TUR DÜŞMÜYOR. Yedeğin kendisi yazıldı; kendini anlatan yarının
+      // eksik kalması ciddi ama yedeği geçersiz kılmıyor, ve bir turu bu yüzden başarısız
+      // saymak kullanıcıya yedeği yokmuş gibi gösterirdi.
+      if (response.status === 'refused' || response.status === 'failed') {
+        this.logger.warn(`yedek diskinin açıklaması yazılamadı (${name}): ${response.reason}`);
+        return;
+      }
+    }
   }
 
   /**
