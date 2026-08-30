@@ -104,11 +104,15 @@ function translate(error: unknown): Error {
     // could not prove it put the old file back, so the shares may be down device-wide. Telling an
     // administrator to retry would send them clicking a button while Explorer shows nothing and
     // the reason sits unread in the journal.
+    // AJANIN CÜMLESİ DE GELİYOR, ve eski hâlinin yerine geliyor. Mesaj kullanıcıya "cihazdaki
+    // /etc/samba/depsis.conf dosyasını inceleyin ve sistem günlüğüne bakın" diyordu: bu ürünün
+    // kabul ölçütü, sahibinin olağan hiçbir iş için terminale girmemesi, ve bir hata mesajının
+    // tek tavsiyesi terminal olamaz. Sahada bunun bedeli ödendi — düşen yayının gerçek sebebi
+    //     zfs get mountpoint ev: dataset does not exist
+    // idi, yani ekranda gösterilebilecek kadar somut bir cümle, ve ekranda hiç görünmedi.
     return new InternalServerErrorException(
-      'The Samba configuration was not published, and DEPSIS cannot confirm that the previous ' +
-        'one was restored — SMB shares may be down. Inspect /etc/samba/depsis.conf on the ' +
-        'appliance and check the system journal for the reason the agent recorded, before ' +
-        'retrying.',
+      'Samba yapılandırması yazılamadı ve DEPSIS eskisinin geri konduğunu doğrulayamıyor — ' +
+        `paylaşımlar şu an sunulmuyor olabilir. Ajanın bildirdiği sebep: ${error.agentReason}`,
     );
   }
 

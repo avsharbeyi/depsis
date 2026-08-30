@@ -222,6 +222,100 @@ describeDb('shares, against a real PostgreSQL', () => {
     };
   }
 
+  /**
+   * The row a box writes before it has any storage, and what happens to it afterwards.
+   *
+   * `FilesService` creates the first share LAZILY, the first time somebody opens the file
+   * manager. On a box with no pool there is no dataset name to write, so the row carries the bare
+   * share name — correct on a ZFS-less box, where shares are plain directories.
+   *
+   * On a real appliance it was permanently broken, and the first field install landed in exactly
+   * that window: the owner opened the file manager at 06:12 and made the pool at 06:19. From then
+   * on `zfs get mountpoint ev` answered "dataset does not exist", which failed the WHOLE publish —
+   * so one row nobody could see or delete stopped every share on the box from being served, and
+   * uploads answered `no such file: ev`.
+   */
+  it('bir veri kümesi olmayan paylaşımı, yayımlarken sahiplenir', async () => {
+    await owner.withoutTenant('migration-status', (q) =>
+      // Havuzdan önce açılmış satır: çıplak ad, eğik çizgi yok.
+      q.query(`INSERT INTO shares (organization_id, name, dataset) VALUES ($1, 'ev', 'ev')`, [
+        orgA,
+      ]),
+    );
+
+    // `publishes()` her isteğe `published` diyor; sahiplenme veri kümesi de kuruyor, yani bu süit
+    // için iki cevaplı bir ajan gerekiyor.
+    const { shares, calls } = service((request) =>
+      Promise.resolve<AgentResponse>(
+        request.op === 'create_dataset'
+          ? { status: 'created', dataset: request.dataset }
+          : {
+              status: 'published',
+              shares: 'shares' in request ? request.shares.length : 0,
+              verified: true,
+            },
+      ),
+    );
+    await shares.publish(orgA, 'ci-adopt');
+
+    const made = calls.filter((c) => c.request.op === 'create_dataset');
+    expect(made).toHaveLength(1);
+    expect(made[0]?.request).toMatchObject({ dataset: `${PARENT_DATASET}/ev` });
+
+    const rows = await db.withTenant(orgA, (q) =>
+      q.query<{ dataset: string }>(`SELECT dataset FROM shares WHERE name = 'ev'`),
+    );
+    expect(rows[0]?.dataset).toBe(`${PARENT_DATASET}/ev`);
+
+    // Ve ajana giden yayın isteği ARTIK veri kümesini taşıyor. Sahiplenmenin satırı düzeltip
+    // isteği eski değerle göndermesi, kullanıcı açısından hiçbir şeyi değiştirmezdi.
+    const published = calls.find((c) => c.request.op === 'publish_samba_config');
+    const request = published?.request;
+    const listed =
+      request !== undefined && 'shares' in request
+        ? request.shares.find((s) => s.name === 'ev')
+        : undefined;
+    expect(listed?.dataset).toBe(`${PARENT_DATASET}/ev`);
+  });
+
+  it('veri kümesi zaten varsa sahiplenme yalnız satırı düzeltir', async () => {
+    // `conflict` — ilk denemesi veri kümesini kurup satırı güncelleyemeden düşmüş bir cihaz. Veri
+    // kümesi tam da satırın işaret etmesi gereken şey, yani bu bir hata değil.
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`INSERT INTO shares (organization_id, name, dataset) VALUES ($1, 'ev', 'ev')`, [
+        orgA,
+      ]),
+    );
+
+    const { shares } = service((request) =>
+      Promise.resolve<AgentResponse>(
+        request.op === 'create_dataset'
+          ? { status: 'conflict', reason: 'dataset already exists' }
+          : {
+              status: 'published',
+              shares: 'shares' in request ? request.shares.length : 0,
+              verified: true,
+            },
+      ),
+    );
+    await shares.publish(orgA, 'ci-adopt-conflict');
+
+    const rows = await db.withTenant(orgA, (q) =>
+      q.query<{ dataset: string }>(`SELECT dataset FROM shares WHERE name = 'ev'`),
+    );
+    expect(rows[0]?.dataset).toBe(`${PARENT_DATASET}/ev`);
+  });
+
+  it('zaten sağlam olan satırlara dokunmaz', async () => {
+    // Sahiplenme, adında eğik çizgi olmayan HER satıra değil, yalnız veri kümesi olmayanlara
+    // bakıyor. Her yayımda üç veri kümesini yeniden kurmaya çalışan bir sürüm, `conflict`leri
+    // yutarak çalışıyor gibi görünür ve ajanın denetim günlüğünü anlamsız kılardı.
+    const { shares, calls } = service();
+    await shares.publish(orgA, 'ci-no-adopt');
+
+    expect(calls.filter((c) => c.request.op === 'create_dataset')).toHaveLength(0);
+  });
+
   it('lists only this tenant’s shares, with the address a client would use', async () => {
     const { shares } = service();
 
