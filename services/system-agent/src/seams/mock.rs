@@ -419,6 +419,28 @@ impl SafePath for MockSafePath {
         Ok(found)
     }
 
+    /// The temp root itself, counting EVERYTHING except `.` and `..`.
+    ///
+    /// The filter matters and is copied from the kernel implementation on purpose. `list_entries`
+    /// above drops symlinks, sockets and non-UTF-8 names because DEPSIS has no row shape for
+    /// them; an EMPTINESS answer with that filter would call a root holding a symlink empty, and
+    /// the one operation that reads this answer then mounts a dataset over the directory — hiding
+    /// whatever is under it without deleting it. `read_dir` already omits `.` and `..`.
+    ///
+    /// A mock that answered this question more generously than the kernel does is exactly the gap
+    /// that put this method here: `list_entries(&[])` succeeded on the temp root and failed on a
+    /// real box, so the dispatcher's tests were green while the appliance could not set up
+    /// storage at all.
+    fn root_is_empty(&self) -> Result<bool, SeamError> {
+        let mut reader = std::fs::read_dir(&self.root)
+            .map_err(|_| SeamError::NotFound(self.root.display().to_string()))?;
+        match reader.next() {
+            None => Ok(true),
+            Some(Ok(_)) => Ok(false),
+            Some(Err(e)) => Err(SeamError::Io(format!("readdir: {e}"))),
+        }
+    }
+
     fn list_stale_files(
         &self,
         relative: &[&str],

@@ -108,6 +108,19 @@ export class ShareTreeController {
       // üzerine gidebileceği olgular.
       throw new BadRequestException(response.reason ?? 'paylaşım ağacı kurulamadı');
     }
+    // `failed` DE KENDI CUMLESIYLE. Ajan bir islemi yapmaya calisip dustugunde sebebini yaziyor,
+    // ve o cumle burada ATILIYORDU: kullanicinin gordugu sey "Servis geçici olarak kullanılamıyor"
+    // oluyor, gunluge bakmadan hicbir sey soylemeyen bir cumle.
+    //
+    // Sahada bunun bedeli olctuldu. Ajan `io: empty path` dedi — yani paylasim kokunun bosluguna
+    // bakan cagri, gercek muhurde bos bileşen listesini reddettigi icin dusuyordu. Ekranda bundan
+    // tek bir kelime gorunmedi, ve teshis ancak cihaza SSH ile girilip denetim gunlugu okunarak
+    // yapilabildi. Bu urunun kabul olcutu tam olarak bunun tersi.
+    if (response.status === 'failed') {
+      throw new ServiceUnavailableException(
+        `paylaşım ağacı kurulamadı: ${response.reason ?? 'ajan sebebini bildirmedi'}`,
+      );
+    }
     if (response.status !== 'share_root_prepared' || response.dataset == null) {
       throw new ServiceUnavailableException('paylaşım ağacı kurulamadı: beklenmeyen ajan yanıtı');
     }

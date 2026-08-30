@@ -171,14 +171,7 @@ export function UpdatePanel({ notify }: { notify: Notify }): React.JSX.Element |
           tek cümlelik hata kaldı ve neyin düştüğü görülemedi. */}
       {status !== null &&
         (status.inProgress || status.phase === 'failed') &&
-        status.logTail.length > 0 && (
-          <pre
-            className="term"
-            style={{ minHeight: 0, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' }}
-          >
-            {status.logTail.join('\n')}
-          </pre>
-        )}
+        status.logTail.length > 0 && <Log lines={status.logTail} />}
 
       {asking ? (
         <div className="netrow">
@@ -234,6 +227,39 @@ export function UpdatePanel({ notify }: { notify: Notify }): React.JSX.Element |
         sürüme geri alınır ve çalışır durumda bırakılır.
       </p>
     </>
+  );
+}
+
+/**
+ * Kurulumun kendi çıktısı — güncelleme koşarken canlı, düştüğünde ekranda kalan.
+ *
+ * KENDİ KUTUSU, konsolunki değil. Önce `.term`i ödünç alıyordu; o sınıf xterm.js'in çizdiği
+ * konsol için yazılmış ve yüksekliğini bir esnek kutunun içinde alıyor. Sistem ekranının
+ * akışında `flex: 1` hiçbir şeye tutunmuyor, ve satır içi bir `maxHeight` ile birlikte geriye
+ * ince bir şerit kalıyordu: güncellemenin neden düştüğünü okuyacağınız tek yer, okunamayacak
+ * kadar dar.
+ *
+ * SON SATIRA YAPIŞIYOR. Kurulum üç dakika sürüyor ve ekran her üç saniyede bir yenileniyor;
+ * okunacak yer daima en alt. Ama yalnız kullanıcı zaten aşağıdayken: yukarı kaydırıp bir hata
+ * satırını okuyan birini üç saniye sonra en alta fırlatmak, günlüğü okunamaz kılardı.
+ */
+function Log({ lines }: { lines: readonly string[] }): React.JSX.Element {
+  const box = useRef<HTMLPreElement>(null);
+  const text = lines.join('\n');
+
+  useEffect(() => {
+    const node = box.current;
+    if (node === null) return;
+    // 24px'lik pay, "en altta sayılır" eşiği: bir satırın kesri kadar yukarıda duran biri hâlâ
+    // takip ediyordur, ve kesin eşitlik arayan bir kontrol alt uca hiç yapışmazdı.
+    const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 24;
+    if (atBottom) node.scrollTop = node.scrollHeight;
+  }, [text]);
+
+  return (
+    <pre className="updlog" ref={box} aria-label="Kurulum günlüğü" tabIndex={0}>
+      {text}
+    </pre>
   );
 }
 
