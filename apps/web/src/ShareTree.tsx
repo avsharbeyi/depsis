@@ -85,11 +85,18 @@ export function ShareTreeNotice({
  * Hata durumunda `null` KALIR ve bu bilinçli: "bu kutuda havuz yok" ile "soramadık" aynı şey
  * değil, ve ikisini boş bir nesnede birleştirmek, ulaşılamayan bir ajanı "havuz kurun" diyen bir
  * uyarıya çevirirdi.
+ *
+ * `enabled` SORMAYI HİÇ YAPMAMAK İÇİN. Paylaşımlar ekranı bu soruyu ancak cevabının bir işe
+ * yaradığı durumda soruyor — ortada hiç paylaşım yokken, ya da bir açma denemesi 503 verdikten
+ * sonra. Zaten paylaşım sunan bir kutuda paylaşım ağacı tanım gereği var, ve ajana ulaşılamayan
+ * bir yığında bu soru yalnızca tarayıcı konsoluna bir 503 satırı yazdırırdı: ekranın söyleyecek
+ * bir şeyi yokken ürettiği gürültü.
  */
-export function useStorageSetup(reloadKey: number): Storage | null {
+export function useStorageSetup(reloadKey: number, enabled = true): Storage | null {
   const [storage, setStorage] = useState<Storage | null>(null);
 
   useEffect(() => {
+    if (!enabled) return undefined;
     let alive = true;
     void (async () => {
       const { data } = await api.GET('/system/storage', {});
@@ -99,7 +106,7 @@ export function useStorageSetup(reloadKey: number): Storage | null {
     return () => {
       alive = false;
     };
-  }, [reloadKey]);
+  }, [reloadKey, enabled]);
 
   return storage;
 }

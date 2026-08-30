@@ -72,15 +72,8 @@ export function Shares({
   const [permissionsFor, setPermissionsFor] = useState<PermissionTarget | null>(null);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
-  /**
-   * Kutunun depolama durumu — bu ekranın kendi işi için değil, AÇAMADIĞI paylaşımın sebebini
-   * söyleyebilmek için.
-   *
-   * Sahadaki ilk kurulumda havuz kuruldu, paylaşım açılmadı, ve bu ekranın söyleyebildiği tek şey
-   * "Depolama havuzu ayarlı değil ya da ajana ulaşılamıyor" oldu: iki ayrı sebebi bir cümlede
-   * birleştiren, çaresi başka bir ekranda duran bir bildirim.
-   */
-  const storage = useStorageSetup(reloadKey);
+  /** Bir açma denemesi 503 aldı mı — sebebini sormaya değer kılan ikinci durum. */
+  const [createUnavailable, setCreateUnavailable] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -102,6 +95,23 @@ export function Shares({
       alive = false;
     };
   }, [reloadKey, onUnauthenticated]);
+
+  /**
+   * Kutunun depolama durumu — bu ekranın kendi işi için değil, AÇAMADIĞI paylaşımın sebebini
+   * söyleyebilmek için.
+   *
+   * Sahadaki ilk kurulumda havuz kuruldu, paylaşım açılmadı, ve bu ekranın söyleyebildiği tek şey
+   * "Depolama havuzu ayarlı değil ya da ajana ulaşılamıyor" oldu: iki ayrı sebebi bir cümlede
+   * birleştiren, çaresi başka bir ekranda duran bir bildirim.
+   *
+   * YALNIZ CEVABININ İŞE YARADIĞI DURUMDA soruluyor. Zaten paylaşım sunan bir kutuda paylaşım
+   * ağacı tanım gereği var; orada bu soruyu sormak, ekranın söyleyecek bir şeyi yokken ürettiği
+   * bir istekten ibaret olurdu.
+   */
+  const storage = useStorageSetup(
+    reloadKey,
+    createUnavailable || (page !== null && page.items.length === 0),
+  );
 
   async function copyPath(uncPath: string): Promise<void> {
     try {
@@ -156,6 +166,7 @@ export function Shares({
       return false;
     }
     if (data === undefined) {
+      if (response.status === 503) setCreateUnavailable(true);
       notify(
         'error',
         problemMessage(
