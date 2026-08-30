@@ -113,6 +113,32 @@ describe('LicenseService.check', () => {
     expect(result.ok).toBe(false);
   });
 
+  it('KONSOLUN SARDIGI bir jetonu kabul eder', () => {
+    // Sahadaki ilk gercek lisans denemesi bunun yuzunden dustu. cmd.exe uzun satiri sariyor, ve
+    // secip kopyalayan kisi sarma noktalarindaki satir sonlarini da kopyaliyor. Jetonun kendisi
+    // gecerliydi; reddeden taraf haksizdi.
+    const token = issue('--until', '2030-01-01');
+    const wrapped = token.replace(/(.{40})/gu, '$1\n');
+    expect(wrapped).toContain(String.fromCharCode(10));
+    expect(service().check(wrapped).ok).toBe(true);
+  });
+
+  it('secime karisan cerceve cizgilerini gormezden gelir', () => {
+    // Arac jetonu iki cizgi arasinda basiyor; secim bazen onlari da kapiyor.
+    const token = issue();
+    const messy = ['  ── LİSANS ANAHTARI ──', '', token, '', '  ─────────────────'].join(
+      String.fromCharCode(10),
+    );
+    expect(service().check(messy).ok).toBe(true);
+  });
+
+  it('baska bir SURUM numarasini kendi cumlesiyle reddeder', () => {
+    // "Taninmadi" ile "bu surumu tanimiyorum" ayri seyler: ikincisi ne yapilacagini soyluyor.
+    const result = service().check('DEPSIS-9.aaa.bbb');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain('sürüm');
+  });
+
   it('tanınmayan biçimi, imzayı hiç denemeden reddeder', () => {
     for (const junk of ['', 'DEPSIS-1', 'DEPSIS-9.aaa.bbb', 'bir kelime', 'a.b.c']) {
       expect(service().check(junk).ok).toBe(false);

@@ -114,11 +114,20 @@ function issue(privateKeyPem, fields) {
 
 /** Cihazın yaptığının aynısı — ve bilerek aynısı: iki ayrı doğrulama, bir gün ayrışır. */
 function check(publicKeyPem, token) {
-  const parts = String(token).trim().split('.');
-  if (parts.length !== 3 || parts[0] !== `${PREFIX}-${VERSION}`) {
+  // Cihazdaki `LicenseService.check` ile AYNI tolerans: butun bosluklar atilip jeton metnin
+  // icinden araniyor. Iki dogrulama ayrisirsa, saticinin gordugu ile cihazin gordugu farkli olur.
+  const compact = String(token).replace(/\s+/gu, '');
+  const found = new RegExp(
+    String.raw`${PREFIX}-(\d+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)`,
+    'u',
+  ).exec(compact);
+  if (found === null) {
     return { ok: false, reason: 'jeton biçimi tanınmadı' };
   }
-  const [, payloadB64, signatureB64] = parts;
+  const [, version, payloadB64, signatureB64] = found;
+  if (Number(version) !== VERSION) {
+    return { ok: false, reason: `jeton ${version}. sürüm; bu araç ${VERSION}. sürümü tanıyor` };
+  }
   let valid = false;
   try {
     valid = verify(
