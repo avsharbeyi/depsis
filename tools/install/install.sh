@@ -398,6 +398,70 @@ database() {
 
 # ─── 5. yükleme ───────────────────────────────────────────────────────────────
 
+# Ajan ve konsol ikilileri: ya arşivden hazır gelirler ya burada derlenirler.
+#
+# ── neden ayrı bir işlev ─────────────────────────────────────────────────────
+#
+# İlk hâli üç satırdı — `cargo varsa derle, yoksa uyar` — ve sahadaki ilk yazılım güncellemesi
+# tam bu üç satırda düştü. Sebebi ikiye bölünüyor ve ikisi de burada karşılanıyor.
+#
+# BİR: sürüm arşivi yalnız KAYNAK taşıyordu (`git archive`), yani `target/release` boştu; cargo
+# da bulunamayınca elde kurulacak bir ikili kalmadı ve kurulum "derlenmemiş" deyip düştü. Bu,
+# 2009 model bir kutuya her güvenlik düzeltmesi için tam bir Rust derlemesi yaptırmanın da
+# yanlış olduğunu gösterdi: sürümü üreten taraf zaten derliyor. Artık arşiv ikilileri hazır
+# getiriyor, `.depsis-prebuilt` işaretiyle, ve arşivin tamamı imzalı olduğu için o ikililer de
+# imzalı — kutuda derlemekten daha güvenli, çünkü derleme zincirine hiç güvenmiyoruz.
+#
+# İKİ: cargo aslında KUTUDAYDI. `firstboot.sh` rustup'ı /root/.cargo/bin altına kuruyor ve
+# systemd'nin bir birime verdiği PATH orayı içermiyor; elle kurulumda çalışan şey, güncelleme
+# yolunda görünmez oluyordu. Aşağıdaki arama tam olarak bunu kapatıyor.
+rust_binaries() {
+  local marker="$REPO/target/release/.depsis-prebuilt"
+  local arch
+  arch="$(uname -m)"
+
+  # HAZIR İKİLİLER. İşaret dosyası, ikililerin hangi mimari için üretildiğini söylüyor: yanlış
+  # mimarideki bir ikiliyi kurmak, "Exec format error" ile açılışta düşen bir servis demektir ve
+  # o hatanın kurulum günlüğünde hiçbir izi olmazdı.
+  if [ -f "$marker" ]; then
+    local built
+    built="$(head -n1 "$marker" | tr -d '[:space:]')"
+    if [ "$built" = "$arch" ]; then
+      local bin missing=no
+      for bin in depsis-agent depsis-console; do
+        [ -x "$REPO/target/release/$bin" ] || missing=yes
+      done
+      if [ "$missing" = no ]; then
+        same "sürüm arşivi $arch ikililerini hazır getiriyor; derleme yok"
+        return 0
+      fi
+      warn 'hazır ikili işareti var ama ikililer eksik; derlemeye düşülüyor'
+    else
+      warn "hazır ikililer $built için üretilmiş, bu kutu $arch; derlemeye düşülüyor"
+    fi
+  fi
+
+  # RUSTUP'IN YERİ. `command -v` yetmiyor: rustup $HOME/.cargo/bin'e kuruyor ve bu betik bir
+  # systemd biriminden koştuğunda o dizin PATH'te olmuyor.
+  if ! command -v cargo >/dev/null 2>&1; then
+    local candidate
+    for candidate in "${HOME:-/root}/.cargo/bin" /root/.cargo/bin; do
+      if [ -x "$candidate/cargo" ]; then
+        PATH="$candidate:$PATH"
+        export PATH
+        break
+      fi
+    done
+  fi
+
+  if command -v cargo >/dev/null 2>&1; then
+    ( cd "$REPO" && cargo build --release --bin depsis-agent --bin depsis-console >/dev/null )
+    ok 'Rust ikilileri derlendi'
+  else
+    warn 'cargo yok; target/release altındaki mevcut ikililer kullanılacak'
+  fi
+}
+
 payload() {
   step 'derleme ve yerleştirme'
 
@@ -405,19 +469,14 @@ payload() {
     ( cd "$REPO" && pnpm install --frozen-lockfile >/dev/null )
     ( cd "$REPO" && pnpm turbo run build >/dev/null )
     ok 'TypeScript derlendi'
-    if command -v cargo >/dev/null 2>&1; then
-      ( cd "$REPO" && cargo build --release --bin depsis-agent --bin depsis-console >/dev/null )
-      ok 'Rust ikilileri derlendi'
-    else
-      warn 'cargo yok; target/release altındaki mevcut ikililer kullanılacak'
-    fi
+    rust_binaries
   else
     same '--skip-build: mevcut çıktı kullanılıyor'
   fi
 
   local bin
   for bin in depsis-agent depsis-console; do
-    [ -x "$REPO/target/release/$bin" ] || die "$bin derlenmemiş: cargo build --release --bin $bin"
+    [ -x "$REPO/target/release/$bin" ] || die "$bin yok: bu ağaç ne hazır ikili taşıyor ne de derlenebildi"
     install -m 0755 "$REPO/target/release/$bin" "$PREFIX/$bin"
   done
   ok "ajan ve konsol ikilileri $PREFIX altında"
@@ -548,6 +607,24 @@ ENV
   if [ ! -f "$ETC/console.env" ]; then
     printf 'DEPSIS_CONSOLE_PRIVILEGED=0
 ' > "$ETC/console.env"
+  fi
+  # DEPSIS_API_UID DE BURAYA. Konsol, kendisine bağlanan tarafın uid'ini SO_PEERCRED ile bu
+  # değere karşı sınıyor ve değer yoksa "DEPSIS_API_UID is unset; refusing to start" deyip
+  # çıkıyor — yani konsol hiç açılmıyor.
+  #
+  # İlk saha kurulumunda tam bu oldu. Eksik dosya düzeltilirken dosya YARIM yazıldı: birim
+  # dosyasının kendi açıklaması "written by the installer" diyordu ama kurulum uid'i yalnız
+  # agent.env'e yazıyordu. Sonuç, kullanıcının gördüğü hâliyle, "Konsol servisi çalışmıyor".
+  #
+  # Satır her kurulumda TAZELENİYOR, `console.env` yokken bir kez yazılmıyor: depsis-api hesabı
+  # silinip yeniden açılırsa uid değişir, ve o gün konsol sessizce yanlış uid'e bakardı.
+  # Dosyanın geri kalanına dokunulmuyor — operatörün DEPSIS_CONSOLE_PRIVILEGED=1 kararı burada.
+  local console_uid
+  console_uid="DEPSIS_API_UID=$(id -u depsis-api)"
+  if grep -q '^DEPSIS_API_UID=' "$ETC/console.env"; then
+    sed -i "s|^DEPSIS_API_UID=.*|$console_uid|" "$ETC/console.env"
+  else
+    printf '%s\n' "$console_uid" >> "$ETC/console.env"
   fi
   chmod 0644 "$ETC/console.env"
   ok "$ETC/api.env, $ETC/agent.env ve $ETC/console.env"

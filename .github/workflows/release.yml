@@ -57,15 +57,72 @@ jobs:
           echo "tag=$TAG" >>"$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse "$TAG^{commit}")" >>"$GITHUB_OUTPUT"
 
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rust ikilileri
+        # ── neden sürümün içinde derlenmiş ikili var ────────────────────────────────────────
+        #
+        # Sahadaki ilk yazılım güncellemesi burada düştü. Arşiv yalnız KAYNAK taşıyordu, cihazda
+        # cargo PATH'te yoktu, ve kurulum "depsis-agent derlenmemiş" deyip geri alındı. Kutu
+        # çalışır kaldı ama güncellenemez hâle geldi — yani bir güvenlik düzeltmesinin
+        # kullanıcıya ulaşma yolu kapandı.
+        #
+        # Kutuda derlemek doğru cevap değildi. Bu ürün 3-4 GiB belleğe sahip, on yıllık
+        # işlemcili kutulara kuruluyor; her düzeltme için soğuk bir Rust derlemesi yaptırmak,
+        # güncellemeyi kimsenin başlatmayacağı bir işe çevirir. Sürümü ÜRETEN taraf zaten
+        # derliyor.
+        #
+        # GÜVENLİK BAKIMINDAN DA DAHA İYİ, ve bu ters gelebilir: ikililer arşivin içinde, arşivin
+        # tamamı imzalı, ve cihaz imzayı kendi taşıdığı açık anahtarla doğruluyor. Kutuda
+        # derlemek ise kutudaki derleyiciye, crates.io'dan o an inen kaynağa ve aradaki ağa
+        # güvenmek demekti — imzanın kapsamadığı üç şey.
+        #
+        # `--locked`: Cargo.lock'ta yazan sürümler, o an yayınlanmış olanlar değil.
+        run: |
+          cargo build --locked --release --bin depsis-agent --bin depsis-console
+          ls -l target/release/depsis-agent target/release/depsis-console
+          # glibc: runner Ubuntu 24.04 (2.39), cihaz Debian 13 (2.41). Eski glibc'ye karşı
+          # derlenen ikili yenisinde çalışır; tersi çalışmaz. Yön doğru, ve yanlışa dönerse
+          # aşağıdaki satır sürümü üretirken görünür olsun diye basılıyor.
+          objdump -T target/release/depsis-agent | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1
+
       - name: Kaynak arşivi
         # `git archive`, deponun O ETİKETTEKİ hâlini paketler: çalışma ağacındaki hiçbir kirlilik
         # arşive giremez. `--prefix` ile açılan dizin, güncelleyicinin beklediği biçimde.
+        #
+        # İkililer arşive SONRADAN ekleniyor, `git archive`in çıktısı önce sıkıştırılmamış tar
+        # olarak duruyor ki `tar -r` ona ekleyebilsin. Eklenen tek şey `target/release` altındaki
+        # iki ikili ve onları tanıtan işaret dosyası; deponun geri kalanı yine etiketin bire bir
+        # kendisi.
         run: |
           TAG='${{ steps.tag.outputs.tag }}'
-          git archive --format=tar --prefix="depsis-$TAG/" "$TAG" \
-            | gzip -n > "depsis-$TAG.tar.gz"
-          sha256sum "depsis-$TAG.tar.gz" > "depsis-$TAG.tar.gz.sha256"
-          ls -l "depsis-$TAG.tar.gz"
+          TOP="depsis-$TAG"
+          git archive --format=tar --prefix="$TOP/" "$TAG" -o "$TOP.tar"
+
+          mkdir -p "$TOP/target/release"
+          install -m 0755 target/release/depsis-agent target/release/depsis-console \
+            "$TOP/target/release/"
+          # İŞARET DOSYASI. İlk satırı mimari, çünkü kurulum onu kendi `uname -m`i ile
+          # karşılaştırıyor: yanlış mimarideki bir ikiliyi kurmak, açılışta "Exec format error"
+          # ile düşen ve sebebi kurulum günlüğünde görünmeyen bir servis demek olurdu.
+          {
+            uname -m
+            printf 'tag=%s\n' "$TAG"
+            printf 'commit=%s\n' '${{ steps.tag.outputs.commit }}'
+          } > "$TOP/target/release/.depsis-prebuilt"
+          tar -rf "$TOP.tar" "$TOP/target"
+          rm -rf "$TOP"
+
+          gzip -n -c "$TOP.tar" > "$TOP.tar.gz"
+          rm -f "$TOP.tar"
+          sha256sum "$TOP.tar.gz" > "$TOP.tar.gz.sha256"
+          ls -l "$TOP.tar.gz"
+          # Arşivin gerçekten ikilileri taşıdığı BURADA görülsün: eksikse sürüm hiç çıkmasın,
+          # çünkü eksikliği ancak bir müşteri güncellemeye basınca anlaşılırdı.
+          tar -tzf "$TOP.tar.gz" | grep -x "$TOP/target/release/depsis-agent"
+          tar -tzf "$TOP.tar.gz" | grep -x "$TOP/target/release/depsis-console"
+          tar -tzf "$TOP.tar.gz" | grep -x "$TOP/target/release/.depsis-prebuilt"
 
       - name: İmzala
         # SIR YOKSA DÜŞ. Bu adımın sessizce atlanması, imzasız bir sürümün "sürüm" diye
