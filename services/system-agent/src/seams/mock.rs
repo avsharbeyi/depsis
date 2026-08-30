@@ -573,4 +573,22 @@ impl CommandRunner for MockCommandRunner {
         self.calls.borrow_mut().push(argv);
         Ok(self.responses.borrow_mut().pop_front().unwrap_or_default())
     }
+
+    /// Kaydediliyor, ve SIRRIN KENDİSİ KAYDEDİLMİYOR.
+    ///
+    /// Çağrı listesine `<stdin>` diye bir işaret konuyor: bir test "parola stdin'den gitti mi"
+    /// sorusunu sorabilsin, ama parolanın kendisi test çıktısına, panik mesajına ya da CI
+    /// günlüğüne düşmesin. Bu tipin var olma sebebi zaten buydu.
+    fn run_with_stdin(
+        &self,
+        program: &str,
+        args: &[&str],
+        _stdin: &str,
+    ) -> Result<String, SeamError> {
+        let mut argv = vec![program.to_string()];
+        argv.extend(args.iter().map(|a| (*a).to_string()));
+        argv.push("<stdin>".to_string());
+        self.calls.borrow_mut().push(argv);
+        Ok(self.responses.borrow_mut().pop_front().unwrap_or_default())
+    }
 }

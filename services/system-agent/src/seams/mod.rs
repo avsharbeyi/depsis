@@ -457,6 +457,34 @@ pub trait CommandRunner {
         self.run(program, args)
     }
 
+    /// `run`, ama bir SIR stdin'den geçiyor.
+    ///
+    /// ── neden argv değil ─────────────────────────────────────────────────────────────────
+    ///
+    /// Yedek diskinin parolası `zfs` sürecine ulaşmak zorunda, ve argv ile geçmenin bedeli
+    /// ölçülebilir: `/proc/<pid>/cmdline` bu kutudaki her kullanıcıya okunabilir, yani parola
+    /// komut koştuğu sürece `ps` çıktısında durur. Dosyaya yazmak da aynı derde başka bir
+    /// kılıf — diske dokunan bir parola, silinse bile bloklarda kalır.
+    ///
+    /// stdin ise yalnız iki süreç arasında: ajan yazar, `zfs` okur, ve arada hiçbir yerde
+    /// görünmez.
+    ///
+    /// ── VARSAYILAN REDDEDİYOR ────────────────────────────────────────────────────────────
+    ///
+    /// `run_piped` ile aynı gerekçe, ve burada daha da ağırı: sessizce `Ok("")` dönen bir
+    /// varsayılan, anahtar yüklemeyi BAŞARILI gösterirdi. Sonuç, kilitli bir diski açık sanan
+    /// bir cihaz olurdu — ve o yanlışın görüleceği yer, yedeklemenin ilk turunda yazamamak.
+    fn run_with_stdin(
+        &self,
+        program: &str,
+        _args: &[&str],
+        _stdin: &str,
+    ) -> Result<String, SeamError> {
+        Err(SeamError::Io(format!(
+            "bu koşucu stdin'den girdi veremiyor ({program}); yalnız gerçek koşucu verebilir"
+        )))
+    }
+
     /// Run two programs with the first's stdout wired to the second's stdin.
     ///
     /// NO SHELL, and that is the entire reason this is a seam method rather than one `run` call

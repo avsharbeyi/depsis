@@ -422,6 +422,24 @@ export type AgentRequest =
       pool: SafeComponent;
     }
   | {
+      op: 'prepare_backup_root';
+      passphrase: Passphrase;
+      pool: SafeComponent;
+    }
+  | {
+      op: 'backup_root_status';
+      pool: SafeComponent;
+    }
+  | {
+      op: 'load_backup_key';
+      passphrase: Passphrase;
+      pool: SafeComponent;
+    }
+  | {
+      op: 'unload_backup_key';
+      pool: SafeComponent;
+    }
+  | {
       disk: DiskRef;
       op: 'wipe_disk';
     }
@@ -727,6 +745,29 @@ export type KnownHostsLine = string;
  * The account on the far end. Same argument as `SshHostName`, one character narrower.
  */
 export type SshUserName = string;
+/**
+ * Yedek diskinin parolası — ZFS'in kendi anahtarı olarak.
+ *
+ * ── NEDEN AYRI BİR TİP ───────────────────────────────────────────────────────────────────────
+ *
+ * Bu, ajanın gördüğü tek KULLANICI SIRRIDIR ve `String` olarak taşınamaz. Üç sebep, üçü de bir
+ * `String`in kendiliğinden yaptığı şeyler:
+ *
+ * BİR — `Debug`. Bu depoda hemen her tip `#[derive(Debug)]` taşıyor ve istekler hata
+ * mesajlarında, `unexpected request` dallarında ve panik yollarında basılıyor. Bir `String`
+ * parola, ilk beklenmedik istekte journald'a düz metin olarak düşerdi. Buradaki `Debug`
+ * elle yazılmış ve içeriği ASLA basmıyor.
+ *
+ * İKİ — SATIR SONU. Parola `zfs load-key`e stdin'den, bir satır olarak veriliyor. İçinde satır
+ * sonu olan bir parola, ZFS'e parolanın yalnız ilk parçasını verirdi: disk kurulurken kabul
+ * edilen değerle sonra açarken verilen değer birbirini tutmazdı, ve kullanıcı "parolam doğru
+ * ama açılmıyor" derdi. Reddetmek, sessizce kesmekten iyi.
+ *
+ * ÜÇ — UZUNLUK. Alt sınır ZFS'in kendi kuralı (`keyformat=passphrase` en az sekiz bayt ister);
+ * üst sınır kontrol soketinin istek satırına sığmak için. İkisi de burada reddediliyor ki
+ * kullanıcı hatayı diski kurarken görsün, kurduktan sonra değil.
+ */
+export type Passphrase = string;
 /**
  * A ZeroTier network id: exactly sixteen lowercase hexadecimal digits.
  *
@@ -1233,6 +1274,26 @@ export type AgentResponse =
     }
   | {
       status: 'removed';
+    }
+  | {
+      /**
+       * Şifreli yarıya daha ne kadar yazılabilir. Kilitliyken 0 dönebilir.
+       */
+      available_bytes: number;
+      /**
+       * Şifreli yarının anahtarı yüklü mü.
+       */
+      key_loaded: boolean;
+      /**
+       * Şifreli yarı bağlı mı — yani dosyalar okunabiliyor mu.
+       */
+      mounted: boolean;
+      /**
+       * İki veri kümesi de yerinde mi.
+       */
+      prepared: boolean;
+      status: 'backup_root';
+      used_bytes: number;
     }
   | {
       status: 'directory_created';

@@ -86,6 +86,15 @@ const MAX_CONTROLLER_MEMBERS: usize = 256;
 /// yeterli, ve gerçekten asılmış bir komutu sonsuza bırakmayacak kadar kısa.
 const LONG_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
+/// `Vec<String>` bir argv'yi koşucunun beklediği `&[&str]`e çevirir.
+///
+/// Argv üreten yardımcılar `String` döndürüyor (parçaların bir kısmı biçimlendiriliyor:
+/// `mountpoint=/yedek` gibi), koşucu ise dilim istiyor. Bu satır bu dosyada zaten birkaç yerde
+/// elle yazılmış; yedekleme onu dört kez daha yazdıracaktı.
+fn borrow(argv: &[String]) -> Vec<&str> {
+    argv.iter().map(String::as_str).collect()
+}
+
 /// Controller'ın ağ kaydını arayüzün okuduğu şekle indir.
 fn describe_network(record: &crate::ztcontroller::NetworkRecord) -> ZeroTierControlledNetwork {
     ZeroTierControlledNetwork {
@@ -554,6 +563,114 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             .run(bin::ZFS, &crate::pools::list_filesystems_argv())?;
         let filesystems = crate::pools::parse_filesystems(&listing);
         Ok(crate::pools::mounted_at(&filesystems, &root.to_string_lossy()).map(str::to_string))
+    }
+
+    /// Bir havuzu yedek diski düzenine sokar: şifresiz `aciklama`, şifreli `veri`.
+    ///
+    /// SIRA ÖNEMLİ VE ŞİFRESİZ OLAN ÖNCE. Şifreli yarı düşerse geriye kendini anlatan bir disk
+    /// kalıyor; tersi olsaydı, açılabilen ama ne olduğunu söyleyemeyen bir disk kalırdı — ve
+    /// kurulum sihirbazı onu tanıyamazdı.
+    fn prepare_backup_root(
+        &self,
+        pool: &str,
+        passphrase: &crate::op::Passphrase,
+    ) -> Result<Response, SeamError> {
+        let meta = crate::backup::meta_dataset(pool);
+        let data = crate::backup::data_dataset(pool);
+
+        self.runner
+            .run(bin::ZFS, &borrow(&crate::backup::create_meta_argv(&meta)))?;
+        // Parola stdin'den; argv'de yok, dosyada yok.
+        self.runner.run_with_stdin(
+            bin::ZFS,
+            &borrow(&crate::backup::create_data_argv(&data)),
+            passphrase.expose(),
+        )?;
+        // `canmount=noauto` yüzünden yeni küme kendiliğinden bağlanmıyor; ilk turun yazabilmesi
+        // için burada bağlanıyor. Anahtar zaten yüklü — az önce onunla kuruldu.
+        self.runner
+            .run(bin::ZFS, &borrow(&crate::backup::mount_argv(&data)))?;
+
+        self.backup_root_status(pool)
+    }
+
+    /// Şifreli yarının anahtarını yükler ve bağlar.
+    ///
+    /// ZATEN YÜKLÜYSE HATA DEĞİL. `zfs load-key` yüklü bir anahtar için "Key already loaded" ile
+    /// düşüyor; bunu kullanıcıya hata olarak göstermek, doğru parolayı ikinci kez giren birine
+    /// "olmadı" demek olurdu. Durum geri okunuyor ve cevabı o veriyor.
+    fn load_backup_key(
+        &self,
+        pool: &str,
+        passphrase: &crate::op::Passphrase,
+    ) -> Result<Response, SeamError> {
+        let data = crate::backup::data_dataset(pool);
+        let loaded = self.runner.run_with_stdin(
+            bin::ZFS,
+            &borrow(&crate::backup::load_key_argv(&data)),
+            passphrase.expose(),
+        );
+        if let Err(error) = loaded {
+            // YANLIŞ PAROLA İLE ZATEN AÇIK ARASINDAKİ FARK. İlki kullanıcının düzeltebileceği bir
+            // şey, ikincisi hiçbir şey. Ayırmanın tek yolu durumu okumak: anahtar yüklüyse
+            // sebebi neyse önemsiz.
+            let state = crate::backup::parse_state(
+                &self
+                    .runner
+                    .run(bin::ZFS, &borrow(&crate::backup::status_argv(&data)))?,
+            )?;
+            if !state.key_loaded {
+                return Err(error);
+            }
+        }
+        // Bağlama ayrı bir adım: anahtar yüklü olmak, dosyaların görünmesi demek değil.
+        // `already mounted` bir hata değil, o yüzden durum geri okunup karar oradan veriliyor.
+        let _ = self
+            .runner
+            .run(bin::ZFS, &borrow(&crate::backup::mount_argv(&data)));
+        self.backup_root_status(pool)
+    }
+
+    /// Yedek diskinin durumu — hazır mı, kilitli mi, ne kadar yeri var.
+    fn backup_root_status(&self, pool: &str) -> Result<Response, SeamError> {
+        let data = crate::backup::data_dataset(pool);
+        let out = self
+            .runner
+            .run(bin::ZFS, &borrow(&crate::backup::status_argv(&data)));
+
+        // VERİ KÜMESİ YOKSA "HAZIR DEĞİL", HATA DEĞİL. Bu işlemin ilk çağrıldığı an, henüz hiçbir
+        // şeyin kurulmadığı an: bir hata döndürmek, ekranın "yedek diski kurun" diyeceği yerde
+        // "ajana ulaşılamıyor" demesine yol açardı.
+        //
+        // İKİ YOLDAN "YOK" GELEBİLİR ve ikisi de aynı cevabı hak ediyor: `zfs list` olmayan bir
+        // veri kümesi için sıfırdan farklı çıkışla düşüyor, ve boş bir cevap da aynı şeyi
+        // söylüyor. BİÇİMİ BOZUK bir satır ise başka bir şeydir — o, beklediğimiz `zfs`
+        // olmadığının işareti — ve yutulmuyor.
+        let state = match out {
+            Err(_) => None,
+            Ok(text) => match crate::backup::parse_state(&text) {
+                Ok(state) => Some(state),
+                Err(SeamError::NotFound(_)) => None,
+                Err(error) => return Err(error),
+            },
+        };
+
+        let Some(state) = state else {
+            return Ok(Response::BackupRoot {
+                prepared: false,
+                key_loaded: false,
+                mounted: false,
+                available_bytes: 0,
+                used_bytes: 0,
+            });
+        };
+        Ok(Response::BackupRoot {
+            prepared: true,
+            key_loaded: state.key_loaded,
+            mounted: state.mounted,
+            available_bytes: state.available_bytes,
+            used_bytes: state.used_bytes,
+        })
     }
 
     fn share_root_status(&self) -> Result<Response, SeamError> {
@@ -2473,6 +2590,22 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
 
             Request::ListDatabaseDumps {} => self.database_dumps(),
 
+            Request::PrepareBackupRoot { pool, passphrase } => {
+                self.prepare_backup_root(pool.as_str(), passphrase)
+            }
+            Request::BackupRootStatus { pool } => self.backup_root_status(pool.as_str()),
+            Request::LoadBackupKey { pool, passphrase } => {
+                self.load_backup_key(pool.as_str(), passphrase)
+            }
+            Request::UnloadBackupKey { pool } => {
+                let data = crate::backup::data_dataset(pool.as_str());
+                self.runner
+                    .run(bin::ZFS, &borrow(&crate::backup::unload_key_argv(&data)))?;
+                // Durum GERİ OKUNUYOR, varsayılmıyor. `zfs unload-key` sessizce başarılı olur ve
+                // "kilitlendi" demek, komutun cevabını değil isteğin yankısını bildirmek olurdu.
+                self.backup_root_status(pool.as_str())
+            }
+
             Request::StartScrub { pool } => {
                 self.runner
                     .run(bin::ZPOOL, &crate::scrub::scrub_argv(pool.as_str()))?;
@@ -3714,6 +3847,248 @@ mod tests {
         );
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
         assert_eq!(r.calls.borrow().len(), 1, "only lsblk ran");
+    }
+
+    /// Yedek diski kurulurken parola ARGV'YE HİÇ GİRMİYOR.
+    ///
+    /// `/proc/<pid>/cmdline` bu kutudaki her kullanıcıya okunabilir, yani argv'den geçen bir
+    /// parola komut koştuğu sürece `ps` çıktısında durur. Bu testin ölçtüğü şey bir tercih değil
+    /// bir sınır: parola stdin'den geçmek zorunda, ve sahte koşucu onu `<stdin>` işaretiyle
+    /// kaydediyor — parolanın kendisi test çıktısına da düşmesin diye.
+    #[test]
+    fn yedek_diski_kurulurken_parola_argvye_hic_girmiyor() {
+        let r = MockCommandRunner::with_responses([
+            String::new(),                                               // zfs create aciklama
+            String::new(),                                               // zfs create veri
+            String::new(),                                               // zfs mount veri
+            "yedek/veri\tyes\tavailable\t900000000000\t0\n".to_string(), // durum
+        ]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"prepare_backup_root","pool":"yedek","passphrase":"cok-gizli-parola"}"#,
+            peer(API_UID),
+            "yb1",
+            "yedek diski kuruluyor",
+        );
+        assert!(
+            matches!(
+                resp,
+                Response::BackupRoot {
+                    prepared: true,
+                    key_loaded: true,
+                    ..
+                }
+            ),
+            "{resp:?}"
+        );
+
+        let calls = r.calls.borrow();
+        for call in calls.iter() {
+            assert!(
+                !call.iter().any(|a| a.contains("cok-gizli-parola")),
+                "parola argv'ye sızdı: {call:?}"
+            );
+        }
+        // Ve gerçekten stdin'den geçti: şifreli kümeyi kuran çağrı işaretli.
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.iter().any(|a| a == "encryption=aes-256-gcm")
+                    && c.iter().any(|a| a == "<stdin>")),
+            "{calls:?}"
+        );
+    }
+
+    /// Şifresiz yarı ÖNCE kuruluyor.
+    ///
+    /// Sıra bir tercih değil: şifreli yarı düşerse geriye kendini anlatan bir disk kalıyor. Tersi
+    /// olsaydı, açılabilen ama ne olduğunu söyleyemeyen bir disk kalırdı — ve yanmış cihaz
+    /// senaryosunda kurulum sihirbazı onu tanıyamazdı.
+    #[test]
+    fn kendini_anlatan_yari_once_kuruluyor() {
+        let r = MockCommandRunner::with_responses([
+            String::new(),
+            String::new(),
+            String::new(),
+            "yedek/veri\tyes\tavailable\t1\t0\n".to_string(),
+        ]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let _ = agent(&r, &s, &h).handle(
+            r#"{"op":"prepare_backup_root","pool":"yedek","passphrase":"cok-gizli-parola"}"#,
+            peer(API_UID),
+            "yb2",
+            "yedek diski kuruluyor",
+        );
+        let calls = r.calls.borrow();
+        let meta = calls
+            .iter()
+            .position(|c| c.iter().any(|a| a == "yedek/aciklama"))
+            .expect("aciklama kümesi kurulmalı");
+        let data = calls
+            .iter()
+            .position(|c| c.iter().any(|a| a == "encryption=aes-256-gcm"))
+            .expect("veri kümesi kurulmalı");
+        assert!(meta < data, "şifresiz yarı önce kurulmalı: {calls:?}");
+    }
+
+    /// Hazırlanmamış bir disk BİR HATA DEĞİL.
+    ///
+    /// Bu işlemin ilk çağrıldığı an, henüz hiçbir şeyin kurulmadığı an. Hata döndürmek, ekranın
+    /// "yedek diski kurun" diyeceği yerde "ajana ulaşılamıyor" demesine yol açardı — ve o cümle
+    /// kullanıcıya yapacak bir şey bırakmaz.
+    #[test]
+    fn hazirlanmamis_bir_disk_hata_degil_hazir_degil() {
+        // `zfs list` olmayan bir veri kümesi için boş döner (gerçek kutuda sıfırdan
+        // farklı çıkışla da düşer; ikisi de aynı cevabı hak ediyor).
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"backup_root_status","pool":"yedek"}"#,
+            peer(API_UID),
+            "yb3",
+            "yedek diski soruluyor",
+        );
+        assert!(
+            matches!(
+                resp,
+                Response::BackupRoot {
+                    prepared: false,
+                    key_loaded: false,
+                    ..
+                }
+            ),
+            "{resp:?}"
+        );
+    }
+
+    /// Kilitli bir disk, hazır AMA kilitli görünüyor — ve ikisi ayrı bayrak.
+    ///
+    /// Birleştirmek, kullanıcıya yapacağı şeyin tersini söyletirdi: hazırlanmamış bir disk için
+    /// "parolanızı girin", kilitli bir disk için "yedek diski kurun".
+    #[test]
+    fn kilitli_bir_disk_hazir_ama_kilitli() {
+        let r =
+            MockCommandRunner::with_responses(["yedek/veri\tno\tunavailable\t-\t0\n".to_string()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"backup_root_status","pool":"yedek"}"#,
+            peer(API_UID),
+            "yb4",
+            "yedek diski soruluyor",
+        );
+        assert!(
+            matches!(
+                resp,
+                Response::BackupRoot {
+                    prepared: true,
+                    key_loaded: false,
+                    mounted: false,
+                    ..
+                }
+            ),
+            "{resp:?}"
+        );
+    }
+
+    /// Parola sekiz bayttan kısaysa, DİSK KURULMADAN reddediliyor.
+    ///
+    /// ZFS'in kendi alt sınırı sekiz bayt. Onu ajanın sınırında yakalamak, kullanıcının hatayı
+    /// diski kurarken görmesi demek; yakalamamak, `zfs`in cümlesini bir kurulum ortasında
+    /// görmesi demekti.
+    #[test]
+    fn cok_kisa_bir_parola_hicbir_komut_kosmadan_reddediliyor() {
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"prepare_backup_root","pool":"yedek","passphrase":"kisa"}"#,
+            peer(API_UID),
+            "yb5",
+            "yedek diski kuruluyor",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        assert!(r.calls.borrow().is_empty(), "tek bir komut bile koşmamalı");
+    }
+
+    /// Satır sonu taşıyan bir parola reddediliyor.
+    ///
+    /// Parola `zfs`e stdin'den BİR SATIR olarak veriliyor. İçinde satır sonu olan bir parola,
+    /// ZFS'e yalnız ilk parçasını verirdi: disk kurulurken kabul edilen değerle sonra açarken
+    /// verilen değer birbirini tutmaz, ve kullanıcı "parolam doğru ama açılmıyor" derdi.
+    #[test]
+    fn satir_sonu_tasiyan_bir_parola_reddediliyor() {
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            "{\"op\":\"prepare_backup_root\",\"pool\":\"yedek\",\"passphrase\":\"iki\\nsatir-parola\"}",
+            peer(API_UID),
+            "yb6",
+            "yedek diski kuruluyor",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        assert!(r.calls.borrow().is_empty());
+    }
+
+    /// Kilitlemek, bağlıyken de çalışmalı — yoksa kilit düğmesi hiçbir zaman iş görmez.
+    #[test]
+    fn kilitleme_bagliyken_de_calisiyor() {
+        let r = MockCommandRunner::with_responses([
+            String::new(),
+            "yedek/veri\tno\tunavailable\t-\t0\n".to_string(),
+        ]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"unload_backup_key","pool":"yedek"}"#,
+            peer(API_UID),
+            "yb7",
+            "yedek diski kilitleniyor",
+        );
+        assert!(
+            matches!(
+                resp,
+                Response::BackupRoot {
+                    key_loaded: false,
+                    ..
+                }
+            ),
+            "{resp:?}"
+        );
+        let calls = r.calls.borrow();
+        assert!(
+            calls[0].iter().any(|a| a == "-u"),
+            "önce ayırmadan kilitleme 'dataset is busy' ile düşerdi: {calls:?}"
+        );
+    }
+
+    /// Denetim kaydına parola GİRMİYOR — kayıt yalnız işlem adını taşıyor.
+    #[test]
+    fn denetim_kaydinda_parola_yok() {
+        let r = MockCommandRunner::with_responses([
+            String::new(),
+            String::new(),
+            String::new(),
+            "yedek/veri\tyes\tavailable\t1\t0\n".to_string(),
+        ]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let _ = agent(&r, &s, &h).handle(
+            r#"{"op":"prepare_backup_root","pool":"yedek","passphrase":"cok-gizli-parola"}"#,
+            peer(API_UID),
+            "yb8",
+            "yedek diski kuruluyor",
+        );
+        let written = format!("{:?}", *s.entries());
+        assert!(
+            !written.contains("cok-gizli-parola"),
+            "parola denetim kaydına sızdı: {written}"
+        );
+        assert!(written.contains("prepare_backup_root"), "{written}");
     }
 
     #[test]
