@@ -52,10 +52,24 @@ describe('the emitted agent schema', () => {
       // kurmuş oluyor. Ajan indirmiyor — birimi `IPAddressDeny=any` taşıyor — yalnızca
       // indirmeyi üstlenen ayrı systemd birimini başlatıyor.
       'apply_update',
+      // Yedek AGACI: ikinci bir muhurlu kok. Hangi koke dokunuldugu ISLEMIN ADINDA sabit —
+      // `realm: Live | Backup` diye bir operand YOK, cunku o operand tek bir alan degeriyle
+      // canli agaci hedefleyen bir yedek cagrisi yaratirdi ve alanin dogru doldugunu ajan degil
+      // cagiran taraf garanti ederdi.
+      'backup_create_directory',
+      'backup_list_directory',
+      // Silinenlere tasima VE yeniden adlandirma, tek arac. Ikisi de sifir bayt kopyaliyor:
+      // gecikmeli silmenin defteri dizinin ADI, ve kirk bin fotografli bir klasorun adinin
+      // degismesi yedek tarafinda da tek bir tasima.
+      'backup_move_entry',
       // The fourth thing nobody was backing up. `identity.secret` cannot be recreated, and a
       // network id is welded to it — a new identity means the household permanently loses
       // remote access to its own appliance.
       'backup_node_identity',
+      // Ozyineleme YOK: dolu bir dizin `Conflict` ile geri geliyor ve agaci cagiran taraf
+      // yuruyor. Kok yetkiyle kosan bir surecte `rm -r`nin karsiligi olan bir islem, tek bir
+      // yanlis operandla butun yedegi silerdi.
+      'backup_remove_entry',
       // Yedek diski: sifreli havuzun kurulmasi, kilidinin acilmasi ve kapanmasi. Parola
       // `prepare_backup_root` ve `load_backup_key` isteklerinde geciyor ve argv'ye HIC konmuyor —
       // `/proc/<pid>/cmdline` bu kutudaki her kullaniciya okunabilir. Denetim kaydina giren sey
@@ -69,6 +83,7 @@ describe('the emitted agent schema', () => {
       // of these per file, because a recursive copy is a blast radius the caller chose.
       'check_update',
       'copy_file',
+      'copy_file_to_backup',
       'create_dataset',
       // ONE directory, never `mkdir -p`. Its absence was a hole under the product rather than a
       // gap in the set: `FilesService.createFolder` could write a row and nothing else, so a
@@ -339,7 +354,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(31);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(33);
   });
 
   it('agrees with the number the agent actually reports', () => {

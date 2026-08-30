@@ -440,6 +440,33 @@ export type AgentRequest =
       pool: SafeComponent;
     }
   | {
+      from: SafeComponent[];
+      max_bytes: number;
+      offset: number;
+      op: 'copy_file_to_backup';
+      share: SafeComponent;
+      staging_name: SafeComponent;
+      to: SafeComponent[];
+    }
+  | {
+      op: 'backup_list_directory';
+      path: SafeComponent[];
+    }
+  | {
+      op: 'backup_create_directory';
+      path: SafeComponent[];
+    }
+  | {
+      from: SafeComponent[];
+      op: 'backup_move_entry';
+      to: SafeComponent[];
+    }
+  | {
+      directory: boolean;
+      op: 'backup_remove_entry';
+      path: SafeComponent[];
+    }
+  | {
       disk: DiskRef;
       op: 'wipe_disk';
     }
