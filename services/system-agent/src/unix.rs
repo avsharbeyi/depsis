@@ -662,6 +662,42 @@ impl SafePath for Openat2SafePath {
         Self::entries_of(&self.open_dir(relative)?)
     }
 
+    /// The shares root itself, read through the SAME descriptor everything else is anchored to.
+    ///
+    /// `open_dir(&[])` is deliberately NOT the route. `openat2` here always takes the first
+    /// component as the SHARE NAME — each share is its own dataset and therefore its own mount —
+    /// so an empty component list has no meaning down there and is refused. Special-casing it
+    /// inside `open_dir` would also reach `remove_file`, `remove_dir` and `create_dir`, which
+    /// resolve their parent through the same method: the root would become a deletable parent in
+    /// a process running as root. This asks the question instead of handing out the descriptor.
+    ///
+    /// `root_fd()` is not a second route into the tree. It is the anchor `openat2` already uses
+    /// as its `dirfd` on every call in this file, opened with `DIRECTORY` and `CLOEXEC`, and it
+    /// is read here and nowhere else.
+    fn root_is_empty(&self) -> Result<bool, SeamError> {
+        let root = std::fs::File::from(self.root_fd()?);
+        let mut reader = rustix::fs::Dir::read_from(&root)
+            .map_err(|e| SeamError::Io(format!("open directory stream: {e}")))?;
+
+        // `.` ve `..` DIŞINDA HER ŞEY sayılıyor — `entries_of` DEĞİL, ve fark burada önemli.
+        //
+        // O yardımcı, sembolik bağları, soketleri, aygıt düğümlerini ve UTF-8 olmayan adları
+        // ATIYOR, çünkü DEPSIS'in onlar için bir satır biçimi yok. Bir LİSTELEME için doğru olan
+        // bu filtre, bir BOŞLUK sorusu için yanlış: bu cevaba bakan işlem, dizinin üstüne bir veri
+        // kümesi bağlıyor, ve bağlanan bir dizinin altındaki her şey silinmeden görünmez oluyor.
+        // İçinde yalnız bir sembolik bağ olan bir kökü "boş" saymak, tam olarak bu işlemin
+        // engellemek için var olduğu şeyi yapardı.
+        while let Some(entry) = reader.read() {
+            let entry = entry.map_err(|e| SeamError::Io(format!("readdir: {e}")))?;
+            let raw = entry.file_name().to_bytes();
+            if raw == b"." || raw == b".." {
+                continue;
+            }
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     fn list_snapshot_entries(
         &self,
         share: &str,
@@ -1822,6 +1858,76 @@ mod tests {
         assert!(split_envelope("").is_err());
         assert!(split_envelope("[]").is_err());
         assert!(split_envelope("null").is_err());
+    }
+
+    /// The shares root's own emptiness, against a real kernel — the question the appliance could
+    /// not answer for a whole release.
+    ///
+    /// WHAT THIS REPLACES. The two operations that need this asked `list_entries(&[])`. The mock
+    /// answered it by listing the temp root; `openat2` refuses an empty component list outright,
+    /// because the first component is always the SHARE NAME. So `share_root_status` reported
+    /// "not empty" on every real box (the error was swallowed with `.unwrap_or(false)`) and
+    /// `prepare_share_root` failed with `io: empty path`. The wizard hid its own checkbox, the
+    /// recovery button answered 503, and the box could not open a single share.
+    ///
+    /// A dispatcher test could not have caught it: the seam it runs against is the one that
+    /// answered. Only a test against the kernel can.
+    #[test]
+    fn the_shares_root_can_be_asked_whether_it_is_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Openat2SafePath::open_root(dir.path()).expect("root");
+
+        assert!(
+            paths.root_is_empty().expect("a fresh root answers"),
+            "a directory with nothing in it is empty"
+        );
+
+        std::fs::create_dir(dir.path().join("belgeler")).expect("seed");
+        assert!(
+            !paths.root_is_empty().expect("answers with a share in it"),
+            "a root holding a share directory is not empty"
+        );
+    }
+
+    /// A symlink counts. It is the case the listing filter would have dropped.
+    ///
+    /// `entries_of` — which every other listing goes through — omits symlinks, sockets and
+    /// non-UTF-8 names, because DEPSIS has no row shape for them. Reusing that filter for an
+    /// EMPTINESS answer would be a quiet data-hiding bug: the one caller that reads this answer
+    /// goes on to `zfs create -o mountpoint=<root>`, and a mount over a non-empty directory makes
+    /// everything under it invisible while it still occupies the disk. The refusal exists for
+    /// exactly that, so the question has to count everything the kernel reports.
+    #[test]
+    fn a_root_holding_only_a_symlink_is_not_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("hedef");
+        std::fs::create_dir(&target).expect("seed");
+
+        let root = dir.path().join("paylasimlar");
+        std::fs::create_dir(&root).expect("mkdir");
+        std::os::unix::fs::symlink(&target, root.join("bag")).expect("symlink");
+
+        let paths = Openat2SafePath::open_root(&root).expect("root");
+        assert!(
+            !paths.root_is_empty().expect("answers"),
+            "a symlink is something; mounting a dataset over it would hide where it points"
+        );
+    }
+
+    /// The refusal that made `list_entries(&[])` the wrong route, kept measured.
+    ///
+    /// If a later change ever made an empty component list resolve to the root inside `open_dir`,
+    /// it would also reach `remove_file`, `remove_dir` and `create_dir` — they resolve their
+    /// parent through the same method — and the shares root would become a deletable parent in a
+    /// process running as root. This test is what makes that change loud instead of silent.
+    #[test]
+    fn an_empty_component_list_is_still_refused_by_the_directory_opener() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Openat2SafePath::open_root(dir.path()).expect("root");
+        assert!(
+            paths.open_dir(&[]).is_err(),
+            "open_dir(&[]) must stay a refusal; root_is_empty is the sanctioned way to ask"
+        );
     }
 
     #[test]

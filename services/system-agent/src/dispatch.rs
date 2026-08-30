@@ -563,11 +563,15 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         // Through the confined root rather than by reading the path again: this is the same
         // directory the agent resolves every share under, and asking it twice by two routes is how
         // the two answers start to disagree.
+        //
+        // HATA ARTIK YUTULMUYOR, ve bu bir saha dersi. Önceki hâli `list_entries(&[])` çağırıp
+        // sonucu `.unwrap_or(false)` ile "boş değil"e çeviriyordu. Gerçek mühür boş bileşen
+        // listesini reddettiği için bu çağrı HER ZAMAN hata veriyordu, yani bu alan her gerçek
+        // kutuda `false` idi — ve sihirbaz "paylaşım ağacını da kur" onay kutusunu tam olarak bu
+        // alana bakarak gizliyordu. Ürün bir sürüm boyunca depolamayı hiç kuramadı ve hiçbir
+        // ekranda bunun sebebi yazmadı: "soramadım" ile "dolu" aynı cevaba iniyordu.
         let empty = match self.paths {
-            Some(paths) => paths
-                .list_entries(&[])
-                .map(|e| e.is_empty())
-                .unwrap_or(false),
+            Some(paths) => paths.root_is_empty()?,
             None => false,
         };
 
@@ -607,7 +611,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
 
         match self.paths {
             Some(paths) => {
-                if !paths.list_entries(&[])?.is_empty() {
+                if !paths.root_is_empty()? {
                     return Ok(Response::Refused {
                         reason: format!(
                             "{path} is not empty; mounting a dataset over it would hide what is \

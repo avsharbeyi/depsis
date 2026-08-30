@@ -286,6 +286,32 @@ pub trait SafePath {
     /// row that claimed otherwise would be a lie the interface then has to act on.
     fn list_entries(&self, relative: &[&str]) -> Result<Vec<DirEntryInfo>, SeamError>;
 
+    /// Is the shares ROOT ITSELF empty — the directory every share is created under.
+    ///
+    /// ── NEDEN AYRI BİR METOT, `list_entries(&[])` DEĞİL ──────────────────────────────────
+    ///
+    /// Çağıran taraf tam olarak bunu istiyordu ve boş bir bileşen listesiyle sordu. Sahte mühür
+    /// buna geçici kökü listeleyerek cevap verdi; gerçek mühür ise `openat2`'yi ilk bileşen
+    /// PAYLAŞIMIN ADI olacak şekilde kuruyor ve boş listeyi `Io("empty path")` ile reddediyor.
+    /// İki taraf da kendi içinde tutarlıydı, ve aradaki fark bir sürüm boyunca sahada durdu:
+    /// birim testleri yeşil, gerçek cihaz depolamayı hiç kuramıyor.
+    ///
+    /// Boş listeyi gerçek mühürde de kabul etmek, düzeltmenin YANLIŞ biçimi olurdu. `open_dir`
+    /// yalnız listelemek için değil; `remove_file`, `remove_dir` ve `create_dir` de ebeveyn
+    /// dizini onunla açıyor. Boş listenin oraya kadar "kök" diye ulaşması, kök yetkiyle koşan bir
+    /// süreçte paylaşım kökünün kendisini silme yoluna bir kapı açmak demekti — bugün dispatch
+    /// katmanı bunu ayrıca reddediyor, ama iki savunmadan birini gerekmeden kaldırmak için sebep
+    /// yok.
+    ///
+    /// Bu metot bunun yerine SORUNUN KENDİSİNİ soruyor. Bir tanıtıcı dışarı vermiyor, tek bir
+    /// `bool` dönüyor, ve yanlış kullanılabileceği bir biçimi yok.
+    ///
+    /// Hata YUTULMUYOR — dönen tip `Result`. Önceki hâli `.unwrap_or(false)` ile "boş değil"e
+    /// çeviriyordu, ve "soramadım" ile "dolu" aynı cevaba indiğinde sihirbaz onay kutusunu
+    /// sonsuza kadar gizliyordu: kullanıcının gördüğü şey, sebebi hiçbir yerde yazmayan bir
+    /// eksiklik oldu.
+    fn root_is_empty(&self) -> Result<bool, SeamError>;
+
     /// Everything directly under `relative` INSIDE one snapshot of one share.
     ///
     /// This is the method that made per-file restore possible, and it is the only place in this

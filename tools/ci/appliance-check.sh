@@ -104,9 +104,21 @@ zpool version >/dev/null 2>&1 || { echo 'ZFS yok; zfsutils-linux kurulmalı' >&2
 mkdir -p "$IMAGES"
 truncate -s 512M "$IMAGES/a.img" "$IMAGES/b.img"
 zpool create -f -o ashift=12 -O acltype=posixacl -O xattr=sa "$POOL" mirror "$IMAGES/a.img" "$IMAGES/b.img"
-zfs create -o "mountpoint=$SHARES_ROOT" "$POOL/depsis"
 check 'havuz kuruldu ve ONLINE' "$(zpool list -H -o health "$POOL")" 'ONLINE'
-check 'paylaşım kökü bir veri kümesi' "$(zfs list -H -o name "$POOL/depsis")" "$POOL/depsis"
+
+# PAYLAŞIM KÖKÜ BURADA KURULMUYOR, ve bu bir düzeltme.
+#
+# Bu satır eskiden `zfs create -o mountpoint=$SHARES_ROOT "$POOL/depsis"` idi — yani kapı,
+# ürünün `prepare_share_root` işlemini ATLAYIP aynı işi elle yapıyordu. Sonuç, o işlemi HİÇ
+# ölçmeyen bir kapı oldu: gerçek kutuda `prepare_share_root` `io: empty path` ile düşerken bu
+# betik yeşil yanıyordu, çünkü kurduğu kökü kendisi kurmuştu.
+#
+# Kök artık BOŞ bir dizin olarak açılıyor; veri kümesini ajanın kendi işlemi kuruyor (aşağıda,
+# ajan ayağa kalktıktan sonra). Betiğin geri kalanı o adımın çıktısının üstünde duruyor, yani
+# adım düşerse kapı da düşer.
+mkdir -p "$SHARES_ROOT"
+check 'paylaşım kökü henüz veri kümesi DEĞİL' \
+  "$(zfs list -H -o name "$POOL/depsis" 2>&1 || true)" 'dataset does not exist'
 
 # ── 2. Samba: DEPSIS'in yazacağı dosyayı içeren bir smb.conf ────────────────
 say 'Samba'
@@ -177,9 +189,40 @@ ask() {
 
 check 'sürüm el sıkışması' "$(ask handshake '{"op":"ping"}')" '"status":"ok"'
 check 'havuzlar operandsız listeleniyor' "$(ask pools '{"op":"list_pools"}')" "$POOL"
-check 'paylaşım kökünün veri kümesi biliniyor' \
-  "$(ask root '{"op":"share_root_status"}')" "$POOL/depsis"
 check 'diskler operandsız listeleniyor' "$(ask disks '{"op":"list_disks"}')" '"status":"disks"'
+
+# ── 3.5 PAYLAŞIM AĞACI: sihirbazın son adımı, ajanın kendi işlemiyle ────────
+#
+# ── neden bu blok var ────────────────────────────────────────────────────────
+#
+# Sahada bir sürüm boyunca depolama hiç kurulamadı ve bu betik o sürede yeşil yandı. Sebep, iki
+# ölçmenin de kendi içinde doğru olmasıydı: birim testleri sahte yol mührüne karşı koşuyordu ve
+# o mühür boş bileşen listesini kabul ediyordu; bu kapı ise paylaşım kökünü ürünün işlemiyle
+# değil, elle `zfs create` ile kuruyordu. Yani ikisi de `prepare_share_root`u hiç çalıştırmadı.
+#
+# Gerçek kutuda `openat2` boş bileşen listesini reddediyor — ilk bileşen PAYLAŞIMIN ADI, çünkü
+# her paylaşım kendi veri kümesi. `share_root_status` bunu `.unwrap_or(false)` ile yutup "kök boş
+# değil" dedi (sihirbaz onay kutusunu gizledi), `prepare_share_root` ise `io: empty path` ile
+# düştü (kurtarma düğmesi 503 verdi). Kullanıcı "havuz kurdum ama paylaşım yapmıyor" dedi ve
+# hiçbir ekranda sebebi yazmıyordu.
+#
+# Buradaki üç ölçüm o üç yarıyı da tutuyor: boş kök BOŞ görünüyor mu, işlem veri kümesini kuruyor
+# mu, ve kurduktan sonra kök artık dolu görünüyor mu.
+say 'paylaşım ağacı (prepare_share_root)'
+check 'boş kök BOŞ bildiriliyor' \
+  "$(ask root '{"op":"share_root_status"}')" '"empty":true'
+check 'paylaşım ağacı ajanın işlemiyle kuruldu' \
+  "$(ask tree "{\"op\":\"prepare_share_root\",\"pool\":\"$POOL\"}")" '"status":"share_root_prepared"'
+check 've gerçekten bir veri kümesi' "$(zfs list -H -o name "$POOL/depsis")" "$POOL/depsis"
+check 've gerçekten paylaşım kökünde bağlı' \
+  "$(zfs get -H -o value mountpoint "$POOL/depsis")" "$SHARES_ROOT"
+check 'paylaşım kökünün veri kümesi artık biliniyor' \
+  "$(ask root '{"op":"share_root_status"}')" "$POOL/depsis"
+# İKİNCİ KEZ REDDEDİLİYOR. `zfs create -o mountpoint=X` dolu bir X'in üstüne şikâyet etmeden
+# bağlanır ve altındaki her şey silinmeden görünmez olur — bu işlemin var olma sebebinin yarısı
+# o reddin kendisi, ve reddi ölçmeyen bir kapı işlemin yarısını ölçmüyor demektir.
+check 'ikinci kez kurmak reddediliyor' \
+  "$(ask tree "{\"op\":\"prepare_share_root\",\"pool\":\"$POOL\"}")" 'already mounted'
 
 # ── 4. Paylaşım: veri kümesi, klasör, ACL — sahada kırılan üç adım ──────────
 say 'paylaşım yaşam döngüsü'
