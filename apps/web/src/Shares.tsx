@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
 import { Connect } from './Connect.js';
+import { ShareTreeNotice, useStorageSetup } from './ShareTree.js';
 import { Empty, Win } from './ui.js';
 import { Permissions, type PermissionTarget } from './Permissions.js';
 
@@ -71,6 +72,15 @@ export function Shares({
   const [permissionsFor, setPermissionsFor] = useState<PermissionTarget | null>(null);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
+  /**
+   * Kutunun depolama durumu — bu ekranın kendi işi için değil, AÇAMADIĞI paylaşımın sebebini
+   * söyleyebilmek için.
+   *
+   * Sahadaki ilk kurulumda havuz kuruldu, paylaşım açılmadı, ve bu ekranın söyleyebildiği tek şey
+   * "Depolama havuzu ayarlı değil ya da ajana ulaşılamıyor" oldu: iki ayrı sebebi bir cümlede
+   * birleştiren, çaresi başka bir ekranda duran bir bildirim.
+   */
+  const storage = useStorageSetup(reloadKey);
 
   useEffect(() => {
     let alive = true;
@@ -150,8 +160,15 @@ export function Shares({
         'error',
         problemMessage(
           error,
+          // 503'ün İKİ AYRI SEBEBİ var ve kullanıcının yapacağı şey ikisinde farklı. Havuz
+          // varken paylaşım ağacı yoksa çare bu ekranın tepesindeki düğme; ajana ulaşılamıyorsa
+          // beklemekten başka yapılacak bir şey yok. Tek cümlede birleştirmek, çaresi elinin
+          // altında duran kişiye "yapabileceğin bir şey yok" demekti.
           response.status === 503
-            ? 'Depolama havuzu ayarlı değil ya da ajana ulaşılamıyor. Paylaşım açılmadı.'
+            ? storage !== null && storage.pools.length > 0 && storage.parentDataset === undefined
+              ? 'Paylaşım ağacı kurulu değil. Bu sayfanın en üstündeki "Paylaşım ağacını kur" ' +
+                'düğmesine basın; sonra paylaşımı yeniden açabilirsiniz.'
+              : 'Depolama havuzu ayarlı değil ya da ajana ulaşılamıyor. Paylaşım açılmadı.'
             : 'Paylaşım açılamadı.',
         ),
       );
@@ -193,6 +210,12 @@ export function Shares({
 
   return (
     <>
+      {/* PAYLAŞIM AÇILAMAMASININ EN SIK SEBEBİ, ve çaresi burada duruyor. Havuz kurulurken
+          "paylaşım ağacını da kur" işaretlenmediyse kutu tamamen sağlıklı görünür ve tek bir
+          paylaşım açamaz; eski hâlinde bunun tek belirtisi, "Yeni paylaşım" denendiğinde çıkan
+          ve ne yapılacağını söylemeyen bir bildirimdi. */}
+      <ShareTreeNotice storage={storage} notify={notify} onPrepared={reload} />
+
       {!page.smbAvailable && (
         <div className="warn" role="status">
           <span className="ic" aria-hidden>

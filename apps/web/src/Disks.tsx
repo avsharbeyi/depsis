@@ -1,9 +1,10 @@
 import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
-import { api, problemMessage } from './api.js';
+import { api } from './api.js';
 import { CreatePool } from './CreatePool.js';
 import { formatBytes } from './Dashboard.js';
+import { ShareTreeNotice } from './ShareTree.js';
 import type { Snapshot as SystemSnapshot } from './snapshot.js';
 import { Empty } from './ui.js';
 
@@ -54,22 +55,6 @@ export function Disks({ notify, snapshot }: Props): React.JSX.Element {
   const [reloadKey, setReloadKey] = useState(0);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
-  const [preparing, setPreparing] = useState(false);
-
-  /** Paylaşım ağacını var olan bir havuzda kurar. Yıkıcı değil: ajan dolu bir kökü reddediyor. */
-  async function prepareTree(): Promise<void> {
-    const pool = storage?.pools[0];
-    if (pool === undefined) return;
-    setPreparing(true);
-    const { data, error } = await api.POST('/storage/share-tree', { body: { pool } });
-    setPreparing(false);
-    if (data === undefined) {
-      notify('error', problemMessage(error, 'Paylaşım ağacı kurulamadı.'));
-      return;
-    }
-    notify('ok', `Paylaşım ağacı kuruldu: ${data.dataset}. Artık paylaşım açabilirsiniz.`);
-    reload();
-  }
 
   useEffect(() => {
     let alive = true;
@@ -198,27 +183,9 @@ export function Disks({ notify, snapshot }: Props): React.JSX.Element {
       {/* Havuz var, ağaç yok: ürünün en sinsi ara durumu. Kutu tamamen sağlıklı görünür ve tek
           bir dosya sunamaz. Buradaki tavsiye bir KABUK KOMUTUYDU (`zfs create -o mountpoint=…`)
           ve bu, ürünün kabul ölçütüne aykırıydı: cihazın sahibi olağan hiçbir iş için terminale
-          girmemeli. Artık bir düğme. */}
-      {needsTree && (
-        <div className="warn">
-          <span className="ic" aria-hidden>
-            ⚠
-          </span>
-          <span className="tx">
-            <b>Havuz var, paylaşım ağacı yok.</b>
-            DEPSIS paylaşımları hangi veri kümesinin altında açacağını bilmiyor, o yüzden yeni
-            paylaşım açılamıyor. Aşağıdaki düğme onu {pools[0]} havuzunda kurar; hiçbir şey silmez.{' '}
-            <button
-              type="button"
-              className="b"
-              disabled={preparing}
-              onClick={() => void prepareTree()}
-            >
-              {preparing ? 'Kuruluyor…' : 'Paylaşım ağacını kur'}
-            </button>
-          </span>
-        </div>
-      )}
+          girmemeli. Artık bir düğme — ve AYNI düğme Paylaşımlar ekranında da duruyor, çünkü
+          eksikliği orada fark eden birinin buraya geleceğini varsaymak sahada tutmadı. */}
+      <ShareTreeNotice storage={storage} notify={notify} onPrepared={reload} />
 
       {/* Sihirbaz: gereken durumda AÇIK, gerekmeyen durumda katlanmış. Depolaması hazır bir
           kutuda ekranın diskleri silen bir sihirbazla bitmesi, en nadir eylemi en görünür yere

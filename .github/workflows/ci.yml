@@ -43,6 +43,14 @@ jobs:
           fi
           echo "All Linux-consumed files are LF."
 
+      - name: Services get the environment their units promise them
+        # Bir servisin başlamak için şart koştuğu her değişken, kurulumun ONA verdiği env
+        # dosyasına yazılıyor mu? Yönetici konsolu sahaya çıktığı günden beri hiç açılmamıştı,
+        # çünkü kurulum `DEPSIS_API_UID`i yalnız `agent.env`e yazıyordu ve konsol onu
+        # `console.env`den bekliyordu. Üç dosyanın hiçbiri tek başına hatalı değildi; hatalı olan
+        # aralarındaki sözleşmeydi, ve hiçbir test bir sözleşmeye bakmıyordu.
+        run: bash tools/ci/env-contract.sh
+
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
