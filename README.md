@@ -570,10 +570,18 @@ ya da kırılabilir bir algoritma kullanılır.
 Bir yedekleme cihazını bir takvim gününde kullanılamaz hâle getirmek, verinin kendisini rehin
 almaktır. Zorlama istenirse bu ayrı ve bilinçli bir karardır; varsayılan olarak alınmadı.
 
-Satıcı tarafı `tools/license/keygen.mjs`:
+Satıcı tarafı: Masaüstündeki **`Lisans Ver.cmd`**’ye çift tıklayın, iki soruya cevap verin
+(cihaz kodu ve bitiş tarihi), çıkan anahtarı müşterinin **Sistem → Lisans** ekranına yapıştırın.
+İki soru, çünkü mekanik olarak iş yapan alan ikidir: **imza** (anahtarın satıcıdan geldiğini
+kanıtlar) ve **cihaz kodu** (bu kutuya mı verilmiş). Müşteri adı ve plan hiçbir şeyle
+karşılaştırılmıyor; isterseniz `keygen.mjs` hâlâ `--to` ve `--plan` kabul ediyor.
+
+Her verilen lisans, anahtarın yanındaki `lisans-defteri.csv`’ye bir satır olarak yazılıyor.
+
+Komut satırından:
 
 ```bash
-node tools/license/keygen.mjs issue --key ~/depsis-anahtarlar/depsis-license.key --to “Ad Soyad” --plan ev --device XXXX-XXXX-XXXX --until 2027-12-31
+node tools/license/keygen.mjs issue --key ~/depsis-anahtarlar/depsis-license.key --device XXXX-XXXX-XXXX --until 2027-12-31
 ```
 
 Anahtar çiftini bir kez `keygen.mjs init <dizin>` üretir. **Özel anahtar depoya girmez**; depoda

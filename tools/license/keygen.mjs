@@ -27,8 +27,11 @@
 //       Lisans imza çiftini üretir: <dizin>/depsis-license.key (GİZLİ) ve license-key.pub.
 //       Açık anahtar depoya girer; özel anahtar ASLA.
 //
-//   node tools/license/keygen.mjs issue --key <özel-anahtar> --to "Ad Soyad" \
-//        [--plan ev|pro] [--device XXXX-XXXX-XXXX] [--until 2027-01-01] [--note "..."]
+//   node tools/license/keygen.mjs issue --key <özel-anahtar> \
+//        [--device XXXX-XXXX-XXXX] [--until 2027-01-01] [--to "Ad Soyad"] [--plan p]
+//
+//       `--to` ve `--plan` İSTEĞE BAĞLI: hiçbir şeyle karşılaştırılmıyorlar, yalnız ekranda
+//       görünüyorlar. Mekanik olarak iş yapan iki şey var — imza ve `--device`.
 //       Bir lisans jetonu basar. `--until` verilmezse SÜRESİZ.
 //
 //   node tools/license/keygen.mjs verify --pub <açık-anahtar> <jeton>
@@ -95,7 +98,7 @@ function issue(privateKeyPem, fields) {
   const payload = {
     v: VERSION,
     id: fields.id,
-    to: fields.to,
+    to: fields.to ?? null,
     plan: fields.plan ?? null,
     issued: fields.issued,
     until: fields.until ?? null,
@@ -166,9 +169,9 @@ function cmdInit(argv) {
 function cmdIssue(argv) {
   const keyPath = argOf(argv, '--key');
   const to = argOf(argv, '--to');
-  if (keyPath === undefined || to === undefined) {
+  if (keyPath === undefined) {
     console.error(
-      'kullanım: keygen.mjs issue --key <özel-anahtar> --to "Ad Soyad" [--plan p] [--device XXXX-XXXX-XXXX] [--until YYYY-MM-DD] [--note "..."]',
+      'kullanım: keygen.mjs issue --key <özel-anahtar> [--device XXXX-XXXX-XXXX] [--until YYYY-MM-DD] [--to "Ad Soyad"] [--plan p] [--note "..."]',
     );
     process.exit(2);
   }
@@ -250,8 +253,8 @@ function cmdBatch(argv) {
     seen.add(id);
     const token = issue(privateKeyPem, {
       id,
-      // Havuzdaki jetonlar HENÜZ KİMSEYE ait değil; kime verildiği satış anında kaydedilir.
-      to: argOf(argv, '--to') ?? '(atanmadı)',
+      // Havuzdaki jetonlar HENÜZ KİMSEYE ait değil.
+      to: argOf(argv, '--to'),
       plan: argOf(argv, '--plan'),
       issued: new Date().toISOString(),
       until: until === undefined ? undefined : new Date(`${until}T23:59:59Z`).toISOString(),

@@ -11,7 +11,7 @@ const PREFIX = 'DEPSIS';
 
 export interface LicensePayload {
   id: string;
-  to: string;
+  to: string | null;
   plan: string | null;
   issued: string;
   until: string | null;
@@ -139,8 +139,11 @@ export class LicenseService {
     } catch {
       return { ok: false, reason: 'lisans anahtarının içeriği okunamadı' };
     }
-    if (typeof payload.to !== 'string' || payload.to === '' || typeof payload.id !== 'string') {
-      return { ok: false, reason: 'lisans anahtarı kime verildiğini söylemiyor' };
+    if (typeof payload.id !== 'string' || payload.id === '') {
+      // Kimlik ŞART, ad değil: numara jetonu adlandıran şey (defter, iptal listesi). Ad
+      // hiçbir şeyle karşılaştırılmıyor ve isimsiz lisans meşru bir şey — havuzdan çıkan
+      // jetonların hiçbirinde ad yok.
+      return { ok: false, reason: 'lisans anahtarının kendi numarası yok' };
     }
 
     // CİHAZ BAĞI. Jeton bir cihaza bağlıysa, o cihaz BU olmalı.

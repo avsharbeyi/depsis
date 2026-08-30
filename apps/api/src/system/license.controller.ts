@@ -82,7 +82,7 @@ export class LicenseController {
       actorId: session.userId,
       action: 'system.license-installed',
       target: { kind: 'system', id: result.payload.id },
-      summary: `Lisans kuruldu: ${result.payload.to} (${result.payload.id}).`,
+      summary: `Lisans kuruldu: ${result.payload.to ?? result.payload.id} (${result.payload.id}).`,
       correlationId: randomUUID(),
     });
 
