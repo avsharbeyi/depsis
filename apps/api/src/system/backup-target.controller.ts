@@ -7,6 +7,7 @@ import {
   ForbiddenException,
   Get,
   HttpCode,
+  Query,
   Patch,
   Post,
   Req,
@@ -46,6 +47,26 @@ const prepareBody = z.object({
 });
 
 const unlockBody = z.object({ passphrase: z.string().min(8).max(512) });
+
+/**
+ * Yol bileseni — ajanin `SafeComponent`iyle ayni bicim.
+ *
+ * Egik cizgi, `..` ve NUL burada da reddediliyor. Ajan zaten reddediyor; buradaki kopya, hatanin
+ * kullaniciya bir 400 olarak ve anlasilir bir cumleyle donmesi icin.
+ */
+const COMPONENT = z
+  .string()
+  .min(1)
+  .max(255)
+  .refine((v) => !v.includes('/') && v !== '.' && v !== '..' && !v.includes('\0'), {
+    message: 'yol bileseni bir egik cizgi ya da nokta-nokta olamaz',
+  });
+
+const restoreBody = z.object({
+  from: z.array(COMPONENT).min(1),
+  share: COMPONENT,
+  to: z.array(COMPONENT).min(1),
+});
 
 const patchBody = z
   .object({
@@ -179,6 +200,68 @@ export class BackupTargetController {
     if (target === null) throw new BadRequestException('bu cihazda yedek diski kurulu degil');
     await this.runs.runNow(session.organizationId);
     return { queued: true };
+  }
+
+  /**
+   * Yedek agacinda gezinme.
+   *
+   * Sahibinin sozu: "yedek diski tipki ana depolama gibi olmali ama dosyalara yedekleme
+   * kismindan erisilmeli." Kok iki klasor gosteriyor ve ikisi de gorunuyor: `Dosyalar/`
+   * gecikmeli ayna, `DEPSIS-YEDEK/` defterin kendisi.
+   */
+  @Get('entries')
+  async entries(
+    @Req() request: AuthenticatedRequest,
+    @Query('path') rawPath?: string,
+  ): Promise<unknown> {
+    const session = await this.requireAdmin(request);
+    // Bos ya da eksik `path` KOKUN kendisi, ve bu bir hata degil: gezgin oradan basliyor.
+    const parts = (rawPath ?? '')
+      .split('/')
+      .map((part) => part.trim())
+      .filter((part) => part !== '');
+    const parsed = z.array(COMPONENT).safeParse(parts);
+    if (!parsed.success) throw new BadRequestException(parsed.error.issues[0]?.message);
+    try {
+      return await this.targets.browse(session.organizationId, parsed.data, randomUUID());
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
+  /**
+   * Yedekteki bir dosyayi bir paylasima geri getirir.
+   *
+   * ISTEK BEKLIYOR, kuyruga alinmiyor: tek bir dosyanin geri getirilmesi saniyeler suruyor ve
+   * kullanici sonucu HEMEN gormek istiyor — "kuyruga alindi" diyen bir cevap, dosyanin gelip
+   * gelmedigini baska bir ekranda aratirdi. Buyuk bir agacin tamaminin geri getirilmesi ayri bir
+   * istek ve o gelene kadar dosya dosya calisiyor.
+   */
+  @Post('restore')
+  @HttpCode(200)
+  async restore(@Req() request: AuthenticatedRequest, @Body() body: unknown): Promise<unknown> {
+    const session = await this.requireAdmin(request);
+    requireSameOrigin(request);
+    const parsed = restoreBody.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.issues[0]?.message);
+
+    let result;
+    try {
+      result = await this.targets.restore(session.organizationId, parsed.data, randomUUID());
+    } catch (error) {
+      throw this.translate(error);
+    }
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'backup.file-restored',
+      target: {
+        kind: 'share',
+        id: parsed.data.share,
+        label: parsed.data.to.join('/'),
+      },
+      summary: `'${parsed.data.from.join('/')}' yedekten '${parsed.data.share}/${parsed.data.to.join('/')}' konumuna geri getirildi.`,
+    });
+    return result;
   }
 
   @Patch()

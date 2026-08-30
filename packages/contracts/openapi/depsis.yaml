@@ -3004,6 +3004,71 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /backups/target/entries:
+    get:
+      tags: [system]
+      summary: Yedek agacinda gezinme
+      description: |
+        Yedek diski bir arsiv degil, gezilebilen ikinci bir depolama — ve ona paylasimlarin
+        gezgininden degil, YEDEKLEME ekranindan giriliyor.
+
+        Kok iki klasor gosteriyor ve ikisi de gorunuyor: `Dosyalar/` gecikmeli ayna,
+        `DEPSIS-YEDEK/` ise defterin kendisi. Defteri gizlemek, silinme tarihlerini yalniz urunun
+        okuyabildigi bir bilgiye cevirirdi — oysa onun diski baska bir bilgisayara takan insana da
+        gorunmesi, bu tasarimin amaci.
+
+        `path` bos ya da eksikse kokun kendisi listeleniyor; bu bir hata degil, gezginin baslangic
+        noktasi.
+      parameters:
+        - name: path
+          in: query
+          required: false
+          schema: { type: string }
+          description: Egik cizgiyle ayrilmis yol. Bos ise yedek agacinin koku.
+      responses:
+        '200':
+          description: Dizin
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupListing' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
+  /backups/target/restore:
+    post:
+      tags: [system]
+      summary: Yedekteki bir dosyayi geri getir
+      description: |
+        Yedegin var olma sebebi. Dosya yedekten okunup bir paylasima yaziliyor; yedekteki kopya
+        YERINDE KALIYOR — geri getirme tasimak degil kopyalamak, ve silinenler klasorunden alinan
+        bir dosya saklama suresi dolana kadar orada duruyor.
+
+        HEDEFTE BIR DOSYA VARSA USTUNE YAZILMIYOR. Kullanicinin hala uzerinde calistigi bir
+        dosyayi sessizce eski haliyle degistirmek, geri getirmenin cozmeye calistigi kaybin bir
+        baskasini uretmek olurdu; cakisma 400 ile ve ajanin kendi cumlesiyle geri geliyor.
+
+        ISTEK BEKLIYOR, kuyruga alinmiyor: tek bir dosya saniyeler suruyor ve kullanici sonucu
+        hemen gormek istiyor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RestoreFromBackupRequest' }
+      responses:
+        '200':
+          description: Geri getirildi
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [restoredBytes]
+                properties:
+                  restoredBytes: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
   /backups/target/run:
     post:
       tags: [system]
@@ -5375,6 +5440,46 @@ components:
           type: string
           pattern: '^[A-Za-z][A-Za-z0-9_.:-]{0,62}$'
           description: Ağacın kurulacağı havuz. Kutuda olmayan bir ad 400 ile döner.
+
+    BackupListing:
+      type: object
+      required: [entries, truncated]
+      properties:
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/BackupEntry' }
+        truncated:
+          type: boolean
+          description: |
+            Dizin tek listelemeye sigmadi. Ekran bunu SOYLEMEK zorunda: kesilmis bir liste, eksik
+            olanin var olmadigi gibi okunur.
+
+    BackupEntry:
+      type: object
+      required: [name, directory, sizeBytes, modifiedAt]
+      properties:
+        name: { type: string }
+        directory: { type: boolean }
+        sizeBytes: { type: integer, format: int64 }
+        modifiedAt: { type: string, format: date-time }
+
+    RestoreFromBackupRequest:
+      type: object
+      required: [from, share, to]
+      properties:
+        from:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: Yedek agacindaki yol, bilesen bilesen.
+        share:
+          type: string
+          description: Geri getirilecegi paylasim.
+        to:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: Paylasim icindeki hedef yol, bilesen bilesen.
 
     BackupTarget:
       type: object

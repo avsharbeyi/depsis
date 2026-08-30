@@ -7,6 +7,7 @@ import { formatBytes } from './Dashboard.js';
 type Target = OpenApi.components['schemas']['BackupTarget'];
 type Status = OpenApi.components['schemas']['BackupTargetStatus'];
 type Disk = OpenApi.components['schemas']['DiskInventoryEntry'];
+type Listing = OpenApi.components['schemas']['BackupListing'];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
 
 /**
@@ -185,6 +186,7 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
         <Acik
           target={target}
           busy={busy}
+          notify={notify}
           onRunNow={() => void runNow()}
           onLock={() => void lock()}
           onSave={save}
@@ -414,6 +416,7 @@ function Kilitli(props: {
 function Acik(props: {
   target: Target;
   busy: boolean;
+  notify: Notify;
   onRunNow: () => void;
   onLock: () => void;
   onSave: (patch: { cadenceHours?: number; retainDays?: number }) => Promise<void>;
@@ -489,6 +492,8 @@ function Acik(props: {
         </span>
       </div>
 
+      <Gezgin notify={props.notify} />
+
       <div className="netrow">
         <button type="button" className="b" disabled={busy} onClick={props.onRunNow}>
           Şimdi yedek al
@@ -500,6 +505,170 @@ function Acik(props: {
           Kilitlemek dosyaları okunamaz yapar ve yedeklemeyi durdurur. Açmak için parola gerekir.
         </span>
       </div>
+    </>
+  );
+}
+
+/**
+ * Yedek ağacında gezinme ve geri getirme.
+ *
+ * ── BU BİLEŞENİN VAR OLMA SEBEBİ ─────────────────────────────────────────────────────────────
+ *
+ * Bir yedeğin var olma sebebi geri getirmektir. Ürünün eski yedekleme ekranı yedek ALIYOR,
+ * LİSTELİYOR ve ÇOĞALTIYOR ama hiçbir şey GERİ VERMİYORDU: geri alma başka bir ekranın köşesinde
+ * duran küçük bir düğmenin arkasındaydı, ve "yedeğimi geri alacağım" diyen kişinin açacağı ekran
+ * bunu yapamayan tek ekrandı.
+ *
+ * ── İKİ KLASÖR DE GÖRÜNÜYOR ──────────────────────────────────────────────────────────────────
+ *
+ * `Dosyalar/` gecikmeli ayna, `DEPSIS-YEDEK/silinenler/<tarih>/` ise sildikleriniz — gün gün.
+ * İkincisini gizlemek, silinme tarihlerini yalnız ürünün okuyabildiği bir bilgiye çevirirdi;
+ * oysa o klasör adlarının insan tarafından okunabilmesi bu tasarımın amacı: diski başka bir
+ * bilgisayara takan biri aynı bilgiyi dosya gezgininde görüyor.
+ */
+function Gezgin({ notify }: { notify: Notify }): React.JSX.Element {
+  const [path, setPath] = useState<string[]>([]);
+  const [listing, setListing] = useState<Listing | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const { data, error } = await api.GET('/backups/target/entries', {
+        params: { query: { path: path.join('/') } },
+      });
+      if (!alive) return;
+      if (data === undefined) {
+        notify('error', problemMessage(error, 'Yedek okunamadı.'));
+        return;
+      }
+      setListing(data);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [path, reloadKey, notify]);
+
+  async function restore(name: string): Promise<void> {
+    // GERİ GETİRME HEDEFİ: `Dosyalar/<paylaşım>/<yol>` biçimindeki bir yol, aynı paylaşımın aynı
+    // yerine döner. `silinenler/<tarih>/<paylaşım>/<yol>` de öyle — tarih klasörü atlanıyor,
+    // çünkü kullanıcının istediği şey dosyanın SİLİNMEDEN ÖNCEKİ yerine dönmesi.
+    const full = [...path, name];
+    let share: string | undefined;
+    let to: string[] = [];
+    if (full[0] === 'Dosyalar' && full.length >= 3) {
+      share = full[1];
+      to = full.slice(2);
+    } else if (full[0] === 'DEPSIS-YEDEK' && full[1] === 'silinenler' && full.length >= 5) {
+      share = full[3];
+      to = full.slice(4);
+    }
+    if (share === undefined || to.length === 0) {
+      notify('error', 'Bu dosyanın hangi paylaşıma döneceği anlaşılamadı.');
+      return;
+    }
+
+    setBusy(true);
+    const { data, error } = await api.POST('/backups/target/restore', {
+      body: { from: full, share, to },
+    });
+    setBusy(false);
+    if (data === undefined) {
+      notify('error', problemMessage(error, 'Geri getirilemedi.'));
+      return;
+    }
+    notify('ok', `${name} geri getirildi: ${share}/${to.join('/')}`);
+  }
+
+  return (
+    <>
+      <div className="netrow">
+        <span className="lbl">Yedekteki dosyalar</span>
+        <span className="note m">
+          {path.length === 0 ? '/' : `/${path.join('/')}`}
+          {path.length > 0 && (
+            <>
+              {' · '}
+              <button
+                type="button"
+                className="b ghost"
+                onClick={() => setPath((p) => p.slice(0, -1))}
+              >
+                ↑ yukarı
+              </button>
+            </>
+          )}
+        </span>
+        <button type="button" className="b ghost" onClick={() => setReloadKey((k) => k + 1)}>
+          ⟳
+        </button>
+      </div>
+
+      {listing === null ? (
+        <p className="note">Okunuyor…</p>
+      ) : listing.entries.length === 0 ? (
+        <p className="note">Bu klasör boş.</p>
+      ) : (
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th>Ad</th>
+              <th>Boyut</th>
+              <th>Değişme</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {listing.entries.map((entry) => (
+              <tr key={entry.name}>
+                <td>
+                  {entry.directory ? (
+                    <button
+                      type="button"
+                      className="b ghost"
+                      onClick={() => setPath((p) => [...p, entry.name])}
+                    >
+                      {entry.name}/
+                    </button>
+                  ) : (
+                    entry.name
+                  )}
+                </td>
+                <td className="m">{entry.directory ? '—' : formatBytes(entry.sizeBytes)}</td>
+                <td className="m">{new Date(entry.modifiedAt).toLocaleString()}</td>
+                <td>
+                  {!entry.directory && (
+                    <button
+                      type="button"
+                      className="b"
+                      disabled={busy}
+                      onClick={() => void restore(entry.name)}
+                    >
+                      Geri getir
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {/* KESİLMİŞ BİR LİSTE SÖYLENMEK ZORUNDA. Sessizce kısaltılmış bir liste, eksik olanın var
+          olmadığı gibi okunur — ve burada "var olmayan" bir dosya, kullanıcının aradığı dosya. */}
+      {listing?.truncated === true && (
+        <div className="warn">
+          <span className="ic" aria-hidden>
+            ⚠
+          </span>
+          <span className="tx">
+            <b>Bu klasör tam gösterilemiyor.</b>
+            İçinde tek seferde listelenebileceğinden fazla dosya var. Aradığınız dosya burada
+            görünmüyorsa, olmadığı anlamına gelmez.
+          </span>
+        </div>
+      )}
     </>
   );
 }

@@ -1,7 +1,17 @@
+import { randomUUID } from 'node:crypto';
+
 import { Injectable, Logger } from '@nestjs/common';
 
 import { AgentService, AgentUnavailableError, expectStatus } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
+
+/**
+ * Geri getirmede bir çağrının taşıyacağı en fazla bayt.
+ *
+ * Kontrol soketi sıralı; dilim onu paylaşıyor. Sayı bir dosyanın ne kadar sürede geleceğini
+ * değil, gelirken cihazın kullanılabilir kalıp kalmadığını belirliyor.
+ */
+const RESTORE_SLICE = 32 * 1024 * 1024;
 
 /** Yedek diski kurulmamış. */
 export class NoBackupTargetError extends Error {
@@ -256,6 +266,99 @@ export class BackupTargetService {
     const updated = await this.row(organizationId);
     if (updated === null) throw new Error('yedek hedefi güncellendi ama geri okunamadı');
     return updated;
+  }
+
+  /**
+   * Yedek ağacında bir dizini listeler.
+   *
+   * ── NEDEN AYRI BİR GEZGİN ────────────────────────────────────────────────────────────────
+   *
+   * Sahibinin sözü: *"yedek diski tıpkı ana depolama gibi olmalı ama dosyalara yedekleme
+   * kısmından erişilmeli."* Yedek bir arşiv değil, gezilebilen ikinci bir depolama — ve ona
+   * paylaşımların gezgininden değil, YEDEKLEME ekranından giriliyor.
+   *
+   * Kök iki klasör gösteriyor ve ikisi de görünmeli: `Dosyalar/` gecikmeli ayna, `DEPSIS-YEDEK/`
+   * ise defterin kendisi. Defteri gizlemek, silinme tarihlerini yalnız ürünün okuyabildiği bir
+   * bilgiye çevirirdi — oysa onun diski başka bir bilgisayara takan insana da görünmesi, bu
+   * tasarımın amacı.
+   */
+  async browse(
+    organizationId: string,
+    path: string[],
+    correlationId: string,
+  ): Promise<{ entries: unknown[]; truncated: boolean }> {
+    const row = await this.row(organizationId);
+    if (row === null) throw new NoBackupTargetError();
+
+    const response = await this.agent.call(
+      { op: 'backup_list_directory', path },
+      `yedekte gezinme: ${path.join('/')}`,
+      correlationId,
+    );
+    if (response.status === 'refused' || response.status === 'failed') {
+      throw new BackupAgentRefusedError(response.reason);
+    }
+    if (response.status === 'not_found') return { entries: [], truncated: false };
+    const listing = expectStatus(response, 'listing');
+    return {
+      entries: listing.entries.map((entry) => ({
+        name: entry.name,
+        directory: entry.directory,
+        sizeBytes: Number(entry.size),
+        modifiedAt: new Date(Number(entry.modified_unix) * 1000).toISOString(),
+      })),
+      truncated: listing.truncated,
+    };
+  }
+
+  /**
+   * Yedekteki bir dosyayı bir paylaşıma geri getirir.
+   *
+   * DİLİM DİLİM, ve döngü BURADA: ajanın bir çağrısı en fazla bir dilim taşıyor, çünkü kontrol
+   * soketi sıralı ve elli gigabaytlık bir dosya o süre boyunca cihazdaki her şeyi durdururdu.
+   *
+   * HEDEFTE BİR DOSYA VARSA ÜSTÜNE YAZILMIYOR: ajan `Conflict` diyor ve o cümle kullanıcıya
+   * aynen gidiyor. Kullanıcının hâlâ üzerinde çalıştığı bir dosyayı sessizce eskisiyle
+   * değiştirmek, geri getirmenin çözmeye çalıştığı kaybın bir başkasını üretmek olurdu.
+   */
+  async restore(
+    organizationId: string,
+    input: { from: string[]; share: string; to: string[] },
+    correlationId: string,
+  ): Promise<{ restoredBytes: number }> {
+    const row = await this.row(organizationId);
+    if (row === null) throw new NoBackupTargetError();
+
+    const staging = `geri-${randomUUID()}`;
+    let offset = 0;
+    for (;;) {
+      const response = await this.agent.call(
+        {
+          op: 'restore_file_from_backup',
+          from: input.from,
+          share: input.share,
+          to: input.to,
+          staging_name: staging,
+          offset,
+          max_bytes: RESTORE_SLICE,
+        },
+        `yedekten geri getirme: ${input.from.join('/')}`,
+        correlationId,
+      );
+      if (response.status === 'refused' || response.status === 'failed') {
+        throw new BackupAgentRefusedError(response.reason);
+      }
+      if (response.status === 'not_found' || response.status === 'conflict') {
+        throw new BackupAgentRefusedError(response.reason);
+      }
+      if (response.status === 'out_of_space') {
+        throw new BackupAgentRefusedError(response.reason);
+      }
+      const copied = expectStatus(response, 'copied');
+      offset = Number(copied.offset);
+      if (copied.done) break;
+    }
+    return { restoredBytes: offset };
   }
 
   /**
