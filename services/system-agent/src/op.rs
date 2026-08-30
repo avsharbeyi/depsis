@@ -2236,8 +2236,20 @@ pub enum Response {
     Snapshot {
         full_name: String,
     },
+    /// İki anlık görüntü arasında ne değişti — AYRIŞTIRILMIŞ hâlde.
+    ///
+    /// Eskiden `lines: Vec<String>` idi, yani `zfs diff` çıktısı ham hâliyle. İki şey yanlıştı ve
+    /// ikisi de yalnız bu işlem gerçekten çağrıldığında görülecekti (bugüne kadar hiç
+    /// çağrılmamış). BİR: yollar sekizlik kaçışlarla geliyor, yani Türkçe adlı her dosya ve
+    /// içinde boşluk olan her ad bozuk. İKİ: liste sınırsızdı; sekiz yüz bin dosyalık bir delta
+    /// kök yetkiyle koşan ajanın belleğini bitirirdi.
+    ///
+    /// `truncated` BİR UYARI DEĞİL BİR EMİR. Kesilmiş bir dizin listesi eksik bir ekrandır;
+    /// kesilmiş bir değişiklik listesi, yedeklenmeyen dosyalardır. Çağıran taraf bunu gördüğünde
+    /// ağacı baştan yürümek zorunda.
     Diff {
-        lines: Vec<String>,
+        entries: Vec<crate::diff::DiffEntry>,
+        truncated: bool,
     },
     /// Whether this node can act as a controller.
     #[serde(rename = "zerotier_controller")]
@@ -2734,6 +2746,11 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 30, `Response::Diff` ayrıştırılmış hâle geçtiğiyle: ham `lines: Vec<String>` yerine tipli
+/// `entries` ve bir `truncated`. Buradaki uyuşmazlığın bedeli sessiz olurdu — eski bir ajanla
+/// konuşan yeni bir API, yedeklenecek dosyaların listesini boş okur ve HİÇBİR ŞEY DEĞİŞMEMİŞ
+/// gibi davranırdı; yani yedekleme sessizce hiçbir dosya almaz.
+///
 /// 29, `Response::Update`in `signed` alanıyla: kutu imzalı sürüm kipinde mi.
 ///
 /// 28, TLS işlemleriyle: `tls_status`, `install_certificate` ve `Response::Tls`.
@@ -2742,7 +2759,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 29;
+pub const SCHEMA_VERSION: u32 = 30;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

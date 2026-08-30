@@ -1722,22 +1722,27 @@
       ]
     },
     {
+      "description": "İki anlık görüntü arasında ne değişti — AYRIŞTIRILMIŞ hâlde.\n\nEskiden `lines: Vec<String>` idi, yani `zfs diff` çıktısı ham hâliyle. İki şey yanlıştı ve\nikisi de yalnız bu işlem gerçekten çağrıldığında görülecekti (bugüne kadar hiç\nçağrılmamış). BİR: yollar sekizlik kaçışlarla geliyor, yani Türkçe adlı her dosya ve\niçinde boşluk olan her ad bozuk. İKİ: liste sınırsızdı; sekiz yüz bin dosyalık bir delta\nkök yetkiyle koşan ajanın belleğini bitirirdi.\n\n`truncated` BİR UYARI DEĞİL BİR EMİR. Kesilmiş bir dizin listesi eksik bir ekrandır;\nkesilmiş bir değişiklik listesi, yedeklenmeyen dosyalardır. Çağıran taraf bunu gördüğünde\nağacı baştan yürümek zorunda.",
       "type": "object",
       "properties": {
-        "lines": {
+        "entries": {
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/DiffEntry"
           }
         },
         "status": {
           "type": "string",
           "const": "diff"
+        },
+        "truncated": {
+          "type": "boolean"
         }
       },
       "required": [
         "status",
-        "lines"
+        "entries",
+        "truncated"
       ]
     },
     {
@@ -2924,6 +2929,53 @@
         "name",
         "size_bytes",
         "created_unix"
+      ]
+    },
+    "DiffChange": {
+      "description": "Bir nesneye ne olduğu.",
+      "type": "string",
+      "enum": [
+        "added",
+        "modified",
+        "removed",
+        "renamed"
+      ]
+    },
+    "DiffEntry": {
+      "description": "Tek bir değişiklik.",
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/DiffChange"
+        },
+        "kind": {
+          "$ref": "#/$defs/DiffKind"
+        },
+        "old_path": {
+          "description": "Yalnız `Renamed` için dolu: eski yol. Diğerlerinde `None`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Veri kümesinin bağlama noktasına göre MUTLAK yol, kaçışları çözülmüş hâlde.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "change",
+        "kind",
+        "path"
+      ]
+    },
+    "DiffKind": {
+      "description": "Nesnenin ne olduğu.\n\n`zfs diff -F`'in tip sütunu dokuz değer üretebiliyor; yedekleme yalnız ikisini taşıyabiliyor\n(dosya ve dizin) ve geri kalan her şey `Other`. Soket, fifo ve aygıt düğümü için DEPSIS'in bir\nsatır biçimi yok — `entries_of` da onları aynı gerekçeyle atıyor — ama burada ATILMIYORLAR:\nsilinmiş bir fifo'nun yedekten kaldırılması gereken bir karşılığı olabilir, ve çağıran tarafın\n\"bu neydi\" sorusuna cevap verebilmesi gerekiyor.",
+      "type": "string",
+      "enum": [
+        "file",
+        "directory",
+        "other"
       ]
     },
     "DirEntry": {

@@ -936,6 +936,20 @@ impl ExecRunner {
 
 impl CommandRunner for ExecRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, SeamError> {
+        self.run_with_timeout(program, args, Self::RUN_TIMEOUT)
+    }
+
+    /// Ayni govde, sureyi CAGIRAN veriyor.
+    ///
+    /// `run` bunu varsayilan tavanla cagiriyor; ayri bir sure isteyen tek yer `zfs diff`, ve
+    /// gerekcesi seam'in kendi belgesinde. Ikinci bir govde YAZILMADI: zaman asiminin dogru
+    /// islemesi (cocugu oldurmek, beklemek, neyin dolduğunu soylemek) tek bir yerde durmali.
+    fn run_with_timeout(
+        &self,
+        program: &str,
+        args: &[&str],
+        timeout: std::time::Duration,
+    ) -> Result<String, SeamError> {
         // ZAMAN AŞIMI, ve sahada ödenmiş bedeli var: USB'deki disk bir anlığına düşünce ZFS
         // havuzu ASKIYA aldı, askıdaki havuza dokunan `zfs` komutu D durumunda asılı kaldı, ve
         // ajanın SIRALI kontrol soketi o tek komutun arkasında sonsuza dek bekledi — sahibin
@@ -951,7 +965,7 @@ impl CommandRunner for ExecRunner {
             .spawn()
             .map_err(|e| SeamError::Io(format!("spawn {program}: {e}")))?;
 
-        let until = std::time::Instant::now() + Self::RUN_TIMEOUT;
+        let until = std::time::Instant::now() + timeout;
         loop {
             match child.try_wait() {
                 Err(e) => return Err(SeamError::Io(format!("wait {program}: {e}"))),
@@ -961,7 +975,7 @@ impl CommandRunner for ExecRunner {
                     let _ = child.wait();
                     return Err(SeamError::Io(format!(
                         "{program} {} saniyede yanıt vermedi ve öldürüldü — askıya alınmış bir                          havuz (zpool status: SUSPENDED) en bilinen sebep",
-                        Self::RUN_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     )));
                 }
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
