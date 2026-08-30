@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api, problemMessage } from './api.js';
+import { BackupDisk } from './BackupDisk.js';
 import { DatabaseBackups } from './DatabaseBackups.js';
 import { Offsite } from './Offsite.js';
 import { Pool } from './Scrub.js';
@@ -149,6 +150,11 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
           Eskiden her zaman false'tu — ajanda anlık görüntüleri listeleyecek bir işlem yoktu ve bu
           kutu "bu liste havuzun envanteri değil" diyordu. Artık liste havuzla karşılaştırılıyor,
           ve kutu yalnız karşılaştırmanın YAPILAMADIĞI hâlde çıkıyor. */}
+      {/* EN ÜSTTE, ve yeri bir tercih değil. Bu panelin cevapladığı soru — "verim güvende mi" —
+          sahibinin bu ekrana geldiğinde sorduğu tek soru. Anlık görüntü listesiyle açılan bir
+          ekran, o soruyu bir tablonun altına gömüyordu. */}
+      <BackupDisk notify={notify} />
+
       {page !== null && !page.complete && (
         <div className="warn">
           <span className="ic" aria-hidden>
