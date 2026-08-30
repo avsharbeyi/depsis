@@ -4612,6 +4612,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/backups/target/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Simdi yedek al
+         * @description Bir turu hemen kuyruga alir. IS KUYRUGA KONUYOR, burada kosturulmuyor: bir tur saatler
+         *     surebilir ve bir HTTP istegi o kadar beklemez; beklese bile tarayici vazgectiginde tur
+         *     yarim kalirdi.
+         *
+         *     AYRI BIR IS TURU, ve ayri olmasi bir tuzagi kapatiyor. Zincirin tekilligini koruyan kismi
+         *     indeks — ayni anda yalniz bir zamanlanmis tur kuyrukta olabilir — elle baslatilan turu da
+         *     engellerdi: zincir geregi her zaman tam olarak bir bekleyen satir var, yani dugme hicbir
+         *     zaman is kuyruga koyamazdi.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Kuyruga alindi */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            queued: true;
+                        };
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/backups/target/lock": {
         parameters: {
             query?: never;

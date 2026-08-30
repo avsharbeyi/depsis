@@ -3004,6 +3004,32 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /backups/target/run:
+    post:
+      tags: [system]
+      summary: Simdi yedek al
+      description: |
+        Bir turu hemen kuyruga alir. IS KUYRUGA KONUYOR, burada kosturulmuyor: bir tur saatler
+        surebilir ve bir HTTP istegi o kadar beklemez; beklese bile tarayici vazgectiginde tur
+        yarim kalirdi.
+
+        AYRI BIR IS TURU, ve ayri olmasi bir tuzagi kapatiyor. Zincirin tekilligini koruyan kismi
+        indeks — ayni anda yalniz bir zamanlanmis tur kuyrukta olabilir — elle baslatilan turu da
+        engellerdi: zincir geregi her zaman tam olarak bir bekleyen satir var, yani dugme hicbir
+        zaman is kuyruga koyamazdi.
+      responses:
+        '202':
+          description: Kuyruga alindi
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [queued]
+                properties:
+                  queued: { type: boolean, enum: [true] }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+
   /backups/target/lock:
     post:
       tags: [system]

@@ -21,6 +21,7 @@ import { ProcessesController } from './processes.controller.js';
 import { SystemController } from './system.controller.js';
 import { LicenseController } from './license.controller.js';
 import { LicenseService } from './license.service.js';
+import { BackupRunService } from './backup-run.service.js';
 import { BackupTargetController } from './backup-target.controller.js';
 import { BackupTargetService } from './backup-target.service.js';
 import { ShareTreeController } from './share-tree.controller.js';
@@ -48,6 +49,7 @@ import { UpdateController } from './update.controller.js';
   ],
   providers: [
     BackupTargetService,
+    BackupRunService,
     {
       provide: SystemService,
       inject: [AgentService, DbService, APP_CONFIG],

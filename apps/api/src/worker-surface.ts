@@ -41,6 +41,9 @@ export {
   type JobStatus,
 } from './jobs/jobs.service.js';
 
+export { BackupRunModule } from './system/backup-run.module.js';
+export { BackupRunService, type RunOutcome } from './system/backup-run.service.js';
+
 export { PosixIdentityService } from './identity/posix.service.js';
 
 /**

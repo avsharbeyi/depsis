@@ -116,6 +116,19 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
     reload();
   }
 
+  async function runNow(): Promise<void> {
+    setBusy(true);
+    const { data, error } = await api.POST('/backups/target/run', {});
+    setBusy(false);
+    if (data === undefined) {
+      notify('error', problemMessage(error, 'Yedek turu başlatılamadı.'));
+      return;
+    }
+    // "BAŞLADI" DEĞİL "KUYRUĞA ALINDI". Tur saatler sürebilir ve bu istek onu beklemiyor;
+    // "yedeğiniz alındı" demek, henüz olmamış bir şeyi olmuş gibi göstermek olurdu.
+    notify('ok', 'Yedek turu kuyruğa alındı. Büyük değişikliklerde uzun sürebilir.');
+  }
+
   async function lock(): Promise<void> {
     setBusy(true);
     const { data, error } = await api.POST('/backups/target/lock', {});
@@ -169,7 +182,13 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
           onSubmit={() => void prepare()}
         />
       ) : target.unlocked ? (
-        <Acik target={target} busy={busy} onLock={() => void lock()} onSave={save} />
+        <Acik
+          target={target}
+          busy={busy}
+          onRunNow={() => void runNow()}
+          onLock={() => void lock()}
+          onSave={save}
+        />
       ) : (
         <Kilitli
           target={target}
@@ -395,6 +414,7 @@ function Kilitli(props: {
 function Acik(props: {
   target: Target;
   busy: boolean;
+  onRunNow: () => void;
   onLock: () => void;
   onSave: (patch: { cadenceHours?: number; retainDays?: number }) => Promise<void>;
 }): React.JSX.Element {
@@ -470,6 +490,9 @@ function Acik(props: {
       </div>
 
       <div className="netrow">
+        <button type="button" className="b" disabled={busy} onClick={props.onRunNow}>
+          Şimdi yedek al
+        </button>
         <button type="button" className="b ghost" disabled={busy} onClick={props.onLock}>
           Kilitle
         </button>
