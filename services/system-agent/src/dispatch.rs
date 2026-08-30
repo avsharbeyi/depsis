@@ -1690,6 +1690,168 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         Ok(Response::Listing { entries, truncated })
     }
 
+    /// Bir dosyayı CANLI ağaçtan YEDEK ağacına kopyalar, dilim dilim.
+    ///
+    /// ── İKİ KÖK, TEK KOPYA ───────────────────────────────────────────────────────────────
+    ///
+    /// Kaynak canlı kökten, hedef yedek kökünden çözülüyor, ve ikisini de ÇAĞIRAN SEÇMİYOR:
+    /// hangi tarafın hangisi olduğu bu işlevin gövdesinde sabit. `CopyFile` ile aynı iş gibi
+    /// görünüyor ama değil — o, tek bir kökün içinde kalıyor.
+    ///
+    /// ── NEDEN DİLİM DİLİM ────────────────────────────────────────────────────────────────
+    ///
+    /// Kontrol soketi SIRALI (ADR-0006). Elli gigabaytlık bir dosyayı tek çağrıda kopyalamak,
+    /// o kopyalama boyunca cihazdaki başka her şeyin durması demek: dosya yöneticisi, telemetri,
+    /// paylaşım listesi. `MAX_COPY_SLICE` bir turun kaç saat süreceğini değil, ARADA cihazın
+    /// kullanılabilir kalıp kalmadığını belirliyor.
+    ///
+    /// ── ARA ALAN VE YAYIMLAMA ────────────────────────────────────────────────────────────
+    ///
+    /// Baytlar önce yedek kökündeki ara alana yazılıyor, dosya tamamlandığında tek bir atomik
+    /// `renameat2(RENAME_NOREPLACE)` ile yerine oturuyor. Yarıda kesilen bir tur yedekte YARIM
+    /// DOSYA bırakmıyor: yarım kalan şey ara alanda kalıyor ve süpürücünün işi oluyor. Yedekte
+    /// yarım bir dosya, tam sanılan bir dosyadır — ve kullanıcı onu ancak ihtiyaç duyduğu gün
+    /// açmayı dener.
+    ///
+    /// `RENAME_NOREPLACE`in burada ikinci bir işi var: aynı adla değişmiş bir dosya kopyalanırken
+    /// hedefte eskisi duruyor. Üstüne yazmak için önce eskisinin silinmesi gerekiyor, ve o kararı
+    /// ajan değil çağıran taraf veriyor — çünkü "eski sürümü sakla" ile "üstüne yaz" arasındaki
+    /// fark bir yedekleme politikasıdır, bir dosya işlemi değil.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "her operand ayrı bir karar; gruplamak hangisinin hangi köke ait olduğunu gizlerdi"
+    )]
+    fn copy_file_to_backup(
+        &self,
+        share: &str,
+        from: &[&str],
+        to: &[&str],
+        staging_name: &str,
+        offset: u64,
+        max_bytes: u64,
+    ) -> Result<Response, SeamError> {
+        let Some(live) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+        let Some(backup) = self.backup_root() else {
+            return Ok(Self::backup_unavailable());
+        };
+        let Some((to_name, to_dirs)) = to.split_last() else {
+            return Ok(Response::Refused {
+                reason: "boş hedef yolu yedek kökünün kendisidir".to_string(),
+            });
+        };
+        // Ajanın kendi ağacı yedeklenmiyor: ara alan, yarım kalmış yüklemelerin yeri ve onların
+        // yedekte bir karşılığı olmamalı.
+        if Self::touches_agent_state(from) {
+            return Ok(Response::Refused {
+                reason: format!("{}/ ajanın kendi ağacı ve yedeklenmiyor", STAGING_DIR[0]),
+            });
+        }
+
+        let mut source: Vec<&str> = vec![share];
+        source.extend_from_slice(from);
+        let source_file = match live.open(&source, OpenIntent::Read) {
+            Ok(file) => file,
+            Err(SeamError::NotFound(what)) => {
+                // KAYNAK KAYBOLMUŞ OLABİLİR ve bu olağan: tur bir anlık görüntünün listesiyle
+                // çalışıyor, kullanıcı bu arada dosyayı silmiş olabilir. Hata değil, bir sonraki
+                // turun silinenlere taşıyacağı bir olgu.
+                return Ok(Response::NotFound {
+                    reason: format!("{what}: kaynakta yok"),
+                });
+            }
+            Err(SeamError::PathEscape(what)) => {
+                return Ok(Response::Refused {
+                    reason: format!("{what}: yol sınırı reddetti"),
+                });
+            }
+            Err(other) => return Err(other),
+        };
+        let total = source_file
+            .metadata()
+            .map_err(|e| SeamError::Io(format!("stat source: {e}")))?
+            .len();
+
+        let staged = [STAGING_DIR[0], STAGING_DIR[1], staging_name];
+        let mut staging_file = backup.open(&staged, OpenIntent::Append)?;
+        let staged_len = staging_file
+            .metadata()
+            .map_err(|e| SeamError::Io(format!("stat staging file: {e}")))?
+            .len();
+        // DOSYA OTORİTE, çağıranın sayısı değil. Uyuşmazlık, çağıranla dosya sisteminin ne kadar
+        // yazıldığı konusunda anlaşmadığı anlamına gelir; devam etmek ya bir bölgeyi iki kez
+        // yazar ya bir delik bırakır — ikisi de tam görünen ve olmayan bir dosya üretir.
+        if staged_len != offset {
+            return Ok(Response::Conflict {
+                reason: format!("ara dosya {staged_len} bayt, çağıran {offset} bekliyordu"),
+            });
+        }
+
+        let slice = max_bytes.min(crate::op::MAX_COPY_SLICE);
+        let mut reader = &source_file;
+        std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(offset))
+            .map_err(|e| SeamError::Io(format!("seek source to {offset}: {e}")))?;
+        let mut window = std::io::Read::take(reader, slice);
+
+        let copied = match std::io::copy(&mut window, &mut staging_file) {
+            Ok(n) => n,
+            Err(e)
+                if matches!(
+                    crate::data::classify(&e),
+                    crate::data::FailureKind::OutOfSpace
+                ) =>
+            {
+                // YEDEK DİSKİ DOLDU. Kendi cevabı, çünkü çağıranın yapacağı şey farklı: tur
+                // durmalı ve kullanıcıya söylenmeli. Yeniden denemek, dolu diske yirmi tane daha
+                // yarım dosya park etmek olurdu.
+                return Ok(Response::OutOfSpace {
+                    reason: format!("yedek diskinde {} için yer yok: {e}", from.join("/")),
+                });
+            }
+            Err(e) => return Err(SeamError::Io(format!("copy slice into staging: {e}"))),
+        };
+
+        let now = offset.saturating_add(copied);
+        if now < total {
+            return Ok(Response::Copied {
+                offset: now,
+                done: false,
+            });
+        }
+
+        if let Err(e) = staging_file.sync_all() {
+            if matches!(
+                crate::data::classify(&e),
+                crate::data::FailureKind::OutOfSpace
+            ) {
+                // ZFS kotayı işlem grubu yazılırken hesaplıyor, yani dolu bir disk çoğunlukla
+                // TAM BURADA görünüyor.
+                return Ok(Response::OutOfSpace {
+                    reason: format!("yedeği diske yazarken yer kalmadı: {e}"),
+                });
+            }
+            return Err(SeamError::Io(format!("fsync copy before publish: {e}")));
+        }
+
+        let staging_dir = [STAGING_DIR[0], STAGING_DIR[1]];
+        match backup.publish(&staging_dir, staging_name, to_dirs, to_name) {
+            Ok(()) => Ok(Response::Copied {
+                offset: now,
+                done: true,
+            }),
+            Err(SeamError::NotFound(what)) => Ok(Response::NotFound {
+                reason: format!("{what}: yedekte hedef dizin yok"),
+            }),
+            Err(SeamError::AlreadyExists(what)) => Ok(Response::Conflict {
+                reason: format!("{what}: yedekte zaten bir dosya var"),
+            }),
+            Err(other) => Err(other),
+        }
+    }
+
     /// Yedek ağacındaki mühürlü kök, ya da onun neden olmadığını söyleyen bir red.
     ///
     /// `None`un iki sebebi var ve ikisi de kullanıcıya farklı bir cümle borçlu: disk hiç yok, ya
@@ -2767,6 +2929,25 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
 
             Request::ListDatabaseDumps {} => self.database_dumps(),
 
+            Request::CopyFileToBackup {
+                share,
+                from,
+                to,
+                staging_name,
+                offset,
+                max_bytes,
+            } => {
+                let f: Vec<&str> = from.iter().map(SafeComponent::as_str).collect();
+                let t: Vec<&str> = to.iter().map(SafeComponent::as_str).collect();
+                self.copy_file_to_backup(
+                    share.as_str(),
+                    &f,
+                    &t,
+                    staging_name.as_str(),
+                    *offset,
+                    *max_bytes,
+                )
+            }
             Request::BackupListDirectory { path } => {
                 let parts: Vec<&str> = path.iter().map(SafeComponent::as_str).collect();
                 self.backup_list_directory(&parts)
@@ -4075,6 +4256,157 @@ mod tests {
         );
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
         assert_eq!(r.calls.borrow().len(), 1, "only lsblk ran");
+    }
+
+    /// Bir dosya canlı ağaçtan yedeğe kopyalanıyor, ve kaynak YERİNDE KALIYOR.
+    #[test]
+    fn dosya_canli_agactan_yedege_kopyalaniyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        std::fs::write(h.root_path().join("belgeler/vergi.pdf"), b"iceriik").expect("write");
+        let backup = h.backup_path();
+        std::fs::create_dir_all(backup.join(STAGING_DIR[0]).join(STAGING_DIR[1])).expect("mkdir");
+        std::fs::create_dir_all(backup.join("Dosyalar/belgeler")).expect("mkdir");
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"copy_file_to_backup","share":"belgeler","from":["vergi.pdf"],
+                "to":["Dosyalar","belgeler","vergi.pdf"],"staging_name":"p1","offset":0,
+                "max_bytes":1048576}"#,
+            peer(API_UID),
+            "yc1",
+            "yedege kopyalama",
+        );
+        assert!(
+            matches!(resp, Response::Copied { done: true, .. }),
+            "{resp:?}"
+        );
+
+        assert_eq!(
+            std::fs::read(backup.join("Dosyalar/belgeler/vergi.pdf")).expect("yedekte olmali"),
+            b"iceriik"
+        );
+        assert!(
+            h.root_path().join("belgeler/vergi.pdf").exists(),
+            "kaynak yerinde kalmalı: yedekleme taşımak değil kopyalamak"
+        );
+    }
+
+    /// YARIM KALAN BİR KOPYA YEDEĞE ÇIKMIYOR.
+    ///
+    /// Yedekte yarım bir dosya, TAM SANILAN bir dosyadır — ve kullanıcı onu ancak ihtiyaç
+    /// duyduğu gün açmayı dener. Yarıda kesilen tur, yarım kalanı ara alanda bırakıyor.
+    #[test]
+    fn yarim_kalan_kopya_yedege_cikmiyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        std::fs::write(h.root_path().join("belgeler/buyuk.bin"), vec![7u8; 100]).expect("write");
+        let backup = h.backup_path();
+        std::fs::create_dir_all(backup.join(STAGING_DIR[0]).join(STAGING_DIR[1])).expect("mkdir");
+        std::fs::create_dir_all(backup.join("Dosyalar")).expect("mkdir");
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"copy_file_to_backup","share":"belgeler","from":["buyuk.bin"],
+                "to":["Dosyalar","buyuk.bin"],"staging_name":"p2","offset":0,"max_bytes":40}"#,
+            peer(API_UID),
+            "yc2",
+            "yarim dilim",
+        );
+        assert!(
+            matches!(
+                resp,
+                Response::Copied {
+                    offset: 40,
+                    done: false
+                }
+            ),
+            "{resp:?}"
+        );
+        assert!(
+            !backup.join("Dosyalar/buyuk.bin").exists(),
+            "yarım dosya yedekte GÖRÜNMEMELİ"
+        );
+    }
+
+    /// Çağıranın söylediği offset ile ara dosyanın gerçek boyutu tutmuyorsa REDDEDİLİYOR.
+    ///
+    /// Devam etmek ya bir bölgeyi iki kez yazar ya bir delik bırakır; ikisi de tam görünen ve
+    /// olmayan bir dosya üretir — bir yedekte bunun bedeli, ihtiyaç duyulan gün ödenir.
+    #[test]
+    fn yanlis_offset_reddediliyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        std::fs::write(h.root_path().join("belgeler/a.txt"), b"0123456789").expect("write");
+        let backup = h.backup_path();
+        let staging = backup.join(STAGING_DIR[0]).join(STAGING_DIR[1]);
+        std::fs::create_dir_all(&staging).expect("mkdir");
+        std::fs::write(staging.join("p3"), b"012").expect("write"); // üç bayt var
+        std::fs::create_dir_all(backup.join("Dosyalar")).expect("mkdir");
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"copy_file_to_backup","share":"belgeler","from":["a.txt"],
+                "to":["Dosyalar","a.txt"],"staging_name":"p3","offset":7,"max_bytes":1048576}"#,
+            peer(API_UID),
+            "yc3",
+            "yanlis offset",
+        );
+        assert!(matches!(resp, Response::Conflict { .. }), "{resp:?}");
+    }
+
+    /// Hedefte bir dosya varsa ÜSTÜNE YAZILMIYOR.
+    ///
+    /// "Eski sürümü sakla" ile "üstüne yaz" arasındaki fark bir yedekleme POLİTİKASI, bir dosya
+    /// işlemi değil — ve o kararı ajan değil çağıran taraf veriyor.
+    #[test]
+    fn yedekteki_dosyanin_ustune_yazilmiyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        std::fs::write(h.root_path().join("belgeler/a.txt"), b"yeni").expect("write");
+        let backup = h.backup_path();
+        std::fs::create_dir_all(backup.join(STAGING_DIR[0]).join(STAGING_DIR[1])).expect("mkdir");
+        std::fs::create_dir_all(backup.join("Dosyalar")).expect("mkdir");
+        std::fs::write(backup.join("Dosyalar/a.txt"), b"eski").expect("write");
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"copy_file_to_backup","share":"belgeler","from":["a.txt"],
+                "to":["Dosyalar","a.txt"],"staging_name":"p4","offset":0,"max_bytes":1048576}"#,
+            peer(API_UID),
+            "yc4",
+            "cakisan hedef",
+        );
+        assert!(matches!(resp, Response::Conflict { .. }), "{resp:?}");
+        assert_eq!(
+            std::fs::read(backup.join("Dosyalar/a.txt")).expect("okunmali"),
+            b"eski",
+            "eski sürüm yerinde kalmalı"
+        );
+    }
+
+    /// Ajanın kendi ağacı yedeklenmiyor.
+    ///
+    /// `.depsis/staging` yarım kalmış yüklemelerin yeri; onları yedeğe taşımak, kullanıcının
+    /// hiç görmediği baytları kotasına yazmak olurdu.
+    #[test]
+    fn ajanin_kendi_agaci_yedeklenmiyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"copy_file_to_backup","share":"belgeler","from":[".depsis","staging","x"],
+                "to":["Dosyalar","x"],"staging_name":"p5","offset":0,"max_bytes":1024}"#,
+            peer(API_UID),
+            "yc5",
+            "ajan agaci",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
     }
 
     /// İKİ KÖK KARIŞMIYOR — bu dosyadaki en önemli yedekleme testi.

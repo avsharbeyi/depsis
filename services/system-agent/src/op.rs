@@ -1552,6 +1552,28 @@ pub enum Request {
     #[serde(rename = "unload_backup_key")]
     UnloadBackupKey { pool: SafeComponent },
 
+    /// Bir dosyayı CANLI ağaçtan YEDEK ağacına kopyalar, dilim dilim.
+    ///
+    /// Kaynak canlı kökten, hedef yedek kökünden çözülüyor, ve ikisini de ÇAĞIRAN SEÇMİYOR:
+    /// hangi tarafın hangisi olduğu işlemin ADINDA sabit. `CopyFile` ile aynı iş gibi görünüyor
+    /// ama değil — o, tek bir kökün içinde kalıyor.
+    ///
+    /// DİLİM DİLİM, çünkü kontrol soketi SIRALI. Elli gigabaytlık bir dosyayı tek çağrıda
+    /// kopyalamak, o süre boyunca cihazdaki başka her şeyin durması demek.
+    ///
+    /// `offset` ÇAĞIRANIN İDDİASI, otorite değil: ajan ara dosyanın gerçek boyutuna bakıyor ve
+    /// uyuşmazsa reddediyor. Devam etmek ya bir bölgeyi iki kez yazar ya bir delik bırakır —
+    /// ikisi de tam görünen ve olmayan bir dosya üretir.
+    #[serde(rename = "copy_file_to_backup")]
+    CopyFileToBackup {
+        share: SafeComponent,
+        from: Vec<SafeComponent>,
+        to: Vec<SafeComponent>,
+        staging_name: SafeComponent,
+        offset: u64,
+        max_bytes: u64,
+    },
+
     /// Yedek ağacında bir dizini listeler.
     ///
     /// ── KÖK, ÇAĞIRANIN SEÇTİĞİ BİR ŞEY DEĞİL ─────────────────────────────────────────────
@@ -2934,6 +2956,9 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 33, `copy_file_to_backup` ile: canlı ağaçtan yedek ağacına dilimli kopyalama. İki kökü de
+/// işlemin gövdesi seçiyor, çağıran değil.
+///
 /// 32, yedek AĞACININ işlemleriyle: `backup_list_directory`, `backup_create_directory`,
 /// `backup_move_entry`, `backup_remove_entry`. Yedek ağacı ikinci bir mühürlü kök; hangi köke
 /// dokunulacağı işlemin ADINDA sabit, çağıranın seçtiği bir alanda değil.
@@ -2955,7 +2980,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 32;
+pub const SCHEMA_VERSION: u32 = 33;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

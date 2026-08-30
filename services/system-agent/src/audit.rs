@@ -52,6 +52,7 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::ReplicateOffsite { .. } => "replicate_offsite",
         Request::DestroySnapshot { .. } => "destroy_snapshot",
         Request::StartScrub { .. } => "start_scrub",
+        Request::CopyFileToBackup { .. } => "copy_file_to_backup",
         Request::BackupListDirectory { .. } => "backup_list_directory",
         Request::BackupCreateDirectory { .. } => "backup_create_directory",
         Request::BackupMoveEntry { .. } => "backup_move_entry",

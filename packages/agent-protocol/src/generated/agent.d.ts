@@ -440,6 +440,15 @@ export type AgentRequest =
       pool: SafeComponent;
     }
   | {
+      from: SafeComponent[];
+      max_bytes: number;
+      offset: number;
+      op: 'copy_file_to_backup';
+      share: SafeComponent;
+      staging_name: SafeComponent;
+      to: SafeComponent[];
+    }
+  | {
       op: 'backup_list_directory';
       path: SafeComponent[];
     }

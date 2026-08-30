@@ -83,6 +83,7 @@ describe('the emitted agent schema', () => {
       // of these per file, because a recursive copy is a blast radius the caller chose.
       'check_update',
       'copy_file',
+      'copy_file_to_backup',
       'create_dataset',
       // ONE directory, never `mkdir -p`. Its absence was a hole under the product rather than a
       // gap in the set: `FilesService.createFolder` could write a row and nothing else, so a
@@ -353,7 +354,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(32);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(33);
   });
 
   it('agrees with the number the agent actually reports', () => {

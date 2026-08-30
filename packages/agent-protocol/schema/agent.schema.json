@@ -957,6 +957,54 @@
       ]
     },
     {
+      "description": "Bir dosyayı CANLI ağaçtan YEDEK ağacına kopyalar, dilim dilim.\n\nKaynak canlı kökten, hedef yedek kökünden çözülüyor, ve ikisini de ÇAĞIRAN SEÇMİYOR:\nhangi tarafın hangisi olduğu işlemin ADINDA sabit. `CopyFile` ile aynı iş gibi görünüyor\nama değil — o, tek bir kökün içinde kalıyor.\n\nDİLİM DİLİM, çünkü kontrol soketi SIRALI. Elli gigabaytlık bir dosyayı tek çağrıda\nkopyalamak, o süre boyunca cihazdaki başka her şeyin durması demek.\n\n`offset` ÇAĞIRANIN İDDİASI, otorite değil: ajan ara dosyanın gerçek boyutuna bakıyor ve\nuyuşmazsa reddediyor. Devam etmek ya bir bölgeyi iki kez yazar ya bir delik bırakır —\nikisi de tam görünen ve olmayan bir dosya üretir.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "offset": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "op": {
+          "type": "string",
+          "const": "copy_file_to_backup"
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "staging_name": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "to": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "from",
+        "to",
+        "staging_name",
+        "offset",
+        "max_bytes"
+      ]
+    },
+    {
       "description": "Yedek ağacında bir dizini listeler.\n\n── KÖK, ÇAĞIRANIN SEÇTİĞİ BİR ŞEY DEĞİL ─────────────────────────────────────────────\n\n`ListDirectory` canlı paylaşımları, bu ise yedek diskini okuyor. İki AYRI işlem\nolmalarının sebebi ADR-0006: çağıran taraf bir yol adlandıramadığı gibi bir KÖK de\nadlandıramamalı. Tek bir işleme `realm: Live | Backup` diye bir alan koymak, tek bir\nalan değeriyle canlı ağacı hedefleyen bir yedek çağrısı yaratırdı — ve o alanın doğru\ndolduğunu ajan değil çağıran taraf garanti ederdi.\n\nYedek ağacının kendi düzeni var ve ilk bileşen onu söylüyor: `Dosyalar/` gecikmeli\nayna, `DEPSIS-YEDEK/` defter ve günlükler.",
       "type": "object",
       "properties": {
