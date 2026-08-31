@@ -953,6 +953,40 @@
       ]
     },
     {
+      "description": "Bir dosyanın yedekteki kopyasını aslıyla KARŞILAŞTIRIR.\n\n── \"YEDEK ALINDI\" BİR İDDİA ─────────────────────────────────────────────────────────\n\nYedekleme turu kaç dosya kopyaladığını sayıyor ve bunu ekranda söylüyor. Ama saydığı şey\nKENDİ yaptığı çağrılar; diskteki baytlara hiç bakmıyor. Kopyanın boş, yarım ya da başka\nbir dosya olduğu bir kusur, sayıları hiç bozmadan aylarca sürebilir — ve yalnız kurtarma\ngününde, yani düzeltmenin artık mümkün olmadığı gün, ortaya çıkar.\n\nBu işlem o iddiayı ölçüyor: iki dosya açılıyor ve baytları karşılaştırılıyor.\n\n── HİÇBİR ŞEY YAZMIYOR ──────────────────────────────────────────────────────────────\n\nDoğrulamanın bir dosyayı geri getirerek yapılması da mümkündü, ama o, kullanıcının\ndosyalarının arasına her gün bir dosya bırakmak demekti. Okuyup karşılaştırmak aynı soruyu\ncevaplıyor ve hiçbir iz bırakmıyor.\n\n── ÖNCE BOYUT, SONRA BAYTLAR ────────────────────────────────────────────────────────\n\nBoyutlar farklıysa cevap zaten hayır ve tek bir bayt okumaya gerek yok. Aynıysa içerik\nokunuyor — ama `MAX_VERIFY_BYTES` kadar: yüz gigabaytlık bir dosyayı her gün baştan sona\nokumak, doğrulamayı cihazı kullanılamaz kılan bir işe çevirirdi. Ne kadarının okunduğu\ncevapta yazıyor, çünkü \"ilk 64 MB aynı\" ile \"dosya aynı\" farklı iki cümle ve ekran hangisi\nolduğunu söylemek zorunda.",
+      "type": "object",
+      "properties": {
+        "backup": {
+          "description": "Yedek ağacındaki yol — `Dosyalar/<paylaşım>/…`. Çağıran veriyor, ajan türetmiyor:\nyedek ağacının düzeni API'nin kararı ve ajanın onu ikinci kez bilmesi, iki yerde\nayrı ayrı değişebilen bir kural olurdu.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "live": {
+          "description": "Paylaşım içindeki yol.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "op": {
+          "type": "string",
+          "const": "compare_backup_copy"
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "live",
+        "backup"
+      ]
+    },
+    {
       "description": "Diskin şifresiz yarısındaki bir dosyayı okur.\n\nPAROLA SORULMADAN. `backup_write_meta`nın karşılığı: orada `OKUBENI.txt` ve `disk.json`\nduruyor, ve ikincisi kurtarma ekranının \"bu disk hangi cihazın, en son ne zaman yedek\naldı\" sorusuna verdiği cevabın kaynağı.\n\nKökteki tek bir dosya, ve okunan miktar `MAX_META_BYTES` ile sınırlı — o yarıya kim\nyazdığını bilmediğimiz bir dosya konmuş olabilir, ve sınırsız okumak, diski takan kişinin\nbelleğimizi doldurabilmesi demek olurdu.",
       "type": "object",
       "properties": {
@@ -2646,6 +2680,48 @@
       "required": [
         "status",
         "pools"
+      ]
+    },
+    {
+      "description": "İki dosyanın karşılaştırılması.",
+      "type": "object",
+      "properties": {
+        "backup_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "compared_bytes": {
+          "description": "Kaç bayt gerçekten okunup karşılaştırıldı.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "identical": {
+          "description": "Okunan kadarıyla aynılar mı.",
+          "type": "boolean"
+        },
+        "live_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "partial": {
+          "description": "Dosya sınırdan büyüktü; yalnız başı okundu. Ekran bunu söylemek zorunda.",
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "const": "comparison"
+        }
+      },
+      "required": [
+        "status",
+        "identical",
+        "live_bytes",
+        "backup_bytes",
+        "compared_bytes",
+        "partial"
       ]
     },
     {

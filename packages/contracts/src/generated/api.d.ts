@@ -7591,6 +7591,29 @@ export interface components {
             /** @description Diskin sifresiz yarisinda yazan cihaz kimligi. */
             deviceId?: string | null;
             enabled: boolean;
+            /**
+             * Format: date-time
+             * @description Yedegin GERCEKTEN okundugu son an. Tur kac dosya kopyaladigini sayiyor ama diskteki
+             *     baytlara bakmiyor; gunluk dogrulama bir dosyayi okuyup asliyla karsilastiriyor.
+             *
+             *     `null` HIC DOGRULANMADI demek, "saglam" demek DEGIL. Ekranin bu ikisini ayirmasi
+             *     gerekiyor: yapilmamis bir olcumu basarili gostermek, dogrulamanin tamamini suse
+             *     cevirir.
+             */
+            lastVerifiedAt: string | null;
+            lastVerifyOk: boolean | null;
+            /**
+             * @description Neyin olculdugu: hangi dosya, ne kadari okundu. "Dogrulandi" tek basina bir sey
+             *     soylemiyor — buyuk bir dosyanin yalniz basi okunmus olabilir ve ekran bunu soylemeli.
+             */
+            lastVerifyNote: string | null;
+            /**
+             * Format: date-time
+             * @description Yedek havuzunda son `scrub`in baslatildigi an; haftada bir. Karsilastirmanin yerine
+             *     gecmiyor: scrub "disk dogru okuyor" diyor, karsilastirma "yazdigimiz sey dogruydu"
+             *     diyor.
+             */
+            lastScrubAt: string | null;
             /** @description Iki veri kumesi de yerinde mi. */
             prepared: boolean;
             /**

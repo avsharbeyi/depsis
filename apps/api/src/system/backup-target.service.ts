@@ -87,6 +87,17 @@ export interface BackupTargetRow {
   recoveryOnly: boolean;
   deviceId: string | null;
   enabled: boolean;
+  /**
+   * Son doğrulamanın sonucu — yedeğin gerçekten okunduğunun kaydı.
+   *
+   * `null`, HİÇ DOĞRULANMADI demek, "sağlam" demek değil. Ekranın bu ikisini ayırması gerekiyor:
+   * yapılmamış bir ölçümü başarılı göstermek, doğrulamanın tamamını süse çevirir.
+   */
+  lastVerifiedAt: string | null;
+  lastVerifyOk: boolean | null;
+  /** Neyin ölçüldüğü: hangi dosya, ne kadarı okundu. "Doğrulandı" tek başına bir şey söylemiyor. */
+  lastVerifyNote: string | null;
+  lastScrubAt: string | null;
 }
 
 /** Hedef + diskin O ANKİ hâli, tek cevapta. */
@@ -133,9 +144,14 @@ export class BackupTargetService {
         recovery_only: boolean;
         device_id: string | null;
         enabled: boolean;
+        last_verified_at: Date | null;
+        last_verify_ok: boolean | null;
+        last_verify_note: string | null;
+        last_scrub_at: Date | null;
       }>(
         `SELECT id::text AS id, pool, label, cadence_hours, retain_days,
-                recovery_only, device_id, enabled
+                recovery_only, device_id, enabled,
+                last_verified_at, last_verify_ok, last_verify_note, last_scrub_at
            FROM public.backup_targets`,
       ),
     );
@@ -150,6 +166,10 @@ export class BackupTargetService {
       recoveryOnly: row.recovery_only,
       deviceId: row.device_id,
       enabled: row.enabled,
+      lastVerifiedAt: row.last_verified_at?.toISOString() ?? null,
+      lastVerifyOk: row.last_verify_ok,
+      lastVerifyNote: row.last_verify_note,
+      lastScrubAt: row.last_scrub_at?.toISOString() ?? null,
     };
   }
 

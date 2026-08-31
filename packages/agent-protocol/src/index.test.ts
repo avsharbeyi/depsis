@@ -84,6 +84,11 @@ describe('the emitted agent schema', () => {
       // both safer and faster. One FILE: the API issues one `create_directory` per folder and one
       // of these per file, because a recursive copy is a blast radius the caller chose.
       'check_update',
+      // "Yedek alindi" bir IDDIA: tur kac dosya kopyaladigini sayiyor ama diskteki baytlara hic
+      // bakmiyordu. Bu islem o iddiayi olcuyor -- iki dosya acilip baytlari karsilastiriliyor --
+      // ve HICBIR SEY YAZMIYOR: dogrulamayi bir dosyayi geri getirerek yapmak, kullanicinin
+      // dosyalarinin arasina her gun bir dosya birakmakti.
+      'compare_backup_copy',
       'copy_file',
       'copy_file_to_backup',
       'create_dataset',
@@ -365,7 +370,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(36);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(37);
   });
 
   it('agrees with the number the agent actually reports', () => {

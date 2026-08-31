@@ -6,9 +6,19 @@ import type { JobHandler } from '../worker.service.js';
 export const BACKUP_RUN_KIND = 'storage.backup.run';
 export const BACKUP_RUN_NOW_KIND = 'storage.backup.run.now';
 export const BACKUP_PURGE_KIND = 'storage.backup.purge';
+export const BACKUP_VERIFY_KIND = 'storage.backup.verify';
 
 /** Temizlik turu saatte bir dönüyor: bir gün klasörünün süresi gün içinde de dolabilir. */
 const PURGE_INTERVAL_MS = 3_600_000;
+
+/**
+ * Doğrulama günde bir.
+ *
+ * Daha sık olması bir şey ölçmezdi: iki tur arasında değişen bir şey yoksa aynı dosya aynı sonucu
+ * verir. Daha seyrek olması ise bozuk bir yedeğin fark edilmesini haftalara yayardı, ve
+ * doğrulamanın bütün amacı o süreyi kısaltmak.
+ */
+const VERIFY_INTERVAL_MS = 24 * 3_600_000;
 
 /**
  * Altı saatlik yedekleme turu.
@@ -115,6 +125,34 @@ export function backupPurgeHandler(runs: BackupRunService): JobHandler {
     if (purged > 0) {
       logger.log(`${purged} dosya saklama süresi dolduğu için kalıcı olarak silindi`);
     }
+    await report(1);
+  };
+}
+
+/**
+ * Günlük doğrulama: yedekten gerçekten bir dosya okunuyor.
+ *
+ * ARDIL ÖNCE, iş sonra — ve burada gerekçe en keskin hâlinde: duran bir doğrulama, hiçbir şey
+ * ölçmediği hâlde son ölçümün sonucunu ekranda tutar. Yani "yedeğiniz sağlam" cümlesi, aylar önce
+ * yapılmış bir ölçümün cümlesi olarak orada durur.
+ */
+export function backupVerifyHandler(runs: BackupRunService): JobHandler {
+  const logger = new Logger('BackupVerifyHandler');
+
+  return async ({ job, report }) => {
+    const organizationId = job.organizationId;
+    if (organizationId === null) {
+      throw new Error('bir storage.backup.verify işi bir kuruluşa ait olmalı');
+    }
+    if (!(await report(0.05))) return;
+
+    await runs.scheduleVerify(organizationId, new Date(Date.now() + VERIFY_INTERVAL_MS));
+
+    const result = await runs.verifyOnce(organizationId);
+    // BAŞARISIZ DOĞRULAMA GÜNLÜĞE DÜŞÜYOR ve iş DÜŞMÜYOR: işi başarısız saymak onu yeniden
+    // denetirdi, oysa bozuk bir kopya yeniden okununca düzelmiyor. Kullanıcının görmesi gereken
+    // yer ekran, ve oraya satırdan geliyor.
+    if (!result.ok) logger.warn(`yedek doğrulaması: ${result.note}`);
     await report(1);
   };
 }

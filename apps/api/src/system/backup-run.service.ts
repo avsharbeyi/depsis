@@ -160,6 +160,23 @@ export class BackupRunService {
       }
     }
 
+    // EN SON KOPYALANAN DOSYA satıra yazılıyor — günlük doğrulamanın okuyacağı dosya. Tur
+    // sonunda bir kez: her dosyada bir UPDATE, doğrulamanın maliyetini yedeklemenin kendisine
+    // yüklerdi. Bu turda hiç dosya kopyalanmadıysa eskisi olduğu gibi kalıyor, çünkü o dosya hâlâ
+    // yedekte duruyor ve hâlâ okunabilir olmalı.
+    if (this.lastCopied !== null) {
+      const copied = this.lastCopied;
+      this.lastCopied = null;
+      await this.db.withTenant(organizationId, (q) =>
+        q.query(
+          `UPDATE public.backup_targets
+              SET last_copied_share = $2, last_copied_path = $3
+            WHERE id = $1::uuid`,
+          [target.id, copied.share, copied.path],
+        ),
+      );
+    }
+
     await this.record(organizationId, target.id, trigger, total);
     // DİSKİN "SON YEDEK" TARİHİ TAZELENİYOR. O tarih diskin ŞİFRESİZ yarısında duruyor ve yanmış
     // bir cihazın diskini takan kişinin ekranda göreceği ilk şey o — eskimiş bir tarih, yedeğin
@@ -290,6 +307,15 @@ export class BackupRunService {
   }
 
   /** Bir dosyayı yedeğe kopyalar, gerekirse üst dizinleri açarak. */
+  /**
+   * Bu turda en son kopyalanan dosya, tur bitince satıra yazılmak üzere.
+   *
+   * Her dosyada bir UPDATE atmak yerine burada tutuluyor: bir tur binlerce dosya kopyalayabilir
+   * ve bunların her biri için veritabanına yazmak, doğrulamanın maliyetini yedeklemenin kendisine
+   * yüklerdi.
+   */
+  private lastCopied: { share: string; path: string[] } | null = null;
+
   private async copyOne(
     shareName: string,
     parts: string[],
@@ -332,6 +358,11 @@ export class BackupRunService {
       if (copied.done) break;
     }
     total.copiedFiles += 1;
+
+    // EN SON KOPYALANAN DOSYA, günlük doğrulamanın okuyacağı dosya. Rastgele bir dosya seçmek
+    // yerine bu: yeni yazılmış bir kopya, kopyalama yolunun bozulduğunu en çabuk gösteren şey, ve
+    // aylar önce yazılmış bir dosyayı doğrulamak bugünün turu hakkında hiçbir şey söylemez.
+    this.lastCopied = { share: shareName, path: parts };
   }
 
   /**
@@ -506,6 +537,7 @@ export class BackupRunService {
       for (const row of rows) {
         await this.scheduleNext(row.id, new Date());
         await this.schedulePurge(row.id, new Date());
+        await this.scheduleVerify(row.id, new Date());
       }
       if (rows.length > 0) {
         this.logger.log(`yedek turu ${rows.length} kiracı için tohumlandı`);
@@ -517,6 +549,167 @@ export class BackupRunService {
         }`,
       );
     }
+  }
+
+  /**
+   * Yedeğin gerçekten okunabildiğini ÖLÇER — günde bir.
+   *
+   * ── SAYMAK ÖLÇMEK DEĞİL ──────────────────────────────────────────────────────────────────
+   *
+   * Tur kaç dosya kopyaladığını sayıyor, ama saydığı şey kendi yaptığı çağrılar. Kopyanın boş,
+   * yarım ya da başka bir dosya olduğu bir kusur sayıları hiç bozmadan aylarca sürebilir — ve
+   * yalnız kurtarma gününde, yani düzeltmenin artık mümkün olmadığı gün, ortaya çıkar.
+   *
+   * Burada gerçekten bir dosya okunuyor ve aslıyla karşılaştırılıyor.
+   *
+   * ── HANGİ DOSYA ──────────────────────────────────────────────────────────────────────────
+   *
+   * Turun EN SON kopyaladığı dosya. Yeni yazılmış bir kopya, kopyalama yolunun bozulduğunu en
+   * çabuk gösteren şey; aylar önce yazılmış bir dosyayı doğrulamak bugünün turu hakkında hiçbir
+   * şey söylemez.
+   *
+   * Hiç dosya kopyalanmadıysa ölçüm YAPILMIYOR ve sonuç "başarılı" diye yazılmıyor. Yapılmamış
+   * bir ölçümü başarılı saymak, doğrulamanın tamamını süse çevirirdi.
+   *
+   * ── HAFTADA BİR DE TARAMA ────────────────────────────────────────────────────────────────
+   *
+   * `scrub`, ZFS'in her bloğun sağlamasını okuyup doğrulaması: diskin sessizce çürümesine karşı
+   * olan ölçüm. Karşılaştırmanın yerine geçmiyor, ikisi ayrı şeyleri ölçüyor — scrub "disk doğru
+   * okuyor" diyor, karşılaştırma "yazdığımız şey doğruydu" diyor.
+   */
+  async verifyOnce(organizationId: string): Promise<{ ok: boolean; note: string }> {
+    const correlationId = randomUUID();
+    const target = await this.targets.row(organizationId);
+    if (target === null) return { ok: false, note: 'yedek diski kurulu değil' };
+
+    // KURTARMA DİSKİ DOĞRULANMIYOR: bu cihaz ona hiçbir şey yazmadı, yani orada karşılaştırılacak
+    // bir "asıl" yok. Başka bir cihazın dosyalarını bu cihazın paylaşımlarıyla karşılaştırmak,
+    // her seferinde "bozuk" derdi.
+    if (target.recoveryOnly) return { ok: true, note: 'kurtarma diski; doğrulama yapılmıyor' };
+
+    const status = expectStatus(
+      await this.agent.call(
+        { op: 'backup_root_status', pool: target.pool },
+        `doğrulama: diskin durumu (${target.pool})`,
+        correlationId,
+      ),
+      'backup_root',
+    );
+    if (!status.prepared || !status.key_loaded || !status.mounted) {
+      return { ok: false, note: 'disk kilitli; doğrulama yapılamadı' };
+    }
+
+    await this.scrubIfDue(organizationId, target.pool, correlationId);
+
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ share: string | null; path: string[] | null }>(
+        `SELECT last_copied_share AS share, last_copied_path AS path
+           FROM public.backup_targets WHERE id = $1::uuid`,
+        [target.id],
+      ),
+    );
+    const last = rows[0];
+    if (last?.share == null || last.path == null || last.path.length === 0) {
+      const note = 'henüz doğrulanacak bir dosya yok';
+      await this.recordVerification(organizationId, target.id, null, note);
+      return { ok: false, note };
+    }
+
+    const response = await this.agent.call(
+      {
+        op: 'compare_backup_copy',
+        share: last.share,
+        live: last.path,
+        backup: [FILES, last.share, ...last.path],
+      },
+      `doğrulama: ${last.share}/${last.path.join('/')}`,
+      correlationId,
+    );
+
+    const name = `${last.share}/${last.path.join('/')}`;
+    if (response.status === 'not_found') {
+      // ASIL SİLİNMİŞ. Bir kusur değil ve "bozuk" da değil: ölçülecek bir şey kalmamış.
+      const note = `${name} artık yok; doğrulanacak bir şey kalmadı`;
+      await this.recordVerification(organizationId, target.id, null, note);
+      return { ok: false, note };
+    }
+    if (response.status === 'refused' || response.status === 'failed') {
+      await this.recordVerification(organizationId, target.id, false, response.reason);
+      return { ok: false, note: response.reason };
+    }
+
+    const result = expectStatus(response, 'comparison');
+    const howMuch = result.partial
+      ? `ilk ${Math.round(Number(result.compared_bytes) / (1024 * 1024))} MB`
+      : 'tamamı';
+    const note = result.identical
+      ? `${name} okundu; ${howMuch} aslıyla aynı`
+      : `${name} yedekte aslından FARKLI (asıl ${result.live_bytes} bayt, yedek ${result.backup_bytes} bayt)`;
+    await this.recordVerification(organizationId, target.id, result.identical, note);
+    if (!result.identical) this.logger.error(`yedek doğrulaması düştü: ${note}`);
+    return { ok: result.identical, note };
+  }
+
+  /**
+   * Haftada bir tarama başlatır.
+   *
+   * BAŞLATIYOR, beklemiyor: bir scrub saatler sürüyor ve sonucunu `scrub_status` söylüyor. Bunu
+   * beklemek, doğrulama işini bir gün boyunca kuyrukta tutmak olurdu.
+   */
+  private async scrubIfDue(
+    organizationId: string,
+    pool: string,
+    correlationId: string,
+  ): Promise<void> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ due: boolean }>(
+        `SELECT (last_scrub_at IS NULL OR last_scrub_at < now() - interval '7 days') AS due
+           FROM public.backup_targets`,
+      ),
+    );
+    if (rows[0]?.due !== true) return;
+
+    const response = await this.agent.call(
+      { op: 'start_scrub', pool },
+      `doğrulama: yedek havuzu taranıyor (${pool})`,
+      correlationId,
+    );
+    if (response.status === 'refused' || response.status === 'failed') {
+      // ZATEN KOŞAN BİR TARAMA hata değil: bir sonraki hafta yine denenecek.
+      this.logger.warn(`yedek havuzu taraması başlatılamadı: ${response.reason}`);
+      return;
+    }
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(`UPDATE public.backup_targets SET last_scrub_at = now()`),
+    );
+  }
+
+  private async recordVerification(
+    organizationId: string,
+    targetId: string,
+    ok: boolean | null,
+    note: string,
+  ): Promise<void> {
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `UPDATE public.backup_targets
+            SET last_verified_at = now(), last_verify_ok = $2, last_verify_note = $3
+          WHERE id = $1::uuid`,
+        [targetId, ok, note],
+      ),
+    );
+  }
+
+  /** Doğrulama zincirinin bir sonraki halkası. */
+  async scheduleVerify(organizationId: string, runAfter: Date): Promise<void> {
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `INSERT INTO public.job_queue (organization_id, kind, payload, run_after, max_attempts)
+         VALUES ($1, 'storage.backup.verify', '{}'::jsonb, $2, 3)
+         ON CONFLICT DO NOTHING`,
+        [organizationId, runAfter],
+      ),
+    );
   }
 
   /** Bir sonraki turu kuyruğa alır. Zincirin kendisi. */

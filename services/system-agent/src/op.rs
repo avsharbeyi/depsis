@@ -1577,6 +1577,41 @@ pub enum Request {
     #[serde(rename = "export_backup_pool")]
     ExportBackupPool { pool: SafeComponent },
 
+    /// Bir dosyanın yedekteki kopyasını aslıyla KARŞILAŞTIRIR.
+    ///
+    /// ── "YEDEK ALINDI" BİR İDDİA ─────────────────────────────────────────────────────────
+    ///
+    /// Yedekleme turu kaç dosya kopyaladığını sayıyor ve bunu ekranda söylüyor. Ama saydığı şey
+    /// KENDİ yaptığı çağrılar; diskteki baytlara hiç bakmıyor. Kopyanın boş, yarım ya da başka
+    /// bir dosya olduğu bir kusur, sayıları hiç bozmadan aylarca sürebilir — ve yalnız kurtarma
+    /// gününde, yani düzeltmenin artık mümkün olmadığı gün, ortaya çıkar.
+    ///
+    /// Bu işlem o iddiayı ölçüyor: iki dosya açılıyor ve baytları karşılaştırılıyor.
+    ///
+    /// ── HİÇBİR ŞEY YAZMIYOR ──────────────────────────────────────────────────────────────
+    ///
+    /// Doğrulamanın bir dosyayı geri getirerek yapılması da mümkündü, ama o, kullanıcının
+    /// dosyalarının arasına her gün bir dosya bırakmak demekti. Okuyup karşılaştırmak aynı soruyu
+    /// cevaplıyor ve hiçbir iz bırakmıyor.
+    ///
+    /// ── ÖNCE BOYUT, SONRA BAYTLAR ────────────────────────────────────────────────────────
+    ///
+    /// Boyutlar farklıysa cevap zaten hayır ve tek bir bayt okumaya gerek yok. Aynıysa içerik
+    /// okunuyor — ama `MAX_VERIFY_BYTES` kadar: yüz gigabaytlık bir dosyayı her gün baştan sona
+    /// okumak, doğrulamayı cihazı kullanılamaz kılan bir işe çevirirdi. Ne kadarının okunduğu
+    /// cevapta yazıyor, çünkü "ilk 64 MB aynı" ile "dosya aynı" farklı iki cümle ve ekran hangisi
+    /// olduğunu söylemek zorunda.
+    #[serde(rename = "compare_backup_copy")]
+    CompareBackupCopy {
+        share: SafeComponent,
+        /// Paylaşım içindeki yol.
+        live: Vec<SafeComponent>,
+        /// Yedek ağacındaki yol — `Dosyalar/<paylaşım>/…`. Çağıran veriyor, ajan türetmiyor:
+        /// yedek ağacının düzeni API'nin kararı ve ajanın onu ikinci kez bilmesi, iki yerde
+        /// ayrı ayrı değişebilen bir kural olurdu.
+        backup: Vec<SafeComponent>,
+    },
+
     /// Diskin şifresiz yarısındaki bir dosyayı okur.
     ///
     /// PAROLA SORULMADAN. `backup_write_meta`nın karşılığı: orada `OKUBENI.txt` ve `disk.json`
@@ -2768,6 +2803,17 @@ pub enum Response {
     ImportablePools {
         pools: Vec<ImportablePoolView>,
     },
+    /// İki dosyanın karşılaştırılması.
+    Comparison {
+        /// Okunan kadarıyla aynılar mı.
+        identical: bool,
+        live_bytes: u64,
+        backup_bytes: u64,
+        /// Kaç bayt gerçekten okunup karşılaştırıldı.
+        compared_bytes: u64,
+        /// Dosya sınırdan büyüktü; yalnız başı okundu. Ekran bunu söylemek zorunda.
+        partial: bool,
+    },
     /// Diskin şifresiz yarısındaki bir dosyanın içeriği.
     MetaFile {
         content: String,
@@ -3104,6 +3150,10 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 37, `compare_backup_copy` ile: yedekteki kopyanın aslıyla karşılaştırılması. Tur kaç dosya
+/// kopyaladığını sayıyordu ama diskteki baytlara hiç bakmıyordu — yani "yedek alındı" ölçülmemiş
+/// bir iddiaydı.
+///
 /// 36, kurtarma işlemleriyle: `scan_importable_pools`, `import_backup_pool`,
 /// `export_backup_pool`, `backup_read_meta`. Yanmış bir cihazdan çıkan diskin yeni bir cihazda
 /// TERMİNALSİZ açılabilmesi. Disk kendini anlatıyordu (35) ama anlattığı tek yol `zpool import`
@@ -3139,7 +3189,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 36;
+pub const SCHEMA_VERSION: u32 = 37;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///
@@ -3149,6 +3199,14 @@ pub const SCHEMA_VERSION: u32 = 36;
 /// busy. The agent clamps rather than trusting the caller, because the whole point is that no
 /// single call can be made long.
 pub const MAX_COPY_SLICE: u64 = 64 * 1024 * 1024;
+
+/// Doğrulamanın tek bir dosyada okuyacağı en fazla bayt.
+///
+/// Yüz gigabaytlık bir dosyayı her gün baştan sona okumak, doğrulamayı cihazı kullanılamaz kılan
+/// bir işe çevirirdi. Bu sınıra takılan bir karşılaştırma "ilk bu kadarı aynı" diyor ve bunu
+/// SÖYLÜYOR — sessizce kısaltılmış bir doğrulama, yapılmamış bir doğrulamadan daha kötüdür, çünkü
+/// yapılmış gibi görünür.
+pub const MAX_VERIFY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The mode `SecureShareRoot` writes: `rwx` for the owner, `r-x` for the group, nothing for other.
 ///
