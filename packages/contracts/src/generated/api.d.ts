@@ -4724,6 +4724,160 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/backups/target/recovery/scan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Takilabilecek yedek disklerini tara
+         * @description KURTARMANIN ILK ADIMI, ve sahibinin altinci sartinin terminalsiz yarisi: *"sistem diski ve
+         *     depolama diski yansa bile yedek diski eger sifre biliniyorsa kullanilabilir olmali."*
+         *
+         *     Yanmis bir cihazdan cikan disk yeni bir cihaza takildiginda, bu uc onu goruyor. PAROLA
+         *     SORULMUYOR ve sorulamaz: burada okunan sey havuzun kendi yapisi, sifreli yarinin icerigi
+         *     degil.
+         *
+         *     `needsAdopt`, havuzun duzgun birakilmamis oldugunu soyluyor — olen bir cihazdan cikan
+         *     diskin olagan hali. Ekran bunu bir onay olarak sormali, cunku ayni disk hala calisan baska
+         *     bir cihazda takiliysa devralmak havuzu bozar.
+         *
+         *     Bos liste bir hata degil: saglikli bir cihazda olagan cevap tam olarak budur.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Takilabilecek havuzlar */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ImportableBackupPools"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backups/target/recovery/adopt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Baska bir cihazin yedek diskini tani
+         * @description DOSYALAR HALA KILITLI. Bu adim diski yalniz TANIYOR: havuzu hicbir veri kumesini
+         *     baglamadan takiyor, DEPSIS yedek diski oldugunu veri kumelerinin adlarindan doguruluyor
+         *     ve sifresiz yarisindaki `disk.json`u okuyor. Acan sey, bundan sonra `POST
+         *     /backups/target/unlock`a girilen parola.
+         *
+         *     Iki ayri adim olmasinin sebebi kullanicinin gordugu sey: parolayi sormadan once ekranin
+         *     "bu, X etiketli cihazin 12 Agustos'ta aldigi yedek" diyebilmesi gerekiyor. Yanlis diski
+         *     taktigini, parolasini yazdiktan sonra ogrenmemeli.
+         *
+         *     HAVUZ DEPSIS YEDEK DISKI DEGILSE GERI BIRAKILIYOR ve 400 donuyor: takmak bir yan etki, ve
+         *     kullanicinin sectigi havuzun bu cihaza ait oldugu anlamina gelmiyor.
+         *
+         *     Satir KURTARMA KIPINDE aciliyor (`recoveryOnly`): yedekleme turu bu diske yazmiyor.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AdoptBackupDiskRequest"];
+                };
+            };
+            responses: {
+                /** @description Disk tanindi; hala kilitli */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AdoptedBackupDisk"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backups/target/recovery/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Kurtarma diskini birak
+         * @description Fisi cekmeden onceki dogru adim: havuz birakiliyor ve kurtarma satiri siliniyor. Sifreli
+         *     yarinin anahtari da havuzla birlikte gidiyor, yani birakmak kilitlemenin tamamlanmis hali.
+         *
+         *     YALNIZ KURTARMA DISKLERI. Cihazin kendi yedek diskini birakmak ayarlarini da silmek
+         *     olurdu; onun karsiligi `POST /backups/target/lock`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Birakildi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/backups/target/run": {
         parameters: {
             query?: never;
@@ -7380,6 +7534,40 @@ export interface components {
             share: string;
             /** @description Paylasim icindeki hedef yol, bilesen bilesen. */
             to: string[];
+        };
+        ImportableBackupPools: {
+            pools: {
+                name: string;
+                /**
+                 * @description ZFS'IN KENDI KELIMESI, cevrilmeden: `ONLINE`, `DEGRADED`, `FAULTED`, `UNAVAIL`.
+                 *     `DEGRADED` bir havuzdan dosya kurtarilabilir ve `FAULTED` bir havuzdan cogu
+                 *     zaman kurtarilamaz; ikisini "sorunlu" diye tek kelimeye indirmek, kullaniciya
+                 *     yapabilecegi ile yapamayacagini ayirt ettirmemek olurdu.
+                 */
+                state: string;
+                /**
+                 * @description Havuz duzgun birakilmamis. Olen bir cihazdan cikan diskin olagan hali, ve
+                 *     devralma kullanicinin gordugu bir uyarinin arkasinda olmali.
+                 */
+                needsAdopt: boolean;
+            }[];
+        };
+        AdoptBackupDiskRequest: {
+            pool: string;
+            /**
+             * @description `zpool import -f`. Ayni disk hala calisan baska bir cihazda takiliysa devralmak havuzu
+             *     bozar; bu yuzden kullanicinin acikca onayladigi bir alan.
+             */
+            adopt: boolean;
+        };
+        AdoptedBackupDisk: components["schemas"]["BackupTarget"] & {
+            /**
+             * Format: date-time
+             * @description Diskin sifresiz yarisindaki `disk.json`da yazan son yedek tarihi. `null`, o yarinin
+             *     bos oldugu anlamina geliyor — v0.2.1'den once kurulmus bir disk. Tanimayi
+             *     reddetmek, kurtarmayi tam da en cok gereken durumda calismaz kilardi.
+             */
+            lastBackupAt: string | null;
         };
         BackupTarget: {
             /** Format: uuid */

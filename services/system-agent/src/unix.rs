@@ -48,6 +48,23 @@ pub struct Openat2SafePath {
     reason = "same as the struct above: constructed only by tests until Phase 1 wires path-taking operations into dispatch"
 )]
 impl Openat2SafePath {
+    /// Bir yolu, ŞU AN var olmasını beklemeden mühürlü kök olarak alır.
+    ///
+    /// `open_root`tan farkı, açılışta hiçbir şey yoklamaması. Paylaşım kökü için doğru olan
+    /// yoklamak — yoksa yapılandırma yanlıştır ve servis öyle başlamamalı. Yedek diski için
+    /// doğru olan yoklamamak: bir yedek diski açılışta çoğu zaman YOK ya da KİLİTLİ, ve bu bir
+    /// arıza değil — parola hiçbir yere yazılmadığı için her yeniden başlatmadan sonraki olağan
+    /// hâl. Kökün o an kullanılabilir olup olmadığı `root_ready` ile, kullanılacağı anda
+    /// soruluyor.
+    ///
+    /// Kök zaten her çağrıda yolundan yeniden açıldığı için bunun bir bedeli yok: burada
+    /// saklanan şey bir tanımlayıcı değil, bir yol.
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        Self {
+            root_display: path.into(),
+        }
+    }
+
     pub fn open_root(path: impl Into<PathBuf>) -> Result<Self, SeamError> {
         let confined = Self {
             root_display: path.into(),
@@ -809,6 +826,38 @@ impl SafePath for Openat2SafePath {
                 Err(SeamError::NotEmpty(name.to_string()))
             }
             Err(e) => Err(SeamError::Io(format!("rmdir {name}: {e}"))),
+        }
+    }
+
+    fn root_ready(&self) -> bool {
+        // Kökün kendisi ve `..`. İkisinin aygıt numarası aynıysa burası bir bağlama noktası
+        // DEĞİL — yani `/yedek`, yedek diski değil, sistem diskinin üzerinde duran boş bir dizin.
+        //
+        // `stat` yerine önce açıp `fstat`: açılamıyorsa cevap zaten "hayır", ve açılmış bir
+        // tanımlayıcı üzerinden sorulan iki soru, arada bir şey değişse bile aynı nesneyi
+        // anlatır.
+        let Ok(here) = rustix::fs::open(
+            &self.root_display,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) else {
+            return false;
+        };
+        let Ok(above) = rustix::fs::openat(
+            &here,
+            "..",
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) else {
+            return false;
+        };
+        match (rustix::fs::fstat(&here), rustix::fs::fstat(&above)) {
+            (Ok(here), Ok(above)) => here.st_dev != above.st_dev,
+            _ => false,
         }
     }
 }

@@ -48,6 +48,15 @@ const prepareBody = z.object({
 
 const unlockBody = z.object({ passphrase: z.string().min(8).max(512) });
 
+const adoptBody = z.object({
+  pool: POOL,
+  // DEVRALMA AYRI BİR ONAY. Ölen bir cihazdan çıkan disk hiçbir zaman düzgün bırakılmamış olur,
+  // yani kurtarmada neredeyse her zaman gerekiyor — ama aynı disk hâlâ çalışan başka bir cihazda
+  // takılıysa devralmak havuzu bozar, ve o karar kullanıcının gördüğü bir uyarının arkasında
+  // olmalı.
+  adopt: z.boolean(),
+});
+
 /**
  * Yol bileseni — ajanin `SafeComponent`iyle ayni bicim.
  *
@@ -262,6 +271,73 @@ export class BackupTargetController {
       summary: `'${parsed.data.from.join('/')}' yedekten '${parsed.data.share}/${parsed.data.to.join('/')}' konumuna geri getirildi.`,
     });
     return result;
+  }
+
+  /**
+   * Takilabilecek havuzlari sayar — kurtarmanin ilk adimi.
+   *
+   * PAROLA SORULMUYOR ve sorulamaz: bu, diskin SIFRESIZ yarisindan okunan bilgi. Sahibinin
+   * sarti *"sistem diski ve depolama diski yansa bile yedek diski eger sifre biliniyorsa
+   * kullanilabilir olmali"* — ve o yolun ilk adimi, elinde disk olan kisinin ekranda ne
+   * oldugunu gormesi.
+   */
+  @Get('recovery/scan')
+  async scan(@Req() request: AuthenticatedRequest): Promise<unknown> {
+    await this.requireAdmin(request);
+    try {
+      return await this.targets.scanImportable(randomUUID());
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
+  /**
+   * Baska bir cihazin yedek diskini bu cihaza tanitir.
+   *
+   * DOSYALAR HALA KILITLI. Bu adim yalniz taniyor: havuzu hicbir veri kumesini baglamadan
+   * takiyor ve sifresiz yarisini okuyor. Acan sey, bundan sonra `POST unlock`a girilen parola.
+   */
+  @Post('recovery/adopt')
+  @HttpCode(200)
+  async adopt(@Req() request: AuthenticatedRequest, @Body() body: unknown): Promise<unknown> {
+    const session = await this.requireAdmin(request);
+    requireSameOrigin(request);
+    const parsed = adoptBody.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.issues[0]?.message);
+
+    let view;
+    try {
+      view = await this.targets.adopt(session.organizationId, parsed.data, randomUUID());
+    } catch (error) {
+      throw this.translate(error);
+    }
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'backup.recovery-adopted',
+      target: { kind: 'pool', id: parsed.data.pool, label: view.label },
+      summary: `'${parsed.data.pool}' havuzu kurtarma diski olarak tanindi.`,
+    });
+    return view;
+  }
+
+  /** Devralinan diski birakir — fisini cekmeden onceki dogru adim. */
+  @Post('recovery/release')
+  @HttpCode(204)
+  async release(@Req() request: AuthenticatedRequest): Promise<void> {
+    const session = await this.requireAdmin(request);
+    requireSameOrigin(request);
+    const target = await this.targets.row(session.organizationId);
+    try {
+      await this.targets.release(session.organizationId, randomUUID());
+    } catch (error) {
+      throw this.translate(error);
+    }
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'backup.recovery-released',
+      target: { kind: 'pool', id: target?.pool ?? '', label: target?.label ?? '' },
+      summary: `Kurtarma diski birakildi; fisi cekilebilir.`,
+    });
   }
 
   @Patch()

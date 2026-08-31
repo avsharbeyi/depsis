@@ -2000,6 +2000,125 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
+    /// Takılabilecek havuzları listeler.
+    ///
+    /// HİÇ HAVUZ OLMAMASI BİR HATA DEĞİL, ve bu yalnız bir incelik değil: sağlıklı bir cihazda
+    /// olağan cevap tam olarak budur. `zpool import` hiç havuz bulamadığında kimi sürümlerde
+    /// sıfırdan farklı çıkıyor ve kendi cümlesini yazıyor; onu hata sayan bir ekran, hiçbir şeyin
+    /// yanlış olmadığı bir cihazda kırmızı gösterirdi.
+    fn scan_importable_pools(&self) -> Result<Response, SeamError> {
+        let out = match self.runner.run(bin::ZPOOL, &crate::backup::scan_argv()) {
+            Ok(out) => out,
+            Err(SeamError::Command { stderr, .. }) if stderr.contains("no pools available") => {
+                String::new()
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(Response::ImportablePools {
+            pools: crate::backup::parse_importable(&out)
+                .into_iter()
+                .map(|found| crate::op::ImportablePoolView {
+                    name: found.name,
+                    id: found.id,
+                    state: found.state,
+                    needs_adopt: found.needs_adopt,
+                })
+                .collect(),
+        })
+    }
+
+    /// Bir havuzu takar, DEPSIS yedek diski olduğunu doğrular, şifresiz yarısını bağlar.
+    ///
+    /// ── SIRA ÖNEMLİ ──────────────────────────────────────────────────────────────────────
+    ///
+    /// Önce `-N` ile takılıyor: hiçbir veri kümesi bağlanmıyor. Bir havuzun bağlama noktaları
+    /// havuzun KENDİ içinde yazılı, yani tanımadığımız bir havuzu olağan şekilde takmak, onun
+    /// seçtiği yerlere — `/srv/depsis` dâhil — bağlanmasına izin vermek demek.
+    ///
+    /// Sonra imza doğrulanıyor. Doğrulanmazsa havuz GERİ BIRAKILIYOR: takmak bir yan etki ve
+    /// yanlış havuzu takılı bırakmak, kullanıcının hiç istemediği bir şeyi yapmış olmak.
+    ///
+    /// En son yalnız şifresiz yarı bağlanıyor. Şifreli yarı burada bağlanmıyor ve bağlanamaz:
+    /// anahtarı yok, ve anahtar yalnız kullanıcı bir ekrana parolasını girdiği anda var oluyor.
+    fn import_backup_pool(&self, pool: &str, adopt: bool) -> Result<Response, SeamError> {
+        // BU CİHAZIN ZATEN BİR YEDEK DİSKİ VARSA REDDEDİLİYOR. İki havuzun bağlama noktaları aynı
+        // — `/yedek` ve `/yedek-bilgi` — ve ikincisini takmak, birincisini görünmez kılar. O
+        // hâlde çalışan yedeklemenin sessizce başka bir diske yazması gibi görünür.
+        if self.backup_meta_root().is_some() {
+            return Ok(Response::Refused {
+                reason: "bu cihazda zaten bağlı bir yedek diski var; önce onu çıkarın".to_string(),
+            });
+        }
+
+        self.runner.run(
+            bin::ZPOOL,
+            &borrow(&crate::backup::import_argv(pool, adopt)),
+        )?;
+
+        let listing = self
+            .runner
+            .run(bin::ZFS, &crate::pools::list_filesystems_argv())?;
+        let datasets: Vec<String> = crate::pools::parse_filesystems(&listing)
+            .into_iter()
+            .map(|fs| fs.name)
+            .collect();
+        if !crate::backup::looks_like_backup_pool(&datasets, pool) {
+            let _ = self
+                .runner
+                .run(bin::ZPOOL, &borrow(&crate::backup::export_argv(pool)));
+            return Ok(Response::Refused {
+                reason: format!("{pool} bir DEPSIS yedek diski değil; havuz olduğu gibi bırakıldı"),
+            });
+        }
+
+        // Yalnız şifresiz yarı. `canmount=on` olduğu için `-N` olmasaydı kendiliğinden bağlanırdı;
+        // burada açıkça bağlanıyor çünkü `-N` tam olarak onu engelledi.
+        self.runner.run(
+            bin::ZFS,
+            &borrow(&crate::backup::mount_argv(&crate::backup::meta_dataset(
+                pool,
+            ))),
+        )?;
+        self.backup_root_status(pool)
+    }
+
+    /// Takılı bir yedek havuzunu bırakır.
+    ///
+    /// Diskin fişini çekmeden önceki doğru adım. Cevap `backup_root_status`tan geliyor ve
+    /// bırakılmış bir havuz için "hazır değil" diyor — ki doğrusu bu: disk artık bu cihazda yok.
+    fn export_backup_pool(&self, pool: &str) -> Result<Response, SeamError> {
+        self.runner
+            .run(bin::ZPOOL, &borrow(&crate::backup::export_argv(pool)))?;
+        self.backup_root_status(pool)
+    }
+
+    /// Diskin şifresiz yarısındaki bir dosyayı okur.
+    ///
+    /// OKUNAN MİKTAR SINIRLI. O yarıya kimin ne yazdığını bilmiyoruz — parolasız yazılabilen bir
+    /// alan — ve sınırsız okumak, diski takan kişinin ajanın belleğini doldurabilmesi demek
+    /// olurdu. Sınır `backup_write_meta`nınkiyle aynı: bizim yazdığımız iki dosya birkaç kilobayt.
+    ///
+    /// GEÇERSİZ UTF-8 HATA DEĞİL, kayıpla okunuyor. Bu dosyaları bir insan ve bir kurulum ekranı
+    /// okuyor; bozuk bir bayt yüzünden hiçbir şey göstermemek, kurtarma ekranının diski hiç
+    /// tanıyamaması demek olurdu.
+    fn backup_read_meta(&self, name: &str) -> Result<Response, SeamError> {
+        let Some(meta) = self.backup_meta_root() else {
+            return Ok(Response::Refused {
+                reason: "yedek diskinin açıklama bölümü bağlı değil".to_string(),
+            });
+        };
+        let file = meta.open(&[name], OpenIntent::Read)?;
+        let mut buffer = Vec::new();
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(file, crate::op::MAX_META_BYTES as u64),
+            &mut buffer,
+        )
+        .map_err(|e| SeamError::Io(format!("read meta: {e}")))?;
+        Ok(Response::MetaFile {
+            content: String::from_utf8_lossy(&buffer).into_owned(),
+        })
+    }
+
     /// Diskin şifresiz yarısına küçük bir metin dosyası yazar.
     ///
     /// KÖKTEKİ TEK BİR DOSYA. Alt yol yok, dizin açma yok: o yarı iki dosya taşıyor ve bir ağaca
@@ -2010,7 +2129,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// olurdu. Ara alan ve atomik geçiş kullanılıyor: yarıda kesilen bir yazma, yarım bir
     /// `disk.json` bırakmıyor — ve yarım bir JSON, sihirbazın diski hiç tanıyamaması demek.
     fn backup_write_meta(&self, name: &str, content: &str) -> Result<Response, SeamError> {
-        let Some(meta) = self.backup_meta else {
+        let Some(meta) = self.backup_meta_root() else {
             return Ok(Response::Refused {
                 reason: "yedek diskinin açıklama bölümü bağlı değil".to_string(),
             });
@@ -2041,14 +2160,35 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         Ok(Response::Written {})
     }
 
-    /// Yedek ağacındaki mühürlü kök, ya da onun neden olmadığını söyleyen bir red.
+    /// Yedek ağacındaki mühürlü kök — ŞU AN bağlıysa.
     ///
-    /// `None`un iki sebebi var ve ikisi de kullanıcıya farklı bir cümle borçlu: disk hiç yok, ya
-    /// da disk KİLİTLİ. Ajan buradan ikisini ayıramıyor — kilitli bir diskte bağlama noktası
-    /// boş bir dizin — ve ayırmaya çalışmıyor: cümleyi kuran taraf, `BackupRootStatus`un
-    /// cevabını da elinde tutan API.
+    /// ── SORU HER SEFERİNDE YENİDEN SORULUYOR ─────────────────────────────────────────────
+    ///
+    /// Eskiden bu cevap açılışta bir kez alınıyordu, ve o bir kez yanlıştı. Yedek diski
+    /// kurulduğu an ajan çalışıyor oluyor: kurulumdan önce `/yedek` diye bir şey yok, kurulumdan
+    /// sonra var. Açılışta alınan cevap "yok" olarak donuyor ve ajan yeniden başlatılana kadar
+    /// öyle kalıyordu — yani kullanıcı diski kuruyor, "şimdi yedek al" diyor, ve ürün diski
+    /// bağlı değil diyordu. Terminale girmeden çıkışı da yoktu.
+    ///
+    /// ── VE "VAR" YETMİYOR ────────────────────────────────────────────────────────────────
+    ///
+    /// Kilitli bir diskte `/yedek` VAR: sistem diskinin üzerinde duran boş bir dizin. Oraya
+    /// yazmak, yedek sanılan dosyaları sistem diskine yazmak olurdu — ve disk açıldığı anda
+    /// üstüne bağlanıp hepsini görünmez kılardı. `root_ready` bu yüzden "kendi bağlama noktası
+    /// mı" diye soruyor, "duruyor mu" diye değil.
+    ///
+    /// `None`un iki sebebi hâlâ ayrı cümleler hak ediyor — disk hiç yok, ya da kilitli — ve ajan
+    /// ikisini ayırmıyor: cümleyi kuran taraf, `BackupRootStatus`un cevabını da elinde tutan API.
     fn backup_root(&self) -> Option<&'a P> {
-        self.backup
+        self.backup.filter(|root| root.root_ready())
+    }
+
+    /// Diskin şifresiz yarısındaki mühürlü kök — ŞU AN bağlıysa.
+    ///
+    /// Şifreli yarıdan bağımsız: havuz takılı olduğu sürece bu yarı bağlı, çünkü onu okuyan şey
+    /// kurulum sihirbazı ve o an henüz kimse parola girmemiş oluyor.
+    fn backup_meta_root(&self) -> Option<&'a P> {
+        self.backup_meta.filter(|root| root.root_ready())
     }
 
     /// Yedek ağacı yokken verilen tek cevap, tek yerde yazılı.
@@ -3156,6 +3296,12 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     *max_bytes,
                 )
             }
+            Request::ScanImportablePools {} => self.scan_importable_pools(),
+            Request::ImportBackupPool { pool, adopt } => {
+                self.import_backup_pool(pool.as_str(), *adopt)
+            }
+            Request::ExportBackupPool { pool } => self.export_backup_pool(pool.as_str()),
+            Request::BackupReadMeta { name } => self.backup_read_meta(name.as_str()),
             Request::BackupWriteMeta { name, content } => {
                 self.backup_write_meta(name.as_str(), content)
             }
@@ -4710,6 +4856,125 @@ mod tests {
         );
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
         assert!(!h.meta_path().join("buyuk.txt").exists());
+    }
+
+    /// Bu cihazın kendi yedek diski bağlıyken kurtarma REDDEDİLİYOR.
+    ///
+    /// İki havuzun bağlama noktaları aynı; ikincisini takmak birincisini görünmez kılar, ve o
+    /// hâlde çalışan yedekleme sessizce başka bir diske yazıyor gibi görünürdü.
+    #[test]
+    fn zaten_bagli_bir_yedek_diski_varken_kurtarma_reddediliyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"import_backup_pool","pool":"yedek","adopt":true}"#,
+            peer(API_UID),
+            "kt1",
+            "kurtarma denemesi",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        // VE HİÇBİR KOMUT KOŞMADI: reddetmek, takıp geri bırakmaktan farklı.
+        assert!(r.call(0).is_none(), "hiçbir komut koşmamalı");
+    }
+
+    /// DEPSIS yedek diski olmayan bir havuz GERİ BIRAKILIYOR.
+    ///
+    /// Takmak bir yan etki, ve kullanıcının seçtiği havuzun bu cihaza ait olduğu anlamına
+    /// gelmiyor: bilgisayarda başka ZFS havuzları da olabilir.
+    #[test]
+    fn depsis_yedek_diski_olmayan_havuz_geri_birakiliyor() {
+        let h = Harness::with_share("belgeler");
+        let r = MockCommandRunner::with_responses([String::new(), "baska\t/baska\n".to_string()]);
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"import_backup_pool","pool":"baska","adopt":false}"#,
+            peer(API_UID),
+            "kt2",
+            "yabanci havuz",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        assert_eq!(
+            &r.call(2).expect("geri birakilmali")[1..],
+            ["export", "baska"]
+        );
+    }
+
+    /// İmzası doğrulanan havuzun YALNIZ şifresiz yarısı bağlanıyor.
+    ///
+    /// Şifreli yarı burada bağlanmıyor ve bağlanamaz: anahtarı yok, ve anahtar yalnız kullanıcı
+    /// bir ekrana parolasını girdiği anda var oluyor.
+    #[test]
+    fn imzasi_dogrulanan_havuzun_yalniz_sifresiz_yarisi_bagleniyor() {
+        let h = Harness::with_share("belgeler");
+        let r = MockCommandRunner::with_responses([
+            String::new(),
+            "yedek\tnone\nyedek/veri\t/yedek\nyedek/aciklama\t/yedek-bilgi\n".to_string(),
+            String::new(),
+            String::new(),
+        ]);
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"import_backup_pool","pool":"yedek","adopt":true}"#,
+            peer(API_UID),
+            "kt3",
+            "kurtarma",
+        );
+        assert!(matches!(resp, Response::BackupRoot { .. }), "{resp:?}");
+        assert_eq!(
+            &r.call(0).expect("takilmali")[1..],
+            ["import", "-N", "-f", "yedek"]
+        );
+        assert_eq!(
+            &r.call(2).expect("baglanmali")[1..],
+            ["mount", "yedek/aciklama"]
+        );
+    }
+
+    /// Şifresiz yarıdaki dosya PAROLA SORULMADAN okunuyor — kurtarma ekranının kaynağı.
+    #[test]
+    fn aciklama_dosyasi_okunuyor() {
+        let h = Harness::with_backup("belgeler");
+        std::fs::write(h.meta_path().join("disk.json"), "{\"etiket\":\"ev\"}").expect("yazilmali");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"backup_read_meta","name":"disk.json"}"#,
+            peer(API_UID),
+            "kt4",
+            "aciklama okunuyor",
+        );
+        match resp {
+            Response::MetaFile { content } => assert_eq!(content, "{\"etiket\":\"ev\"}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Bağlı olmayan bir kök kullanılmıyor.
+    ///
+    /// Kilitli bir yedek diskinde bağlama noktası VAR — sistem diskinin üzerinde duran boş bir
+    /// dizin — ve oraya yazmak, yedek sanılan dosyaları sistem diskine yazmak olurdu.
+    #[test]
+    fn bagli_olmayan_kok_kullanilmiyor() {
+        let h = Harness::with_backup("belgeler");
+        h.backup_meta
+            .as_ref()
+            .expect("açıklama kökü kurulmalı")
+            .set_ready(false);
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"backup_read_meta","name":"disk.json"}"#,
+            peer(API_UID),
+            "kt5",
+            "bagli olmayan kok",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
     }
 
     /// Silinmiş bir dosya yedekten geri geliyor — yedeğin var olma sebebi.
