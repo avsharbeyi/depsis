@@ -235,6 +235,61 @@ describeDb('shares, against a real PostgreSQL', () => {
    * so one row nobody could see or delete stopped every share on the box from being served, and
    * uploads answered `no such file: ev`.
    */
+  /**
+   * Ve LİSTELERKEN de sahiplenir — kullanıcının gizli bir adım bilmesi gerekmeden.
+   *
+   * Sahiplenmenin tek kancası "yayımla" düğmesiydi, ve sahada bunun bedeli şu oldu: depolama
+   * hazır olmadan (Secure Boot yüzünden ZFS modülü yüklenemiyordu) kurulan bir paylaşımın satırı
+   * yazıldı, veri kümesi hiç oluşmadı, ve ürün bunu kullanıcı kendiliğinden "yeniden yayımla"
+   * diyene kadar fark etmedi. Arada dosya yüklemeyi deneyen sahip "beklenmeyen bir hata" gördü.
+   *
+   * Paylaşımlar listesi hem belirtinin çıktığı hem de çözümün arandığı ekran; onarımı buraya
+   * bağlamak, o gizli adımı ortadan kaldırıyor.
+   */
+  it('bir veri kümesi olmayan paylaşımı, listelerken de sahiplenir', async () => {
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`INSERT INTO shares (organization_id, name, dataset) VALUES ($1, 'ev', 'ev')`, [
+        orgA,
+      ]),
+    );
+
+    const { shares, calls } = service((request) =>
+      Promise.resolve<AgentResponse>(
+        request.op === 'create_dataset'
+          ? { status: 'created', dataset: request.dataset }
+          : { status: 'published', shares: 0, verified: true },
+      ),
+    );
+    const listing = await shares.list(orgA);
+
+    expect(calls.filter((c) => c.request.op === 'create_dataset')).toHaveLength(1);
+    // LİSTE TAZELENMİŞ HÂLİ TAŞIYOR: onarımı yapıp kullanıcıya hâlâ bozuk satırı göstermek,
+    // ekranın kendi yaptığı işi yalanlaması olurdu.
+    expect(listing.items.find((item) => item.name === 'ev')?.dataset).toBe(`${PARENT_DATASET}/ev`);
+  });
+
+  /**
+   * Sağlam bir kutuda liste FAZLADAN TEK ÇAĞRI YAPMIYOR.
+   *
+   * Onarımın koşulu bir veritabanı sorgusu değil, zaten elde olan satırlar; askıda bir satır
+   * yoksa hiçbir ajan çağrısı olmuyor. Bu olmadan her liste okuması bir yazma yoluna dönerdi.
+   */
+  it('askıda satır yokken listelemek ajana hiç dokunmuyor', async () => {
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`INSERT INTO shares (organization_id, name, dataset) VALUES ($1, 'ev', $2)`, [
+        orgA,
+        `${PARENT_DATASET}/ev`,
+      ]),
+    );
+
+    const { shares, calls } = service(() =>
+      Promise.resolve<AgentResponse>({ status: 'published', shares: 0, verified: true }),
+    );
+    await shares.list(orgA);
+
+    expect(calls).toHaveLength(0);
+  });
+
   it('bir veri kümesi olmayan paylaşımı, yayımlarken sahiplenir', async () => {
     await owner.withoutTenant('migration-status', (q) =>
       // Havuzdan önce açılmış satır: çıplak ad, eğik çizgi yok.
