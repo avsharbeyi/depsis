@@ -2067,9 +2067,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 .runner
                 .run(bin::ZPOOL, &borrow(&crate::backup::export_argv(pool)));
             return Ok(Response::Refused {
-                reason: format!(
-                    "{pool} bir DEPSIS yedek diski değil; havuz olduğu gibi bırakıldı"
-                ),
+                reason: format!("{pool} bir DEPSIS yedek diski değil; havuz olduğu gibi bırakıldı"),
             });
         }
 
@@ -4888,10 +4886,7 @@ mod tests {
     #[test]
     fn depsis_yedek_diski_olmayan_havuz_geri_birakiliyor() {
         let h = Harness::with_share("belgeler");
-        let r = MockCommandRunner::with_responses([
-            String::new(),
-            "baska\t/baska\n".to_string(),
-        ]);
+        let r = MockCommandRunner::with_responses([String::new(), "baska\t/baska\n".to_string()]);
         let s = MemorySink::default();
 
         let resp = agent(&r, &s, &h).handle(
@@ -4943,8 +4938,7 @@ mod tests {
     #[test]
     fn aciklama_dosyasi_okunuyor() {
         let h = Harness::with_backup("belgeler");
-        std::fs::write(h.meta_path().join("disk.json"), "{\"etiket\":\"ev\"}")
-            .expect("yazilmali");
+        std::fs::write(h.meta_path().join("disk.json"), "{\"etiket\":\"ev\"}").expect("yazilmali");
         let r = MockCommandRunner::default();
         let s = MemorySink::default();
 

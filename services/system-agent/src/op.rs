@@ -1567,10 +1567,7 @@ pub enum Request {
     /// işlenen: aynı disk hâlâ çalışan başka bir cihazda takılıysa devralmak havuzu bozar, ve bu
     /// karar kullanıcının gördüğü bir uyarının arkasında olmalı.
     #[serde(rename = "import_backup_pool")]
-    ImportBackupPool {
-        pool: SafeComponent,
-        adopt: bool,
-    },
+    ImportBackupPool { pool: SafeComponent, adopt: bool },
 
     /// Takılı bir yedek havuzunu bırakır.
     ///

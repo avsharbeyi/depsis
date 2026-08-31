@@ -860,7 +860,6 @@ impl SafePath for Openat2SafePath {
             _ => false,
         }
     }
-
 }
 
 /// Tokens from the kernel's CSPRNG.
