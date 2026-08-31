@@ -24,6 +24,10 @@
 -- ve onun cevabı tek bir satır. Bir geçmiş tablosu, hiç kimsenin açmadığı bir ekran ve her gün
 -- büyüyen bir tablo olurdu; başarısız bir doğrulama zaten denetim kaydına ve bildirime düşüyor.
 
+-- Up Migration
+
+SELECT public.assert_rls_roles_sane();
+
 ALTER TABLE public.backup_targets
   -- Turun en son kopyaladığı dosya. Doğrulama tam olarak bunu okuyor.
   --
@@ -47,3 +51,15 @@ ALTER TABLE public.backup_targets
 CREATE UNIQUE INDEX IF NOT EXISTS job_queue_one_scheduled_backup_verify
   ON public.job_queue (organization_id)
   WHERE kind = 'storage.backup.verify' AND status = 'queued';
+
+-- Down Migration
+
+DROP INDEX IF EXISTS public.job_queue_one_scheduled_backup_verify;
+
+ALTER TABLE public.backup_targets
+  DROP COLUMN IF EXISTS last_copied_share,
+  DROP COLUMN IF EXISTS last_copied_path,
+  DROP COLUMN IF EXISTS last_verified_at,
+  DROP COLUMN IF EXISTS last_verify_ok,
+  DROP COLUMN IF EXISTS last_verify_note,
+  DROP COLUMN IF EXISTS last_scrub_at;
