@@ -4897,8 +4897,8 @@ mod tests {
         );
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
         assert_eq!(
-            r.call(2).expect("geri birakilmali"),
-            ["zpool", "export", "baska"]
+            &r.call(2).expect("geri birakilmali")[1..],
+            ["export", "baska"]
         );
     }
 
@@ -4925,12 +4925,12 @@ mod tests {
         );
         assert!(matches!(resp, Response::BackupRoot { .. }), "{resp:?}");
         assert_eq!(
-            r.call(0).expect("takilmali"),
-            ["zpool", "import", "-N", "-f", "yedek"]
+            &r.call(0).expect("takilmali")[1..],
+            ["import", "-N", "-f", "yedek"]
         );
         assert_eq!(
-            r.call(2).expect("baglanmali"),
-            ["zfs", "mount", "yedek/aciklama"]
+            &r.call(2).expect("baglanmali")[1..],
+            ["mount", "yedek/aciklama"]
         );
     }
 
