@@ -5012,7 +5012,12 @@ mod tests {
 
         let resp = agent(&r, &s, &h).handle(COMPARE_REQUEST, peer(API_UID), "dg1", "dogrulama");
         match resp {
-            Response::Comparison { identical, compared_bytes, partial, .. } => {
+            Response::Comparison {
+                identical,
+                compared_bytes,
+                partial,
+                ..
+            } => {
                 assert!(identical);
                 assert_eq!(compared_bytes, 7);
                 assert!(!partial);
