@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Injectable, Logger } from '@nestjs/common';
 import { PERMISSIONS as ALL_PERMISSIONS } from '@depsis/authz';
 
@@ -426,7 +428,39 @@ export class SharesService {
    * `withTenant`, so RLS decides what is visible rather than a WHERE clause anyone could forget.
    */
   async list(organizationId: string): Promise<ShareListing> {
-    const rows = await this.rows(organizationId);
+    let rows = await this.rows(organizationId);
+
+    // ── ASKIDA KALMIŞ PAYLAŞIMLAR BURADA DA SAHİPLENİLİYOR ─────────────────────────────────
+    //
+    // Sahiplenmenin tek kancası "yayımla" düğmesiydi, ve sahada bunun bedeli şu oldu: depolama
+    // hazır olmadan kurulan bir paylaşımın satırı yazıldı, veri kümesi hiç oluşmadı, ve ürün
+    // bunu ancak kullanıcı kendiliğinden "yeniden yayımla" deyene kadar fark etmedi. Arada
+    // dosya yüklemeyi deneyen kullanıcı "beklenmeyen bir hata" gördü — ajan `no such file`
+    // diyordu, çünkü paylaşım diskte gerçekten yoktu.
+    //
+    // BU EKRAN, KUSURUN GÖRÜLDÜĞÜ EKRAN. Paylaşımlar listesi hem sorunun belirtisinin çıktığı
+    // hem de kullanıcının çözüm arayacağı yer; onarımı buraya bağlamak, kullanıcıdan gizli bir
+    // adım bilmesini istememek demek.
+    //
+    // KOŞULLU, ve koşul bir veritabanı sorgusu değil: satırlar zaten elde. Askıda bir satır
+    // yoksa — olağan hâl — fazladan tek bir çağrı bile yapılmıyor, yani liste okuması bir
+    // yazma yoluna dönüşmüyor.
+    if (rows.some((row) => !row.dataset.includes('/'))) {
+      try {
+        if ((await this.adoptPendingShares(organizationId, randomUUID())) > 0) {
+          rows = await this.rows(organizationId);
+        }
+      } catch (error) {
+        // SAHİPLENME DÜŞERSE LİSTE YİNE GELİYOR. Depolama hâlâ hazır değilse — havuz yok, ZFS
+        // yüklenemiyor — onarım yapılamaz; ama o durumda paylaşımları hiç gösterememek,
+        // kullanıcıyı bir kusurun üstüne ikinci bir kusurla oturtmak olurdu.
+        this.logger.warn(
+          `askıda paylaşımlar sahiplenilemedi: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
 
     // `isAvailable()` is the startup handshake's verdict and is not refreshed per request, so an
     // agent that died an hour ago still reads as reachable. It is still the right input: the
