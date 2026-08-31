@@ -1533,6 +1533,65 @@ pub enum Request {
         passphrase: Passphrase,
     },
 
+    /// Takılabilecek havuzları listeler. İşlenen YOK.
+    ///
+    /// ── YANMIŞ CİHAZ ─────────────────────────────────────────────────────────────────────
+    ///
+    /// Cihazın sahibinin şartı: *"sistem diski ve depolama diski yansa bile yedek diski eğer
+    /// şifre biliniyorsa kullanılabilir olmalı."* Bu işlem o cümlenin ilk adımı: yeni bir cihaza
+    /// takılan diskte ne olduğunu, hiçbir parola sorulmadan, söylüyor.
+    ///
+    /// Kimlik bilgisi TAŞIMIYOR. Havuz adı, durumu ve devralma gerekip gerekmediği; kullanıcı
+    /// adı, kuruluş adı, paylaşım adı yok — o bilgiler diskin şifreli yarısında ve orada
+    /// kalıyorlar.
+    #[serde(rename = "scan_importable_pools")]
+    ScanImportablePools {},
+
+    /// Bir havuzu, hiçbir veri kümesini bağlamadan takar; DEPSIS yedek diskiyse şifresiz yarısını
+    /// bağlar.
+    ///
+    /// ── TAKMAK BİR YAN ETKİ, VE GERİ ALINIYOR ────────────────────────────────────────────
+    ///
+    /// Kullanıcının bir havuzu seçmesi, o havuzun bu cihaza ait olduğu anlamına gelmiyor:
+    /// bilgisayarda başka ZFS havuzları da olabilir. Bu yüzden takma `-N` ile, yani hiçbir şey
+    /// bağlanmadan yapılıyor; havuzun DEPSIS yedek diski olduğu veri kümelerinin adlarından
+    /// doğrulanıyor; ve doğrulanmazsa havuz GERİ BIRAKILIYOR.
+    ///
+    /// Doğrulama neden dosya okuyarak değil: şifresiz yarıdaki dosyaları diski eline geçiren
+    /// herkes yazabilir, veri kümelerinin adları ise havuzun kendi yapısı.
+    ///
+    /// ── DEVRALMA ─────────────────────────────────────────────────────────────────────────
+    ///
+    /// `adopt`, `zpool import -f` demek. Ölen bir cihazdan çıkan disk hiçbir zaman düzgün
+    /// bırakılmış olmuyor, o yüzden kurtarmada neredeyse her zaman gerekiyor. Yine de ayrı bir
+    /// işlenen: aynı disk hâlâ çalışan başka bir cihazda takılıysa devralmak havuzu bozar, ve bu
+    /// karar kullanıcının gördüğü bir uyarının arkasında olmalı.
+    #[serde(rename = "import_backup_pool")]
+    ImportBackupPool {
+        pool: SafeComponent,
+        adopt: bool,
+    },
+
+    /// Takılı bir yedek havuzunu bırakır.
+    ///
+    /// Diskin fişini çekmeden önceki doğru adım, ve kurtarmadan vazgeçen kullanıcının çıkış yolu.
+    /// Şifreli yarının anahtarı da havuzla birlikte gidiyor — yani bırakmak, kilitlemenin
+    /// tamamlanmış hâli.
+    #[serde(rename = "export_backup_pool")]
+    ExportBackupPool { pool: SafeComponent },
+
+    /// Diskin şifresiz yarısındaki bir dosyayı okur.
+    ///
+    /// PAROLA SORULMADAN. `backup_write_meta`nın karşılığı: orada `OKUBENI.txt` ve `disk.json`
+    /// duruyor, ve ikincisi kurtarma ekranının "bu disk hangi cihazın, en son ne zaman yedek
+    /// aldı" sorusuna verdiği cevabın kaynağı.
+    ///
+    /// Kökteki tek bir dosya, ve okunan miktar `MAX_META_BYTES` ile sınırlı — o yarıya kim
+    /// yazdığını bilmediğimiz bir dosya konmuş olabilir, ve sınırsız okumak, diski takan kişinin
+    /// belleğimizi doldurabilmesi demek olurdu.
+    #[serde(rename = "backup_read_meta")]
+    BackupReadMeta { name: SafeComponent },
+
     /// Yedek diski hazır mı, kilitli mi, ne kadar yeri var.
     ///
     /// Yedekleme turunun İLK sorusu. Anahtar yüklü değilse tur koşmuyor — ve bu bir hata değil,
@@ -2256,6 +2315,21 @@ pub struct ZeroTierPeer {
     pub direct: bool,
 }
 
+/// `zpool import` çıktısındaki bir havuz, dışarıya anlatılan hâli.
+///
+/// `state` ZFS'İN KENDİ KELİMESİ, çevrilmeden geçiyor. `DEGRADED` bir havuzdan dosya
+/// kurtarılabilir ve `FAULTED` bir havuzdan çoğu zaman kurtarılamaz; bu ikisini "sorunlu" diye
+/// tek kelimeye indirmek, kullanıcıya yapabileceği ile yapamayacağını ayırt ettirmemek olurdu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImportablePoolView {
+    pub name: String,
+    pub id: String,
+    pub state: String,
+    /// Havuz düzgün bırakılmamış; takmak için devralmak gerekiyor.
+    pub needs_adopt: bool,
+}
+
 /// One snapshot on the wire.
 ///
 /// Its own type rather than `snapshots::SnapshotInfo` for the reason every other wire type here is
@@ -2691,6 +2765,16 @@ pub enum Response {
         temperature_celsius: Option<i32>,
         raw: String,
     },
+    /// Takılabilecek havuzlar.
+    ///
+    /// Boş liste bir hata değil: takılabilecek havuzun olmaması, cihazın olağan hâli.
+    ImportablePools {
+        pools: Vec<ImportablePoolView>,
+    },
+    /// Diskin şifresiz yarısındaki bir dosyanın içeriği.
+    MetaFile {
+        content: String,
+    },
     Pools {
         pools: Vec<String>,
     },
@@ -3023,6 +3107,11 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 36, kurtarma işlemleriyle: `scan_importable_pools`, `import_backup_pool`,
+/// `export_backup_pool`, `backup_read_meta`. Yanmış bir cihazdan çıkan diskin yeni bir cihazda
+/// TERMİNALSİZ açılabilmesi. Disk kendini anlatıyordu (35) ama anlattığı tek yol `zpool import`
+/// yazmaktı.
+///
 /// 35, `backup_write_meta` ile: diskin şifresiz yarısına yazma. O yarı vardı ve BOŞTU — yani
 /// "kendini anlatan disk" bir iddiaydı ve karşılığı yoktu.
 ///
@@ -3053,7 +3142,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 35;
+pub const SCHEMA_VERSION: u32 = 36;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

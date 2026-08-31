@@ -37,8 +37,9 @@ function okubeni(label: string): string {
     'bilmeniz gerekiyor; DEPSIS onu hicbir yerde saklamiyor.',
     '',
     'EN KOLAY YOL',
-    '  Diski bir DEPSIS cihazina takin ve tarayicidan cihazin adresine gidin. Ekran diski',
-    '  taniyacak ve sifreyi soracak.',
+    '  Diski bir DEPSIS cihazina takin, tarayicidan cihazin adresine gidin ve YEDEKLEME',
+    '  ekraninda "Elimde bir yedek diski var" deyin. Ekran diski taniyacak, etiketini ve son',
+    '  yedek tarihini gosterecek, sonra sifrenizi soracak. Terminale hic girmeniz gerekmiyor.',
     '',
     'DEPSIS CIHAZINIZ YOKSA',
     '  ZFS kurulu herhangi bir Linux bilgisayarda (ZFS 2.1 ve ustu):',
@@ -317,6 +318,169 @@ export class BackupTargetService {
     const updated = await this.row(organizationId);
     if (updated === null) throw new Error('yedek hedefi güncellendi ama geri okunamadı');
     return updated;
+  }
+
+  /**
+   * Takılabilecek havuzlar — kurtarmanın ilk adımı.
+   *
+   * ── SAHİBİNİN ALTINCI ŞARTI ──────────────────────────────────────────────────────────────
+   *
+   * *"Sistem diski ve depolama diski yansa bile yedek diski eğer şifre biliniyorsa
+   * kullanılabilir olmalı."* Bu, o cümlenin terminalsiz yarısı: yeni bir cihaza takılan diskte
+   * ne olduğunu, hiçbir parola sorulmadan, ekranda göstermek.
+   *
+   * KURULUŞA BAĞLI DEĞİL, çünkü olamaz: takılan disk başka bir cihazın diski ve bu cihazın
+   * veritabanında ona ait hiçbir satır yok. Yetki kontrolü denetleyicide, yönetici olma şartıyla.
+   */
+  async scanImportable(correlationId: string): Promise<{
+    pools: { name: string; state: string; needsAdopt: boolean }[];
+  }> {
+    const response = await this.agent.call(
+      { op: 'scan_importable_pools' },
+      'takılabilecek havuzlar taranıyor',
+      correlationId,
+    );
+    if (response.status === 'refused' || response.status === 'failed') {
+      throw new BackupAgentRefusedError(response.reason);
+    }
+    const found = expectStatus(response, 'importable_pools');
+    return {
+      pools: found.pools.map((pool) => ({
+        name: pool.name,
+        state: pool.state,
+        needsAdopt: pool.needs_adopt,
+      })),
+    };
+  }
+
+  /**
+   * Başka bir cihazın yedek diskini bu cihaza tanıtır.
+   *
+   * ── PAROLA BURADA SORULMUYOR ─────────────────────────────────────────────────────────────
+   *
+   * Bu adım diski yalnız TANIYOR: havuzu hiçbir veri kümesini bağlamadan takıyor, DEPSIS yedek
+   * diski olduğunu veri kümelerinin adlarından doğruluyor ve şifresiz yarısını okuyor. Dosyalar
+   * hâlâ kilitli; onları açan şey bir sonraki adımda girilen parola.
+   *
+   * Ayrı iki adım olmasının sebebi kullanıcının gördüğü şey: parolayı sormadan önce ekranın
+   * "bu, X etiketli cihazın 12 Ağustos'ta aldığı yedek" diyebilmesi gerekiyor. Yanlış diski
+   * taktığını, parolasını yazdıktan sonra öğrenmemeli.
+   *
+   * ── SATIR KURTARMA KİPİNDE ───────────────────────────────────────────────────────────────
+   *
+   * `recovery_only`, ve bu bayrak bir ayar değil bir koruma: yedekleme turu bu diske YAZMIYOR.
+   * Yazsaydı, başka bir cihazın yedeğini bu cihaza göre "düzeltir" — yani yeni cihazda henüz
+   * olmayan her şeyi silinmiş sayıp silinenler klasörüne taşırdı, ki kurtarmaya gelen kişinin
+   * geri almak istediği şey tam olarak o dosyalar.
+   */
+  async adopt(
+    organizationId: string,
+    input: { pool: string; adopt: boolean },
+    correlationId: string,
+  ): Promise<BackupTargetView & { lastBackupAt: string | null }> {
+    // ZATEN BİR DİSK VARSA REDDEDİLİYOR. Ajan da reddediyor (iki havuzun bağlama noktaları
+    // aynı), ama buradaki cümle kullanıcıya ne yapması gerektiğini söyleyen cümle.
+    const existing = await this.row(organizationId);
+    if (existing !== null) {
+      throw new BackupAgentRefusedError(
+        'bu cihazda zaten bir yedek diski kurulu; kurtarma için önce onu kaldırın',
+      );
+    }
+
+    const response = await this.agent.call(
+      { op: 'import_backup_pool', pool: input.pool, adopt: input.adopt },
+      `yedek diski tanınıyor (${input.pool})`,
+      correlationId,
+    );
+    if (response.status === 'refused' || response.status === 'failed') {
+      throw new BackupAgentRefusedError(response.reason);
+    }
+    const status = expectStatus(response, 'backup_root');
+
+    const described = await this.readDiskDescription(correlationId);
+    const label = described?.etiket ?? input.pool;
+
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `INSERT INTO public.backup_targets
+                (organization_id, pool, label, recovery_only, enabled, device_id)
+              VALUES ($1, $2, $3, true, false, $4)`,
+        [organizationId, input.pool, label, described?.cihazId ?? null],
+      ),
+    );
+    this.logger.log(`kurtarma: ${input.pool} tanındı (${label})`);
+
+    const row = await this.row(organizationId);
+    if (row === null) throw new Error('kurtarma satırı yazıldı ama geri okunamadı');
+    return {
+      ...row,
+      prepared: status.prepared,
+      unlocked: status.key_loaded && status.mounted,
+      availableBytes: Number(status.available_bytes),
+      usedBytes: Number(status.used_bytes),
+      lastBackupAt: described?.sonYedek ?? null,
+    };
+  }
+
+  /**
+   * Devralınan diski bırakır — fişini çekmeden önceki doğru adım.
+   *
+   * YALNIZ KURTARMA DİSKLERİ. Cihazın kendi yedek diskini bırakmak, ayarlarını da silmek olurdu;
+   * onun karşılığı kilitlemek.
+   */
+  async release(organizationId: string, correlationId: string): Promise<void> {
+    const row = await this.row(organizationId);
+    if (row === null) throw new NoBackupTargetError();
+    if (!row.recoveryOnly) {
+      throw new BackupAgentRefusedError('bu cihazın kendi yedek diski; çıkarmak yerine kilitleyin');
+    }
+
+    const response = await this.agent.call(
+      { op: 'export_backup_pool', pool: row.pool },
+      `kurtarma diski bırakılıyor (${row.pool})`,
+      correlationId,
+    );
+    if (response.status === 'refused' || response.status === 'failed') {
+      throw new BackupAgentRefusedError(response.reason);
+    }
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(`DELETE FROM public.backup_targets WHERE id = $1::uuid`, [row.id]),
+    );
+    this.logger.log(`kurtarma diski bırakıldı: ${row.pool}`);
+  }
+
+  /**
+   * Diskin şifresiz yarısındaki `disk.json`u okur.
+   *
+   * OKUNAMAMASI HATA DEĞİL. Dosya, diskin kendini anlatan yarısında ve orayı DEPSIS yazıyor —
+   * ama v0.2.1'den önce kurulmuş bir diskte o yarı BOŞ. Böyle bir diski tanımayı reddetmek,
+   * kurtarmayı tam da en çok gereken durumda çalışmaz kılardı; etiket yerine havuz adı gösterilip
+   * devam ediliyor.
+   */
+  private async readDiskDescription(
+    correlationId: string,
+  ): Promise<{ etiket?: string; cihazId?: string; sonYedek?: string } | null> {
+    try {
+      const response = await this.agent.call(
+        { op: 'backup_read_meta', name: 'disk.json' },
+        'yedek diskinin açıklaması okunuyor',
+        correlationId,
+      );
+      if (response.status === 'refused' || response.status === 'failed') return null;
+      const file = expectStatus(response, 'meta_file');
+      const parsed: unknown = JSON.parse(file.content);
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      const record = parsed as Record<string, unknown>;
+      return {
+        ...(typeof record['etiket'] === 'string' ? { etiket: record['etiket'] } : {}),
+        ...(typeof record['cihazId'] === 'string' ? { cihazId: record['cihazId'] } : {}),
+        ...(typeof record['sonYedek'] === 'string' ? { sonYedek: record['sonYedek'] } : {}),
+      };
+    } catch {
+      // JSON bozuksa ya da ajan cevap vermediyse: etiketsiz devam. Diskin tanınması, açıklama
+      // dosyasının sağlamlığına bağlı olmamalı.
+      return null;
+    }
   }
 
   /**

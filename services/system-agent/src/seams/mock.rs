@@ -99,6 +99,13 @@ pub struct MockSafePath {
     /// the part that does discriminate; that what it returns is swap-proof is asserted against a
     /// real kernel in `unix.rs`.
     command_paths: std::sync::Mutex<usize>,
+    /// `root_ready` ne cevaplasın.
+    ///
+    /// Gerçekte bu soru çekirdeğe soruluyor ve cevabı diskin o anki hali veriyor. Taşınabilir bir
+    /// testte bağlama noktası kurulamaz, o yüzden burada AYARLANIYOR: testlerin ölçtüğü şey
+    /// ajanın cevaba nasıl davrandığı — bağlı değilken yazmayı reddetmesi — ve o davranış
+    /// çekirdekten bağımsız.
+    ready: std::sync::Mutex<bool>,
 }
 
 impl MockSafePath {
@@ -109,6 +116,7 @@ impl MockSafePath {
             modes: std::sync::Mutex::new(Vec::new()),
             last_dir: std::sync::Mutex::new(None),
             command_paths: std::sync::Mutex::new(0),
+            ready: std::sync::Mutex::new(true),
         }
     }
 
@@ -154,6 +162,15 @@ impl MockSafePath {
             p.push(component);
         }
         Ok(p)
+    }
+}
+
+impl MockSafePath {
+    /// Kökü "bağlı değil" hâline getirir — kilitli ya da hiç takılmamış bir yedek diski.
+    pub fn set_ready(&self, ready: bool) {
+        if let Ok(mut slot) = self.ready.lock() {
+            *slot = ready;
+        }
     }
 }
 
@@ -502,6 +519,10 @@ impl SafePath for MockSafePath {
             }
             Err(e) => Err(SeamError::Io(format!("rmdir {name}: {e}"))),
         }
+    }
+
+    fn root_ready(&self) -> bool {
+        self.ready.lock().map(|slot| *slot).unwrap_or(false)
     }
 }
 

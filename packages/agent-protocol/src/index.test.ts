@@ -66,6 +66,7 @@ describe('the emitted agent schema', () => {
       // network id is welded to it — a new identity means the household permanently loses
       // remote access to its own appliance.
       'backup_node_identity',
+      'backup_read_meta',
       // Ozyineleme YOK: dolu bir dizin `Conflict` ile geri geliyor ve agaci cagiran taraf
       // yuruyor. Kok yetkiyle kosan bir surecte `rm -r`nin karsiligi olan bir islem, tek bir
       // yanlis operandla butun yedegi silerdi.
@@ -117,6 +118,13 @@ describe('the emitted agent schema', () => {
       // hashes, sealed TOTP secrets and NT hashes, and a share would hand all of them to
       // anybody holding `download` on it.
       'dump_database',
+      // KURTARMA. Yanmis bir cihazdan cikan yedek diskinin yeni bir cihazda acilmasi, ve o yolun
+      // TERMINALSIZ olmasi: `scan_importable_pools` takilabilecek havuzlari sayiyor,
+      // `import_backup_pool` hicbir veri kumesini baglamadan takip imzayi dogruluyor,
+      // `export_backup_pool` geri birakiyor. Ucu de parola ISTEMIYOR -- parola yalniz sifreli
+      // yarinin acilmasinda, `load_backup_key`te geciyor.
+      'export_backup_pool',
+      'import_backup_pool',
       // Rename and relocate, one `renameat2(RENAME_NOREPLACE)` on two descriptors the agent
       // resolved itself. Named for the entry rather than for the syscall because the API asks for
       // an outcome, and because `rename` in this product already means the metadata-only kind.
@@ -195,6 +203,7 @@ describe('the emitted agent schema', () => {
       'replicate_offsite',
       'restore_file_from_backup',
       'restore_from_snapshot',
+      'scan_importable_pools',
       // The one operation that touches a share root's MODE, and the reason it is separate from
       // `create_dataset`. `zfs create` leaves a mountpoint at 0755 root:root and `apply_folder_acl`
       // refuses to touch the user::/group::/other:: triple, so every share root was `other::r-x`
@@ -356,7 +365,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(35);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(36);
   });
 
   it('agrees with the number the agent actually reports', () => {

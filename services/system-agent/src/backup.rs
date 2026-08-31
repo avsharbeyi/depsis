@@ -153,6 +153,136 @@ pub struct DatasetState {
     pub key_loaded: bool,
 }
 
+/// Takılabilecek havuzları listeleyen argv. İşlenen YOK.
+///
+/// `zpool import`, operand olmadan, o an takılı OLMAYAN ama diskleri görünen havuzları anlatıyor.
+/// Yanmış bir cihazın diskini yeni bir cihaza takan kişinin ilk sorusu bu: "bu diskte ne var?"
+///
+/// `-H` YOK, çünkü bu komutta yok. Çıktı düzyazı ve bu tasarımın bir zayıflığı, bir tercihi değil;
+/// `parse_importable` bu yüzden tanımadığı her satırı SESSİZCE ATIYOR ve yalnız tanıdığı üç alanı
+/// okuyor — düzyazının değişmesi, olmayan bir havuzun uydurulmasına değil, bir havuzun
+/// görünmemesine yol açsın diye.
+pub fn scan_argv() -> [&'static str; 1] {
+    ["import"]
+}
+
+/// Bir havuzu, HİÇBİR VERİ KÜMESİNİ BAĞLAMADAN takan argv.
+///
+/// ── `-N` NEDEN ZORUNLU ───────────────────────────────────────────────────────────────────────
+///
+/// Bir havuzun bağlama noktaları havuzun KENDİ içinde yazılı. Yani tanımadığımız bir havuzu
+/// olağan şekilde takmak, o havuzun seçtiği yerlere — `/srv/depsis` dâhil — bağlanmasına izin
+/// vermek demek. Bu cihazın kendi paylaşım ağacının üstüne başka bir cihazın verisinin
+/// bağlanması, "kurtarma" adı altında yapılabilecek en kötü şey olurdu.
+///
+/// `-N` ile hiçbir şey bağlanmıyor. Havuzun DEPSIS yedek diski olduğu doğrulandıktan sonra,
+/// yalnız beklenen iki veri kümesi, yalnız beklenen iki noktaya, tek tek bağlanıyor.
+///
+/// ── `-f` NEDEN AYRI BİR İŞLENEN ──────────────────────────────────────────────────────────────
+///
+/// Ölen bir cihazdan çıkan disk hiçbir zaman düzgün "export" edilmiş olmuyor, ve ZFS bunu
+/// "başka bir sistem tarafından kullanılıyordu" diye reddediyor. Doğru cevap çoğu zaman devralmak
+/// — ama HER ZAMAN değil: aynı disk hâlâ çalışan başka bir cihazda takılıysa, iki cihazın aynı
+/// havuza yazması havuzu bozar. Bu yüzden devralma kullanıcının gördüğü ve onayladığı bir adım,
+/// ajanın kendiliğinden verdiği bir karar değil.
+pub fn import_argv(pool: &str, adopt: bool) -> Vec<String> {
+    let mut argv = vec!["import".to_string(), "-N".to_string()];
+    if adopt {
+        argv.push("-f".to_string());
+    }
+    argv.push(pool.to_string());
+    argv
+}
+
+/// Havuzu bırakan argv.
+///
+/// Takılan havuzun DEPSIS yedek diski OLMADIĞI anlaşıldığında geri alma adımı: takmak bir yan
+/// etki ve yanlış havuzu takılı bırakmak, kullanıcının hiç istemediği bir şeyi yapmış olmak.
+pub fn export_argv(pool: &str) -> Vec<String> {
+    vec!["export".to_string(), pool.to_string()]
+}
+
+/// `zpool import` çıktısındaki bir havuz.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportablePool {
+    pub name: String,
+    pub id: String,
+    /// `ONLINE`, `DEGRADED`, `FAULTED`, `UNAVAIL` — ZFS'in kendi kelimesi, çevrilmeden.
+    pub state: String,
+    /// Havuz düzgün bırakılmamış; takmak için devralmak gerekiyor.
+    pub needs_adopt: bool,
+}
+
+/// `zpool import` düzyazısını okur.
+///
+/// TANIMADIĞI HER SATIR ATILIYOR. Bu komutun betikler için bir biçimi yok ve çıktısı sürümler
+/// arasında değişiyor; tanımadığı bir satırda hata vermek, ZFS'in bir gün fazladan bir satır
+/// yazmasıyla kurtarma ekranının tamamen çalışmaz olması demekti. Tersi de doğru: eksik okunan bir
+/// kayıt bir havuzun GÖRÜNMEMESİNE yol açar, ki kullanıcı bunu ekranda fark eder ve düzeltilebilir
+/// — uydurulmuş bir havuz adı ise fark edilmez.
+///
+/// Boşluk içeren bir ad okunmuyor: havuz adları boşluk içeremiyor, ve `zpool` hiç havuz yokken
+/// düzyazı yazıyor ("no pools available to import").
+pub fn parse_importable(out: &str) -> Vec<ImportablePool> {
+    let mut found: Vec<ImportablePool> = Vec::new();
+    let mut name: Option<String> = None;
+    let mut id = String::new();
+    let mut state = String::new();
+    let mut adopt = false;
+
+    fn flush(
+        found: &mut Vec<ImportablePool>,
+        name: &mut Option<String>,
+        id: &mut String,
+        state: &mut String,
+        adopt: &mut bool,
+    ) {
+        if let Some(name) = name.take() {
+            found.push(ImportablePool {
+                name,
+                id: std::mem::take(id),
+                state: std::mem::take(state),
+                needs_adopt: *adopt,
+            });
+        }
+        *adopt = false;
+    }
+
+    for line in out.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("pool:") {
+            // Yeni kayıt: öncekini kapat.
+            flush(&mut found, &mut name, &mut id, &mut state, &mut adopt);
+            let value = value.trim();
+            if !value.is_empty() && !value.contains(char::is_whitespace) {
+                name = Some(value.to_string());
+            }
+        } else if let Some(value) = trimmed.strip_prefix("id:") {
+            id = value.trim().to_string();
+        } else if let Some(value) = trimmed.strip_prefix("state:") {
+            state = value.trim().to_string();
+        } else if trimmed.contains("another system") || trimmed.contains("'-f' flag") {
+            // `status:` ve `action:` satırları; ikisi de aynı şeyi söylüyor ve hangisinin
+            // yazılacağı ZFS sürümüne göre değişiyor.
+            adopt = true;
+        }
+    }
+    flush(&mut found, &mut name, &mut id, &mut state, &mut adopt);
+    found
+}
+
+/// Takılan havuzun DEPSIS yedek diski olup olmadığı.
+///
+/// İMZA, İKİ VERİ KÜMESİNİN VARLIĞI. `<havuz>/veri` ve `<havuz>/aciklama` birlikte yalnız
+/// `PrepareBackupRoot` tarafından kuruluyor; ikisi birden varsa bu disk bir DEPSIS yedek diski.
+/// Dosya okuyarak karar vermek daha zayıf olurdu: şifresiz yarıdaki dosyaları herkes yazabilir,
+/// veri kümelerinin adları ise havuzun kendi yapısı.
+pub fn looks_like_backup_pool(datasets: &[String], pool: &str) -> bool {
+    let data = data_dataset(pool);
+    let meta = meta_dataset(pool);
+    datasets.iter().any(|name| name == &data) && datasets.iter().any(|name| name == &meta)
+}
+
 /// `zfs list -H -p -o name,mounted,keystatus,available,used` çıktısının TEK satırını okur.
 ///
 /// Tek satır bekleniyor ve fazlası HATA: `zfs list` bir veri kümesi adı verildiğinde tam olarak
@@ -215,6 +345,100 @@ pub fn parse_state(out: &str) -> Result<DatasetState, SeamError> {
 )]
 mod tests {
     use super::*;
+
+    /// `zpool import`in düzyazısı okunuyor: ad, kimlik, durum, ve devralma gerekip gerekmediği.
+    #[test]
+    fn takilabilecek_havuzlar_okunuyor() {
+        let out = "   pool: yedek
+     id: 12345678901234567890
+  state: ONLINE
+ action: The pool can be imported using its name or numeric identifier.
+ config:
+
+\tyedek       ONLINE
+\t  sdb       ONLINE
+";
+        let found = parse_importable(out);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "yedek");
+        assert_eq!(found[0].id, "12345678901234567890");
+        assert_eq!(found[0].state, "ONLINE");
+        assert!(!found[0].needs_adopt);
+    }
+
+    /// Ölen bir cihazdan çıkan disk düzgün bırakılmamış olur, ve ZFS bunu söyler.
+    ///
+    /// Kurtarmanın olağan hâli tam olarak bu, ve ekranın devralma uyarısını gösterip
+    /// göstermeyeceği buradan çıkıyor.
+    #[test]
+    fn duzgun_birakilmamis_havuz_devralma_istiyor() {
+        let out = "   pool: yedek
+     id: 9
+  state: ONLINE
+ status: The pool was last accessed by another system.
+ action: The pool can be imported using its name or numeric identifier and
+\tthe '-f' flag.
+";
+        let found = parse_importable(out);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].needs_adopt);
+    }
+
+    /// İki havuz iki kayıt, ve devralma bayrağı ÖNCEKİ kayıttan taşmıyor.
+    ///
+    /// Taşsaydı, sağlıklı bir diskin yanına takılan bozuk bir disk yüzünden kullanıcıya gereksiz
+    /// bir devralma uyarısı gösterilirdi — ve o uyarıya alışan kişi, gerçekten tehlikeli olan
+    /// durumda da onu geçer.
+    #[test]
+    fn devralma_bayragi_kayitlar_arasinda_tasmiyor() {
+        let out = "   pool: eski
+     id: 1
+  state: ONLINE
+ status: The pool was last accessed by another system.
+
+   pool: yeni
+     id: 2
+  state: ONLINE
+";
+        let found = parse_importable(out);
+        assert_eq!(found.len(), 2);
+        assert!(found[0].needs_adopt);
+        assert!(!found[1].needs_adopt, "ikinci havuz devralma istemiyor");
+    }
+
+    /// `zpool`un kendi düzyazısı havuz adı olarak okunmuyor.
+    #[test]
+    fn hic_havuz_yoksa_liste_bos() {
+        assert!(parse_importable("no pools available to import\n").is_empty());
+        assert!(parse_importable("").is_empty());
+    }
+
+    /// `-N` HER ZAMAN var: bir havuzun bağlama noktaları havuzun kendi içinde yazılı, ve
+    /// tanımadığımız bir havuzu olağan şekilde takmak onun `/srv/depsis`e bağlanmasına izin
+    /// vermek demek.
+    #[test]
+    fn takma_hicbir_veri_kumesini_baglamiyor() {
+        assert_eq!(import_argv("yedek", false), ["import", "-N", "yedek"]);
+        assert_eq!(import_argv("yedek", true), ["import", "-N", "-f", "yedek"]);
+    }
+
+    /// İmza iki veri kümesinin birlikte var olması. Biri yetmiyor.
+    #[test]
+    fn imza_iki_veri_kumesinin_varligi() {
+        let full = vec![
+            "yedek".to_string(),
+            "yedek/veri".to_string(),
+            "yedek/aciklama".to_string(),
+        ];
+        assert!(looks_like_backup_pool(&full, "yedek"));
+
+        let half = vec!["yedek".to_string(), "yedek/veri".to_string()];
+        assert!(!looks_like_backup_pool(&half, "yedek"));
+
+        // Başka bir havuzun aynı adlı veri kümeleri bu havuzu DEPSIS yedek diski yapmıyor.
+        let other = vec!["baska/veri".to_string(), "baska/aciklama".to_string()];
+        assert!(!looks_like_backup_pool(&other, "yedek"));
+    }
 
     #[test]
     fn iki_veri_kumesi_havuzun_altinda() {

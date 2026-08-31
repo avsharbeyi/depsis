@@ -427,6 +427,22 @@ export type AgentRequest =
       pool: SafeComponent;
     }
   | {
+      op: 'scan_importable_pools';
+    }
+  | {
+      adopt: boolean;
+      op: 'import_backup_pool';
+      pool: SafeComponent;
+    }
+  | {
+      op: 'export_backup_pool';
+      pool: SafeComponent;
+    }
+  | {
+      name: SafeComponent;
+      op: 'backup_read_meta';
+    }
+  | {
       op: 'backup_root_status';
       pool: SafeComponent;
     }
@@ -1222,6 +1238,14 @@ export type AgentResponse =
       temperature_celsius?: number | null;
     }
   | {
+      pools: ImportablePoolView[];
+      status: 'importable_pools';
+    }
+  | {
+      content: string;
+      status: 'meta_file';
+    }
+  | {
       pools: string[];
       status: 'pools';
     }
@@ -1599,6 +1623,22 @@ export interface SnapshotEntry {
    * What destroying it would free — not what it "contains". See `snapshots::SnapshotInfo`.
    */
   used_bytes: number;
+}
+/**
+ * `zpool import` çıktısındaki bir havuz, dışarıya anlatılan hâli.
+ *
+ * `state` ZFS'İN KENDİ KELİMESİ, çevrilmeden geçiyor. `DEGRADED` bir havuzdan dosya
+ * kurtarılabilir ve `FAULTED` bir havuzdan çoğu zaman kurtarılamaz; bu ikisini "sorunlu" diye
+ * tek kelimeye indirmek, kullanıcıya yapabileceği ile yapamayacağını ayırt ettirmemek olurdu.
+ */
+export interface ImportablePoolView {
+  id: string;
+  name: string;
+  /**
+   * Havuz düzgün bırakılmamış; takmak için devralmak gerekiyor.
+   */
+  needs_adopt: boolean;
+  state: string;
 }
 /**
  * A disk named twice: the stable link to use, and the WWN it must still be.

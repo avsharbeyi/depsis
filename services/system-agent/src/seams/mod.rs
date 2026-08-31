@@ -406,6 +406,30 @@ pub trait SafePath {
     /// `EISDIR` and harmless, while a caller that meant "file" and reached a directory should hear
     /// about it rather than have the agent guess.
     fn remove_dir(&self, dir: &[&str], name: &str) -> Result<bool, SeamError>;
+
+    /// Bu mühürlü kök ŞU AN kendi bağlama noktası mı.
+    ///
+    /// ── SORUNUN ZAMANI ───────────────────────────────────────────────────────────────────
+    ///
+    /// Kökün var olup olmadığı AÇILIŞTA sorulacak bir soru değil. Yedek diski açılışta yok
+    /// olabilir ve bir dakika sonra kurulmuş olabilir; ya da açılışta kilitli olur ve kullanıcı
+    /// parolayı girince bağlanır. Bir kez sorulup saklanan cevap, o iki durumu da "disk yok"
+    /// olarak dondurur — ve ajan yeniden başlatılana kadar öyle kalır.
+    ///
+    /// ── NEDEN "VAR MI" DEĞİL DE "KENDİ BAĞLAMA NOKTASI MI" ────────────────────────────────
+    ///
+    /// Çünkü kilitli bir yedek diskinde bağlama noktası VAR: `/yedek` boş bir dizin olarak
+    /// sistem diskinin üzerinde duruyor. Oraya yazmak, kullanıcının yedek sandığı dosyaları
+    /// sistem diskine yazmak demek — hem yedek alınmamış olur hem de görünmez, çünkü disk
+    /// açıldığı anda o dizinin üstüne bağlanır ve altındakiler kaybolur.
+    ///
+    /// Bir dizinin kendi bağlama noktası olması, dizinin aygıt numarasının `..`ınkinden farklı
+    /// olması demek. Bu ZFS'e özel bir bilgi değil, çekirdeğin her dosya sistemi için verdiği
+    /// cevap.
+    ///
+    /// `Result` değil `bool`: cevabın "hayır" olması bir arıza değil, kilitli bir diskin olağan
+    /// hali. Okunamayan bir kök de "hayır" — üstüne yazmamak için bilmemiz gereken tek şey bu.
+    fn root_ready(&self) -> bool;
 }
 
 /// Where unguessable values come from.

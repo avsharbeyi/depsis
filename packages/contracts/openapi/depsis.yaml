@@ -3069,6 +3069,81 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /backups/target/recovery/scan:
+    get:
+      tags: [system]
+      summary: Takilabilecek yedek disklerini tara
+      description: |
+        KURTARMANIN ILK ADIMI, ve sahibinin altinci sartinin terminalsiz yarisi: *"sistem diski ve
+        depolama diski yansa bile yedek diski eger sifre biliniyorsa kullanilabilir olmali."*
+
+        Yanmis bir cihazdan cikan disk yeni bir cihaza takildiginda, bu uc onu goruyor. PAROLA
+        SORULMUYOR ve sorulamaz: burada okunan sey havuzun kendi yapisi, sifreli yarinin icerigi
+        degil.
+
+        `needsAdopt`, havuzun duzgun birakilmamis oldugunu soyluyor — olen bir cihazdan cikan
+        diskin olagan hali. Ekran bunu bir onay olarak sormali, cunku ayni disk hala calisan baska
+        bir cihazda takiliysa devralmak havuzu bozar.
+
+        Bos liste bir hata degil: saglikli bir cihazda olagan cevap tam olarak budur.
+      responses:
+        '200':
+          description: Takilabilecek havuzlar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportableBackupPools' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
+  /backups/target/recovery/adopt:
+    post:
+      tags: [system]
+      summary: Baska bir cihazin yedek diskini tani
+      description: |
+        DOSYALAR HALA KILITLI. Bu adim diski yalniz TANIYOR: havuzu hicbir veri kumesini
+        baglamadan takiyor, DEPSIS yedek diski oldugunu veri kumelerinin adlarindan doguruluyor
+        ve sifresiz yarisindaki `disk.json`u okuyor. Acan sey, bundan sonra `POST
+        /backups/target/unlock`a girilen parola.
+
+        Iki ayri adim olmasinin sebebi kullanicinin gordugu sey: parolayi sormadan once ekranin
+        "bu, X etiketli cihazin 12 Agustos'ta aldigi yedek" diyebilmesi gerekiyor. Yanlis diski
+        taktigini, parolasini yazdiktan sonra ogrenmemeli.
+
+        HAVUZ DEPSIS YEDEK DISKI DEGILSE GERI BIRAKILIYOR ve 400 donuyor: takmak bir yan etki, ve
+        kullanicinin sectigi havuzun bu cihaza ait oldugu anlamina gelmiyor.
+
+        Satir KURTARMA KIPINDE aciliyor (`recoveryOnly`): yedekleme turu bu diske yazmiyor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdoptBackupDiskRequest' }
+      responses:
+        '200':
+          description: Disk tanindi; hala kilitli
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdoptedBackupDisk' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
+  /backups/target/recovery/release:
+    post:
+      tags: [system]
+      summary: Kurtarma diskini birak
+      description: |
+        Fisi cekmeden onceki dogru adim: havuz birakiliyor ve kurtarma satiri siliniyor. Sifreli
+        yarinin anahtari da havuzla birlikte gidiyor, yani birakmak kilitlemenin tamamlanmis hali.
+
+        YALNIZ KURTARMA DISKLERI. Cihazin kendi yedek diskini birakmak ayarlarini da silmek
+        olurdu; onun karsiligi `POST /backups/target/lock`.
+      responses:
+        '204': { description: Birakildi }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
   /backups/target/run:
     post:
       tags: [system]
@@ -5480,6 +5555,55 @@ components:
           minItems: 1
           items: { type: string }
           description: Paylasim icindeki hedef yol, bilesen bilesen.
+
+    ImportableBackupPools:
+      type: object
+      required: [pools]
+      properties:
+        pools:
+          type: array
+          items:
+            type: object
+            required: [name, state, needsAdopt]
+            properties:
+              name: { type: string }
+              state:
+                type: string
+                description: |
+                  ZFS'IN KENDI KELIMESI, cevrilmeden: `ONLINE`, `DEGRADED`, `FAULTED`, `UNAVAIL`.
+                  `DEGRADED` bir havuzdan dosya kurtarilabilir ve `FAULTED` bir havuzdan cogu
+                  zaman kurtarilamaz; ikisini "sorunlu" diye tek kelimeye indirmek, kullaniciya
+                  yapabilecegi ile yapamayacagini ayirt ettirmemek olurdu.
+              needsAdopt:
+                type: boolean
+                description: |
+                  Havuz duzgun birakilmamis. Olen bir cihazdan cikan diskin olagan hali, ve
+                  devralma kullanicinin gordugu bir uyarinin arkasinda olmali.
+
+    AdoptBackupDiskRequest:
+      type: object
+      required: [pool, adopt]
+      properties:
+        pool: { type: string }
+        adopt:
+          type: boolean
+          description: |
+            `zpool import -f`. Ayni disk hala calisan baska bir cihazda takiliysa devralmak havuzu
+            bozar; bu yuzden kullanicinin acikca onayladigi bir alan.
+
+    AdoptedBackupDisk:
+      allOf:
+        - $ref: '#/components/schemas/BackupTarget'
+        - type: object
+          required: [lastBackupAt]
+          properties:
+            lastBackupAt:
+              type: [string, 'null']
+              format: date-time
+              description: |
+                Diskin sifresiz yarisindaki `disk.json`da yazan son yedek tarihi. `null`, o yarinin
+                bos oldugu anlamina geliyor — v0.2.1'den once kurulmus bir disk. Tanimayi
+                reddetmek, kurtarmayi tam da en cok gereken durumda calismaz kilardi.
 
     BackupTarget:
       type: object

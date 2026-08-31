@@ -122,10 +122,16 @@ fn serve() -> std::process::ExitCode {
     // Ajan burada BAGLAMIYOR ve baglamamali: baglamak anahtari ister, anahtar parolayi ister, ve
     // parola yalniz kullanicinin bir ekrana girdigi anda var oluyor. Burasi yalniz "bagliysa
     // uzerinde calisabilirim" diyor.
-    let backup = unix::Openat2SafePath::open_root(depsis_agent::backup::DATA_MOUNTPOINT).ok();
+    //
+    // ACILISTA YOKLANMIYOR, ve bu bir gozden kacma degil. Yedek diski kurulurken ajan zaten
+    // calisiyor: kurulumdan once /yedek diye bir sey yok, kurulumdan sonra var. Acilista alinan
+    // "yok" cevabi ajan yeniden baslatilana kadar donuyordu -- kullanici diski kuruyor, "simdi
+    // yedek al" diyor, urun diski bagli degil diyordu. Kokun o an kullanilabilir olup olmadigi
+    // `root_ready` ile, kullanilacagi anda soruluyor.
+    let backup = unix::Openat2SafePath::at(depsis_agent::backup::DATA_MOUNTPOINT);
     // Diskin SIFRESIZ yarisi. Sifreli yari kilitliyken bile bagli kaliyor, cunku onu okuyan sey
     // kurulum sihirbazi ve o an henuz kimse parola girmemis oluyor.
-    let backup_meta = unix::Openat2SafePath::open_root(depsis_agent::backup::META_MOUNTPOINT).ok();
+    let backup_meta = unix::Openat2SafePath::at(depsis_agent::backup::META_MOUNTPOINT);
 
     let transfers = std::sync::Mutex::new(TransferRegistry::new());
     let tokens = unix::KernelTokens;
@@ -135,8 +141,8 @@ fn serve() -> std::process::ExitCode {
         &runner,
         &audit,
         shares.as_ref(),
-        backup.as_ref(),
-        backup_meta.as_ref(),
+        Some(&backup),
+        Some(&backup_meta),
         &tokens,
         &transfers,
         unix::write_private,

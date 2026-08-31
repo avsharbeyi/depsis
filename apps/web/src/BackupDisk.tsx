@@ -8,6 +8,7 @@ type Target = OpenApi.components['schemas']['BackupTarget'];
 type Status = OpenApi.components['schemas']['BackupTargetStatus'];
 type Disk = OpenApi.components['schemas']['DiskInventoryEntry'];
 type Listing = OpenApi.components['schemas']['BackupListing'];
+type Importable = OpenApi.components['schemas']['ImportableBackupPools']['pools'][number];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
 
 /**
@@ -40,7 +41,7 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
   const [allowed, setAllowed] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [mode, setMode] = useState<'yok' | 'kur' | 'ac'>('yok');
+  const [mode, setMode] = useState<'yok' | 'kur' | 'ac' | 'kurtar'>('yok');
   const [passphrase, setPassphrase] = useState('');
   const [confirmPass, setConfirmPass] = useState('');
   const [pool, setPool] = useState('');
@@ -142,6 +143,18 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
     reload();
   }
 
+  async function release(): Promise<void> {
+    setBusy(true);
+    const { response, error } = await api.POST('/backups/target/recovery/release', {});
+    setBusy(false);
+    if (!response.ok) {
+      notify('error', problemMessage(error, 'Disk bırakılamadı.'));
+      return;
+    }
+    notify('ok', 'Kurtarma diski bırakıldı. Fişini çekebilirsiniz.');
+    reload();
+  }
+
   async function save(patch: { cadenceHours?: number; retainDays?: number }): Promise<void> {
     setBusy(true);
     const { data, error } = await api.PATCH('/backups/target', { body: patch });
@@ -181,6 +194,10 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
           onPassphrase={setPassphrase}
           onConfirm={setConfirmPass}
           onSubmit={() => void prepare()}
+          recovering={mode === 'kurtar'}
+          onRecover={() => setMode(mode === 'kurtar' ? 'yok' : 'kurtar')}
+          notify={notify}
+          onAdopted={reload}
         />
       ) : target.unlocked ? (
         <Acik
@@ -189,6 +206,7 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
           notify={notify}
           onRunNow={() => void runNow()}
           onLock={() => void lock()}
+          onRelease={() => void release()}
           onSave={save}
         />
       ) : (
@@ -204,6 +222,7 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
           }}
           onPassphrase={setPassphrase}
           onSubmit={() => void unlock()}
+          onRelease={() => void release()}
         />
       )}
     </>
@@ -232,6 +251,10 @@ function Kurulmamis(props: {
   onPassphrase: (v: string) => void;
   onConfirm: (v: string) => void;
   onSubmit: () => void;
+  recovering: boolean;
+  onRecover: () => void;
+  notify: Notify;
+  onAdopted: () => void;
 }): React.JSX.Element {
   const { pools, open, busy, pool, label, passphrase, confirmPass } = props;
   const ready = pool !== '' && label.trim() !== '' && passphrase.length >= 8;
@@ -259,6 +282,12 @@ function Kurulmamis(props: {
               Önce Diskler ekranından ikinci bir havuz kurun; yedek diski o havuzun üstüne kurulur.
             </span>
           )}
+          {/* YANMIŞ CİHAZ YOLU, ve burada duruyor çünkü onu arayan kişi tam olarak burada
+              oluyor: elinde bir yedek diski var, cihazında hiçbir şey yok. Kurulum düğmesinin
+              yanına konması, "kur" diyerek diski silmesini önlüyor. */}
+          <button type="button" className="b ghost" onClick={props.onRecover}>
+            Elimde bir yedek diski var
+          </button>
         </div>
       ) : (
         <>
@@ -343,8 +372,153 @@ function Kurulmamis(props: {
           </div>
         </>
       )}
+
+      {props.recovering && <Kurtarma notify={props.notify} onAdopted={props.onAdopted} />}
     </>
   );
+}
+
+/**
+ * Başka bir cihazın yedek diskini tanıma.
+ *
+ * ── SAHİBİNİN ALTINCI ŞARTI ──────────────────────────────────────────────────────────────────
+ *
+ * *"Sistem diski ve depolama diski yansa bile yedek diski eğer şifre biliniyorsa kullanılabilir
+ * olmalı."* Diskin şifresiz yarısında bunun terminalli yolu zaten yazılı (`zpool import -f`);
+ * burası aynı şeyin dört tıkla yapılan hâli, ve ürünün ölçütü bu — bu cihaz Linux meraklıları
+ * için değil.
+ *
+ * ── İKİ AYRI ADIM, VE SIRASI ÖNEMLİ ──────────────────────────────────────────────────────────
+ *
+ * Önce TANIMA: disk takılıyor, DEPSIS yedek diski olduğu doğrulanıyor, etiketi ve son yedek
+ * tarihi okunuyor. Dosyalar hâlâ kilitli. Ancak bundan sonra parola soruluyor.
+ *
+ * Ters sırada olsaydı, yanlış diski taktığını parolasını yazdıktan sonra öğrenirdi — ve kurtarma
+ * yapan biri, elindeki her diski sırayla deniyor olabilir.
+ *
+ * ── DEVRALMA BİR ONAY ────────────────────────────────────────────────────────────────────────
+ *
+ * Ölen bir cihazdan çıkan disk hiçbir zaman düzgün bırakılmamış olur, yani devralma neredeyse
+ * her zaman gerekiyor. Yine de sessizce yapılmıyor: aynı disk hâlâ çalışan başka bir cihazda
+ * takılıysa devralmak havuzu bozar, ve bunu kullanıcıdan başka kimse bilemez.
+ */
+function Kurtarma(props: { notify: Notify; onAdopted: () => void }): React.JSX.Element {
+  const [found, setFound] = useState<Importable[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [adopt, setAdopt] = useState(false);
+
+  async function scan(): Promise<void> {
+    setBusy(true);
+    const { data, error } = await api.GET('/backups/target/recovery/scan', {});
+    setBusy(false);
+    if (data === undefined) {
+      props.notify('error', problemMessage(error, 'Diskler taranamadı.'));
+      return;
+    }
+    setFound(data.pools);
+  }
+
+  async function take(pool: string): Promise<void> {
+    setBusy(true);
+    const { data, error } = await api.POST('/backups/target/recovery/adopt', {
+      body: { pool, adopt },
+    });
+    setBusy(false);
+    if (data === undefined) {
+      props.notify('error', problemMessage(error, 'Disk tanınamadı.'));
+      return;
+    }
+    const when =
+      data.lastBackupAt === null
+        ? 'son yedek tarihi okunamadı'
+        : `son yedek ${new Date(data.lastBackupAt).toLocaleString()}`;
+    props.notify('ok', `${data.label} tanındı — ${when}. Şimdi parolasını girin.`);
+    props.onAdopted();
+  }
+
+  return (
+    <>
+      <div className="netrow">
+        <span className="lbl">Yedek diskinden geri dön</span>
+        <button type="button" className="b" disabled={busy} onClick={() => void scan()}>
+          {busy ? 'Taranıyor…' : 'Takılı diskleri tara'}
+        </button>
+      </div>
+      <p className="note">
+        Yanmış ya da değiştirilmiş bir cihazın yedek diskini bu cihaza takın. Bu adım diski yalnız
+        tanır; dosyalar parolanızı girene kadar kilitli kalır.
+      </p>
+
+      {found !== null &&
+        (found.length === 0 ? (
+          <p className="note">
+            Takılabilecek bir havuz görünmüyor. Diskin kabloları takılı mı, ve cihaz onu açılıştan
+            sonra mı gördü?
+          </p>
+        ) : (
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Havuz</th>
+                <th>Durum</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {found.map((pool) => (
+                <tr key={pool.name}>
+                  <td className="m">{pool.name}</td>
+                  <td>{durum(pool.state)}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="b"
+                      disabled={busy || (pool.needsAdopt && !adopt)}
+                      onClick={() => void take(pool.name)}
+                    >
+                      Bu diski tanı
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ))}
+
+      {/* DEVRALMA UYARISI, ve yalnız gerektiğinde gösteriliyor. Her zaman görünen bir onay
+          kutusu, insanların okumadan işaretlediği bir kutudur. */}
+      {found?.some((pool) => pool.needsAdopt) === true && (
+        <>
+          <div className="warn">
+            <span className="ic" aria-hidden>
+              ⚠
+            </span>
+            <span className="tx">
+              <b>Bu disk başka bir cihazda kullanılıyordu.</b>
+              Düzgün çıkarılmamış — yanmış bir cihazdan çıkan diskin olağan hâli. Ama o cihaz hâlâ
+              çalışıyorsa ve disk ona bağlıysa, devralmak yedeğin tamamını bozar.
+            </span>
+          </div>
+          <label className="netrow">
+            <input
+              type="checkbox"
+              checked={adopt}
+              onChange={(event) => setAdopt(event.target.checked)}
+            />
+            <span className="tx">O cihaz artık çalışmıyor; diski bu cihaz devralsın.</span>
+          </label>
+        </>
+      )}
+    </>
+  );
+}
+
+/** ZFS'in kelimesi ve karşılığı — ikisi de gösteriliyor. */
+function durum(state: string): string {
+  if (state === 'ONLINE') return 'Sağlam (ONLINE)';
+  if (state === 'DEGRADED') return 'Bir diski arızalı ama okunabilir (DEGRADED)';
+  if (state === 'FAULTED' || state === 'UNAVAIL') return `Okunamıyor (${state})`;
+  return state;
 }
 
 /**
@@ -363,6 +537,7 @@ function Kilitli(props: {
   onCancel: () => void;
   onPassphrase: (v: string) => void;
   onSubmit: () => void;
+  onRelease: () => void;
 }): React.JSX.Element {
   const { target, open, busy, passphrase } = props;
   return (
@@ -372,9 +547,19 @@ function Kilitli(props: {
           🔒
         </span>
         <span className="tx">
-          <b>Yedek diski kilitli.</b>
-          {target.label} açılana kadar yedekleme duruyor. Cihaz her açıldığında kilitli gelir —
-          parola hiçbir yerde saklanmıyor, çalınan bir cihazın yedeği de okunamasın diye.
+          {target.recoveryOnly ? (
+            <>
+              <b>Kurtarma diski kilitli.</b>
+              {target.label} — başka bir cihazın yedeği. Parolayı girince dosyalarını görebilecek ve
+              tek tek geri getirebileceksiniz. Bu cihaz bu diske hiçbir şey yazmıyor.
+            </>
+          ) : (
+            <>
+              <b>Yedek diski kilitli.</b>
+              {target.label} açılana kadar yedekleme duruyor. Cihaz her açıldığında kilitli gelir —
+              parola hiçbir yerde saklanmıyor, çalınan bir cihazın yedeği de okunamasın diye.
+            </>
+          )}
         </span>
       </div>
 
@@ -383,6 +568,13 @@ function Kilitli(props: {
           <button type="button" className="b" onClick={props.onOpen}>
             Kilidi aç
           </button>
+          {/* ÇIKARMAK, YALNIZ KURTARMA DİSKLERİNDE. Cihazın kendi diskini "çıkarmak" ayarlarını
+              da silmek olurdu; onun karşılığı kilitlemek. */}
+          {target.recoveryOnly && (
+            <button type="button" className="b ghost" disabled={busy} onClick={props.onRelease}>
+              Diski çıkar
+            </button>
+          )}
         </div>
       ) : (
         <div className="netrow">
@@ -419,6 +611,7 @@ function Acik(props: {
   notify: Notify;
   onRunNow: () => void;
   onLock: () => void;
+  onRelease: () => void;
   onSave: (patch: { cadenceHours?: number; retainDays?: number }) => Promise<void>;
 }): React.JSX.Element {
   const { target, busy } = props;
@@ -445,66 +638,88 @@ function Acik(props: {
           </span>
           <span className="tx">
             <b>Bu disk başka bir cihazın yedeği.</b>
-            Dosyaları okuyabilir ve geri getirebilirsiniz; bu cihaz diske hiçbir şey yazmıyor ve
-            hiçbir şey silmiyor. Devretmek isterseniz aşağıdan söyleyin.
+            Dosyaları okuyabilir ve tek tek geri getirebilirsiniz; bu cihaz diske hiçbir şey
+            yazmıyor ve hiçbir şey silmiyor. İşiniz bitince aşağıdan çıkarın.
           </span>
         </div>
       )}
 
-      <div className="netrow">
-        <span className="lbl">Sıklık</span>
-        <select
-          className="sb"
-          aria-label="Sıklık"
-          value={cadence}
-          onChange={(event) => {
-            setCadence(event.target.value);
-            void props.onSave({ cadenceHours: Number(event.target.value) });
-          }}
-        >
-          <option value="1">Saatte bir</option>
-          <option value="3">3 saatte bir</option>
-          <option value="6">6 saatte bir</option>
-          <option value="12">12 saatte bir</option>
-          <option value="24">Günde bir</option>
-        </select>
-        <span className="note">Sistemin önerisi 6 saat.</span>
-      </div>
+      {/* AYARLAR YALNIZ CİHAZIN KENDİ DİSKİNDE. Kurtarma diskine hiçbir tur yazmıyor; sıklık
+          ve saklama süresi orada hiçbir şeyi değiştirmeyen iki kutu olurdu — ve hiçbir şey
+          yapmayan bir ayar, çalışıyormuş gibi duran bir denetimdir. */}
+      {!target.recoveryOnly && (
+        <>
+          <div className="netrow">
+            <span className="lbl">Sıklık</span>
+            <select
+              className="sb"
+              aria-label="Sıklık"
+              value={cadence}
+              onChange={(event) => {
+                setCadence(event.target.value);
+                void props.onSave({ cadenceHours: Number(event.target.value) });
+              }}
+            >
+              <option value="1">Saatte bir</option>
+              <option value="3">3 saatte bir</option>
+              <option value="6">6 saatte bir</option>
+              <option value="12">12 saatte bir</option>
+              <option value="24">Günde bir</option>
+            </select>
+            <span className="note">Sistemin önerisi 6 saat.</span>
+          </div>
 
-      <div className="netrow">
-        <span className="lbl">Silinenler</span>
-        <select
-          className="sb"
-          aria-label="Silinen dosyaların saklanma süresi"
-          value={retain}
-          onChange={(event) => {
-            setRetain(event.target.value);
-            void props.onSave({ retainDays: Number(event.target.value) });
-          }}
-        >
-          <option value="7">7 gün saklansın</option>
-          <option value="30">30 gün saklansın</option>
-          <option value="90">90 gün saklansın</option>
-          <option value="365">1 yıl saklansın</option>
-        </select>
-        <span className="note">
-          Depolamadan sildiğiniz bir dosya yedekte bu kadar daha durur. Sistemin önerisi 30 gün.
-        </span>
-      </div>
+          <div className="netrow">
+            <span className="lbl">Silinenler</span>
+            <select
+              className="sb"
+              aria-label="Silinen dosyaların saklanma süresi"
+              value={retain}
+              onChange={(event) => {
+                setRetain(event.target.value);
+                void props.onSave({ retainDays: Number(event.target.value) });
+              }}
+            >
+              <option value="7">7 gün saklansın</option>
+              <option value="30">30 gün saklansın</option>
+              <option value="90">90 gün saklansın</option>
+              <option value="365">1 yıl saklansın</option>
+            </select>
+            <span className="note">
+              Depolamadan sildiğiniz bir dosya yedekte bu kadar daha durur. Sistemin önerisi 30 gün.
+            </span>
+          </div>
+        </>
+      )}
 
       <Gezgin notify={props.notify} />
 
-      <div className="netrow">
-        <button type="button" className="b" disabled={busy} onClick={props.onRunNow}>
-          Şimdi yedek al
-        </button>
-        <button type="button" className="b ghost" disabled={busy} onClick={props.onLock}>
-          Kilitle
-        </button>
-        <span className="note">
-          Kilitlemek dosyaları okunamaz yapar ve yedeklemeyi durdurur. Açmak için parola gerekir.
-        </span>
-      </div>
+      {target.recoveryOnly ? (
+        <div className="netrow">
+          <button type="button" className="b" disabled={busy} onClick={props.onRelease}>
+            Diski çıkar
+          </button>
+          <button type="button" className="b ghost" disabled={busy} onClick={props.onLock}>
+            Kilitle
+          </button>
+          <span className="note">
+            Çıkarmak diski bu cihazdan bırakır; fişini güvenle çekebilirsiniz. Dosyalarınız diskte
+            olduğu gibi kalır.
+          </span>
+        </div>
+      ) : (
+        <div className="netrow">
+          <button type="button" className="b" disabled={busy} onClick={props.onRunNow}>
+            Şimdi yedek al
+          </button>
+          <button type="button" className="b ghost" disabled={busy} onClick={props.onLock}>
+            Kilitle
+          </button>
+          <span className="note">
+            Kilitlemek dosyaları okunamaz yapar ve yedeklemeyi durdurur. Açmak için parola gerekir.
+          </span>
+        </div>
+      )}
     </>
   );
 }
