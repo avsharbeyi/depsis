@@ -55,6 +55,11 @@ describe('the worker consumes every kind the API enqueues', () => {
       'storage.backup.purge',
       'storage.backup.run',
       'storage.backup.run.now',
+      // Gunluk dogrulama. Tur kac dosya kopyaladigini SAYIYOR ama diskteki baytlara bakmiyor;
+      // bu is gercekten bir dosya okuyup asliyla karsilastiriyor. Ayri bir tur olmasinin sebebi
+      // ritmi: yedek alti saatte bir, dogrulama gunde bir -- daha siki olmasi ayni dosyayi ayni
+      // sonucla tekrar okumak olurdu.
+      'storage.backup.verify',
       'storage.pool.create',
       'storage.replicate',
       'storage.replicate-offsite',

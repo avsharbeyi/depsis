@@ -5616,6 +5616,10 @@ components:
           retainDays,
           recoveryOnly,
           enabled,
+          lastVerifiedAt,
+          lastVerifyOk,
+          lastVerifyNote,
+          lastScrubAt,
           prepared,
           unlocked,
           availableBytes,
@@ -5644,6 +5648,29 @@ components:
           type: [string, 'null']
           description: Diskin sifresiz yarisinda yazan cihaz kimligi.
         enabled: { type: boolean }
+        lastVerifiedAt:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Yedegin GERCEKTEN okundugu son an. Tur kac dosya kopyaladigini sayiyor ama diskteki
+            baytlara bakmiyor; gunluk dogrulama bir dosyayi okuyup asliyla karsilastiriyor.
+
+            `null` HIC DOGRULANMADI demek, "saglam" demek DEGIL. Ekranin bu ikisini ayirmasi
+            gerekiyor: yapilmamis bir olcumu basarili gostermek, dogrulamanin tamamini suse
+            cevirir.
+        lastVerifyOk: { type: [boolean, 'null'] }
+        lastVerifyNote:
+          type: [string, 'null']
+          description: |
+            Neyin olculdugu: hangi dosya, ne kadari okundu. "Dogrulandi" tek basina bir sey
+            soylemiyor — buyuk bir dosyanin yalniz basi okunmus olabilir ve ekran bunu soylemeli.
+        lastScrubAt:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Yedek havuzunda son `scrub`in baslatildigi an; haftada bir. Karsilastirmanin yerine
+            gecmiyor: scrub "disk dogru okuyor" diyor, karsilastirma "yazdigimiz sey dogruydu"
+            diyor.
         prepared:
           type: boolean
           description: Iki veri kumesi de yerinde mi.

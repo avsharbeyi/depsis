@@ -513,6 +513,69 @@ function Kurtarma(props: { notify: Notify; onAdopted: () => void }): React.JSX.E
   );
 }
 
+/**
+ * Yedeğin gerçekten okunduğunun kaydı.
+ *
+ * ── "YEDEK ALINDI" BİR İDDİA ─────────────────────────────────────────────────────────────────
+ *
+ * Tur kaç dosya kopyaladığını sayıyor, ama saydığı şey kendi yaptığı çağrılar. Günde bir kez
+ * gerçekten bir dosya okunup aslıyla karşılaştırılıyor, ve burada yazan şey o ölçümün sonucu.
+ *
+ * ── HİÇ ÖLÇÜLMEMİŞ, "SAĞLAM" DEĞİLDİR ────────────────────────────────────────────────────────
+ *
+ * `null` bir sonuç değil, sonucun yokluğu. Onu yeşil bir onay işaretiyle göstermek, doğrulamanın
+ * tamamını süse çevirirdi — kullanıcı ekranda gördüğü işarete güvenip diskini hiç denemez.
+ *
+ * ── NE ÖLÇÜLDÜĞÜ DE YAZIYOR ──────────────────────────────────────────────────────────────────
+ *
+ * "Doğrulandı" tek başına bir şey söylemiyor: büyük bir dosyanın yalnız başı okunmuş olabilir, ve
+ * hangi dosyanın okunduğu kullanıcının kendi bildiği bir şey. Cümle ajanın ölçtüğü şeyi anlatıyor.
+ */
+function Dogrulama({ target }: { target: Target }): React.JSX.Element {
+  if (target.lastVerifiedAt === null || target.lastVerifiedAt === undefined) {
+    return (
+      <div className="netrow">
+        <span className="lbl">Doğrulama</span>
+        <span className="note">
+          Henüz yapılmadı. İlk yedek turundan sonra, günde bir kez yedekten gerçekten bir dosya
+          okunup aslıyla karşılaştırılacak.
+        </span>
+      </div>
+    );
+  }
+
+  const when = new Date(target.lastVerifiedAt).toLocaleString();
+  const note = target.lastVerifyNote ?? '';
+
+  if (target.lastVerifyOk === false) {
+    return (
+      <div className="warn">
+        <span className="ic" aria-hidden>
+          ⚠
+        </span>
+        <span className="tx">
+          <b>Yedek doğrulanamadı.</b>
+          {note} ({when}) Bu, yedeğinizdeki bir dosyanın aslıyla aynı olmadığı anlamına geliyor;
+          diski kontrol edin ve elle bir yedek turu başlatın.
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="netrow">
+      <span className="lbl">Doğrulama</span>
+      <span className="pill">
+        <i />
+        {target.lastVerifyOk === true ? 'Okundu' : 'Ölçülemedi'}
+      </span>
+      <span className="note">
+        {note} · {when}
+      </span>
+    </div>
+  );
+}
+
 /** ZFS'in kelimesi ve karşılığı — ikisi de gösteriliyor. */
 function durum(state: string): string {
   if (state === 'ONLINE') return 'Sağlam (ONLINE)';
@@ -630,6 +693,8 @@ function Acik(props: {
           {formatBytes(target.usedBytes)} dolu · {formatBytes(target.availableBytes)} boş
         </span>
       </div>
+
+      <Dogrulama target={target} />
 
       {target.recoveryOnly && (
         <div className="warn">

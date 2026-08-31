@@ -86,6 +86,28 @@ const MAX_CONTROLLER_MEMBERS: usize = 256;
 /// yeterli, ve gerçekten asılmış bir komutu sonsuza bırakmayacak kadar kısa.
 const LONG_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
+/// Tampon dolana ya da akış bitene kadar okur.
+///
+/// `read` bir tamponu doldurmak ZORUNDA DEĞİL — daha azını döndürebilir ve bu bir hata değildir.
+/// İki akışı karşılaştırırken bunu görmezden gelmek, aynı dosyaların farklı hizalarda okunmuş
+/// parçalarını karşılaştırmak demek olurdu: aynı olan iki dosya "farklı" çıkardı, ve doğrulama
+/// her gün yanlış alarm verirdi.
+fn read_full(reader: &mut impl std::io::Read, buffer: &mut [u8]) -> Result<usize, SeamError> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        let Some(rest) = buffer.get_mut(filled..) else {
+            break;
+        };
+        match reader.read(rest) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(SeamError::Io(format!("read: {e}"))),
+        }
+    }
+    Ok(filled)
+}
+
 /// `Vec<String>` bir argv'yi koşucunun beklediği `&[&str]`e çevirir.
 ///
 /// Argv üreten yardımcılar `String` döndürüyor (parçaların bir kısmı biçimlendiriliyor:
@@ -2092,6 +2114,110 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         self.backup_root_status(pool)
     }
 
+    /// Bir dosyanın yedekteki kopyasını aslıyla karşılaştırır.
+    ///
+    /// HİÇBİR ŞEY YAZMIYOR ve hiçbir şey taşımıyor: iki dosya açılıyor, baytları karşılaştırılıyor,
+    /// cevap bir cümle. Doğrulamayı bir dosyayı geri getirerek yapmak, kullanıcının dosyalarının
+    /// arasına her gün bir dosya bırakmak demekti.
+    ///
+    /// ÖNCE BOYUT: farklıysa tek bir bayt okumaya gerek yok, ve bu en sık rastlanan kusurun —
+    /// yarım kalmış kopya — tam olarak imzası.
+    fn compare_backup_copy(
+        &self,
+        share: &str,
+        live_path: &[&str],
+        backup_path: &[&str],
+    ) -> Result<Response, SeamError> {
+        let Some(live) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+        let Some(backup) = self.backup_root() else {
+            return Ok(Self::backup_unavailable());
+        };
+
+        let mut source: Vec<&str> = vec![share];
+        source.extend_from_slice(live_path);
+        let live_file = match live.open(&source, OpenIntent::Read) {
+            Ok(file) => file,
+            Err(SeamError::NotFound(what)) => {
+                // ASIL KAYBOLMUŞ OLABİLİR, ve bu bir kusur değil: kullanıcı dosyayı silmiş
+                // olabilir. Doğrulamanın cevabı "bilinmiyor", "bozuk" değil.
+                return Ok(Response::NotFound {
+                    reason: format!("{what}: asıl dosya artık yok"),
+                });
+            }
+            Err(other) => return Err(other),
+        };
+        let backup_file = match backup.open(backup_path, OpenIntent::Read) {
+            Ok(file) => file,
+            Err(SeamError::NotFound(what)) => {
+                return Ok(Response::NotFound {
+                    reason: format!("{what}: yedekte yok"),
+                });
+            }
+            Err(other) => return Err(other),
+        };
+
+        let live_bytes = live_file
+            .metadata()
+            .map_err(|e| SeamError::Io(format!("stat live: {e}")))?
+            .len();
+        let backup_bytes = backup_file
+            .metadata()
+            .map_err(|e| SeamError::Io(format!("stat backup: {e}")))?
+            .len();
+        if live_bytes != backup_bytes {
+            return Ok(Response::Comparison {
+                identical: false,
+                live_bytes,
+                backup_bytes,
+                compared_bytes: 0,
+                partial: false,
+            });
+        }
+
+        let limit = crate::op::MAX_VERIFY_BYTES;
+        let partial = live_bytes > limit;
+        let mut a = std::io::BufReader::new(std::io::Read::take(&live_file, limit));
+        let mut b = std::io::BufReader::new(std::io::Read::take(&backup_file, limit));
+        let mut left = [0u8; 64 * 1024];
+        let mut right = [0u8; 64 * 1024];
+        let mut compared: u64 = 0;
+        loop {
+            let read = read_full(&mut a, &mut left)?;
+            let other = read_full(&mut b, &mut right)?;
+            if read != other {
+                // Boyutlar aynıydı ve okunan miktar farklı çıktı: dosyalardan biri okunurken
+                // değişti. "Aynı değil" demek yanlış olurdu — ölçüm geçersiz.
+                return Err(SeamError::Io(
+                    "karşılaştırma sırasında dosyalardan biri değişti".to_string(),
+                ));
+            }
+            if read == 0 {
+                break;
+            }
+            if left.get(..read) != right.get(..read) {
+                return Ok(Response::Comparison {
+                    identical: false,
+                    live_bytes,
+                    backup_bytes,
+                    compared_bytes: compared,
+                    partial,
+                });
+            }
+            compared += read as u64;
+        }
+        Ok(Response::Comparison {
+            identical: true,
+            live_bytes,
+            backup_bytes,
+            compared_bytes: compared,
+            partial,
+        })
+    }
+
     /// Diskin şifresiz yarısındaki bir dosyayı okur.
     ///
     /// OKUNAN MİKTAR SINIRLI. O yarıya kimin ne yazdığını bilmiyoruz — parolasız yazılabilen bir
@@ -3302,6 +3428,15 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             }
             Request::ExportBackupPool { pool } => self.export_backup_pool(pool.as_str()),
             Request::BackupReadMeta { name } => self.backup_read_meta(name.as_str()),
+            Request::CompareBackupCopy {
+                share,
+                live,
+                backup,
+            } => self.compare_backup_copy(
+                share.as_str(),
+                &live.iter().map(SafeComponent::as_str).collect::<Vec<_>>(),
+                &backup.iter().map(SafeComponent::as_str).collect::<Vec<_>>(),
+            ),
             Request::BackupWriteMeta { name, content } => {
                 self.backup_write_meta(name.as_str(), content)
             }
@@ -3895,6 +4030,12 @@ mod tests {
     use crate::seams::mock::{MockCommandRunner, MockSafePath, MockTokenSource};
 
     const API_UID: u32 = 999;
+
+    /// Doğrulama isteği, üç testte de aynı.
+    const COMPARE_REQUEST: &str = concat!(
+        r#"{"op":"compare_backup_copy","share":"belgeler","live":["not.txt"],"#,
+        r#""backup":["Dosyalar","belgeler","not.txt"]}"#
+    );
 
     fn peer(uid: u32) -> PeerIdentity {
         PeerIdentity {
@@ -4856,6 +4997,65 @@ mod tests {
         );
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
         assert!(!h.meta_path().join("buyuk.txt").exists());
+    }
+
+    /// Aynı içerik: doğrulama "aynı" diyor ve ne kadarını okuduğunu söylüyor.
+    #[test]
+    fn ayni_dosya_ayni_cikiyor() {
+        let h = Harness::with_backup("belgeler");
+        let dir = h.backup_path().join("Dosyalar").join("belgeler");
+        std::fs::create_dir_all(&dir).expect("yedek agaci");
+        std::fs::write(h.share_path(&["belgeler", "not.txt"]), "merhaba").expect("asil");
+        std::fs::write(dir.join("not.txt"), "merhaba").expect("kopya");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(COMPARE_REQUEST, peer(API_UID), "dg1", "dogrulama");
+        match resp {
+            Response::Comparison { identical, compared_bytes, partial, .. } => {
+                assert!(identical);
+                assert_eq!(compared_bytes, 7);
+                assert!(!partial);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// FARKLI İÇERİK, AYNI BOYUT.
+    ///
+    /// Boyut karşılaştırması tek başına yetmiyor: yarım kalmış bir kopya boyuttan yakalanır, ama
+    /// yanlış içerik yazılmış bir dosya yakalanmaz — ve doğrulamanın var olma sebebi tam olarak
+    /// sayıların yakalayamadığı kusurlar.
+    #[test]
+    fn ayni_boyutta_farkli_icerik_yakalaniyor() {
+        let h = Harness::with_backup("belgeler");
+        let dir = h.backup_path().join("Dosyalar").join("belgeler");
+        std::fs::create_dir_all(&dir).expect("yedek agaci");
+        std::fs::write(h.share_path(&["belgeler", "not.txt"]), "merhaba").expect("asil");
+        std::fs::write(dir.join("not.txt"), "merhabb").expect("kopya");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(COMPARE_REQUEST, peer(API_UID), "dg2", "dogrulama");
+        match resp {
+            Response::Comparison { identical, .. } => assert!(!identical),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Yedekte olmayan bir dosya "bozuk" değil, "yok".
+    ///
+    /// İkisini aynı cevaba indirmek, henüz yedeklenmemiş bir dosyayı bozuk bir yedek gibi
+    /// gösterirdi — ve o alarm, gerçek bir bozulmanın fark edilmesini zorlaştırır.
+    #[test]
+    fn yedekte_olmayan_dosya_bozuk_degil() {
+        let h = Harness::with_backup("belgeler");
+        std::fs::write(h.share_path(&["belgeler", "not.txt"]), "merhaba").expect("asil");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(COMPARE_REQUEST, peer(API_UID), "dg3", "dogrulama");
+        assert!(matches!(resp, Response::NotFound { .. }), "{resp:?}");
     }
 
     /// Bu cihazın kendi yedek diski bağlıyken kurtarma REDDEDİLİYOR.

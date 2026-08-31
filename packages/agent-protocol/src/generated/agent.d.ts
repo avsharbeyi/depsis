@@ -439,6 +439,20 @@ export type AgentRequest =
       pool: SafeComponent;
     }
   | {
+      /**
+       * Yedek ağacındaki yol — `Dosyalar/<paylaşım>/…`. Çağıran veriyor, ajan türetmiyor:
+       * yedek ağacının düzeni API'nin kararı ve ajanın onu ikinci kez bilmesi, iki yerde
+       * ayrı ayrı değişebilen bir kural olurdu.
+       */
+      backup: SafeComponent[];
+      /**
+       * Paylaşım içindeki yol.
+       */
+      live: SafeComponent[];
+      op: 'compare_backup_copy';
+      share: SafeComponent;
+    }
+  | {
       name: SafeComponent;
       op: 'backup_read_meta';
     }
@@ -1240,6 +1254,23 @@ export type AgentResponse =
   | {
       pools: ImportablePoolView[];
       status: 'importable_pools';
+    }
+  | {
+      backup_bytes: number;
+      /**
+       * Kaç bayt gerçekten okunup karşılaştırıldı.
+       */
+      compared_bytes: number;
+      /**
+       * Okunan kadarıyla aynılar mı.
+       */
+      identical: boolean;
+      live_bytes: number;
+      /**
+       * Dosya sınırdan büyüktü; yalnız başı okundu. Ekran bunu söylemek zorunda.
+       */
+      partial: boolean;
+      status: 'comparison';
     }
   | {
       content: string;

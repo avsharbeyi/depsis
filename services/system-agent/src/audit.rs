@@ -58,6 +58,7 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::ImportBackupPool { .. } => "import_backup_pool",
         Request::ExportBackupPool { .. } => "export_backup_pool",
         Request::BackupReadMeta { .. } => "backup_read_meta",
+        Request::CompareBackupCopy { .. } => "compare_backup_copy",
         Request::BackupWriteMeta { .. } => "backup_write_meta",
         Request::BackupListDirectory { .. } => "backup_list_directory",
         Request::BackupCreateDirectory { .. } => "backup_create_directory",
