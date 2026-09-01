@@ -838,6 +838,48 @@ paths:
         '413': { $ref: '#/components/responses/Problem' }
         '507': { $ref: '#/components/responses/Problem' }
 
+  /uploads/{uploadId}/resolve:
+    post:
+      tags: [files]
+      summary: Ad cakismasini kullanicinin karariyla bitir
+      description: |
+        Cakisma YAYIMLAMA aninda, yani son parcadan SONRA ortaya cikiyor: dosya butunuyle ara
+        alanda duruyor. Bu yuzden cozum "yeniden yukle" degil "yayimlamayi tekrar dene" --
+        kullanici bir gigabayti ikinci kez gondermiyor.
+
+        `keep-both`: yeni dosya "ad (2).uzanti" ile iniyor; kopyalama yolunun kullandigi
+        adlandirma kuralinin aynisi.
+
+        `replace`: ESKISI COPE GIDIYOR, silinmiyor. Ustune yazmak urunun hicbir katmaninda yok ve
+        olmamasi bilincli (ADR-0008); "degistir" diyen kullanicinin istedigi sey yeni dosyanin o
+        adi almasi, eskisinin geri getirilemez olmasi degil.
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [policy]
+              additionalProperties: false
+              properties:
+                policy: { type: string, enum: [keep-both, replace] }
+      responses:
+        '200':
+          description: Dosya yayimlandi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileEntry' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
   /uploads/{uploadId}:
     parameters:
       - name: uploadId

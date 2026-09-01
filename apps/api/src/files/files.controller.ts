@@ -1130,14 +1130,17 @@ export function translate(error: unknown): Error {
   if (error instanceof NameTakenError) {
     // The message is the whole value of this answer. A bare 409 tells a user their restore failed;
     // this one tells them the name is taken and that renaming the other file is the way out.
-    return new ConflictException(`${error.message}; rename one of them and try again`);
+    return new ProblemException('name-taken', `${error.message}; rename one of them and try again`);
   }
   // 409, and the sentence is the point: the name is free everywhere the user can see and taken
   // where they cannot. Somebody made it over SMB, DEPSIS wrote no row, and neither renaming the
   // invisible thing nor picking another name is obvious without being told which of the two is
   // happening. The agent's own words go to the journal, as everywhere else in this function.
   if (error instanceof NameTakenOnDiskError) {
-    return new ConflictException(logged(error.message, error.agentReason));
+    // `name-taken` kodu, çıplak bir 409 değil: yükleme ekranı bu iki durumu ayırt edip
+    // kullanıcıya "değiştir mi, ikisini de tut mu" diye sorabiliyor. Ayırt edici işaret bir metin
+    // olsaydı, cümlenin her düzeltilişi istemciyi sessizce bozardı.
+    return new ProblemException('name-taken', logged(error.message, error.agentReason));
   }
   // Also 409, and it must be checked BEFORE nothing — it is a sibling of the case above, not a
   // subtype, so order does not matter here; what matters is that the two have different sentences.
@@ -1145,7 +1148,7 @@ export function translate(error: unknown): Error {
   // not a hunt for an SMB client. Trashing writes a flag and leaves the directory, while the
   // unique index excludes trashed rows, which is how the listing can show the name as free.
   if (error instanceof NameTakenByTrashedEntryError) {
-    return new ConflictException(logged(error.message, error.agentReason));
+    return new ProblemException('name-taken', logged(error.message, error.agentReason));
   }
   if (error instanceof TrashedParentError) return new ConflictException(error.message);
   // 403 and not 404: the caller can see the entry they named — they hold `delete` on it, which is

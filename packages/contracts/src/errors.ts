@@ -37,6 +37,11 @@ export const ERROR_CODES = [
   'range-not-satisfiable',
   // concurrency
   'conflict',
+  // 409, ama HANGİ 409 olduğu önemli. Yükleme yolunda iki ayrı çakışma var ve istemci ikisine
+  // farklı davranıyor: `upload-offset-mismatch` yeniden hizalanmayı, bu ise kullanıcıya bir soru
+  // sormayı gerektiriyor ("değiştir mi, ikisini de tut mu"). Ayırt edici işareti bir metin
+  // olsaydı — bugün öyleydi — cümlenin her düzeltilişi istemciyi sessizce bozardı.
+  'name-taken',
   'precondition-failed',
   'idempotency-key-reused',
   // storage
@@ -101,6 +106,7 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   'bad-request': 400,
   'range-not-satisfiable': 416,
   conflict: 409,
+  'name-taken': 409,
   'precondition-failed': 412,
   'idempotency-key-reused': 409,
   'quota-exceeded': 413,
@@ -127,6 +133,7 @@ const TITLE_BY_CODE: Record<ErrorCode, string> = {
   'bad-request': 'İstek kabul edilmedi',
   'range-not-satisfiable': 'İstenen aralık dosyada yok',
   conflict: 'Çakışma',
+  'name-taken': 'Bu ad kullanılıyor',
   'precondition-failed': 'Ön koşul sağlanmadı',
   'idempotency-key-reused': 'Idempotency anahtarı farklı bir istekle kullanılmış',
   'quota-exceeded': 'Kota aşıldı',
