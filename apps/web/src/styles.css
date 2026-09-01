@@ -3438,6 +3438,18 @@ label textarea,
        zaten kurulu (alt bar 38, menü 39, rozet 40); telefonda rozeti bir basamak daha yukarı
        almak, sayfanın kendi içeriğinin onu asla örtememesi demek. */
     z-index: 45;
+    /* ── TELEFONDA ROZET OPAK ────────────────────────────────────────────────
+       Masaüstünde rozet boş bir zeminin üstünde duruyor ve buzlu cam orada bir süs. Telefonda
+       ise yoğun bir dosya listesinin üstünde duruyor: altındaki satırlar bulanık da olsa
+       görünüyor ve rozetin kendi yazısı okunmuyor.
+
+       İkinci ve asıl sebep: `backdrop-filter` taşıyan bir öğe, altında yine `backdrop-filter`
+       taşıyan kartlar varken Chromium'da kendi katmanına alınıyor ve dokunuşun hangi öğeye
+       gittiği kartlarla rozet arasında şaşabiliyor. Sahada bunun bedeli, dosya listesini
+       kaydıran kullanıcının alt bara hiç ulaşamaması. Opak bir zemin hem o belirsizliği
+       kaldırıyor hem de rozeti okunur yapıyor. */
+    backdrop-filter: none;
+    background: rgba(8, 13, 22, 0.95);
   }
   .brandbox .nm {
     display: none;
