@@ -160,3 +160,8 @@ export { loadConfig, type AppConfig } from './config.js';
  * exported here made it look as though it could.
  */
 export { ConfigModule, APP_CONFIG } from './config.module.js';
+
+// Uzak erişimin kendiliğinden yetkilendirmesi işçide koşuyor: bir okuma yolunun yan etkisi
+// olarak yetki vermek, listeyi açan herkesin ağın üyeliğini değiştirmesi demek olurdu.
+export { RemoteService } from './remote/remote.service.js';
+export { RemoteModule } from './remote/remote.module.js';

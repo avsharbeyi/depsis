@@ -38,6 +38,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       notifications: {} as unknown as NotificationsService,
       backupRuns: {} as never,
       schedules: {} as unknown as BackupSchedulesService,
+      remote: {} as never,
     });
     expect(worker.kinds.sort()).toEqual([
       'files.copy',
@@ -47,6 +48,10 @@ describe('the worker consumes every kind the API enqueues', () => {
       'files.trash.purge',
       'identity.sync',
       'permissions.apply',
+      // Aga katilan cihazlarin kendiliginden yetkilendirilmesi. Yirmi saniyede bir zincirleniyor;
+      // bir okumanin yan etkisi olarak yetki vermek, uye listesini acan herkesin agin uyeligini
+      // degistirmesi demek olurdu.
+      'remote.authorize',
       'storage.backup-tick',
       // Yedek diski turu ve elle baslatilan tur. IKI AYRI TUR, ve ayri olmalari zorunlu:
       // zincirin tekilligini koruyan kismi indeks — ayni anda yalniz bir zamanlanmis tur

@@ -3017,14 +3017,24 @@ label textarea,
   color: var(--warn);
 }
 
-/* Satırdaki değişme tarihi. Dar ekranda gizleniyor: 360 pikselde ad, boyut ve tarih yan yana
-   durmuyor ve üçünden feda edilecek olan ad değil. */
-.frow .sz.dt {
+/* Satırdaki değişme tarihi.
+   KENDİ SINIFI, `.sz`in bir çeşidi değil: tarih bir boyut değil, ve ikisini aynı sınıfla çizmek
+   "bu satırın boyut hücresi" sorusunu iki cevaplı yapıyordu — testler de dâhil, ki bunu ilk fark
+   eden onlar oldu.
+   Dar ekranda gizleniyor: 360 pikselde ad, boyut ve tarih yan yana durmuyor ve üçünden feda
+   edilecek olan ad değil. */
+.frow .dt {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--mut);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: none;
   min-width: 74px;
   text-align: right;
 }
 @media (max-width: 560px) {
-  .frow .sz.dt {
+  .frow .dt {
     display: none;
   }
 }

@@ -1800,7 +1800,7 @@ export function Files({
 
                     Dar ekranda gizleniyor (stil sayfası): 360 pikselde ad, boyut ve tarih yan
                     yana durmuyor, ve üçünden feda edilecek olan ad değil. */}
-                <span className="sz dt" title={new Date(entry.modifiedAt).toLocaleString('tr')}>
+                <span className="dt" title={new Date(entry.modifiedAt).toLocaleString('tr')}>
                   {new Date(entry.modifiedAt).toLocaleDateString('tr')}
                 </span>
                 {/* Only when the server sent one. Its absence means "not scheduled to go" — either
