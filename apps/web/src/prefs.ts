@@ -14,7 +14,7 @@ export type Prefs = OpenApi.components['schemas']['Preferences'];
  * has never saved anything — so something has to decide what "no background chosen" means. Deciding
  * it here, once, is why no screen has to write `prefs.background?.kind ?? 'sky'` for itself.
  */
-const DEFAULTS: Prefs = { background: { kind: 'sky' }, sound: false, shortcuts: [] };
+const DEFAULTS: Prefs = { background: { kind: 'sky' }, sound: false, shortcuts: [], favorites: [] };
 
 /**
  * The user's interface preferences, held server-side.

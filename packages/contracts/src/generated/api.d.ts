@@ -7236,6 +7236,33 @@ export interface components {
                 label?: string;
                 cell: number;
             }[];
+            /**
+             * @description Dosya gezgininde hizli erisim seridinde duran klasorler.
+             *
+             *     KISAYOLLARDAN AYRI BIR ALAN, ve ayri olmasi zorunlu: `shortcuts` masaustu izgarasidir
+             *     ve her girdisinin zorunlu bir hucresi var. Bir favoriyi oraya sikistirmak, masada
+             *     gorunmeyen ama dolu duran bir hucre birakirdi.
+             *
+             *     IZ TAM OLARAK SAKLANIYOR (`trail`), yalniz klasorun kimligi degil. Gezgin bir konuma
+             *     iz uzerinden gidiyor; yalniz kimlik saklansaydi favoriye tiklamak once klasorun
+             *     atalarini bulmak icin ayri istekler gerektirirdi. Iz ayni zamanda kirinti yolunun
+             *     kendisi, yani favoriden gidilen yerde "nerede oldugunu" gosteren cizgi de dogru olur.
+             *
+             *     AD BIR ONBELLEK. Klasor yeniden adlandirilirsa serit eski adi gosterir; bir sonraki
+             *     aciliste duzeliyor. Yazarken klasorun VARLIGI DOGRULANMIYOR -- duvar kagidi alaninin
+             *     hatasi tam olarak buydu: var olmayan bir kimlik butun tercih yazmalarini kalici olarak
+             *     reddettirmisti.
+             */
+            favorites?: {
+                /** Format: uuid */
+                id: string;
+                name: string;
+                trail: {
+                    /** Format: uuid */
+                    id: string;
+                    name: string;
+                }[];
+            }[];
         };
         Transfer: {
             /** Format: uuid */

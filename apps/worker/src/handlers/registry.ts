@@ -8,6 +8,7 @@ import type {
   IndexerService,
   JobsService,
   NotificationsService,
+  RemoteService,
   TrashRetentionService,
 } from '@depsis/api/worker-surface';
 
@@ -26,6 +27,7 @@ import {
 import { backupTickHandler, BACKUP_TICK_KIND } from './backup-tick.handler.js';
 import { copyHandler, COPY_KIND } from './copy.handler.js';
 import { createPoolHandler, CREATE_POOL_KIND } from './create-pool.handler.js';
+import { remoteAuthorizeHandler, REMOTE_AUTHORIZE_KIND } from './remote-authorize.handler.js';
 import { indexDrainHandler, INDEX_DRAIN_KIND } from './index-drain.handler.js';
 import { reconcileHandler, RECONCILE_KIND } from './reconcile.handler.js';
 import { trashPurgeHandler, TRASH_PURGE_KIND } from './trash-purge.handler.js';
@@ -58,6 +60,7 @@ export function registerHandlers(
     notifications: NotificationsService;
     schedules: BackupSchedulesService;
     backupRuns: BackupRunService;
+    remote: RemoteService;
   },
 ): void {
   worker.register(SNAPSHOT_KIND, snapshotHandler(services.agent));
@@ -78,6 +81,7 @@ export function registerHandlers(
   // every other handler here is safe to run twice, and this one runs `zpool create` against
   // real disks.
   worker.register(CREATE_POOL_KIND, createPoolHandler(services.agent));
+  worker.register(REMOTE_AUTHORIZE_KIND, remoteAuthorizeHandler(services.remote));
   // The OTHER destructive kind, and enqueued with `maxAttempts: 1` for the same reason:
   // `zfs recv -F` destroys the target, and a retry after an ambiguous failure destroys it
   // again without knowing what state it reached.

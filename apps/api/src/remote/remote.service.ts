@@ -468,6 +468,130 @@ export class RemoteService {
    * authorized a device that was never authorized is worse than no row: it is the answer to "who
    * let this in", and it would be wrong.
    */
+  /**
+   * Yetkilendirme zincirinin bir sonraki halkası.
+   *
+   * `ON CONFLICT DO NOTHING`: aynı anda yalnız bir tane kuyrukta olabilir. Olmasaydı, uyanan her
+   * çalışan bir tane daha ekler ve kuyruk yirmi saniyede bir büyürdü.
+   */
+  async scheduleAuthorize(organizationId: string, runAfter: Date): Promise<void> {
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `INSERT INTO public.job_queue (organization_id, kind, payload, run_after, max_attempts)
+         VALUES ($1, 'remote.authorize', '{}'::jsonb, $2, 3)
+         ON CONFLICT DO NOTHING`,
+        [organizationId, runAfter],
+      ),
+    );
+  }
+
+  /**
+   * Zinciri açılışta tohumla.
+   *
+   * `setInterval` DEĞİL: yalnız o süreç ayaktayken çalışan bir zamanlayıcı, yeniden başlatmada
+   * kaybolur ve kaybolduğunu kimse fark etmez — belirtisi yalnız "yeni telefonum bağlanmıyor"
+   * olur. Zincirin bir kez kopması onu kalıcı olarak durdururdu; tohum o kopmanın telafisi.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const rows = await this.db.withoutTenant('migration-status', (q) =>
+        q.query<{ id: string }>(`SELECT id::text AS id FROM public.organizations`),
+      );
+      for (const row of rows) await this.scheduleAuthorize(row.id, new Date());
+    } catch (error) {
+      this.logger.error(
+        `yetkilendirme zinciri tohumlanamadı: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Ağa katılan cihazları kendiliğinden yetkilendirir.
+   *
+   * ── NEDEN ELLE ONAY KALKTI ───────────────────────────────────────────────────────────────
+   *
+   * Cihazın sahibinin sözü: *"uzak erişim kısmında giren her cihazın otomatik yetkilendirilmesi
+   * gerekiyor elle yetkilendirmeye gerek yok çünkü zaten şifreyle falan giriyorsun."* Ve bu
+   * doğru: ağa katılmak tek başına hiçbir kapıyı açmıyor. SMB'de her paylaşımda `guest ok = no`
+   * yazılı ve her hesabın parolası var; arayüz oturum istiyor. Ağa katılmış ama parolası olmayan
+   * bir cihaz, kutunun önünde duran ama içeri giremeyen bir cihaz.
+   *
+   * Elle onay adımının kazandırdığı tek şey, ağ kimliğini bir yerden görmüş birinin parola
+   * denemesine hiç başlayamaması — yani "yerel ağda olmak" ile "olmamak" arasındaki fark. Bu
+   * gerçek ama küçük bir fark, ve bedeli her yeni telefonda bir ekran açıp düğme aramaktı.
+   *
+   * ── AMA GÖRÜNMEZ DEĞİL ───────────────────────────────────────────────────────────────────
+   *
+   * Her kendiliğinden yetkilendirme denetim defterine düşüyor ve üye listesinde görünüyor. Ağ
+   * ÖZEL kalıyor, yani sahibi bir cihazı istediği an çıkarabiliyor — herkese açık bir ağda
+   * çıkarmak diye bir şey yok, çünkü kimse "üye" değil.
+   *
+   * ── SESSİZCE BAŞARISIZ ───────────────────────────────────────────────────────────────────
+   *
+   * Bir üyenin yetkilendirilememesi turu düşürmüyor: sıradaki üyeye geçiliyor ve bir sonraki tur
+   * yeniden deniyor. Tek bir cihaz yüzünden bütün ağın kendiliğinden yetkilendirmesinin durması,
+   * çözdüğünden büyük bir sorun olurdu.
+   *
+   * Dönen sayı, bu turda yetkilendirilen cihaz sayısı.
+   */
+  async authorizeNewMembers(organizationId: string, correlationId: string): Promise<number> {
+    const networks = await this.controlledNetworks(organizationId, correlationId);
+    let authorized = 0;
+
+    for (const network of networks) {
+      let members: ControllerMember[];
+      try {
+        members = await this.members(organizationId, network.networkId, correlationId);
+      } catch (error) {
+        this.logger.warn(
+          `${network.networkId} üyeleri okunamadı: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        continue;
+      }
+
+      for (const member of members.filter((m) => !m.authorized)) {
+        try {
+          await this.setMemberAuthorized(
+            organizationId,
+            // KİM: bir insan değil, cihazın kendisi. `null` geçilemiyor çünkü denetim kaydı bir
+            // aktör istiyor; kurucu yönetici, bu kararı veren hesap olarak doğru cevap.
+            await this.founderId(),
+            network.networkId,
+            member.memberId,
+            true,
+            null,
+            correlationId,
+          );
+          authorized += 1;
+          this.logger.log(
+            `${member.memberId} kendiliğinden yetkilendirildi (${network.networkId})`,
+          );
+        } catch (error) {
+          this.logger.warn(
+            `${member.memberId} yetkilendirilemedi: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    }
+    return authorized;
+  }
+
+  /** Denetim kaydının aktörü: kurucu yönetici. */
+  private async founderId(): Promise<string> {
+    const rows = await this.db.withoutTenant('migration-status', (q) =>
+      q.query<{ id: string }>(`SELECT admin_user_id::text AS id FROM public.system_setup LIMIT 1`),
+    );
+    const id = rows[0]?.id;
+    if (id === undefined) throw new Error('kurucu yönetici bulunamadı');
+    return id;
+  }
+
   async setMemberAuthorized(
     organizationId: string,
     userId: string,

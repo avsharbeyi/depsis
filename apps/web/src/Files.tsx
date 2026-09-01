@@ -1,3 +1,4 @@
+import type { Prefs } from './prefs.js';
 import type { OpenApi } from '@depsis/contracts';
 import { Fragment, useEffect, useRef, useState } from 'react';
 
@@ -21,6 +22,15 @@ interface Props {
   /** The optional note replaces the default sign-out sentence. A batch cut off by an expired
    *  session reports what it already did there, because this screen unmounts with the desk. */
   onUnauthenticated: (note?: string) => void;
+  /**
+   * Kullanıcının kendi tercihleri — burada yalnız favori klasörler için.
+   *
+   * İsteğe bağlı: bu ekran kurulum sihirbazında ve tercihler okunmadan da çiziliyor, ve favorisi
+   * olmayan bir şerit çalışan bir şerittir. Verilmediğinde yıldız düğmeleri hiç görünmüyor —
+   * kaydedilemeyecek bir işi teklif etmemek, teklif edip sonra düşmekten iyidir.
+   */
+  prefs?: Prefs | undefined;
+  savePrefs?: ((next: Prefs) => Promise<boolean>) | undefined;
 }
 
 /** A step in the trail. Navigation is by id — never by a path string — because that is what the
@@ -39,6 +49,12 @@ interface Loc {
 }
 
 const ROOT: Loc = { trashed: false, trail: [] };
+
+/** Favori şeridinde görünen ad: yalnız ilk yedi harf, gerekiyorsa kısaltma işaretiyle. */
+function shortName(name: string): string {
+  const trimmed = name.trim();
+  return trimmed.length <= 7 ? trimmed : `${trimmed.slice(0, 7)}…`;
+}
 
 /** The maximum the contract allows on one page. This screen has no cursor pagination, so it asks
  *  for as much as it is permitted and says "+" when the server admits there is more, rather than
@@ -202,10 +218,45 @@ function tint(tone: Tone, alpha = 0.22): React.CSSProperties {
 
 /* ─── the screen ────────────────────────────────────────────────────────────── */
 
-export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.Element {
+export function Files({
+  notify,
+  isAdmin,
+  onUnauthenticated,
+  prefs,
+  savePrefs,
+}: Props): React.JSX.Element {
   // Back and forward are a real stack rather than a "previous folder" variable, because with one
   // variable going back twice returns to where you already were.
   const [history, setHistory] = useState<Loc[]>([ROOT]);
+
+  /* ── FAVORİLER ────────────────────────────────────────────────────────────────────────────
+     Sunucudaki tercih belgesinde duruyorlar, tarayıcıda değil: masasını televizyonda düzenleyen
+     kişi aynı favorileri telefonunda bulmalı — kısayollarla aynı gerekçe. */
+  const favorites = prefs?.favorites ?? [];
+  const canFavorite = prefs !== undefined && savePrefs !== undefined;
+  const isFavorite = (id: string): boolean => favorites.some((f) => f.id === id);
+
+  async function toggleFavorite(crumb: Crumb, trail: Crumb[]): Promise<void> {
+    if (prefs === undefined || savePrefs === undefined) return;
+    const already = isFavorite(crumb.id);
+    const next = already
+      ? favorites.filter((f) => f.id !== crumb.id)
+      : [...favorites, { id: crumb.id, name: crumb.name, trail }];
+    // KIRK TANE YETER, ve sınır sözleşmenin: bir şerit kırk öğeden sonra şerit olmaktan çıkıyor.
+    if (next.length > 40) {
+      notify('error', 'En fazla 40 favori tutulabilir.');
+      return;
+    }
+    const ok = await savePrefs({ ...prefs, favorites: next });
+    if (!ok) {
+      notify('error', 'Favori kaydedilemedi.');
+      return;
+    }
+    notify(
+      'ok',
+      already ? `${crumb.name} favorilerden çıkarıldı.` : `${crumb.name} favorilere eklendi.`,
+    );
+  }
   const [pos, setPos] = useState(0);
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
   /** Told apart from "no rows": an empty list is a fact about the folder, a failed read is not. */
@@ -1386,13 +1437,41 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
           karıştırıyordu. History penceresi kodda duruyor; gerekirse Yedekleme'den yaşar. */}
 
       <div className="quick">
-        <button type="button" className={!trashed ? 'qf on' : 'qf'} onClick={() => go(ROOT)}>
+        {/* ── EV BİR SİMGE, BİR BAŞLIK DEĞİL ─────────────────────────────────────────────
+            "Dosyalarım" yazısı şeridin yarısını kaplıyordu ve söylediği şey kullanıcının zaten
+            bildiği bir şeydi: açtığı ekranın adı. Yerine kalan genişlik favorilere gidiyor —
+            yani kullanıcının kendi seçtiği yerlere. */}
+        <button
+          type="button"
+          className={!trashed ? 'qf ic on' : 'qf ic'}
+          onClick={() => go(ROOT)}
+          title="Dosyalarım"
+          aria-label="Dosyalarım"
+        >
           <span className="g" style={tint('iris', 0.2)} aria-hidden>
             🏠
           </span>
-          <span className="l">Dosyalarım</span>
           <span className="c">{counts.home ?? '—'}</span>
         </button>
+
+        {/* ── FAVORİLER ──────────────────────────────────────────────────────────────────
+            Adın yalnız ilk yedi harfi. Bir şeridin işi tanıtmak, okutmak değil: yedi harf
+            kullanıcının kendi koyduğu bir adı tanımasına yetiyor, tam ad ise iki favoriden
+            sonra şeridi bitiriyordu. Tam adı `title` taşıyor. */}
+        {favorites.map((fav) => (
+          <button
+            key={fav.id}
+            type="button"
+            className="qf sm"
+            title={fav.name}
+            onClick={() => go({ trashed: false, trail: fav.trail })}
+          >
+            <span className="g" style={tint('warn', 0.2)} aria-hidden>
+              ★
+            </span>
+            <span className="l">{shortName(fav.name)}</span>
+          </button>
+        ))}
         {/* Çöp ve Yedekler KÜÇÜK ve SAĞDA — sahibin sözü. Asıl kapı Dosyalarım; bu ikisi
             başvurulan yerler, ve mobilde koca bir ikinci satır olarak taşmamalılar. */}
         <span className="qsp" aria-hidden />
@@ -1715,6 +1794,15 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
                 <span className="sz">
                   {entry.kind === 'folder' ? '—' : formatBytes(entry.size)}
                 </span>
+                {/* ── DEĞİŞME TARİHİ ────────────────────────────────────────────────────
+                    Sunucu bu alanı zaten her satırda gönderiyordu ve ekran onu hiç çizmiyordu.
+                    Bir dosya listesinde "hangisi yeni" sorusunun cevabı boyuttan önce gelir.
+
+                    Dar ekranda gizleniyor (stil sayfası): 360 pikselde ad, boyut ve tarih yan
+                    yana durmuyor, ve üçünden feda edilecek olan ad değil. */}
+                <span className="dt" title={new Date(entry.modifiedAt).toLocaleString('tr')}>
+                  {new Date(entry.modifiedAt).toLocaleDateString('tr')}
+                </span>
                 {/* Only when the server sent one. Its absence means "not scheduled to go" — either
                     no policy is set, or this row sits inside a trashed folder and dies on that
                     folder's date rather than its own. Inventing a date here would be a countdown
@@ -1755,6 +1843,32 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
                     </>
                   ) : (
                     <>
+                      {/* ── YILDIZ: YALNIZ KLASÖRLERDE ─────────────────────────────────
+                          Şerit gidilecek YERLERİ tutuyor; bir dosya bir yer değil, ve onu
+                          şeride koymak tıklandığında ne olacağı belli olmayan bir düğme
+                          üretirdi. Tercihler okunmadıysa düğme hiç çizilmiyor: kaydedilemeyecek
+                          bir işi teklif etmemek, teklif edip sonra düşmekten iyidir. */}
+                      {entry.kind === 'folder' && canFavorite && (
+                        <button
+                          type="button"
+                          className={isFavorite(entry.id) ? 'fav on' : 'fav'}
+                          title={isFavorite(entry.id) ? 'Favorilerden çıkar' : 'Favorilere ekle'}
+                          aria-label={
+                            isFavorite(entry.id)
+                              ? `${entry.name} favorilerden çıkar`
+                              : `${entry.name} favorilere ekle`
+                          }
+                          aria-pressed={isFavorite(entry.id)}
+                          onClick={() =>
+                            void toggleFavorite({ id: entry.id, name: entry.name }, [
+                              ...trail,
+                              { id: entry.id, name: entry.name },
+                            ])
+                          }
+                        >
+                          {isFavorite(entry.id) ? '★' : '☆'}
+                        </button>
+                      )}
                       {can(entry, 'move') && (
                         <button
                           type="button"

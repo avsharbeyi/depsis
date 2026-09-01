@@ -5100,6 +5100,42 @@ components:
               id: { type: string, maxLength: 128 }
               label: { type: string, maxLength: 64 }
               cell: { type: integer, minimum: 0, maximum: 999 }
+        favorites:
+          type: array
+          maxItems: 40
+          description: |
+            Dosya gezgininde hizli erisim seridinde duran klasorler.
+
+            KISAYOLLARDAN AYRI BIR ALAN, ve ayri olmasi zorunlu: `shortcuts` masaustu izgarasidir
+            ve her girdisinin zorunlu bir hucresi var. Bir favoriyi oraya sikistirmak, masada
+            gorunmeyen ama dolu duran bir hucre birakirdi.
+
+            IZ TAM OLARAK SAKLANIYOR (`trail`), yalniz klasorun kimligi degil. Gezgin bir konuma
+            iz uzerinden gidiyor; yalniz kimlik saklansaydi favoriye tiklamak once klasorun
+            atalarini bulmak icin ayri istekler gerektirirdi. Iz ayni zamanda kirinti yolunun
+            kendisi, yani favoriden gidilen yerde "nerede oldugunu" gosteren cizgi de dogru olur.
+
+            AD BIR ONBELLEK. Klasor yeniden adlandirilirsa serit eski adi gosterir; bir sonraki
+            aciliste duzeliyor. Yazarken klasorun VARLIGI DOGRULANMIYOR -- duvar kagidi alaninin
+            hatasi tam olarak buydu: var olmayan bir kimlik butun tercih yazmalarini kalici olarak
+            reddettirmisti.
+          items:
+            type: object
+            required: [id, name, trail]
+            additionalProperties: false
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string, maxLength: 255 }
+              trail:
+                type: array
+                maxItems: 24
+                items:
+                  type: object
+                  required: [id, name]
+                  additionalProperties: false
+                  properties:
+                    id: { type: string, format: uuid }
+                    name: { type: string, maxLength: 255 }
       additionalProperties: false
 
     Transfer:

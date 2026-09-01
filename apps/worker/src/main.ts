@@ -27,6 +27,8 @@ import {
   OrganizationsService,
   NotificationsModule,
   NotificationsService,
+  RemoteModule,
+  RemoteService,
 } from '@depsis/api/worker-surface';
 
 import { registerHandlers } from './handlers/registry.js';
@@ -59,6 +61,8 @@ import { WorkerService } from './worker.service.js';
     IndexerModule,
     OrganizationsModule,
     NotificationsModule,
+    // Uzak erişimin kendiliğinden yetkilendirmesi işçide koşuyor; servisi buradan geliyor.
+    RemoteModule,
     BackupRunModule,
     BackupSchedulesModule,
   ],
@@ -89,6 +93,7 @@ async function bootstrap(): Promise<void> {
     notifications: app.get(NotificationsService),
     schedules: app.get(BackupSchedulesService),
     backupRuns: app.get(BackupRunService),
+    remote: app.get(RemoteService),
   });
   // ADR-0011 Layer 1. Started after the handlers so an event that arrives immediately has a
   // consumer registered; the reader only writes to `index_queue`, so the ordering is a courtesy
