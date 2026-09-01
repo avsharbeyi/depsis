@@ -75,9 +75,7 @@ const favoriteSchema = z
   .object({
     id: z.string().uuid(),
     name: z.string().max(255),
-    trail: z
-      .array(z.object({ id: z.string().uuid(), name: z.string().max(255) }).strict())
-      .max(24),
+    trail: z.array(z.object({ id: z.string().uuid(), name: z.string().max(255) }).strict()).max(24),
   })
   .strict();
 
