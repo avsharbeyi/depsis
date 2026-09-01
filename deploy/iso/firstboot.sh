@@ -61,6 +61,12 @@ apt-get install -y -qq samba smbclient >/dev/null || \
   echo 'UYARI: samba kurulamadı; paylaşımlar yayınlanamaz ve arayüz nedenini söyler.'
 apt-get install -y -qq wsdd2 >/dev/null || \
   echo 'UYARI: wsdd2 kurulamadı; cihaz Gezgin Ağ görünümünde kendiliğinden listelenmez.'
+# rsyslog: ag surucusunden yazilan dosyalarin Dosyalar ekraninda SANIYELER icinde gorunmesi
+# icin: ajan her paylasim bolumune `full_audit` yaziyor ve isci o akisi izliyor. Onsuz urun
+# calisiyor ama o dosyalar on bes dakikalik yuruyusle indeksleniyor -- ve Debian 13 kurulumunda
+# rsyslog varsayilan olarak GELMIYOR; journald tek basina yeterli sayiliyor.
+apt-get install -y -qq rsyslog >/dev/null || \
+  echo 'UYARI: rsyslog kurulamadi; agdan yazilan dosyalar duzenli taramayla indekslenecek.'
 
 # ── Kiosk: cihazın kendi ekranında arayüz ────────────────────────────────────
 #

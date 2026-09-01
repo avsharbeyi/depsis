@@ -789,6 +789,31 @@ units() {
   install -m 0644 "$REPO/deploy/tmpfiles/depsis-apps.conf" /etc/tmpfiles.d/depsis-apps.conf
   systemd-tmpfiles --create /etc/tmpfiles.d/depsis-apps.conf || true
 
+  # ── SMB DENETİM AKIŞI: AĞDAN YAZILAN DOSYALARIN HIZLI YOLU ──────────────────────────────
+  #
+  # Ajan her paylaşım bölümüne `full_audit` satırlarını yazıyor, yani smbd her değişiklik için
+  # local5'e bir satır basıyor. Bu kural o satırları işçinin izlediği dosyaya ayırıyor.
+  #
+  # BU ADIM YOKTU ve dosyası deponun içinde kimsenin kurmadığı bir dosya olarak duruyordu —
+  # `deploy/systemd/` birimlerinin başına gelenin aynısı. Sonucu, ağ sürücüsünden gönderilen
+  # dosyaların Dosyalar ekranında saniyeler yerine on beş dakika sonra görünmesi.
+  #
+  # 49, Debian'ın kendi 50-default.conf'undan önce: `stop` ancak o zaman denetim satırlarını
+  # /var/log/syslog dışında tutuyor. Yoğun bir paylaşım saatte on binlerce satır yazıyor.
+  #
+  # Dizin 0750 ve grubu depsis-api: işçi okuyor, yazmıyor.
+  if [ -d /etc/rsyslog.d ]; then
+    install -d -m 0750 -o root -g depsis-api /var/log/depsis
+    install -m 0644 "$REPO/deploy/rsyslog/depsis-smb-audit.conf" \
+      /etc/rsyslog.d/49-depsis-smb-audit.conf
+    systemctl restart rsyslog >/dev/null 2>&1 || true
+    ok 'SMB denetim akışı ayrıldı (hızlı indeksleme)'
+  else
+    # rsyslog yoksa ürün ÇALIŞIYOR, yalnız ağdan yazılanlar on beş dakikalık yürüyüşle
+    # indeksleniyor. Söylenmesi gereken bir gecikme, kurulumu durduracak bir eksik değil.
+    warn 'rsyslog yok; ağdan yazılan dosyalar düzenli taramayla indekslenecek'
+  fi
+
   for f in "$REPO"/deploy/systemd/*; do
     install -m 0644 "$f" "/etc/systemd/system/$(basename "$f")"
   done

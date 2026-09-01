@@ -14,6 +14,7 @@ import { DbModule } from './db/db.module.js';
 import { DeskModule } from './desk/desk.module.js';
 import { EventsModule } from './events/events.module.js';
 import { FilesModule } from './files/files.module.js';
+import { IndexerModule } from './files/indexer.module.js';
 import { HealthModule } from './health/health.module.js';
 import { PosixIdentityModule } from './identity/posix.module.js';
 import { JobsModule } from './jobs/jobs.module.js';
@@ -40,6 +41,17 @@ import { UsersModule } from './users/users.module.js';
     AppsModule,
     AuthModule,
     HealthModule,
+    // ── AĞDAN YAZILAN DOSYALARIN İNDEKSE GİRMESİ ──────────────────────────────────────────
+    //
+    // Bu modül vardı ve HİÇBİR YERE bağlı değildi. Sonucu şuydu: ağ sürücüsünden gönderilen
+    // dosyalar diske iniyor ama Dosyalar ekranında hiç görünmüyordu — çünkü ekranın okuduğu şey
+    // veritabanındaki dizin, ve onu diskle eşitleyen yürüyüşü kuyruğa alan tek yer bu modülün
+    // açılış kancası. Sahada ölçülen hâli: diskte 147 dosya ve 1588 klasör, veritabanında 118
+    // dosya ve 15 klasör.
+    //
+    // İşçi tarafı sağlamdı — `files.reconcile` işleyicisi kayıtlıydı — ama o işi kimse
+    // kuyruğa koymuyordu. Kayıtlı bir işleyici, işi üreten taraf yoksa hiçbir şey yapmıyor.
+    IndexerModule,
     JobsModule,
     PosixIdentityModule,
     MeModule,
