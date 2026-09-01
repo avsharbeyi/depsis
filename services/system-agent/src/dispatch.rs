@@ -835,6 +835,25 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 &mountpoint,
                 "-o",
                 "acltype=posixacl",
+                // ── `chmod` ACL'İ SİLMEMELİ ──────────────────────────────────────────────
+                //
+                // ZFS'in varsayılanı `aclmode=discard`: bir dosyaya `chmod` yapıldığında ACL'in
+                // TAMAMI atılıyor. Samba oluşturduğu her dosyaya `chmod` yapıyor (create mask'i
+                // uygulamak için), yani miras alınan ACL daha dosya görünmeden yok oluyor.
+                //
+                // SAHADA OLAN. Kullanıcı ağ sürücüsünden bir klasör dolusu fotoğraf yükledi;
+                // hepsi `-rw------- kullanıcı` olarak yere indi. Başka hiç kimse — ikinci bir
+                // hesap, arayüzün indirme düğmesi — okuyamadı, ve ekranda bunu söyleyen hiçbir
+                // şey yoktu: izinler ekranında haklar verilmiş görünüyordu, çünkü verilmişti;
+                // diskte duran şey onlar değildi.
+                //
+                // `aclinherit=discard` da varsayılan değil ama `restricted` de yetmiyor: miras
+                // alınan girdilerden yazma haklarını kırpıyor. `passthrough` ikisinde de "ne
+                // miras alındıysa o" demek, ve erişimi belirleyen tek yer ACL'in kendisi oluyor.
+                "-o",
+                "aclmode=passthrough",
+                "-o",
+                "aclinherit=passthrough",
                 "-o",
                 "xattr=sa",
                 &dataset,
@@ -2990,6 +3009,13 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     "create",
                     "-o",
                     acl,
+                    // Paylaşım kökündekiyle aynı gerekçe: `aclmode=discard` varsayılanı,
+                    // Samba'nın her oluşturmadan sonra yaptığı `chmod` ile miras alınan ACL'i
+                    // siliyor ve dosyalar sahibinden başkasına kapalı iniyor.
+                    "-o",
+                    "aclmode=passthrough",
+                    "-o",
+                    "aclinherit=passthrough",
                     "-o",
                     "xattr=sa",
                     "-o",
