@@ -3286,7 +3286,20 @@ label textarea,
      `min-height` bir taban: yatay tutulan bir telefonda `100dvh` çok kısa kalıyor ve dosya
      listesi iki satıra sıkışıyordu. */
   .mfm {
-    height: calc(100dvh - 148px);
+    /* ── NEDEN TAM EKRAN DEĞİL DE 70dvh ──────────────────────────────────────
+       Kart ekranın altına kadar uzatıldığında alt kenarı, sağ altta YÜZEN DEPSIS rozetinin
+       şeridine giriyor — ve o rozet telefondaki tek gezinme yolu, alt barı açan düğme.
+       Örtüştüklerinde rozete yapılan dokunuş karta gidiyordu; yani kullanıcı dosya listesini
+       gördükten sonra başka hiçbir ekrana geçemiyordu.
+
+       Yükseklik başlığın boyuna göre hesaplanmıyor: başlık telefonda satır kaydırıyor ve boyu
+       yazı tipine, kullanıcı adının uzunluğuna, dile göre değişiyor — ondan çıkarma yapan bir
+       hesap, bazı cihazlarda tam kenara denk gelirdi. Görünen alanın oranı sabit bir sayı ve
+       her başlık boyunda rozetin şeridini boş bırakıyor.
+
+       Altta kalan boşluk aynı zamanda İSTENEN bir şey: durum kutularının üst kenarı görünüyor
+       ve aşağıda devamı olduğunu söylüyor. */
+    height: 70dvh;
     min-height: 320px;
   }
   .mfm .wb {
@@ -3425,12 +3438,6 @@ label textarea,
        zaten kurulu (alt bar 38, menü 39, rozet 40); telefonda rozeti bir basamak daha yukarı
        almak, sayfanın kendi içeriğinin onu asla örtememesi demek. */
     z-index: 45;
-  }
-  /* Rozet, kartın sağ alt köşesinin üstünde duruyor. Kartın son satırı onun altında kalmasın
-     diye alta bir güvenli alan bırakılıyor: örtülen bir dosya adı, kullanıcının aradığı dosya
-     olabilir. */
-  .mfm .wb {
-    padding-bottom: 62px;
   }
   .brandbox .nm {
     display: none;
