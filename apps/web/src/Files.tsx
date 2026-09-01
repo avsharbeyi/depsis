@@ -1182,9 +1182,15 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
               pickCode.current?.click();
             }}
           >
+            {/* KARE KODUN KENDİSİ, ve `evenodd` olmadan öyle görünmüyordu: köşe işaretlerinin
+                içi de aynı yönde doldurulduğu için üç halka üç dolu kareye dönüşüyor, geriye
+                kare koda hiç benzemeyen bir blok yığını kalıyordu. Kesişim kuralı içteki kareyi
+                delik yapıyor, en içteki noktayı yeniden dolduruyor — kare kodun köşelerindeki
+                işaret tam olarak bu. */}
             <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true">
               <path
-                d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM5 5h3v3H5zM16 5h3v3h-3zM5 16h3v3H5zM14 14h3v3h-3zM18 14h3v3h-3zM14 18h3v3h-3zM18 18h3v3h-3z"
+                fillRule="evenodd"
+                d="M3 3h8v8H3zM4.5 4.5v5h5v-5zM6 6h2v2H6zM13 3h8v8h-8zM14.5 4.5v5h5v-5zM16 6h2v2h-2zM3 13h8v8H3zM4.5 14.5v5h5v-5zM6 16h2v2H6zM13 13h3v3h-3zM18 13h3v3h-3zM13 18h3v3h-3zM18 18h3v3h-3z"
                 fill="currentColor"
               />
             </svg>

@@ -3167,7 +3167,20 @@ label textarea,
     overflow: visible;
   }
   .main {
-    grid-template-columns: 1fr;
+    /* ── `minmax(0, 1fr)`, SADECE `1fr` DEĞİL ─────────────────────────────────
+       Bir grid parçasının en küçük genişliği varsayılan olarak İÇERİĞİ kadardır: içindeki tek
+       bir geniş öğe — bir dosya tablosu, uzun bir ad — parçayı 360 pikselin ötesine büyütüyor ve
+       sayfayı yatay taşırıyordu.
+
+       Bedeli yalnız bir kaydırma çubuğu değildi. Telefon öykünmesinde yatay taşma, tarayıcının
+       DÜZEN GÖRÜNÜR ALANINI genişletmesine yol açıyor (360 → 934 ölçüldü) ve `position: fixed`
+       öğeler o alana yapıştığı için sağ alttaki DEPSIS rozeti ekranın çok altına, görünmeyen bir
+       yere düşüyordu. Rozet telefondaki tek gezinme yolu olduğu için sonuç, dosya listesini açan
+       kullanıcının başka hiçbir ekrana geçememesiydi.
+
+       Masaüstü kuralı bunu zaten `minmax(0, 1fr)` ile yapıyordu; dar ekran kuralı geride
+       kalmıştı. */
+    grid-template-columns: minmax(0, 1fr);
     padding: 0 14px 12px;
   }
   .side {
@@ -3274,6 +3287,32 @@ label textarea,
   }
   .tfig {
     font-size: 19px;
+  }
+  /* ── TELEFONDA DOSYALAR EKRANI KAPLIYOR ──────────────────────────────────
+     Bu bir NAS: telefondan bakan birinin aradığı ilk şey dosyaları. Kart görünen alanın
+     neredeyse tamamını alıyor, durum kutuları ve kısayol masası hemen altında kalıyor ve
+     kaydırınca geliyor.
+
+     `dvh`, `vh` DEĞİL: mobil tarayıcıların adres çubuğu kayarken `vh` sabit kalır ve kartın alt
+     ucu ekranın dışında kalırdı. Çıkarılan pay üst bar ile kenar boşlukları.
+
+     `min-height` bir taban: yatay tutulan bir telefonda `100dvh` çok kısa kalıyor ve dosya
+     listesi iki satıra sıkışıyordu. */
+  .mfm {
+    /* ── NEDEN BAŞLIKTAN ÇIKARMA DEĞİL DE 70dvh ──────────────────────────────
+       Başlık telefonda satır kaydırıyor ve boyu yazı tipine, kullanıcı adının uzunluğuna, dile
+       göre değişiyor; ondan çıkarma yapan bir hesap bazı cihazlarda tam kenara denk gelir, kimi
+       cihazlarda taşardı. Görünen alanın sabit bir oranı her başlık boyunda çalışıyor.
+
+       Altta kalan boşluk ayrıca İSTENEN bir şey: durum kutularının üst kenarı görünüyor ve
+       aşağıda devamı olduğunu söylüyor. */
+    height: 70dvh;
+    min-height: 320px;
+  }
+
+  .mfm .wb {
+    padding: 10px;
+    gap: 9px;
   }
   .shorts {
     min-height: 200px;

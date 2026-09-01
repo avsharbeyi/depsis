@@ -24,7 +24,7 @@ import { useSnapshot, type Snapshot } from './snapshot.js';
 import { Tasks } from './Tasks.js';
 import { Tiles } from './Tiles.js';
 import { Transfers } from './Transfers.js';
-import { toneRgb, Toasts, useToasts, Win, type Tone } from './ui.js';
+import { Glyph, toneRgb, Toasts, useToasts, Win, type Tone } from './ui.js';
 import { Audit } from './Audit.js';
 import { Processes } from './Processes.js';
 import { System } from './System.js';
@@ -282,6 +282,61 @@ const DOCK_ORDER: PaneId[] = [
   'background',
 ];
 
+/**
+ * Kısayol olarak eklenebilecek pencereler.
+ *
+ * ── ALT BARIN KENDİSİ, İKİNCİ BİR LİSTE DEĞİL ───────────────────────────────────────────────
+ *
+ * Kısayol alanının eskiden kendi elle yazılmış listesi vardı ve o liste alt barın gerisinde
+ * kalmıştı: on sekiz pencerenin yalnız on biri eklenebiliyordu. Kullanıcılar, Takımlar, İşler,
+ * Denetim, Süreçler, Sistem, Paylaşımlar ve Diskler alt barda duruyor ama masaüstüne
+ * konulamıyordu — ve eksik olduklarını söyleyen hiçbir şey yoktu, çünkü bir listede olmamak
+ * sessiz bir durumdur.
+ *
+ * Türetilmiş olması, bir daha geride kalamaması demek: alt bara eklenen her pencere kısayol
+ * olarak da eklenebilir hâle geliyor, ve bunun için kimsenin ikinci bir yeri hatırlaması
+ * gerekmiyor.
+ *
+ * ── YÖNETİCİYE ÖZEL OLANLAR SÜZÜLÜYOR ───────────────────────────────────────────────────────
+ *
+ * `adminOnly` pencereler bir üyeye hiç gösterilmiyor — alt barda olduğu gibi. Eklenebilir
+ * gösterip açılışta 403 vermek, cihazın yapamayacağı bir şeyi vaat eden bir düğme olurdu.
+ */
+export interface ShortcutPane {
+  id: PaneId;
+  label: string;
+  glyph: string;
+  tone: Tone;
+}
+
+export function shortcutPanes(isAdmin: boolean): ShortcutPane[] {
+  return DOCK_ORDER.filter((id) => isAdmin || !PANES[id].adminOnly).map((id) => ({
+    id,
+    label: PANES[id].label,
+    glyph: PANES[id].glyph,
+    tone: PANES[id].tone,
+  }));
+}
+
+/**
+ * Ekran bir telefon genişliğinde mi.
+ *
+ * Bir kez okunup saklanmıyor: tabletin döndürülmesi ya da pencerenin yeniden boyutlandırılması
+ * bu cevabı değiştiriyor, ve değişmeyen bir cevap, dikeyken doğru olan bir düzeni yatayda
+ * bırakırdı. Eşik stil sayfasındaki mobil kırılma noktasının aynısı.
+ */
+function useMobile(): boolean {
+  const query = '(max-width: 680px)';
+  const [mobile, setMobile] = useState<boolean>(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const list = window.matchMedia(query);
+    const onChange = (): void => setMobile(list.matches);
+    list.addEventListener('change', onChange);
+    return () => list.removeEventListener('change', onChange);
+  }, []);
+  return mobile;
+}
+
 const PANE_IDS = Object.keys(PANES) as PaneId[];
 
 export function paneHref(pane: PaneId): string {
@@ -492,6 +547,7 @@ function Desktop({
   const [failed, setFailed] = useState(false);
   const [pane, setPane] = useState<PaneId | null>(paneFromHash);
   const [dockOpen, setDockOpen] = useState(false);
+  const mobile = useMobile();
   const [powerOpen, setPowerOpen] = useState(false);
   const { toasts, push, dismiss } = useToasts();
   const { prefs, save, loaded: prefsLoaded } = usePrefs();
@@ -757,6 +813,29 @@ function Desktop({
         ) : (
           <>
             <div className="left">
+              {/* ── TELEFONDA ÖNCE DOSYALAR ──────────────────────────────────────────────
+                  Bu bir NAS: telefonundan cihaza bakan birinin aradığı ilk şey dosyaları,
+                  disk doluluğu ya da kısayol masası değil. Masaüstünde durum kutuları üstte
+                  mantıklı — geniş ekranda hepsi aynı anda görünüyor — ama telefonda o
+                  sıralama, dosyalara ulaşmak için her seferinde kaydırmak demekti.
+
+                  EKRANI KAPLIYOR, ve diğer kutular kaydırınca geliyor. Yükseklik `dvh` ile
+                  veriliyor: mobil tarayıcıların adres çubuğu kayarken `vh` sabit kalır ve
+                  kartın alt ucu ekranın dışında kalırdı.
+
+                  Yalnız telefonda ÇİZİLİYOR, gizlenmiyor: gizlenen bir dosya gezgini yine de
+                  klasör listesini ister, yani masaüstünde kimsenin görmediği bir istek olurdu. */}
+              {mobile && (
+                <section className="card mfm">
+                  <div className="ch">
+                    <Glyph tone="iris">🗂</Glyph>
+                    <span className="tt">Dosyalar</span>
+                  </div>
+                  <div className="wb">
+                    <Files notify={push} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />
+                  </div>
+                </section>
+              )}
               <Tiles snapshot={snapshot} meId={me.id} onOpen={openPane} />
               {/* Not rendered until the saved layout has actually been read. The field commits
                   every arrangement with a PUT of the whole preferences document, so a desk drawn
@@ -764,7 +843,13 @@ function Desktop({
                   "Boş bir yere çift tıklayarak kısayol ekleyin" hint would meanwhile be asserting that
                   a desk nobody has read yet is empty. */}
               {prefsLoaded ? (
-                <Shortcuts prefs={prefs} save={save} onOpen={openPane} notify={push} />
+                <Shortcuts
+                  prefs={prefs}
+                  save={save}
+                  onOpen={openPane}
+                  notify={push}
+                  isAdmin={isAdmin}
+                />
               ) : (
                 <div className="shorts">
                   <span className="thint" style={{ position: 'absolute', left: 2, top: 4 }}>
