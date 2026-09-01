@@ -3275,6 +3275,24 @@ label textarea,
   .tfig {
     font-size: 19px;
   }
+  /* ── TELEFONDA DOSYALAR EKRANI KAPLIYOR ──────────────────────────────────
+     Bu bir NAS: telefondan bakan birinin aradığı ilk şey dosyaları. Kart görünen alanın
+     neredeyse tamamını alıyor, durum kutuları ve kısayol masası hemen altında kalıyor ve
+     kaydırınca geliyor.
+
+     `dvh`, `vh` DEĞİL: mobil tarayıcıların adres çubuğu kayarken `vh` sabit kalır ve kartın alt
+     ucu ekranın dışında kalırdı. Çıkarılan pay üst bar ile kenar boşlukları.
+
+     `min-height` bir taban: yatay tutulan bir telefonda `100dvh` çok kısa kalıyor ve dosya
+     listesi iki satıra sıkışıyordu. */
+  .mfm {
+    height: calc(100dvh - 148px);
+    min-height: 320px;
+  }
+  .mfm .wb {
+    padding: 10px;
+    gap: 9px;
+  }
   .shorts {
     min-height: 200px;
   }

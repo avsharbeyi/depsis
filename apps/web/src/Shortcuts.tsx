@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import type { PaneId } from './App.js';
+import { api } from './api.js';
+import { shortcutPanes, type PaneId } from './App.js';
 import type { Prefs } from './prefs.js';
 import { toneRgb, type Tone } from './ui.js';
 
@@ -15,32 +16,23 @@ import { toneRgb, type Tone } from './ui.js';
  */
 
 interface PaneMeta {
-  id: PaneId;
+  /**
+   * Bir pencere kimliği (`files`) ya da kurulu bir uygulama (`app:immich`).
+   *
+   * `PaneId` DEĞİL, ve bunun sebebi ikinci tür: kurulu uygulamalar cihaza sonradan geliyor, yani
+   * bir birleşim tipiyle sayılamıyorlar. Önek onları ayırmaya yetiyor ve tıklandığında ne
+   * yapılacağını da o belirliyor — pencere açmak ile uygulamanın adresine gitmek farklı iki şey.
+   */
+  id: string;
   label: string;
   glyph: string;
   tone: Tone;
+  /** Kurulu bir uygulamaysa açılacak adres; çalışmıyorsa `null`. */
+  url?: string | null;
 }
 
-/**
- * Everything that can become a shortcut.
- *
- * The label lives here rather than in the saved preference: `Preferences.shortcuts[].label` exists
- * in the contract, but a copy written into the database in March is a copy that still says the old
- * name in June. The id is the durable part, the wording is the interface's business.
- */
-const CATALOGUE: readonly PaneMeta[] = [
-  { id: 'files', label: 'Dosyalar', glyph: '🗂', tone: 'iris' },
-  { id: 'notes', label: 'Notlar', glyph: '📝', tone: 'warn' },
-  { id: 'tasks', label: 'İşler', glyph: '✓', tone: 'live' },
-  { id: 'users', label: 'Kullanıcılar', glyph: '👥', tone: 'warn' },
-  { id: 'account', label: 'Hesabım', glyph: '👤', tone: 'cool' },
-  { id: 'transfers', label: 'Aktarımlar', glyph: '⇅', tone: 'cool' },
-  { id: 'backups', label: 'Yedekleme', glyph: '🛡', tone: 'live' },
-  { id: 'apps', label: 'Uygulamalar', glyph: '🧩', tone: 'iris' },
-  { id: 'remote', label: 'Uzak erişim', glyph: '🌐', tone: 'cool' },
-  { id: 'console', label: 'Terminal', glyph: '▮', tone: 'dim' },
-  { id: 'background', label: 'Arka plan', glyph: '🎨', tone: 'iris' },
-];
+/** Kurulu uygulamaların kısayol kimliğindeki önek. */
+const APP_PREFIX = 'app:';
 
 /** `.sc` is 78px wide in the stylesheet and the gutter between tiles is 12px. */
 const CELL = 78;
@@ -52,12 +44,8 @@ const DRAG_SLOP = 4;
 type Stored = NonNullable<Prefs['shortcuts']>[number];
 
 interface Placed {
-  id: PaneId;
+  id: string;
   cell: number;
-}
-
-function metaFor(id: string): PaneMeta | undefined {
-  return CATALOGUE.find((pane) => pane.id === id);
 }
 
 /** The tint `.sc .g` and `.pm .g` expect; the same 24%/100% pair `Glyph` uses. */
@@ -66,31 +54,37 @@ function tint(tone: Tone): React.CSSProperties {
   return { background: `rgba(${r},${g},${b},.24)`, color: `rgb(${r},${g},${b})` };
 }
 
+/**
+ * Kaydedilmiş düzen okunuyor — ve TANINMAYAN KİMLİKLER DE KORUNUYOR.
+ *
+ * Eskiden bir kimlik katalogda yoksa atılıyordu, ve bu iki durumda sessizce yanlıştı: bir sonraki
+ * sürümde eklenmiş bir pencere, ve kurulu uygulamalar. İkincisi asıl sorun — uygulama listesi
+ * sunucudan GELİYOR, yani ilk çizimde katalogda henüz yok. Atsaydık, sayfayı her açtığında
+ * kullanıcının uygulama kısayolları önce kaybolur, sonra ilk sürüklemede kalıcı olarak silinirdi.
+ *
+ * Çizilemeyen bir kimlik hiçbir şey göstermiyor ama hücresini tutuyor. Görünmez bir hücre biraz
+ * kafa karıştırıcı; birinin masasından bir simgeyi sessizce silmek ise geri alınamaz.
+ */
 function readLayout(stored: readonly Stored[] | undefined): Placed[] {
   const seen = new Set<string>();
   const out: Placed[] = [];
   for (const entry of stored ?? []) {
-    const pane = metaFor(entry.id);
-    if (pane === undefined || seen.has(pane.id)) continue;
-    seen.add(pane.id);
-    out.push({ id: pane.id, cell: entry.cell });
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    out.push({ id: entry.id, cell: entry.cell });
   }
   return out;
 }
 
 /**
- * Entries this build does not recognise are carried through untouched.
+ * Tanınmayan kimlikler için ayrı bir taşıma YOK, çünkü `readLayout` onları zaten düzende tutuyor.
  *
- * A newer version of the interface — or an older one — may have put a shortcut here for something
- * this code has never heard of. Dropping it on the first drag would silently delete part of
- * somebody's desk to fix a problem nobody had.
+ * Eskiden burada bir süzgeç vardı: kaydedilmiş ama katalogda olmayan girdiler ayrı toplanıp
+ * yazının başına ekleniyordu. Okuma tarafı artık hiçbir şey atmadığı için o süzgeç bugün her
+ * girdiyi İKİ KEZ yazardı.
  */
 function writeLayout(prefs: Prefs, layout: readonly Placed[]): Prefs {
-  const foreign = (prefs.shortcuts ?? []).filter((entry) => metaFor(entry.id) === undefined);
-  return {
-    ...prefs,
-    shortcuts: [...foreign, ...layout.map(({ id, cell }) => ({ id, cell }))],
-  };
+  return { ...prefs, shortcuts: layout.map(({ id, cell }) => ({ id, cell })) };
 }
 
 function clamp(value: number, low: number, high: number): number {
@@ -102,10 +96,13 @@ export function Shortcuts({
   save,
   onOpen,
   notify,
+  isAdmin,
 }: {
   prefs: Prefs;
   save: (p: Prefs) => Promise<boolean>;
   onOpen: (pane: PaneId) => void;
+  /** Yöneticiye özel pencereler kataloğa yalnız yönetici için giriyor. */
+  isAdmin: boolean;
   /**
    * Optional, so the shared signature — `{ prefs, save, onOpen }` — still satisfies this
    * component. Without it a refused arrangement still snaps back to where it was, which is the
@@ -116,8 +113,87 @@ export function Shortcuts({
   const fieldRef = useRef<HTMLDivElement>(null);
   const [grid, setGrid] = useState<{ cols: number; rows: number }>({ cols: 1, rows: 1 });
   const [layout, setLayout] = useState<Placed[]>(() => readLayout(prefs.shortcuts));
-  const [drag, setDrag] = useState<{ id: PaneId; x: number; y: number; cell: number } | null>(null);
+  const [drag, setDrag] = useState<{ id: string; x: number; y: number; cell: number } | null>(null);
   const [picker, setPicker] = useState<{ cell: number; x: number; y: number } | null>(null);
+
+  /**
+   * Kurulu uygulamalar da kısayol olabiliyor.
+   *
+   * ── NEDEN SUNUCUDAN ─────────────────────────────────────────────────────────────────────
+   *
+   * Immich gibi uygulamalar cihaza sonradan kuruluyor; hangilerinin kurulu olduğu ve hangi kapı
+   * numarasından açıldıkları yalnız cihazın bildiği şeyler. Bu yüzden katalog sabit olamıyor.
+   *
+   * ── ADRES BURADA KURULUYOR ──────────────────────────────────────────────────────────────
+   *
+   * Sunucunun `url` alanı 127.0.0.1'i gösteriyor — cihazın kendi üstünden bakınca doğru, telefondan
+   * bakınca telefonun kendisi. Doğru ana makine adı bu sayfaya hangi adla gelindiyse odur, ve onu
+   * yalnız tarayıcı bilir. `Apps` ekranı da aynısını yapıyor.
+   *
+   * ── SESSİZCE BAŞARISIZ ──────────────────────────────────────────────────────────────────
+   *
+   * Uygulama listesi okunamazsa hiçbir uyarı çıkmıyor ve masa pencerelerle çalışmaya devam
+   * ediyor: masaüstünün her açılışında bir hata bildirimi, kullanıcının hiç istemediği bir şey
+   * için özür dilemek olurdu.
+   */
+  const [apps, setApps] = useState<PaneMeta[]>([]);
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const { data } = await api.GET('/apps', {});
+      if (!alive || data === undefined) return;
+      setApps(
+        data.items
+          .filter((item) => item.installed)
+          .map((item) => ({
+            id: `${APP_PREFIX}${item.catalogue.slug}`,
+            label: item.catalogue.name,
+            glyph: '🧩',
+            tone: 'iris',
+            url:
+              item.state === 'running' && item.hostPort !== null && item.hostPort !== undefined
+                ? `http://${window.location.hostname}:${item.hostPort}`
+                : null,
+          })),
+      );
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /**
+   * Eklenebilecek her şey: alt bardaki pencereler ve kurulu uygulamalar.
+   *
+   * Pencereler alt barın kendisinden türetiliyor, elle yazılmış ikinci bir listeden değil — o
+   * liste geride kalmıştı ve on sekiz pencerenin yalnız on biri eklenebiliyordu.
+   */
+  const catalogue = useMemo<PaneMeta[]>(
+    () => [...shortcutPanes(isAdmin), ...apps],
+    [isAdmin, apps],
+  );
+  const metaFor = useCallback(
+    (id: string): PaneMeta | undefined => catalogue.find((pane) => pane.id === id),
+    [catalogue],
+  );
+
+  /** Bir kısayola tıklandığında: pencere açılır, ya da uygulamanın adresine gidilir. */
+  const activate = useCallback(
+    (pane: PaneMeta): void => {
+      if (!pane.id.startsWith(APP_PREFIX)) {
+        onOpen(pane.id as PaneId);
+        return;
+      }
+      if (pane.url === null || pane.url === undefined) {
+        // ÇALIŞMAYAN BİR UYGULAMA SESSİZCE AÇILMIYOR. Boş bir sekme, kullanıcıya uygulamanın
+        // bozuk olduğunu değil tarayıcının bozuk olduğunu düşündürürdü.
+        notify?.('error', `${pane.label} çalışmıyor; Uygulamalar ekranından başlatın.`);
+        return;
+      }
+      window.open(pane.url, '_blank', 'noopener,noreferrer');
+    },
+    [notify, onOpen],
+  );
 
   /**
    * The saved layout is adopted by value, not by identity.
@@ -208,7 +284,7 @@ export function Shortcuts({
   /* ─── dragging ────────────────────────────────────────────────────────────── */
 
   const grabRef = useRef<{
-    id: PaneId;
+    id: string;
     /** Where inside the icon the finger went down, so it does not jump under the cursor. */
     dx: number;
     dy: number;
@@ -254,7 +330,7 @@ export function Shortcuts({
     setPicker({ cell: cellUnderPoint(x - rect.left, y - rect.top), x, y });
   }, []);
 
-  const onPointerDown = (id: PaneId, event: React.PointerEvent<HTMLDivElement>): void => {
+  const onPointerDown = (id: string, event: React.PointerEvent<HTMLDivElement>): void => {
     if (event.button !== 0) return;
     const box = event.currentTarget.getBoundingClientRect();
     grabRef.current = {
@@ -322,7 +398,7 @@ export function Shortcuts({
 
   /* ─── adding and removing ─────────────────────────────────────────────────── */
 
-  const add = (id: PaneId, cell: number): void => {
+  const add = (id: string, cell: number): void => {
     const taken = new Set(layout.map((item) => item.cell));
     let free = cell;
     // The click may land on a cell that filled up while the menu was open, or the menu may have
@@ -331,7 +407,7 @@ export function Shortcuts({
     persist([...layout, { id, cell: free }]);
   };
 
-  const remove = (id: PaneId): void => {
+  const remove = (id: string): void => {
     persist(layout.filter((item) => item.id !== id));
   };
 
@@ -354,7 +430,7 @@ export function Shortcuts({
   }, [picker]);
 
   const placed = new Set(layout.map((item) => item.id));
-  const available = CATALOGUE.filter((pane) => !placed.has(pane.id));
+  const available = catalogue.filter((pane) => !placed.has(pane.id));
 
   return (
     <div
@@ -440,12 +516,12 @@ export function Shortcuts({
                 draggedRef.current = false;
                 return;
               }
-              onOpen(item.id);
+              activate(pane);
             }}
             onKeyDown={(event) => {
               if (event.key !== 'Enter' && event.key !== ' ') return;
               event.preventDefault();
-              onOpen(item.id);
+              activate(pane);
             }}
           >
             <span className="g" style={tint(pane.tone)} aria-hidden>
