@@ -694,6 +694,11 @@ export type AgentRequest =
       users: PosixUserSpec[];
     }
   | {
+      login: PosixName;
+      op: 'remove_posix_identity';
+      uid: PosixId;
+    }
+  | {
       op: 'secure_share_root';
       share: SafeComponent;
     }
@@ -1433,6 +1438,9 @@ export type AgentResponse =
   | {
       created: boolean;
       status: 'app_data_dir_ready';
+    }
+  | {
+      status: 'posix_identity_removed';
     }
   | {
       groups_created: number;

@@ -572,6 +572,12 @@ BAD=$(db -c "
                            -- YOK. Buradaki bir 23505 hicbir kiraciya digeri hakkinda bir sey
                            -- soylemez; yalnizca ikinci bir lisans satiri yazilamayacagini soyler.
                            'license_pkey',
+                           -- Emekli POSIX numarasi (migration 0049). users_posix_uid_unique ile
+                           -- AYNI gerekce: numara uzayi cihaz geneli (ADR-0004), yani bu tablonun
+                           -- tasiyacagi bir kiraci boyutu yok. Buradaki bir 23505 bir kimlik
+                           -- degil, ayni numaranin iki kez emekli edilmeye calisildigini soyler --
+                           -- ve o cakismayi provoke edebilmek icin numarayi zaten bilmek gerekir.
+                           'retired_posix_ids_pkey',
                            'depsis_migrations_pkey')
 ")
 [ -z "$BAD" ] && ok 'every unique/exclusion index carries organization_id or is allow-listed' \

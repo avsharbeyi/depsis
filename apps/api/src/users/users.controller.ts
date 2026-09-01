@@ -3,6 +3,7 @@ import {
   Body,
   ConflictException,
   Controller,
+  Delete,
   ForbiddenException,
   Get,
   HttpCode,
@@ -12,6 +13,7 @@ import {
   Patch,
   Post,
   Req,
+  ServiceUnavailableException,
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
@@ -25,6 +27,8 @@ import { PasswordService } from '../auth/password.service.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { SessionService } from '../auth/session.service.js';
 import {
+  CannotDeleteSelfError,
+  IdentityStillOnBoxError,
   UsernameTakenError,
   LastAdminError,
   UserNotFoundError,
@@ -193,6 +197,70 @@ export class UsersController {
     return { token: issued.token, expiresAt: issued.expiresAt.toISOString() };
   }
 
+  /**
+   * Hesabı tamamen kaldırır.
+   *
+   * ── NEDEN VAR ───────────────────────────────────────────────────────────────────────────────
+   *
+   * Cihazın sahibinin cümlesi: *"kullanıcılar kısmında kullanıcı sadece devredışı bırakılabiliniyor
+   * silinebilmeli."* Ekranda gerçekten yalnız kapatma vardı, çünkü şemada `users` satırına RESTRICT
+   * ile bağlı üç yabancı anahtar duruyordu. Göç 0049 üçünü de kaldırdı.
+   *
+   * ── PAROLA YENİDEN İSTENİYOR ────────────────────────────────────────────────────────────────
+   *
+   * `DELETE /me/mfa` ile aynı §0.5 gerekçesi: geri dönüşü olmayan bir işlem sessizce yapılmaz.
+   * Açık bırakılmış bir yönetici oturumunun başına oturan biri, tek tıkla hesap silememeli.
+   *
+   * ── KENDİ HESABI OLMAZ ──────────────────────────────────────────────────────────────────────
+   *
+   * Silen kişi kendini silemiyor, ve bu son yönetici kuralından ayrı bir kural: iki yönetici varken
+   * bile kendi hesabını silen biri, isteğin ortasında oturumunu kaybediyor ve geri dönemiyor.
+   *
+   * ── NE SİLİNİYOR ────────────────────────────────────────────────────────────────────────────
+   *
+   * Hesap, oturumları, ikinci faktörü, ekip üyelikleri, klasör hibeleri, yarım yüklemeleri — ve
+   * kutudaki Unix hesabı ile Samba kaydı. DOSYALARI DEĞİL: bir hesabı silmek, o hesabın yüklediği
+   * dosyaları silmek değil, ve öyle olsaydı bir kullanıcıyı çıkarmanın bedeli şirketin verisi
+   * olurdu. Dosyalar yerinde kalıyor; sahiplerinin numarası ise bir daha dağıtılmıyor.
+   */
+  @Delete(':id')
+  @HttpCode(204)
+  async remove(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ): Promise<void> {
+    requireSameOrigin(request);
+    const session = requireSession(request);
+    const parsed = confirmSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('your own password is required');
+
+    const me = await this.users.findWithHash(session.organizationId, session.userId);
+    if (me === null || !(await this.passwords.verify(me.password_hash, parsed.data.password))) {
+      throw new UnauthorizedException('your password is wrong');
+    }
+    if (id === session.userId) throw translate(new CannotDeleteSelfError());
+
+    const removed = await this.users
+      .remove(session.organizationId, id, `DELETE /users/${id}`)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
+    // Kayıt İŞTEN SONRA, ve hedefin kimliği artık yalnız burada: satır gitti, yani denetimin
+    // taşıdığı ad silinen hesabın son adı. `target.id` yine de yazılıyor — o kimlikle açılmış
+    // eski kayıtlarla aynı iple bağlanabilsin diye.
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'user.deleted',
+      target: { kind: 'user', id, label: removed.username },
+      summary:
+        `'${removed.username}' hesabı KALICI olarak silindi; oturumları, SMB erişimi ve ` +
+        `sistem hesabı kaldırıldı. Dosyaları yerinde duruyor.`,
+    });
+    this.logger.warn(`user '${removed.username}' deleted by '${session.userId}'`);
+  }
+
   @Patch(':id')
   async update(
     @Req() request: AuthenticatedRequest,
@@ -277,5 +345,11 @@ function translate(error: unknown): Error {
   // 409, not 400: the request is well formed and would be legal at almost any other moment. What
   // refuses it is the state of the organisation.
   if (error instanceof LastAdminError) return new ConflictException(error.message);
+  if (error instanceof CannotDeleteSelfError) return new ForbiddenException(error.message);
+  // 503 ve 500 DEĞİL: silme başarısız oldu çünkü kutuya ulaşılamadı, ve bu geçici bir durum —
+  // çağıranın yapması gereken şey yeniden denemek. Hesap olduğu gibi duruyor.
+  if (error instanceof IdentityStillOnBoxError) {
+    return new ServiceUnavailableException(error.message);
+  }
   return error instanceof Error ? error : new Error(String(error));
 }

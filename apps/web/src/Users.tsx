@@ -45,6 +45,8 @@ export function Users({ currentUserId, notify, onUnauthenticated }: Props): Reac
   const [resetting, setResetting] = useState<User | null>(null);
   const [resetTicket, setResetTicket] = useState<{ token: string; expiresAt: string } | null>(null);
   const [confirmPassword, setConfirmPassword] = useState('');
+  /** Silinmek üzere olan hesap. Ayrı bir durum: silme, devre dışı bırakmanın daha sertı değil. */
+  const [deleting, setDeleting] = useState<User | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -119,6 +121,36 @@ export function Users({ currentUserId, notify, onUnauthenticated }: Props): Reac
       return;
     }
     notify('ok', done);
+    reload();
+  }
+
+  /**
+   * Hesabı kalıcı olarak siler.
+   *
+   * Yöneticinin KENDİ parolası isteniyor, sıfırlama biletinde olduğu gibi ve aynı sebeple: bir
+   * oturum, açık bırakılmış bir dizüstünde bulunabilecek bir şey, ve orada bulunabilecek en
+   * kullanışlı düğme bu olurdu.
+   */
+  async function remove(user: User): Promise<void> {
+    setBusy(true);
+    const { error, response } = await api.DELETE('/users/{id}', {
+      params: { path: { id: user.id } },
+      body: { password: confirmPassword },
+    });
+    setBusy(false);
+    setConfirmPassword('');
+    if (response.status === 401) {
+      // 401 burada iki şey olabilir — oturum düştü ya da parola yanlış — ve ikisini ayıran şey
+      // gövde. Parola yanlışsa ekranı kapatmak, kullanıcıyı sebepsiz yere dışarı atmak olurdu.
+      notify('error', problemMessage(error, 'Parolanız yanlış.'));
+      return;
+    }
+    if (!response.ok) {
+      notify('error', problemMessage(error, 'Hesap silinemedi.'));
+      return;
+    }
+    setDeleting(null);
+    notify('ok', `"${user.username}" hesabı silindi.`);
     reload();
   }
 
@@ -237,6 +269,21 @@ export function Users({ currentUserId, notify, onUnauthenticated }: Props): Reac
                   }}
                 >
                   Parolayı sıfırla
+                </button>
+                {/* Devre dışı bırakmanın daha sertı DEĞİL, başka bir şey: kapatılan hesap geri
+                    açılıyor, silinen hesap geri gelmiyor. Kendi hesabı için kapalı — sunucu da
+                    reddediyor — çünkü silen kişi isteğin ortasında oturumunu kaybeder. */}
+                <button
+                  type="button"
+                  className="revoke"
+                  disabled={busy || self}
+                  title={self ? 'Kendi hesabınızı silemezsiniz' : undefined}
+                  onClick={() => {
+                    setConfirmPassword('');
+                    setDeleting(user);
+                  }}
+                >
+                  Sil
                 </button>
               </div>
             );
@@ -387,9 +434,55 @@ export function Users({ currentUserId, notify, onUnauthenticated }: Props): Reac
 
       <div className="note">
         Devre dışı bırakılan hesap silinmez: oturumları kapanır, giriş yapamaz, istendiğinde geri
-        açılır. Yönetici yetkisi verilen hesap diskleri, uygulamaları ve diğer hesapları
-        değiştirebilir.
+        açılır. <b>Sil</b> ise kalıcı — hesap ve ağ paylaşımı erişimi gider, dosyaları kalır.
+        Yönetici yetkisi verilen hesap diskleri, uygulamaları ve diğer hesapları değiştirebilir.
       </div>
+
+      {deleting !== null && (
+        <Win
+          title={`${deleting.username} hesabını sil`}
+          glyph="⌫"
+          tone="rose"
+          onClose={() => setDeleting(null)}
+        >
+          <div className="notice" role="status">
+            <span className="ic" aria-hidden>
+              ⚠
+            </span>
+            <span className="tx">
+              <b>Bu geri alınamaz</b>
+              Hesap, oturumları, iki adımlı doğrulaması, ekip üyelikleri ve klasör izinleri gider;
+              ağ paylaşımına ({deleting.username}) bu adla bir daha bağlanılamaz.
+            </span>
+          </div>
+          <p className="note">
+            <b>Dosyaları silinmiyor.</b> {deleting.username} kişisinin yüklediği dosyalar paylaşımda
+            olduğu gibi kalıyor — bir hesabı kaldırmanın bedeli kurumun verisi olmamalı. Dosyalar
+            sizde kalsın istemiyorsanız hesabı silmeden önce onları taşıyın ya da silin.
+          </p>
+          <label htmlFor="delete-confirm">Kendi parolanız</label>
+          <input
+            id="delete-confirm"
+            type="password"
+            autoComplete="current-password"
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+          />
+          <div className="row">
+            <button type="button" className="no" onClick={() => setDeleting(null)}>
+              Vazgeç
+            </button>
+            <button
+              type="button"
+              className="yes"
+              disabled={busy || confirmPassword === ''}
+              onClick={() => void remove(deleting)}
+            >
+              {busy ? 'Siliniyor…' : 'Hesabı sil'}
+            </button>
+          </div>
+        </Win>
+      )}
 
       {confirming !== null && (
         <ConfirmBox

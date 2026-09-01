@@ -52,6 +52,8 @@ pub const GROUPADD: &str = "/usr/sbin/groupadd";
 pub const USERADD: &str = "/usr/sbin/useradd";
 pub const GPASSWD: &str = "/usr/bin/gpasswd";
 pub const PDBEDIT: &str = "/usr/bin/pdbedit";
+pub const USERDEL: &str = "/usr/sbin/userdel";
+pub const GROUPDEL: &str = "/usr/sbin/groupdel";
 
 /// Where the passdb import is staged.
 ///
@@ -139,6 +141,92 @@ pub fn team_group_name(gid: PosixId) -> String {
 /// both, so the number cannot already belong to a team.
 pub fn private_group_name(uid: PosixId) -> String {
     format!("depsis-p-{}", uid.get())
+}
+
+/// Take an account off the machine: Samba first, then Unix, then its private group.
+///
+/// ── WHY IT IS NOT `sync`'S JOB ──────────────────────────────────────────────────────────────
+///
+/// `sync` sends desired state and is additive for ACCOUNTS on purpose: a tenant whose sync was
+/// somehow computed from a half-read table would otherwise delete every account not in that list,
+/// and account deletion is not recoverable from a reply. So removal is its own operation, names
+/// exactly one account, and happens only when somebody asked for that account to go.
+///
+/// ── ORDER, AND WHY THIS ONE ────────────────────────────────────────────────────────────────
+///
+/// The passdb entry goes FIRST, and this is the half that actually matters for security: the Unix
+/// account is `-s /usr/sbin/nologin -M` and cannot be logged into, while the passdb entry is a
+/// live SMB credential. If only one of the two could be removed, it must be that one.
+///
+/// ── WHAT IT REFUSES ────────────────────────────────────────────────────────────────────────
+///
+/// The uid arrives as a `PosixId`, so 0 and everything outside 300000-399999 cannot be expressed.
+/// Beyond that, the login and the uid must AGREE on this machine: if `getent` says the name belongs
+/// to a different number, or the number to a different name, nothing is deleted. That is the same
+/// check `sync` performs before creating, for the same reason and with more at stake — deleting the
+/// wrong account is worse than creating the wrong one.
+///
+/// An account that is already absent is a SUCCESS, not an error. The caller's request is that the
+/// account not be on the box, and it is not.
+pub fn remove<R: CommandRunner>(
+    runner: &R,
+    uid: PosixId,
+    login: &PosixName,
+) -> Result<(), IdentityError> {
+    let name = login.as_str();
+
+    if let Some(found) = uid_of(runner, name) {
+        if found != uid.get() {
+            return Err(IdentityError::UidTaken {
+                uid: uid.get(),
+                login: name.to_string(),
+                found: format!("uid {found}"),
+            });
+        }
+    }
+    if let Some(existing) = login_of(runner, uid.get()) {
+        if existing != name {
+            return Err(IdentityError::UidTaken {
+                uid: uid.get(),
+                login: name.to_string(),
+                found: existing,
+            });
+        }
+    }
+
+    // Samba yoksa silinecek bir kimlik bilgisi de yok. `sync` ile aynı ayrım: eksik araç bir hata
+    // değil, kutunun bir hâli.
+    if Path::new(PDBEDIT).exists() {
+        // Hesabı olmayan bir kullanıcıda `pdbedit -x` sıfırdan farklı dönüyor, ve bu bir başarısızlık
+        // değil: istenen şey zaten olmuş.
+        let _ = runner.run(PDBEDIT, &["-x", "-u", name]);
+    }
+
+    // `-r` YOK, ve bilerek: ev dizini silmek bu kutuda kullanıcının DOSYALARINI silmek olurdu.
+    // Hesaplar `-M` ile açılıyor, yani ev dizini hiç yok; ama `-r`nin olmaması, bir gün olsa bile
+    // paylaşımdaki verinin bir hesap silme isteğiyle gitmemesini garanti ediyor.
+    if uid_of(runner, name).is_some() {
+        runner
+            .run(USERDEL, &["--", name])
+            .map_err(|e| IdentityError::Io(format!("userdel {name} ({}): {e}", uid.get())))?;
+    }
+
+    // Özel grup, hesaptan SONRA: bir kullanıcının birincil grubu, kullanıcı dururken silinemiyor.
+    let group = private_group_name(uid);
+    let id = uid.get().to_string();
+    if runner
+        .run(GETENT, &["group", &id])
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .is_some()
+    {
+        runner
+            .run(GROUPDEL, &["--", &group])
+            .map_err(|e| IdentityError::Io(format!("groupdel {group}: {e}")))?;
+    }
+
+    Ok(())
 }
 
 /// Make the machine match the request, or change nothing that matters.
