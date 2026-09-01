@@ -25,7 +25,14 @@ const ROOT_PAGE = 50;
 interface Desk {
   /** False until the first round trip has finished, so "empty" and "not asked yet" differ. */
   loaded: boolean;
-  root: { entries: FileEntry[]; hasMore: boolean } | null;
+  root: {
+    entries: FileEntry[];
+    hasMore: boolean;
+    /** Kökteki gerçek öğe sayısı ve dağılımı; sayfadan değil, sunucudan. Bkz. `FilesTile`. */
+    total?: number;
+    folders?: number;
+    files?: number;
+  } | null;
   notes: Note[] | null;
   tasks: Task[] | null;
 }
@@ -71,7 +78,20 @@ export function Tiles({
       setDesk({
         loaded: true,
         root:
-          root.data === undefined ? null : { entries: root.data.items, hasMore: root.data.hasMore },
+          root.data === undefined
+            ? null
+            : {
+                entries: root.data.items,
+                hasMore: root.data.hasMore,
+                // Sunucunun saydığı, sayfanın değil. Bkz. `FilesTile`.
+                //
+                // Yayılarak, `total: undefined` diye DEĞİL: `exactOptionalPropertyTypes` altında
+                // "alan yok" ile "alan var ve undefined" iki farklı şey, ve buradaki fark gerçek —
+                // alanın olmaması "sunucu saymadı" demek.
+                ...(root.data.total === undefined ? {} : { total: root.data.total }),
+                ...(root.data.folders === undefined ? {} : { folders: root.data.folders }),
+                ...(root.data.files === undefined ? {} : { files: root.data.files }),
+              },
         notes: notes.data?.items ?? null,
         tasks: tasks.data?.items ?? null,
       });
@@ -109,7 +129,36 @@ function FilesTile({
   onOpen: (pane: PaneId) => void;
 }): React.JSX.Element {
   const root = desk.root;
-  const count = root === null ? '—' : `${root.entries.length}${root.hasMore ? '+' : ''}`;
+  /**
+   * ── SAYFA DEĞİL, KLASÖR ─────────────────────────────────────────────────────────────────────
+   *
+   * Kutu "50+ öğe" diyordu, ve o `+` bir tahmin değil bilginin yokluğuydu: elli satır isteniyor,
+   * arkasında ne olduğu sorulmuyordu. Sahibinin sözü: *"sağ üstündeki 50+ öğe yerine tam öğe
+   * sayısı yazsın."* Sunucu artık kökün kendi sayısını gönderiyor.
+   *
+   * Eski hesap yine de duruyor, ve gerekiyor: `total` yalnız klasör listelemesinde dolu, ve bir
+   * gün bu kutu başka bir uçtan beslenirse sayaç yanlış bir sayı yerine dürüst bir `+` gösterir.
+   */
+  const count =
+    root === null
+      ? '—'
+      : (root.total?.toString() ?? `${root.entries.length}${root.hasMore ? '+' : ''}`);
+
+  /**
+   * Kaç klasör, kaç dosya.
+   *
+   * Sahibinin sözü: *"ne kadar klasör ve dosya olduğu yazsın."* Ve fark küçük değil: "48 öğe" bir
+   * kullanıcıya klasöre girmeden önce hiçbir şey anlatmıyor, "6 klasör · 42 dosya" ise neyle
+   * karşılaşacağını anlatıyor.
+   *
+   * Sayılar SUNUCUDAN, sayfadaki satırlardan değil. Sayfayı saymak elli satırlık bir pencereden
+   * bakıp bütün klasör hakkında konuşmak olurdu — ve yanlışlığı, tam da klasör kalabalıklaştığında
+   * ortaya çıkardı.
+   */
+  const split =
+    root?.folders === undefined || root.files === undefined
+      ? null
+      : { folders: root.folders, files: root.files };
 
   /**
    * The size beside the count is the pool's used space, not the sum of the rows above it.
@@ -142,9 +191,16 @@ function FilesTile({
         {desk.loaded && root === null && <Empty glyph="🗂" text="Dosyalar okunamadı" />}
         {root !== null && (
           <>
+            {/* Büyük rakam öğe SAYISI değil DAĞILIMI: sağ üstteki sayı zaten kaç şey olduğunu
+                söylüyor, ve aynı sayıyı iki kez yazmak kutunun yarısını boşa harcamak olurdu.
+
+                `split` bir NESNE, hazır bir cümle değil: büyük rakam ile onun altındaki küçük
+                yazı kutunun iki ayrı parçası, ve tek bir metin ikisine birden bölünemezdi. */}
             <div className="tfig">
-              {count}
-              <small>öğe{size}</small>
+              {split === null ? count : split.folders}
+              <small>
+                {split === null ? `öğe${size}` : `klasör · ${split.files} dosya${size}`}
+              </small>
             </div>
             {recent.length === 0 ? (
               <Empty glyph="🗂" text="Kökte henüz bir şey yok" />

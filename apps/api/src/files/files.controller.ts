@@ -1070,6 +1070,9 @@ export function toPage(
     // `total` yalnız klasör listelemesinde dolu. Arama ve çöp sayfa sayfa gezilen şeyler değil,
     // ve orada bir toplam sorusunun karşılığı yok — alan yazılmıyor, sıfır yazılmıyor.
     ...(source.total === undefined ? {} : { total: source.total }),
+    // Aynı gerekçe, ve aynı yerden geliyorlar: `total`la tek sorgudan. Biri varsa üçü de var.
+    ...(source.folders === undefined ? {} : { folders: source.folders }),
+    ...(source.files === undefined ? {} : { files: source.files }),
     hasMore: source.hasMore,
   };
 }
@@ -1144,7 +1147,7 @@ export function isTrue(raw: string | undefined): boolean {
  * in an order nobody defined.
  */
 function cleanSort(raw: string | undefined): SortOrder {
-  return raw === 'modified' || raw === 'size' ? raw : 'name';
+  return raw === 'type' || raw === 'modified' || raw === 'size' ? raw : 'name';
 }
 
 function clampLimit(raw: string | undefined): number {

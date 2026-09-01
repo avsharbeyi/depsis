@@ -989,7 +989,23 @@ export interface paths {
                     /** @description Opak. İstemci bunu üretmez ve ayrıştırmaz; kodlaması sunucuya aittir. */
                     cursor?: components["parameters"]["Cursor"];
                     limit?: components["parameters"]["Limit"];
-                    sort?: "name" | "modified" | "size";
+                    /**
+                     * @description Sıralama. `kind` dördünde de başta duruyor: klasörler ve dosyalar hiçbir sırada
+                     *     birbirine karışmıyor.
+                     *
+                     *     `name` — ad. `type` — uzantı, ve her uzantının içinde alfabetik.
+                     *     `modified` — en son değişen önce. `size` — en büyük önce.
+                     *
+                     *     Son ikisinin YÖNÜ azalan, ve bu bir tercih: tarihe göre sıralayan biri en son ne
+                     *     değiştiğini soruyor, boyuta göre sıralayan biri diski neyin doldurduğunu — artan sıra
+                     *     ikisine de klasörün en ilgisiz satırıyla cevap verirdi.
+                     *
+                     *     Enum dışında bir değer 400 DEĞİL, `name`. Bir imleç hatası "olmayan bir sayfa
+                     *     istiyorsun" demek; sıralama hatası ise "aynı satırları kimsenin tanımlamadığı bir
+                     *     sırada istiyorsun" — ve bir yer imindeki eski bir değer yüzünden dosya yöneticisini
+                     *     bozmak, sessizce varsayılana düşmekten kötü.
+                     */
+                    sort?: "name" | "type" | "modified" | "size";
                 };
                 header?: never;
                 path?: never;
@@ -7072,8 +7088,22 @@ export interface components {
              */
             total?: number;
             /**
-             * @description Toplam sayı bilerek yok. Filtrelenmemiş bir sayaç, kiracının göremediği
-             *     satırların varlığını sızdırır.
+             * @description Bu klasördeki klasör sayısı. `total` kaç şey olduğunu söylüyor, bu NE olduğunu:
+             *     "48 öğe" klasöre girmeden önce hiçbir şey anlatmıyor, "6 klasör · 42 dosya"
+             *     anlatıyor.
+             *
+             *     `total` ile AYNI sorgudan, aynı taramanın üstünde `FILTER` ile. Biri varsa üçü de var.
+             */
+            folders?: number;
+            /** @description Bu klasördeki dosya sayısı. Bkz. `folders`. */
+            files?: number;
+            /**
+             * @description Bu sayfadan sonra satır var mı.
+             *
+             *     SÜZÜLMEMİŞ bir toplam hâlâ yok, ve olmayacak: kiracının göremediği satırların
+             *     varlığını sızdırırdı. `total`, `folders` ve `files` o toplam değil — listeleme izni
+             *     çağrıdan önce sorulan, kullanıcının zaten sayfa sayfa gezebileceği bir klasörün
+             *     uzunluğu.
              */
             hasMore: boolean;
         };
