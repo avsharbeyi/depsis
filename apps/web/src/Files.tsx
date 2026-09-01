@@ -230,6 +230,8 @@ export function Files({
   const [history, setHistory] = useState<Loc[]>([ROOT]);
   /** Yayımlanmayı bekleyen bir yükleme: baytlar ara alanda, karar kullanıcıda. */
   const [clash, setClash] = useState<{ location: string; filename: string } | null>(null);
+  /** Klasörün kendi öğe sayısı; sunucudan geliyor ve sayfa sınırından bağımsız. */
+  const [total, setTotal] = useState<number | undefined>(undefined);
 
   /* ── FAVORİLER ────────────────────────────────────────────────────────────────────────────
      Sunucudaki tercih belgesinde duruyorlar, tarayıcıda değil: masasını televizyonda düzenleyen
@@ -543,6 +545,7 @@ export function Files({
       }
       setEntries(sorted(result.data.items));
       setMore(result.data.hasMore);
+      setTotal(result.data.total);
       // A selection that survives a folder change acts on rows the user can no longer see.
       setSel(new Set());
     })();
@@ -1169,8 +1172,16 @@ export function Files({
 
   /* ── render ── */
 
+  // ── SAYAÇ ARTIK KLASÖRÜN, SAYFANIN DEĞİL ────────────────────────────────────────────────
+  // "200+ öğe" yazıyordu ve o "+" bir tahmin değil, bilginin yokluğuydu: ekran iki yüz satır
+  // getiriyor ve arkasında ne olduğunu sormuyordu. Sunucu artık klasörün kendi sayısını
+  // gönderiyor. Aramada toplam yok — arama bir klasör değil — ve orada eski davranış duruyor.
   const meta =
-    entries === null ? '—' : `${entries.length}${more ? '+' : ''} ${searching ? 'sonuç' : 'öğe'}`;
+    entries === null
+      ? '—'
+      : total !== undefined && !searching
+        ? `${total} öğe`
+        : `${entries.length}${more ? '+' : ''} ${searching ? 'sonuç' : 'öğe'}`;
 
   /**
    * Every folder the move picker must refuse — all of them, not the first.
@@ -1829,8 +1840,18 @@ export function Files({
                 <span className="n" title={entry.name}>
                   {entry.name}
                 </span>
+                {/* ── KLASÖRDE BOYUT YERİNE İÇİNDEKİLER ────────────────────────────────
+                    Bir klasörün "boyutu" ekranda hep "—" idi: doğru ama işe yaramaz. Kullanıcının
+                    sorduğu şey içinde ne olduğu, ve "boş" da bir cevap — silmeden önce bakılan tek
+                    şey çoğu zaman bu. Sayım bin ile sınırlı, o yüzden bin gören "1000+" yazıyor. */}
                 <span className="sz">
-                  {entry.kind === 'folder' ? '—' : formatBytes(entry.size)}
+                  {entry.kind !== 'folder'
+                    ? formatBytes(entry.size)
+                    : entry.childCount === undefined
+                      ? '—'
+                      : entry.childCount === 0
+                        ? 'boş'
+                        : `${entry.childCount}${entry.childCount >= 1000 ? '+' : ''} öğe`}
                 </span>
                 {/* ── DEĞİŞME TARİHİ ────────────────────────────────────────────────────
                     Sunucu bu alanı zaten her satırda gönderiyordu ve ekran onu hiç çizmiyordu.

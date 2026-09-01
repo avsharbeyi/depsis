@@ -520,8 +520,10 @@ test.describe('Dosya yöneticisi', () => {
     // Folders sort ahead of files and the row carries the folder glyph rather than a document one:
     // a listing that draws every row the same is a listing you have to click to read.
     await expect(satir(pane, name).locator('.g')).toHaveText('📁');
-    // No size for a folder. "0 B" over a folder holding forty gigabytes is worse than nothing.
-    await expect(satir(pane, name).locator('.sz')).toHaveText('—');
+    // Klasörde boyut yerine İÇİNDEKİLER. "0 B", kırk gigabayt tutan bir klasörün üstünde
+    // hiçbir şeyden kötü; yeni açılmış bir klasörün doğru cevabı ise "boş" — kullanıcının silmeden
+    // önce baktığı tek şey çoğu zaman bu.
+    await expect(satir(pane, name).locator('.sz')).toHaveText('boş');
 
     await topla(pane, name, artiklar);
   });

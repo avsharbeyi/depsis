@@ -983,6 +983,9 @@ export function toPage(
   return {
     items,
     ...(source.nextCursor === null ? {} : { nextCursor: source.nextCursor }),
+    // `total` yalnız klasör listelemesinde dolu. Arama ve çöp sayfa sayfa gezilen şeyler değil,
+    // ve orada bir toplam sorusunun karşılığı yok — alan yazılmıyor, sıfır yazılmıyor.
+    ...(source.total === undefined ? {} : { total: source.total }),
     hasMore: source.hasMore,
   };
 }
@@ -1093,6 +1096,12 @@ export function toEntry(
     // where the contract asks for a number, and files above 2^53 bytes are not a case this
     // appliance has.
     size: Number(row.size_bytes),
+    // KLASÖRÜN İÇİNDE KAÇ ÖĞE VAR. Yalnız listelemede geliyor; dosyada ve başka sorgularda alan
+    // hiç yazılmıyor — "sıfır" ile "sorulmadı" farklı iki şey, ve ekran ikincisinde bir sayı
+    // göstermemeli.
+    ...(row.child_count === undefined || row.child_count === null
+      ? {}
+      : { childCount: Number(row.child_count) }),
     modifiedAt: row.updated_at.toISOString(),
     ...(row.content_type === null ? {} : { mimeType: row.content_type }),
     ...(row.trashed_at === null ? {} : { trashedAt: row.trashed_at.toISOString() }),
