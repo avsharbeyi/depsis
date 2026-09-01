@@ -64,10 +64,28 @@ const shortcutSchema = z
   })
   .strict();
 
+/**
+ * Hizli erisim seridindeki klasorler.
+ *
+ * KLASORUN VARLIGI DOGRULANMIYOR, ve bu bilerek. Duvar kagidi alani tam bunu yapiyordu: silinen
+ * bir dosyayi adlandiran bir belge, KISAYOL DUZENI DAHIL her tercih yazmasini kalici olarak
+ * reddettiriyordu. Silinmis bir favori en fazla seritte bir kez tiklanip "bulunamadi" der.
+ */
+const favoriteSchema = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string().max(255),
+    trail: z
+      .array(z.object({ id: z.string().uuid(), name: z.string().max(255) }).strict())
+      .max(24),
+  })
+  .strict();
+
 export const preferencesSchema = z
   .object({
     background: backgroundSchema.optional(),
     sound: z.boolean().optional(),
+    favorites: z.array(favoriteSchema).max(40).optional(),
     // 60 is the contract's cap and also roughly a screenful. The reason there is a cap at all is
     // that this array is written by a drag handler: a loop in one would otherwise grow the row
     // until it hit the 64 KiB CHECK, which reports as a constraint violation rather than as the
