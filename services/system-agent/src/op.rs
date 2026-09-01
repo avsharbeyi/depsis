@@ -1533,6 +1533,30 @@ pub enum Request {
         passphrase: Passphrase,
     },
 
+    /// Cihazı yeniden başlatır.
+    ///
+    /// ── NEDEN AJANDA VE NEDEN TEK BİR İŞLEM ──────────────────────────────────────────────
+    ///
+    /// Yeniden başlatmak kök yetki istiyor ve API'nin bunu kendi başına yapması mümkün değil.
+    /// ADR-0006 kabuk çağrısını yasakladığı için bu, adı ve argümanları burada SABİT olan kapalı
+    /// bir işlem: `systemctl reboot`, işlenensiz. Çağıran ne bir birim adı ne bir gecikme
+    /// veriyor — verebilseydi, "yeniden başlat" düğmesi cihazda herhangi bir birimi çalıştırmanın
+    /// yolu olurdu.
+    ///
+    /// ── CEVAP DÖNÜYOR, SONRA CİHAZ GİDİYOR ───────────────────────────────────────────────
+    ///
+    /// `systemctl reboot` systemd'ye bir istek bırakıp hemen çıkıyor; kapanma ondan sonra
+    /// başlıyor. Yani bu işlem gerçekten cevap veriyor ve arayüz "yeniden başlatılıyor"
+    /// diyebiliyor. Cevabın gelmemesi de bir hata değil — cihaz kapanıyorsa zaten olan şey bu —
+    /// ve o ihtimali çağıran tarafın hoş görmesi gerekiyor.
+    ///
+    /// ── KİM ÇAĞIRABİLİR ──────────────────────────────────────────────────────────────────
+    ///
+    /// Ajan yalnız API'nin kullanıcısını tanıyor; "hangi insan" sorusunun cevabı API'de. Bu
+    /// işlemi yalnız yöneticiye açmak API'nin sorumluluğu, ve orada öyle yapılıyor.
+    #[serde(rename = "reboot_system")]
+    RebootSystem {},
+
     /// Takılabilecek havuzları listeler. İşlenen YOK.
     ///
     /// ── YANMIŞ CİHAZ ─────────────────────────────────────────────────────────────────────
@@ -2797,6 +2821,11 @@ pub enum Response {
         temperature_celsius: Option<i32>,
         raw: String,
     },
+    /// Yeniden başlatma isteği systemd'ye bırakıldı.
+    ///
+    /// "Kapandı" demiyor, çünkü kapanma bu cevaptan sonra başlıyor; söylediği şey isteğin kabul
+    /// edildiği.
+    RebootScheduled {},
     /// Takılabilecek havuzlar.
     ///
     /// Boş liste bir hata değil: takılabilecek havuzun olmaması, cihazın olağan hâli.
@@ -3150,6 +3179,10 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 38, `reboot_system` ile: cihazı yeniden başlatmak. Arayüzdeki güç menüsünde "Yenile" yazan
+/// ve yalnız TARAYICI SAYFASINI tazeleyen bir düğme vardı; cihazın sahibinin oradan beklediği
+/// şey cihazın kendisinin yeniden başlaması.
+///
 /// 37, `compare_backup_copy` ile: yedekteki kopyanın aslıyla karşılaştırılması. Tur kaç dosya
 /// kopyaladığını sayıyordu ama diskteki baytlara hiç bakmıyordu — yani "yedek alındı" ölçülmemiş
 /// bir iddiaydı.
@@ -3189,7 +3222,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 37;
+pub const SCHEMA_VERSION: u32 = 38;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

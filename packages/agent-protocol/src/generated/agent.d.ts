@@ -427,6 +427,9 @@ export type AgentRequest =
       pool: SafeComponent;
     }
   | {
+      op: 'reboot_system';
+    }
+  | {
       op: 'scan_importable_pools';
     }
   | {
@@ -1250,6 +1253,9 @@ export type AgentResponse =
       raw: string;
       status: 'smart';
       temperature_celsius?: number | null;
+    }
+  | {
+      status: 'reboot_scheduled';
     }
   | {
       pools: ImportablePoolView[];

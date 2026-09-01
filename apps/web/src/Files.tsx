@@ -1182,25 +1182,32 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
               pickCode.current?.click();
             }}
           >
-            {/* ── 15 PİKSELDE ÇİZİLMEYEN BİR ÇİZİM, ÇİZİM DEĞİLDİR ──────────────────────
-                Kare kodun köşe işaretleri doğru şekilde delinmişti ama çerçeveleri 24 birimlik
-                bir kutuda 1,5 birim kalınlığındaydı — 15 pikselde 0,94 piksel eder, yani ekranda
-                kaybolur. Geriye yalnız ortadaki noktalar kalıyordu ve simge "nokta" gibi
-                görünüyordu.
+            {/* ── TARAYICI KÖŞELERİ, KARE KODUN KENDİSİ DEĞİL ─────────────────────────
+                Kare kodun kendisini 18 piksele sığdırma denemeleri iki kez tutmadı: köşe
+                işaretlerinin halkaları bir pikselin altında kalıyor ve simge nokta yığınına
+                dönüşüyordu. Küçük boyda okunan şey KODUN DESENİ değil, TARAYICININ ÇERÇEVESİ —
+                dört köşedeki L'ler uzun ve kesintisiz çizgiler olduğu için piksele oturuyor.
 
-                Çizgi yerine KONTUR, ve simge biraz daha büyük: 18 pikselde 2 birimlik bir kontur
-                1,5 piksel tutuyor ve tam piksele oturuyor. Veri kareleri de 3 birime çıktı. */}
+                İçeride birkaç blok var, ve işi kare kodu taklit etmek değil: çerçevenin neyi
+                çerçevelediğini söylüyorlar. */}
             <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-              <g fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="3" y="3" width="7" height="7" rx="1" />
-                <rect x="14" y="3" width="7" height="7" rx="1" />
-                <rect x="3" y="14" width="7" height="7" rx="1" />
+              <g
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M3 8.6V5.7A2.7 2.7 0 0 1 5.7 3h2.9" />
+                <path d="M15.4 3h2.9A2.7 2.7 0 0 1 21 5.7v2.9" />
+                <path d="M21 15.4v2.9a2.7 2.7 0 0 1-2.7 2.7h-2.9" />
+                <path d="M8.6 21H5.7A2.7 2.7 0 0 1 3 18.3v-2.9" />
               </g>
               <g fill="currentColor">
-                <rect x="14" y="14" width="3" height="3" />
-                <rect x="18" y="18" width="3" height="3" />
-                <rect x="14" y="19" width="2" height="2" />
-                <rect x="19" y="14" width="2" height="2" />
+                <rect x="7.4" y="7.4" width="4.2" height="4.2" rx="0.9" />
+                <rect x="13.4" y="13.4" width="3.2" height="3.2" rx="0.8" />
+                <rect x="13.6" y="7.4" width="2.2" height="2.2" rx="0.6" />
+                <rect x="7.4" y="13.6" width="2.2" height="2.2" rx="0.6" />
               </g>
             </svg>
           </button>

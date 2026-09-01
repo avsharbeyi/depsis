@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 
 import { AgentUnavailableError } from '../agent/agent.service.js';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
+import type { AgentService } from '../agent/agent.service.js';
+import type { AuditService } from '../audit/audit.service.js';
 import { SystemController } from './system.controller.js';
 import type { DiskInventory, SystemService, Telemetry } from './system.service.js';
 
@@ -38,7 +40,9 @@ function controller(options: {
       (() =>
         Promise.resolve({ pools: [], disks: [], cpu: {}, memory: { total: 1, available: 1 } })),
   } as unknown as SystemService;
-  return new SystemController(system);
+  // Ajan ve denetim kaydı yalnız yeniden başlatma yolunda kullanılıyor; bu süitin ölçtüğü
+  // okuma uçları ikisine de dokunmuyor, o yüzden boş birer nesne yeterli.
+  return new SystemController(system, {} as unknown as AgentService, {} as unknown as AuditService);
 }
 
 describe('GET /system/disks', () => {
