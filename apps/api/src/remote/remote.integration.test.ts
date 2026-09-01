@@ -210,6 +210,68 @@ describeDb('remote access, against a real PostgreSQL', () => {
     );
   }
 
+  // ── cihazın ne olduğu ──
+
+  it('learns what a device IS from the session it signed in with', async () => {
+    // ZeroTier bunu bilmiyor: üye kaydında işletim sistemi ya da model diye bir alan YOK. Bilen
+    // tek taraf, o cihazın DEPSIS'e girerken kendini tanıttığı tarayıcı — ve iki tarafı
+    // birleştiren şey adres: ağdaki IP'leri controller dağıtıyor, yani aynı anda iki cihazda
+    // olamıyorlar.
+    //
+    // Bu testin asıl ölçtüğü şey EŞLEŞMENİN KENDİSİ. Kullanıcı aracısını okuyan kısım kendi birim
+    // testlerinde; burada yanlış gidebilecek şey `inet` karşılaştırması, ve yanlış gittiğinde
+    // sessizce hiçbir şey öğrenilmiyor — sahada sonsuza kadar "—" yazan bir sütun.
+    // `members` yalnızca BU cihazın yönettiği bir ağa bakıyor, o yüzden satır `controlled` olmalı.
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO remote_networks (organization_id, network_id, label, joined_by, controlled)
+              VALUES ($1, $2, 'Ev', $3, true)`,
+        [orgA, NET_OK, adminA],
+      ),
+    );
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO sessions (organization_id, user_id, token_hash, expires_at, ip_address, user_agent)
+              VALUES ($1, $2, $3, now() + interval '1 hour', $4::inet, $5)`,
+        [
+          orgA,
+          adminA,
+          Buffer.from('c'.repeat(64), 'hex'),
+          // Sıfır dolgulu, ve bilerek: metin karşılaştırması burada düşerdi, `inet` düşmüyor.
+          '10.147.017.099',
+          'Mozilla/5.0 (Linux; Android 14; SM-S926B) AppleWebKit/537.36 Mobile',
+        ],
+      ),
+    );
+
+    const { agent } = stubAgent((request) => {
+      if (request.op === 'zerotier_controller_members') {
+        return Promise.resolve<AgentResponse>({
+          status: 'zerotier_controller_members',
+          members: [
+            {
+              member_id: '1122334455',
+              authorized: true,
+              label: '',
+              addresses: ['10.147.17.99'],
+              seen: true,
+              is_this_appliance: false,
+            },
+          ],
+        });
+      }
+      return healthyDaemon()(request);
+    });
+    const remote = new RemoteService(agent, db);
+
+    const members = await remote.members(orgA, NET_OK, 'corr-dev');
+    expect(members[0]?.device).toBe('Android · SM-S926B');
+
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`DELETE FROM sessions WHERE organization_id = $1`, [orgA]),
+    );
+  });
+
   // ── the id itself ──
 
   it('accepts only sixteen lowercase hex digits as a network id', () => {

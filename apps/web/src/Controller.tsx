@@ -344,7 +344,17 @@ export function Controller({
               <thead>
                 <tr>
                   <th>Cihaz</th>
-                  <th>Durum</th>
+                  {/* CİHAZIN NE OLDUĞU. ZeroTier bunu bilmiyor — üye kaydında işletim sistemi ya
+                      da model diye bir alan yok — ama o cihaz uzak ağ üzerinden DEPSIS'e
+                      girdiğinde tarayıcısı kendini tanıtıyor, ve üyeye atanmış IP ile oturumun
+                      geldiği IP aynı. Sahibin sözü: "cihazların markaları ve türleri mesela s26+
+                      android, windows pc gibi görünsün." */}
+                  <th>Tür</th>
+                  {/* "DURUM" SÜTUNU KALDIRILDI. Ağa katılan her cihaz kendiliğinden
+                      yetkilendiriliyor, yani sütun her satırda aynı yeşil rozeti gösteren bir
+                      sütundu. İstisnalar — henüz yetkilendirilmemiş ya da hiç bağlanmamış bir
+                      cihaz — kayboluyor değil, cihazın kendi hücresine iniyor: orada nadir
+                      oldukları için görülüyorlar. */}
                   <th>Adres</th>
                   {/* "KİM ALDI" SÜTUNU KALDIRILDI. Bir üyeyi kimin yetkilendirdiği, tek
                       yöneticili bir ev cihazında her satırda aynı adı yazan bir sütun; ve
@@ -399,16 +409,19 @@ export function Controller({
                         </button>
                       )}
                       <div className="m">{member.memberId}</div>
-                    </td>
-                    <td>
-                      <span className={member.authorized ? 'pill ok' : 'pill warn'}>
-                        {member.authorized ? 'yetkili' : 'bekliyor'}
-                      </span>
-                      {/* YANLIŞ YAZILMIŞ BİR HANENİN TEK GÖRÜNÜR İZİ. Cihaz ortaya çıkana kadar
-                          doğru adresle yanlış adres birbirinden ayırt edilemiyor; controller ilk
-                          temasta kimliği sabitliyor ve satır ancak o zaman söylediği şey oluyor. */}
+                      {/* İSTİSNALAR, VE YALNIZ İSTİSNALAR. "yetkili" yazmıyor çünkü her cihaz
+                          yetkili; yazan tek şey bunun doğru olmadığı durumlar.
+
+                          "hiç bağlanmadı", yanlış yazılmış bir hanenin TEK görünür izi: cihaz
+                          ortaya çıkana kadar doğru adresle yanlış adres ayırt edilemiyor. */}
+                      {!member.authorized && <span className="pill warn">bekliyor</span>}
                       {member.authorized && !member.seen && <div className="m">hiç bağlanmadı</div>}
                       {member.isThisAppliance && <div className="m">bu cihaz</div>}
+                    </td>
+                    <td className="m">
+                      {/* Boş değil TİRE: "bu cihaz hiç girmedi" ile "bir şey yazmayı unuttuk"
+                          birbirine benzememeli. */}
+                      {member.device ?? '—'}
                     </td>
                     <td className="m">
                       {member.addresses.length === 0 ? '—' : member.addresses.join(', ')}

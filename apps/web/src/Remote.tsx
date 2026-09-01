@@ -290,7 +290,6 @@ export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
         </details>
       )}
 
-      {/* Tanılama YÖNETİCİDE: uç zaten öyle, ve çalışmayacak bir bağlantıyı göstermemek. */}
       {/* EVİN KENDİ AĞI. Yukarısı başkasının ağına KATILMAKLA ilgili; bu, ağı bu cihazın
           yönetmesiyle — my.zerotier.com'a bağlı olmadan. `zerotier-one`'ın kendisi controller,
           yani ayrı bir servis yok. */}

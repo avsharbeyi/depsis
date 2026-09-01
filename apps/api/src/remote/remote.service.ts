@@ -9,6 +9,7 @@ import {
   type AgentResponse,
 } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
+import { deviceNameFrom } from './device-name.js';
 
 type Schemas = OpenApi.components['schemas'];
 export type RemoteStatus = Schemas['RemoteStatus'];
@@ -63,6 +64,16 @@ export interface ControllerMember {
   memberId: string;
   authorized: boolean;
   label: string | null;
+  /**
+   * Cihazın TÜRÜ — "Windows PC", "Android · SM-S926B".
+   *
+   * `label`den ayrı bir alan çünkü ayrı bir soruya cevap veriyor: biri cihazın KİMİN olduğunu
+   * (insanın yazdığı), öteki NE olduğunu (tarayıcısının söylediği) söylüyor. Aynı alana
+   * sıkıştırmak, elle verilmiş bir adı bir sonraki bağlantıda ezmek olurdu.
+   *
+   * `null`, cihazın uzak ağ üzerinden DEPSIS'e henüz hiç girmediği anlamına geliyor.
+   */
+  device: string | null;
   addresses: string[];
   /** Has the device ever actually contacted the controller? See `ZeroTierMember.seen`. */
   seen: boolean;
@@ -75,6 +86,7 @@ export interface ControllerMember {
 interface MemberRow {
   member_id: string;
   label: string | null;
+  device: string | null;
   authorized_at: Date | null;
   authorized_by_username: string | null;
 }
@@ -442,12 +454,23 @@ export class RemoteService {
     }
 
     const provenance = await this.memberRecords(organizationId, networkId);
+    // Cihazların NE OLDUĞU, listelemeden hemen önce tazeleniyor. Okuma yolunda bir yazma var ve
+    // bu bilerek: öğrenilecek şey ancak o cihaz DEPSIS'e girdiğinde ortaya çıkıyor, ve listeye
+    // bakan kişi tam olarak "kim bağlandı" diye bakan kişi.
+    const learned = await this.learnDevices(
+      organizationId,
+      networkId,
+      answer.members.map((member) => ({ memberId: member.member_id, addresses: member.addresses })),
+    );
     return answer.members.map((member) => {
       const record = provenance.get(member.member_id);
       return {
         memberId: member.member_id,
         authorized: member.authorized,
         label: member.label === '' ? (record?.label ?? null) : member.label,
+        // Yeni öğrenilen, kayıtlı olanı geçiyor; ikisi de yoksa null. `??` zinciri sırayla:
+        // bu turda görülen, daha önce görülen, hiç görülmemiş.
+        device: learned.get(member.member_id) ?? record?.device ?? null,
         addresses: member.addresses,
         seen: member.seen,
         isThisAppliance: member.is_this_appliance,
@@ -644,6 +667,7 @@ export class RemoteService {
       memberId: updated.member_id,
       authorized: updated.authorized,
       label: updated.label === '' ? (record?.label ?? null) : updated.label,
+      device: record?.device ?? null,
       addresses: updated.addresses,
       seen: updated.seen,
       isThisAppliance: updated.is_this_appliance,
@@ -721,13 +745,85 @@ export class RemoteService {
     if (!ours.has(networkId)) throw new NetworkNotJoinedError();
   }
 
+  /**
+   * Her üyenin NE OLDUĞUNU, o cihazın kendi oturumundan öğrenir.
+   *
+   * ── EŞLEŞTİREN ŞEY IP ───────────────────────────────────────────────────────────────────────
+   *
+   * ZeroTier üyeye bir adres veriyor (`10.147.x.y`); o cihaz uzak ağ üzerinden DEPSIS'e girdiğinde
+   * oturumun yanına aynı adres `ip_address` olarak yazılıyor (göç 0003). İki tarafı birleştiren
+   * tek şey bu, ve yeterli: ağdaki adresleri controller dağıtıyor, yani aynı anda iki cihazda
+   * olamıyorlar.
+   *
+   * Adres taşıyan `INET` karşılaştırması metin karşılaştırması DEĞİL — `10.147.0.1` ile
+   * `10.147.000.001` aynı adres, ve veritabanı bunu biliyor, metin bilmiyor.
+   *
+   * ── EN SON OTURUM ───────────────────────────────────────────────────────────────────────────
+   *
+   * `DISTINCT ON ... ORDER BY created_at DESC`: bir adresten birden çok oturum açılmış olabilir —
+   * aynı cihazda iki tarayıcı, ya da eski bir oturum. En yenisi, cihazın bugün ne olduğunu
+   * söyleyen.
+   *
+   * ── OKUMA YOLUNDA YAZMA ─────────────────────────────────────────────────────────────────────
+   *
+   * Ve yalnızca DEĞİŞTİĞİNDE: aynı adı ikinci kez yazmak, listeye her bakışta bir UPDATE demek
+   * olurdu. Satır yoksa yazılmıyor da — cihaz kaydı yetkilendirme sırasında doğuyor, ve burada
+   * bir tane uydurmak "bu üyeyi biri içeri aldı" diyen boş bir kayıt üretirdi.
+   */
+  private async learnDevices(
+    organizationId: string,
+    networkId: string,
+    members: readonly { memberId: string; addresses: readonly string[] }[],
+  ): Promise<Map<string, string>> {
+    const addressed = members.filter((member) => member.addresses.length > 0);
+    if (addressed.length === 0) return new Map();
+
+    const all = addressed.flatMap((member) => member.addresses);
+    const sessions = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ ip: string; user_agent: string | null }>(
+        `SELECT DISTINCT ON (ip_address) host(ip_address) AS ip, user_agent
+           FROM public.sessions
+          WHERE organization_id = $1 AND ip_address = ANY($2::inet[])
+          ORDER BY ip_address, created_at DESC`,
+        [organizationId, all],
+      ),
+    );
+    if (sessions.length === 0) return new Map();
+
+    const byAddress = new Map(sessions.map((row) => [row.ip, row.user_agent]));
+    const learned = new Map<string, string>();
+    for (const member of addressed) {
+      for (const address of member.addresses) {
+        const name = deviceNameFrom(byAddress.get(address));
+        if (name !== null) {
+          learned.set(member.memberId, name);
+          break;
+        }
+      }
+    }
+    if (learned.size === 0) return learned;
+
+    await this.db.withTenant(organizationId, async (q) => {
+      for (const [memberId, device] of learned) {
+        await q.query(
+          `UPDATE public.remote_members
+              SET device = $4, device_seen_at = now()
+            WHERE organization_id = $1 AND network_id = $2 AND member_id = $3
+              AND device IS DISTINCT FROM $4`,
+          [organizationId, networkId, memberId, device],
+        );
+      }
+    });
+    return learned;
+  }
+
   private async memberRecords(
     organizationId: string,
     networkId: string,
   ): Promise<Map<string, MemberRow>> {
     const rows = await this.db.withTenant(organizationId, (q) =>
       q.query<MemberRow>(
-        `SELECT m.member_id, m.label, m.authorized_at, u.username AS authorized_by_username
+        `SELECT m.member_id, m.label, m.device, m.authorized_at, u.username AS authorized_by_username
            FROM public.remote_members m
            -- LEFT: authorized_by is ON DELETE SET NULL, and the record outlives the account that
            -- made it. An INNER JOIN would drop exactly the rows whose provenance is most awkward.

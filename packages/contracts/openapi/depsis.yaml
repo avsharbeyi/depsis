@@ -6737,7 +6737,17 @@ components:
     ControllerMember:
       type: object
       required:
-        [memberId, authorized, label, addresses, seen, isThisAppliance, authorizedBy, authorizedAt]
+        [
+          memberId,
+          authorized,
+          label,
+          device,
+          addresses,
+          seen,
+          isThisAppliance,
+          authorizedBy,
+          authorizedAt,
+        ]
       properties:
         memberId:
           type: string
@@ -6747,6 +6757,16 @@ components:
             reddediyor. Yani gösterilebilir, kopyalanabilir, QR'a konabilir.
         authorized: { type: boolean }
         label: { type: [string, 'null'] }
+        device:
+          type: [string, 'null']
+          description: |
+            Cihazın TÜRÜ — "Windows PC", "iPhone", "Android · SM-S926B". ZeroTier bunu bilmiyor;
+            üyeye atanmış IP ile o adresten açılmış son oturumun kullanıcı aracısı eşleştirilerek
+            öğreniliyor. `null`, cihazın uzak ağ üzerinden DEPSIS'e henüz hiç girmediği anlamına
+            geliyor — bir hata değil, henüz olmamış bir şey.
+
+            Elle verilen `label`in YERİNİ ALMIYOR: biri cihazın kimin olduğunu söylüyor, öteki ne
+            olduğunu.
         addresses:
           type: array
           items: { type: string }
