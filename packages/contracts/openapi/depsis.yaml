@@ -737,6 +737,53 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '416': { $ref: '#/components/responses/Problem' }
 
+  /files/{id}/archive:
+    parameters:
+      - $ref: '#/components/parameters/FileId'
+    get:
+      tags: [files]
+      summary: Klasörün tamamını tek arşiv olarak indir
+      description: |
+        Klasörü `.tar.gz` olarak indirir. Yalnız klasörler; bir dosya için 404 döner, çünkü
+        dosyanın kendi yolu `GET /files/{id}/content`.
+
+        ── Aralık yok, ETag yok ────────────────────────────────────────────────
+
+        `Accept-Ranges: none`. Arşiv her istekte YENİDEN üretiliyor, yani iki isteğin baytları
+        birebir aynı olmak zorunda değil; bir aralık isteği ikinci bir arşivin ortasından
+        okurdu. Aynı sebeple ETag de yok: kararlı bir kimlik iddia etmek, olmayan bir
+        kararlılığı söylemek olur.
+
+        ── Yetki alt ağacın TAMAMINDA aranıyor ─────────────────────────────────
+
+        Klasörün kendisinde `download` yetmiyor. ADR-0021'e göre bir alt klasör üstündekinden
+        daha azını verebiliyor, ve arşivi üreten `tar` dosya sistemi düzeyinde koşuyor:
+        içeride yetkisiz bir klasör varsa istek 403 ile reddediliyor. Arşivin bir kısmını
+        sessizce atlamak seçenek değil — eksiğini söylemeyen bir arşiv, eksik olduğunu
+        bilmeyen bir kullanıcı demek.
+
+        ── 507 ─────────────────────────────────────────────────────────────────
+
+        Arşiv üretilirken havuza yazılıyor. Klasörün toplam boyutu havuzda boş kalandan
+        büyükse istek `insufficient-storage` ile ve ARŞİV ÜRETİLMEDEN reddediliyor; gövde iki
+        sayıyı da taşıyor.
+      responses:
+        '200':
+          description: Arşiv
+          headers:
+            Accept-Ranges:
+              schema: { type: string }
+            Content-Disposition:
+              schema: { type: string }
+          content:
+            application/gzip:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+        '507': { $ref: '#/components/responses/Problem' }
+
   /file-operations:
     post:
       tags: [files]
@@ -4509,6 +4556,13 @@ components:
           type: string
           enum: [file, folder]
         size: { type: integer, format: int64 }
+        subtreeBytes:
+          type: integer
+          format: int64
+          description: |
+            Klasorun ALTINDAKI butun dosyalarin toplam boyutu -- dogrudan cocuklar degil, agacin
+            tamami. `size` bir klasorde her zaman 0 ve oyle kaliyor: satirin kendi boyutu ile
+            icindekilerin toplami farkli iki sey.
         childCount:
           type: integer
           description: |

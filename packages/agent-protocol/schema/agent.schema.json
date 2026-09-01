@@ -913,6 +913,37 @@
       ]
     },
     {
+      "description": "Bir klasörü tek bir arşiv olarak indirmeye açar.\n\n── NEDEN ÖNCE DOSYA OLUYOR ──────────────────────────────────────────────────────────\n\nArşivi üretirken aynı anda göndermek daha zarif görünüyor ama bu ajanın veri kanalı öyle\nçalışmıyor: kanal OFSETLİ — karşı taraf \"şuradan şu kadar\" diyebiliyor, yeniden başlatma\nve aralık istekleri buna dayanıyor — ve bir sürecin çıktısında öyle bir yer yok. Arşiv\nönce dosyaya yazılıyor, sonra var olan indirme yolundan iniyor.\n\n── VE NEDEN GERİYE BİR ŞEY KALMIYOR ─────────────────────────────────────────────────\n\nYanıt `Download`, yani `open_download`un verdiğinin AYNISI, çünkü ajan arşivi yazdıktan\nhemen sonra AÇIP BAĞINI SİLİYOR. Geriye adı olmayan bir düğüm kalıyor: yalnızca o\nindirmenin tanımlayıcısından okunabiliyor ve son tanımlayıcı kapandığında çekirdek onu\nkendisi topluyor. İndirme yarıda kesilse, istemci ölse, cihaz elektrik kesintisiyle\nyeniden başlasa bile diskte kalıcı bir çöp yok — ve bir temizleyiciye de gerek yok, çünkü\ntemizlenecek bir ad hiç var olmadı.\n\nBunun bedeli arşivin yeniden kullanılamaması: ikinci bir indirme onu yeniden üretiyor. Bir\nklasör indirmenin nadir bir iş olduğu düşünülürse, kalıcı bir ara dosyanın ömrünü\nyönetmekten ucuz.\n\n── `tar`, VE NEDEN `-C` ─────────────────────────────────────────────────────────────\n\nArşivin içindeki yollar klasörün KENDİ adıyla başlamalı: `Fotograflar/2026/a.jpg`. `tar`\nbunu `-C <üst dizin> <ad>` ile yapıyor. `zip`in dizin değiştirme seçeneği yok — ona mutlak\nbir yol verilseydi arşivin içine `/proc/self/fd/7/...` diye girerdi.\n\nÜst dizin ajanın kendi mühürlü tanımlayıcısından geçiyor (`/proc/self/fd/N`), yeniden\nçözülen bir yol değil: `setfacl`ın kullandığı kaçış kapısının aynısı, ve aynı sebeple —\narada geçen sürede yerine bir sembolik bağ konabilecek bir ad, kök yetkiyle koşan bir\n`tar`a verilecek en son şey.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "archive_folder"
+        },
+        "path": {
+          "description": "Paylaşım içindeki klasörün yolu. Boş olamaz: paylaşımın kökünü arşivlemek, ajanın\nkendi ara alanını da arşivin içine almak demek olurdu.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SafeComponent"
+          }
+        },
+        "share": {
+          "$ref": "#/$defs/SafeComponent"
+        },
+        "staging_name": {
+          "description": "Arşivin ara alandaki geçici adı. Çağıran veriyor çünkü iki eşzamanlı indirmenin aynı\nadı seçmemesi onun bileceği bir şey; ad zaten yalnızca `tar` yazarken var oluyor.",
+          "$ref": "#/$defs/SafeComponent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "share",
+        "path",
+        "staging_name"
+      ]
+    },
+    {
       "description": "Takılabilecek havuzları listeler. İşlenen YOK.\n\n── YANMIŞ CİHAZ ─────────────────────────────────────────────────────────────────────\n\nCihazın sahibinin şartı: *\"sistem diski ve depolama diski yansa bile yedek diski eğer\nşifre biliniyorsa kullanılabilir olmalı.\"* Bu işlem o cümlenin ilk adımı: yeni bir cihaza\ntakılan diskte ne olduğunu, hiçbir parola sorulmadan, söylüyor.\n\nKimlik bilgisi TAŞIMIYOR. Havuz adı, durumu ve devralma gerekip gerekmediği; kullanıcı\nadı, kuruluş adı, paylaşım adı yok — o bilgiler diskin şifreli yarısında ve orada\nkalıyorlar.",
       "type": "object",
       "properties": {

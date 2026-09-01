@@ -430,6 +430,23 @@ export type AgentRequest =
       op: 'reboot_system';
     }
   | {
+      op: 'archive_folder';
+      /**
+       * Paylaşım içindeki klasörün yolu. Boş olamaz: paylaşımın kökünü arşivlemek, ajanın
+       * kendi ara alanını da arşivin içine almak demek olurdu.
+       */
+      path: SafeComponent[];
+      share: SafeComponent;
+      /**
+       * A single path component under a share root — never a path, never absolute.
+       *
+       * ADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access
+       * to `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle
+       * `/` or `..` through, so this type refuses them rather than sanitising.
+       */
+      staging_name: string;
+    }
+  | {
       op: 'scan_importable_pools';
     }
   | {

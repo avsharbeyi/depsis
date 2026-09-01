@@ -52,6 +52,10 @@ describe('the emitted agent schema', () => {
       // kurmuş oluyor. Ajan indirmiyor — birimi `IPAddressDeny=any` taşıyor — yalnızca
       // indirmeyi üstlenen ayrı systemd birimini başlatıyor.
       'apply_update',
+      // Bir klasoru tek dosya olarak indirmek. Arsiv yazildiktan hemen sonra BAGI SILINIYOR ve
+      // geriye yalnizca indirmenin tanimlayicisi kaliyor: yarim kalan bir indirme diskte ad
+      // birakmiyor, ve bir temizleyiciye gerek kalmiyor.
+      'archive_folder',
       // Yedek AGACI: ikinci bir muhurlu kok. Hangi koke dokunuldugu ISLEMIN ADINDA sabit —
       // `realm: Live | Backup` diye bir operand YOK, cunku o operand tek bir alan degeriyle
       // canli agaci hedefleyen bir yedek cagrisi yaratirdi ve alanin dogru doldugunu ajan degil
@@ -374,7 +378,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(38);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(39);
   });
 
   it('agrees with the number the agent actually reports', () => {
