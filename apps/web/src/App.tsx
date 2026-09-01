@@ -836,7 +836,7 @@ function Desktop({
                   </div>
                 </section>
               )}
-              <Tiles snapshot={snapshot} meId={me.id} onOpen={openPane} />
+              <Tiles snapshot={snapshot} meId={me.id} onOpen={openPane} hideFiles={mobile} />
               {/* Not rendered until the saved layout has actually been read. The field commits
                   every arrangement with a PUT of the whole preferences document, so a desk drawn
                   from placeholders is one click away from overwriting the real one — and the

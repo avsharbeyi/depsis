@@ -36,10 +36,19 @@ export function Tiles({
   snapshot,
   meId,
   onOpen,
+  hideFiles = false,
 }: {
   snapshot: Snapshot;
   meId: string;
   onOpen: (pane: PaneId) => void;
+  /**
+   * Dosyalar kutusu çizilmesin.
+   *
+   * Telefonda ana ekranın en üstünde dosya gezgininin KENDİSİ duruyor; hemen altına bir de
+   * "Dosyalar" özet kutusu koymak, aynı adı taşıyan iki kutunun alt alta durması demek. Kutunun
+   * söylediği şey (kaç öğe var, en son ne değişti) zaten üstteki gezginde görünüyor.
+   */
+  hideFiles?: boolean;
 }): React.JSX.Element {
   const [desk, setDesk] = useState<Desk>(NOTHING);
 
@@ -81,7 +90,7 @@ export function Tiles({
 
   return (
     <div className="tiles">
-      <FilesTile desk={desk} snapshot={snapshot} onOpen={onOpen} />
+      {!hideFiles && <FilesTile desk={desk} snapshot={snapshot} onOpen={onOpen} />}
       <NotesTile desk={desk} onOpen={onOpen} />
       <TasksTile desk={desk} meId={meId} onOpen={onOpen} />
     </div>

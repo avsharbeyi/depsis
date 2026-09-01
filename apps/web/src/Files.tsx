@@ -1182,17 +1182,26 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
               pickCode.current?.click();
             }}
           >
-            {/* KARE KODUN KENDİSİ, ve `evenodd` olmadan öyle görünmüyordu: köşe işaretlerinin
-                içi de aynı yönde doldurulduğu için üç halka üç dolu kareye dönüşüyor, geriye
-                kare koda hiç benzemeyen bir blok yığını kalıyordu. Kesişim kuralı içteki kareyi
-                delik yapıyor, en içteki noktayı yeniden dolduruyor — kare kodun köşelerindeki
-                işaret tam olarak bu. */}
-            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                fillRule="evenodd"
-                d="M3 3h8v8H3zM4.5 4.5v5h5v-5zM6 6h2v2H6zM13 3h8v8h-8zM14.5 4.5v5h5v-5zM16 6h2v2h-2zM3 13h8v8H3zM4.5 14.5v5h5v-5zM6 16h2v2H6zM13 13h3v3h-3zM18 13h3v3h-3zM13 18h3v3h-3zM18 18h3v3h-3z"
-                fill="currentColor"
-              />
+            {/* ── 15 PİKSELDE ÇİZİLMEYEN BİR ÇİZİM, ÇİZİM DEĞİLDİR ──────────────────────
+                Kare kodun köşe işaretleri doğru şekilde delinmişti ama çerçeveleri 24 birimlik
+                bir kutuda 1,5 birim kalınlığındaydı — 15 pikselde 0,94 piksel eder, yani ekranda
+                kaybolur. Geriye yalnız ortadaki noktalar kalıyordu ve simge "nokta" gibi
+                görünüyordu.
+
+                Çizgi yerine KONTUR, ve simge biraz daha büyük: 18 pikselde 2 birimlik bir kontur
+                1,5 piksel tutuyor ve tam piksele oturuyor. Veri kareleri de 3 birime çıktı. */}
+            <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+              <g fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="3" width="7" height="7" rx="1" />
+                <rect x="14" y="3" width="7" height="7" rx="1" />
+                <rect x="3" y="14" width="7" height="7" rx="1" />
+              </g>
+              <g fill="currentColor">
+                <rect x="14" y="14" width="3" height="3" />
+                <rect x="18" y="18" width="3" height="3" />
+                <rect x="14" y="19" width="2" height="2" />
+                <rect x="19" y="14" width="2" height="2" />
+              </g>
             </svg>
           </button>
         </div>
