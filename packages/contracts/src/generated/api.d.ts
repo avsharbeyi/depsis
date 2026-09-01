@@ -8576,6 +8576,16 @@ export interface components {
             memberId: string;
             authorized: boolean;
             label: string | null;
+            /**
+             * @description Cihazın TÜRÜ — "Windows PC", "iPhone", "Android · SM-S926B". ZeroTier bunu bilmiyor;
+             *     üyeye atanmış IP ile o adresten açılmış son oturumun kullanıcı aracısı eşleştirilerek
+             *     öğreniliyor. `null`, cihazın uzak ağ üzerinden DEPSIS'e henüz hiç girmediği anlamına
+             *     geliyor — bir hata değil, henüz olmamış bir şey.
+             *
+             *     Elle verilen `label`in YERİNİ ALMIYOR: biri cihazın kimin olduğunu söylüyor, öteki ne
+             *     olduğunu.
+             */
+            device: string | null;
             addresses: string[];
             /**
              * @description Cihaz controller'a HİÇ bağlandı mı. `false`, "bu adres yetkilendirildi ama sahibi hiç
