@@ -175,10 +175,28 @@ export class IndexerService implements OnModuleInit {
       scanned: 0,
     };
 
-    /** Folders still to visit: the share root, then whatever is found under it. */
+    // ── YÜRÜYÜŞ KALDIĞI YERDEN DEVAM EDİYOR ─────────────────────────────────────────────
+    //
+    // Kuyruk eskiden yalnız PAYLAŞIM KÖKÜYLE kuruluyordu, yani her tur baştan başlıyordu. 500
+    // klasörden büyük bir ağaçta bunun iki sonucu oldu ve ikisi de sahada ölçüldü: yürüyüş hiç
+    // bitmiyor (on beş dakikada bir koşması beklenen iş saniyede bir turla 600 kez koştu), ve
+    // ilk 500'ün ötesindeki klasörlerin İÇİ hiç listelenmiyor — satırları var ama içlerindeki
+    // dosyalar hiç görünmüyor.
+    //
+    // İmleç bir sıra numarası değil, klasör başına bir ZAMAN DAMGASI: ağaç yürüyüş sırasında
+    // değiştiğinde sıra numarası anlamını kaybeder, damga kaybetmez. Yeni keşfedilen klasör
+    // `NULL` ile geldiği için sıranın başına geçiyor, yani en yeni değişiklik en önce okunuyor.
+    //
+    // KÖK HER TURDA OKUNUYOR ve bu bilerek: tek bir listeleme, ve paylaşımın en üst seviyesi
+    // kullanıcının en sık baktığı yer. Kökün satırı olmadığı için damgası da yok.
+    const started = new Date();
     const queue: Array<{ id: string | null; components: string[] }> = [
       { id: null, components: [] },
+      ...(await this.stalestFolders(organizationId, shareId, IndexerService.BATCH)),
     ];
+    const seen = new Set<string>(queue.map((f) => f.id).filter((id): id is string => id !== null));
+    /** Bu turda gerçekten listelenen klasörler; damgaları sonunda tek yazmayla vuruluyor. */
+    const scannedIds: string[] = [];
 
     while (queue.length > 0 && result.scanned < IndexerService.BATCH) {
       const folder = queue.shift();
@@ -186,6 +204,7 @@ export class IndexerService implements OnModuleInit {
 
       if (!(await report(result.scanned / IndexerService.BATCH))) {
         this.logger.warn(`lost the lease part-way through ${reason}; stopping`);
+        await this.markScanned(organizationId, scannedIds);
         return { ...result, more: true };
       }
 
@@ -201,11 +220,73 @@ export class IndexerService implements OnModuleInit {
         }
         continue;
       }
-      await this.compare(organizationId, shareId, folder, listing, result, queue);
+      if (folder.id !== null) scannedIds.push(folder.id);
+      await this.compare(organizationId, shareId, folder, listing, result, queue, seen);
     }
 
+    await this.markScanned(organizationId, scannedIds);
     await report(1);
-    return { ...result, more: queue.length > 0 };
+
+    // "Devam" artık kuyruğun boş olup olmamasına değil, DİSKTE bu turda okunmamış bir klasör
+    // kalıp kalmadığına bakıyor. Kuyruğa bakan eski hâl, kuyruk her turda yeniden dolduğu için
+    // hep "devam" diyordu.
+    return { ...result, more: await this.hasUnscanned(organizationId, shareId, started) };
+  }
+
+  /**
+   * En bayat klasörler: en son okunmasının üstünden en çok geçmiş olanlar, hiç okunmamışlar önce.
+   *
+   * Yolun bileşenleri satırdaki `path` alanından çıkıyor (`/a/b` → `['a','b']`), çünkü ajana
+   * giden şey birleştirilmiş bir yol değil, bileşen dizisi.
+   */
+  private async stalestFolders(
+    organizationId: string,
+    shareId: string,
+    limit: number,
+  ): Promise<Array<{ id: string; components: string[] }>> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ id: string; path: string }>(
+        `SELECT id::text AS id, path
+           FROM public.file_entries
+          WHERE share_id = $1::uuid AND kind = 'folder' AND trashed_at IS NULL
+          ORDER BY scanned_at ASC NULLS FIRST, path ASC
+          LIMIT $2`,
+        [shareId, limit],
+      ),
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      components: row.path.split('/').filter((part) => part !== ''),
+    }));
+  }
+
+  /** Okunan klasörlerin damgası, tek yazmada. */
+  private async markScanned(organizationId: string, ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return;
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(`UPDATE public.file_entries SET scanned_at = now() WHERE id = ANY($1::uuid[])`, [
+        ids,
+      ]),
+    );
+  }
+
+  /** Bu turda okunmamış bir klasör kaldı mı — yürüyüşün "devam" cevabı. */
+  private async hasUnscanned(
+    organizationId: string,
+    shareId: string,
+    started: Date,
+  ): Promise<boolean> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ left: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM public.file_entries
+            WHERE share_id = $1::uuid AND kind = 'folder' AND trashed_at IS NULL
+              AND (scanned_at IS NULL OR scanned_at < $2)
+         ) AS "left"`,
+        [shareId, started],
+      ),
+    );
+    return rows[0]?.left === true;
   }
 
   /**
@@ -228,10 +309,23 @@ export class IndexerService implements OnModuleInit {
     },
     result: ReconcileResult,
     queue: Array<{ id: string | null; components: string[] }> | null,
+    /**
+     * Bu turda kuyruğa girmiş klasör kimlikleri.
+     *
+     * Kuyruk artık iki kaynaktan doluyor — en bayat klasörler ve yürüyüş sırasında keşfedilenler
+     * — ve ikisi kesişebiliyor. Aynı klasörü iki kez listelemek yanlış bir sonuç üretmiyor ama
+     * turun bütçesinden yiyor, ve bütçe tam olarak kaç klasörün okunacağı demek.
+     */
+    seen: Set<string> | null = null,
   ): Promise<void> {
     const known = await this.rowsUnder(organizationId, shareId, folder.id);
     const onDisk = new Map(listing.entries.map((entry) => [entry.name, entry]));
     const descend = (id: string | null, name: string): void => {
+      // Kimliği olmayan bir klasör kuyruğa girmiyor: kimlik hem damganın hem de tekrar
+      // görülmenin anahtarı, ve onsuz aynı klasör her turda yeniden okunurdu.
+      if (id === null) return;
+      if (seen !== null && seen.has(id)) return;
+      seen?.add(id);
       queue?.push({ id, components: [...folder.components, name] });
     };
 
