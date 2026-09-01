@@ -44,7 +44,23 @@ const describeDb =
 function noIdentity(): IdentitySyncService {
   return {
     rememberPassword: () => Promise.resolve(),
+    enqueue: () => Promise.resolve(),
   } as unknown as IdentitySyncService;
+}
+
+/** Aynısı, ama `enqueue` çağrılarını sayan. */
+function countingIdentity(): { identity: IdentitySyncService; enqueued: string[] } {
+  const enqueued: string[] = [];
+  return {
+    identity: {
+      rememberPassword: () => Promise.resolve(),
+      enqueue: (_organizationId: string, why: string) => {
+        enqueued.push(why);
+        return Promise.resolve();
+      },
+    } as unknown as IdentitySyncService,
+    enqueued,
+  };
 }
 
 describeDb('system setup, against a real PostgreSQL', () => {
@@ -52,7 +68,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
   let owner: DbService;
   let setup: SetupService;
 
-  async function freshSetup(): Promise<SetupService> {
+  async function freshSetup(identity: IdentitySyncService = noIdentity()): Promise<SetupService> {
     // Wipe whatever a previous run left, so "works exactly once" is measured from a known state.
     await owner.withoutTenant('setup-status', async (q) => {
       await q.query('DELETE FROM system_setup');
@@ -70,7 +86,7 @@ describeDb('system setup, against a real PostgreSQL', () => {
       printed.push(String(message));
     });
     try {
-      const service = new SetupService(db, new PasswordService(), noIdentity());
+      const service = new SetupService(db, new PasswordService(), identity);
       await service.onModuleInit();
       expect(
         printed.some((line) => /[A-Za-z0-9_-]{40,}/.test(line)),
@@ -122,6 +138,27 @@ describeDb('system setup, against a real PostgreSQL', () => {
       organizationSlug: 'Not A Slug',
     });
     expect(result.outcome).toBe('invalid');
+  });
+
+  /**
+   * KURUCU YÖNETİCİ İÇİN EŞİTLEME KUYRUĞA GİRİYOR.
+   *
+   * Sahada eksik olan tam olarak buydu: NT özeti veritabanına yazılıyordu ama onu Samba'ya
+   * taşıyacak iş hiç kuyruğa girmiyordu. Kutuda tek bir Samba hesabı olmuyordu — `pdbedit -L`
+   * bomboş — ve Windows ağ sürücüsü bağlarken "belirtilen ağ parolası geçersiz (86)" diyordu.
+   * Parola doğruydu; karşılığı olan hesap yoktu.
+   *
+   * Kullanıcı oluşturma ve parola değiştirme yolları bunu zaten yapıyordu; her cihazın İLK ve
+   * çoğu zaman TEK hesabı atlanmıştı.
+   */
+  it('kurucu yönetici için kimlik eşitlemesini kuyruğa alır', async () => {
+    const { identity, enqueued } = countingIdentity();
+    const service = await freshSetup(identity);
+
+    const result = await service.claim(claimBody());
+
+    expect(result.outcome).toBe('ok');
+    expect(enqueued).toHaveLength(1);
   });
 
   it('claims the system, creating the organization and its administrator', async () => {
