@@ -1005,12 +1005,13 @@ mod tests {
             read_only: false,
             valid_users: Vec::new(),
         }]);
-        assert!(text.contains("	create mask = 0770
-"), "got: {text}");
-        assert!(text.contains("	directory mask = 0770
-"), "got: {text}");
-        assert!(text.contains("	inherit acls = yes
-"), "got: {text}");
+        for line in [
+            "create mask = 0770",
+            "directory mask = 0770",
+            "inherit acls = yes",
+        ] {
+            assert!(text.contains(line), "{line} eksik; got: {text}");
+        }
         assert!(!text.contains("0777"), "got: {text}");
     }
 
