@@ -1878,6 +1878,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/disks/{diskId}/label": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Diske takma ad ver
+         * @description `diskId`, diskin `/dev/disk/by-id` adi. Bos bir ad gonderilirse ad KALDIRILIYOR: "adi yok"
+         *     bos bir metinle degil, satirin olmamasiyla anlatiliyor.
+         *
+         *     Ad diskin kendisine degil, KIRACIYA ait: iki kiraciyi tasiyan bir kutuda birinin verdigi
+         *     ad otekinin ekraninda gorunmuyor.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    diskId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        label: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Ad kaydedildi ya da kaldirildi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Problem"];
+                401: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/system/telemetry": {
         parameters: {
             query?: never;
@@ -7475,6 +7527,11 @@ export interface components {
             id: string;
             healthy: boolean;
             temperatureCelsius?: number;
+            /**
+             * @description Kullanicinin bu diske verdigi ad. Yan sutundaki listenin isi, diski yuvasindan
+             *     cekecek insana onu TANITMAK -- ve bunu en iyi yapan sey kisinin kendi koydugu ad.
+             */
+            label?: string;
         };
         StorageSetup: {
             /** @description Kutudaki havuzlar. `DEPSIS_ZFS_POOLS` yazılıysa yalnız oradakiler. */
@@ -7920,6 +7977,14 @@ export interface components {
             holds: string[];
             /** @description Bir bölümü bir yere bağlı. */
             mounted: boolean;
+            /**
+             * @description Kullanicinin bu diske verdigi ad. `wwn-0x5001b448b6bf6163` bir insanin ayirt
+             *     edebilecegi bir ad degil; "Sol yuva" oyle.
+             *
+             *     Anahtar `byId`, `kname` DEGIL: `/dev/sda` bir slot degil bir sira, ve ayni disk
+             *     yeniden baslatmadan sonra `sdb` olabilir -- ad o zaman yanlis diski adlandirir.
+             */
+            label?: string;
             /**
              * @description `/`, `/boot` ya da `/boot/efi` bu diskte. Kendi alanı, çünkü bu asla bir yorum
              *     meselesi olmamalı: bu diski silmek cihazın kendisini siler, ve API onu bir onay

@@ -6,7 +6,7 @@ import { CreatePool } from './CreatePool.js';
 import { formatBytes } from './Dashboard.js';
 import { ShareTreeNotice } from './ShareTree.js';
 import type { Snapshot as SystemSnapshot } from './snapshot.js';
-import { Empty } from './ui.js';
+import { Empty, PromptBox } from './ui.js';
 
 type Disk = OpenApi.components['schemas']['DiskInventoryEntry'];
 type Inventory = OpenApi.components['schemas']['DiskInventory'];
@@ -41,6 +41,8 @@ interface Props {
  */
 export function Disks({ notify, snapshot }: Props): React.JSX.Element {
   const [inventory, setInventory] = useState<Inventory | null>(null);
+  /** Adı sorulan disk. `by-id` adı taşınıyor çünkü kaydın anahtarı o. */
+  const [naming, setNaming] = useState<{ byId: string; current: string } | null>(null);
   /**
    * What the box's storage already is.
    *
@@ -88,6 +90,25 @@ export function Disks({ notify, snapshot }: Props): React.JSX.Element {
       alive = false;
     };
   }, [reloadKey, notify]);
+
+  /**
+   * Diske ad verir ya da adını kaldırır.
+   *
+   * BOŞ AD, ADI KALDIRIYOR — ve bu sunucunun da kuralı: "adı yok" boş bir metinle değil, satırın
+   * olmamasıyla anlatılıyor. Kullanıcı için bu, ad kutusunu boşaltmanın "adı sil" demek olması.
+   */
+  async function saveLabel(byId: string, label: string): Promise<void> {
+    const { response } = await api.PUT('/system/disks/{diskId}/label', {
+      params: { path: { diskId: byId } },
+      body: { label },
+    });
+    if (!response.ok) {
+      notify('error', 'Ad kaydedilemedi.');
+      return;
+    }
+    notify('ok', label.trim() === '' ? 'Diskin adı kaldırıldı.' : `Diskin adı: ${label.trim()}`);
+    reload();
+  }
 
   if (state === 'loading') return <p className="note">Yükleniyor…</p>;
   if (state === 'forbidden') return <Empty glyph="🖴" text="Diskler yalnız yöneticilere görünür." />;
@@ -165,7 +186,12 @@ export function Disks({ notify, snapshot }: Props): React.JSX.Element {
           </thead>
           <tbody>
             {disks.map((disk) => (
-              <Row key={disk.byId ?? disk.kname} disk={disk} smart={health.get(disk.byId ?? '')} />
+              <Row
+                key={disk.byId ?? disk.kname}
+                disk={disk}
+                smart={health.get(disk.byId ?? '')}
+                onRename={(d) => setNaming({ byId: d.byId ?? '', current: d.label ?? '' })}
+              />
             ))}
           </tbody>
         </table>
@@ -197,6 +223,20 @@ export function Disks({ notify, snapshot }: Props): React.JSX.Element {
         </details>
       ) : (
         <CreatePool disks={disks} storage={storage} notify={notify} onCreated={reload} />
+      )}
+      {naming !== null && (
+        <PromptBox
+          title="Diske ad ver"
+          label="Ad (boş bırakırsanız ad kaldırılır)"
+          initial={naming.current}
+          confirmLabel="Kaydet"
+          onCancel={() => setNaming(null)}
+          onSubmit={(value) => {
+            const target = naming;
+            setNaming(null);
+            if (target !== null) void saveLabel(target.byId, value);
+          }}
+        />
       )}
     </>
   );
@@ -274,17 +314,38 @@ function StorageState({
 function Row({
   disk,
   smart,
+  onRename,
 }: {
   disk: Disk;
   smart: OpenApi.components['schemas']['DiskStatus'] | undefined;
+  onRename: (disk: Disk) => void;
 }): React.JSX.Element {
   return (
     <tr>
       <td>
         <div>
-          <b>{disk.model ?? disk.kname}</b>
+          {/* ── ÖNCE İNSANIN VERDİĞİ AD ────────────────────────────────────────────────
+              `wwn-0x5001b448b6bf6163` bir insanın ayırt edebileceği bir ad değil; "Sol yuva"
+              öyle. Ad varsa kalın olan o oluyor ve modeli bir satır aşağı iniyor — model hâlâ
+              orada, çünkü diski satın alırken bakılan şey o. */}
+          <b>{disk.label ?? disk.model ?? disk.kname}</b>
           {disk.removable && <span className="pill dim"> çıkarılabilir</span>}
+          {disk.byId !== undefined && (
+            <button
+              type="button"
+              className="b"
+              style={{ marginLeft: 8, padding: '2px 8px', fontSize: 10.5 }}
+              onClick={() => onRename(disk)}
+            >
+              {disk.label === undefined ? '✎ ad ver' : '✎ adı değiştir'}
+            </button>
+          )}
         </div>
+        {disk.label !== undefined && (
+          <div className="m" style={{ opacity: 0.75, fontSize: '0.85em' }}>
+            {disk.model ?? disk.kname}
+          </div>
+        )}
         <div className="m" style={{ opacity: 0.75, fontSize: '0.85em' }}>
           {disk.byId ?? `${disk.kname} — kararlı adı yok`}
         </div>
