@@ -1,9 +1,13 @@
 import {
+  BadRequestException,
+  Body,
   Controller,
   ForbiddenException,
   Get,
   HttpCode,
+  Param,
   Post,
+  Put,
   Req,
   ServiceUnavailableException,
   UnauthorizedException,
@@ -14,6 +18,10 @@ import { randomUUID } from 'node:crypto';
 import { AgentService, AgentUnavailableError } from '../agent/agent.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
+import { z } from 'zod';
+
+/** Ad: kırpılmış hâli boşsa adı kaldırır, yoksa 64 karakter. */
+const labelSchema = z.object({ label: z.string().max(64) });
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import {
   SystemService,
@@ -144,7 +152,9 @@ export class SystemController {
     }
 
     try {
-      return await this.system.inventory(randomUUID());
+      // Kuruluş bağlamı geçiliyor: envanterin kendisi durumsuz, ama kullanıcının disklere
+      // verdiği adlar bir kiracıya ait ve yalnız onun ekranında görünmeli.
+      return await this.system.inventory(randomUUID(), session.organizationId);
     } catch (error) {
       if (error instanceof AgentUnavailableError) {
         // Not a 200 with an empty list, for the same reason telemetry refuses one: the caller of
@@ -156,6 +166,36 @@ export class SystemController {
       }
       throw error;
     }
+  }
+
+  /**
+   * PUT /system/disks/{diskId}/label — diske insan adı ver.
+   *
+   * ANAHTAR `by-id`, `kname` DEĞİL. `/dev/sda` bir slot değil bir sıra: aynı disk yeniden
+   * başlatmadan sonra `sdb` olabilir ve ad o zaman yanlış diski adlandırır — risk R1'in ta
+   * kendisi, ve havuz kurmanın WWN doğrulamasının var olma sebebi.
+   *
+   * Boş ad, adı KALDIRIYOR. "Adı yok" ile "adı boş" farklı iki şey.
+   */
+  @Put('disks/:diskId/label')
+  @HttpCode(204)
+  async setDiskLabel(
+    @Req() request: AuthenticatedRequest,
+    @Param('diskId') diskId: string,
+    @Body() body: unknown,
+  ): Promise<void> {
+    const session = request.depsis;
+    if (session === undefined) throw new UnauthorizedException();
+    requireSameOrigin(request);
+    if (!(await this.system.isSystemAdministrator(session.userId))) {
+      throw new ForbiddenException();
+    }
+    const parsed = labelSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('label: en fazla 64 karakter');
+    if (diskId.length === 0 || diskId.length > 255) {
+      throw new BadRequestException('diskId: 1-255 karakter');
+    }
+    await this.system.setDiskLabel(session.organizationId, diskId, parsed.data.label);
   }
 
   @Get('telemetry')
@@ -175,7 +215,7 @@ export class SystemController {
     const correlationId = randomUUID();
 
     try {
-      return await this.system.telemetry(correlationId);
+      return await this.system.telemetry(correlationId, session.organizationId);
     } catch (error) {
       if (error instanceof AgentUnavailableError) {
         // Deliberately not a 200 with an empty `pools`. "There are no pools" and "we could not find

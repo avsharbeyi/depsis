@@ -150,7 +150,7 @@ export class SystemService {
    *
    * Not being able to ENUMERATE pools is a different thing and does not throw; see `poolTargets`.
    */
-  async telemetry(correlationId: string): Promise<Telemetry> {
+  async telemetry(correlationId: string, organizationId?: string): Promise<Telemetry> {
     const memory = readMemory();
     const loadAverage = readLoadAverage();
     // İŞLEMCİ SICAKLIĞI ARTIK OKUNUYOR. Sözleşmede alan vardı, arayüzde onu çizen iki ekran
@@ -161,7 +161,7 @@ export class SystemService {
 
     return {
       pools: await this.pools(correlationId),
-      disks: await this.disks(correlationId),
+      disks: await this.disks(correlationId, organizationId),
       cpu: {
         ...(loadAverage === undefined ? {} : { loadAverage }),
         ...(temperatureCelsius === undefined ? {} : { temperatureCelsius }),
@@ -177,7 +177,47 @@ export class SystemService {
    * does: an empty list would make "this box has no disks" and "we could not ask" the same answer,
    * and the caller of this one is a wizard that is about to offer disks to overwrite.
    */
-  async inventory(correlationId: string): Promise<DiskInventory> {
+  /**
+   * Kullanıcının disklere verdiği adlar, `by-id` anahtarıyla.
+   *
+   * Envanterin kendisi durumsuz — ajanın anlattığı donanım — ve bu tek satır onun yanına
+   * insanın koyduğu adı ekliyor. Ad YOKSA alan hiç yazılmıyor: boş bir metin "adı yok" demek
+   * değil, "adı boş" demek olurdu.
+   */
+  private async labels(organizationId: string): Promise<Map<string, string>> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ disk_by_id: string; label: string }>(
+        `SELECT disk_by_id, label FROM public.disk_labels`,
+      ),
+    );
+    return new Map(rows.map((row) => [row.disk_by_id, row.label]));
+  }
+
+  /**
+   * Diske ad verir ya da adını kaldırır.
+   *
+   * BOŞ AD SATIRI SİLİYOR. "Adı yok" ile "adı boş" farklı iki şey ve ikincisi ekranda bir sürü
+   * görünmez boşluk demek; ilki, satırın olmaması.
+   */
+  async setDiskLabel(organizationId: string, diskById: string, label: string): Promise<void> {
+    const trimmed = label.trim();
+    if (trimmed === '') {
+      await this.db.withTenant(organizationId, (q) =>
+        q.query(`DELETE FROM public.disk_labels WHERE disk_by_id = $1`, [diskById]),
+      );
+      return;
+    }
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `INSERT INTO public.disk_labels (organization_id, disk_by_id, label)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (organization_id, disk_by_id) DO UPDATE SET label = EXCLUDED.label`,
+        [organizationId, diskById, trimmed],
+      ),
+    );
+  }
+
+  async inventory(correlationId: string, organizationId?: string): Promise<DiskInventory> {
     const response = await this.agent.call({ op: 'list_disks' }, 'disk inventory', correlationId);
 
     if (response.status === 'refused' || response.status === 'failed') {
@@ -189,12 +229,20 @@ export class SystemService {
       );
     }
 
+    // Adlar yalnız kiracı bilindiğinde okunuyor: envanteri kuruluş bağlamı olmadan soran bir
+    // çağrı (kurulum sihirbazı) hâlâ çalışıyor, yalnız adsız.
+    const named =
+      organizationId === undefined ? new Map<string, string>() : await this.labels(organizationId);
+
     return {
       disks: response.disks.map((disk): DiskInventoryEntry => ({
         // `??` rather than spreading a conditional: the contract marks these optional and
         // `exactOptionalPropertyTypes` refuses an explicit `undefined`, so each one is written
         // only when the agent gave a value.
         ...(disk.by_id === null ? {} : { byId: disk.by_id }),
+        // Adı olan diskte alan yazılıyor, olmayanda hiç yazılmıyor: boş bir metin "adı yok"
+        // demek değil, "adı boş" demek olurdu.
+        ...labelOf(named, disk.by_id),
         kname: disk.kname,
         sizeBytes: disk.size_bytes,
         ...(disk.model === null ? {} : { model: disk.model }),
@@ -469,8 +517,12 @@ export class SystemService {
    * painting every row red would be a false alarm on top of a real one, so the transport error is
    * left to propagate into the same 503 the pool query would have produced.
    */
-  private async disks(correlationId: string): Promise<DiskStatus[]> {
+  private async disks(correlationId: string, organizationId?: string): Promise<DiskStatus[]> {
     const statuses: DiskStatus[] = [];
+    // Adlar telemetriye de giriyor: yan sütundaki liste bu şekilden besleniyor ve orada
+    // `wwn-0x…` okumak, diski yuvasından çekecek insana hiçbir şey söylemiyor.
+    const named =
+      organizationId === undefined ? new Map<string, string>() : await this.labels(organizationId);
 
     const { ids, configured } = await this.smartTargets(correlationId);
     for (const id of ids) {
@@ -499,13 +551,14 @@ export class SystemService {
         // not installed. Painting every disk in the machine red for that would be a wall of false
         // alarms produced by a convenience — and it would teach an operator that the health column
         // means nothing, which is worse than an empty column.
-        if (configured) statuses.push({ id, healthy: false });
+        if (configured) statuses.push({ id, healthy: false, ...labelOf(named, id) });
         continue;
       }
 
       statuses.push({
         id,
         healthy: response.healthy,
+        ...labelOf(named, id),
         // Spread rather than `temperatureCelsius: response.temperature_celsius`, because the
         // contract has no null for this field and `exactOptionalPropertyTypes` makes "absent" and
         // "present and undefined" different types. A drive that reports no temperature — several
@@ -533,4 +586,14 @@ export class SystemService {
     this.logger.warn(`pool '${pool}' reported an unrecognised health state: '${reported}'`);
     return 'UNKNOWN';
   }
+}
+
+/** Diskin adı, varsa — `exactOptionalPropertyTypes` altında alanı hiç yazmamanın tek temiz yolu. */
+function labelOf(
+  named: ReadonlyMap<string, string>,
+  byId: string | null | undefined,
+): { label: string } | Record<string, never> {
+  if (byId === null || byId === undefined) return {};
+  const label = named.get(byId);
+  return label === undefined ? {} : { label };
 }

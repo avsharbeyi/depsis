@@ -141,7 +141,7 @@ function StorageCard({
                   style={{ background: disk.healthy ? 'var(--live)' : 'var(--rose)' }}
                 />
                 <span className="n" title={disk.id}>
-                  {diskLabel(disk.id)}
+                  {diskLabel(disk.id, disk.label)}
                 </span>
                 <span className="v">
                   {disk.temperatureCelsius === undefined ? '—' : `${disk.temperatureCelsius} °C`}
@@ -172,7 +172,10 @@ function StorageCard({
  * ellipsis. The last segment is what identifies the drive to whoever has to pull it out; the full
  * path stays on the `title` for anyone who needs to paste it into a command.
  */
-function diskLabel(id: string): string {
+function diskLabel(id: string, given?: string): string {
+  // KULLANICININ VERDİĞİ AD VARSA O. Bu sütunun işi diski POMPADAN ÇEKECEK insana onu tanıtmak,
+  // ve bunu en iyi yapan şey kişinin kendi koyduğu ad — "Sol yuva", "Eski Seagate".
+  if (given !== undefined && given.trim() !== '') return given;
   const parts = id.split('/');
   return parts[parts.length - 1] ?? id;
 }

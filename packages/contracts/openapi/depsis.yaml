@@ -1130,6 +1130,37 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
 
+  /system/disks/{diskId}/label:
+    put:
+      tags: [system]
+      summary: Diske takma ad ver
+      description: |
+        `diskId`, diskin `/dev/disk/by-id` adi. Bos bir ad gonderilirse ad KALDIRILIYOR: "adi yok"
+        bos bir metinle degil, satirin olmamasiyla anlatiliyor.
+
+        Ad diskin kendisine degil, KIRACIYA ait: iki kiraciyi tasiyan bir kutuda birinin verdigi
+        ad otekinin ekraninda gorunmuyor.
+      parameters:
+        - name: diskId
+          in: path
+          required: true
+          schema: { type: string, maxLength: 255 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              additionalProperties: false
+              properties:
+                label: { type: string, maxLength: 64 }
+      responses:
+        '204': { description: Ad kaydedildi ya da kaldirildi }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+
   /system/telemetry:
     get:
       tags: [system]
@@ -5364,6 +5395,12 @@ components:
             reddediyor, çünkü sdX yeniden başlatmada başka bir diski gösterebilir (risk R1).
         healthy: { type: boolean }
         temperatureCelsius: { type: integer }
+        label:
+          type: string
+          maxLength: 64
+          description: |
+            Kullanicinin bu diske verdigi ad. Yan sutundaki listenin isi, diski yuvasindan
+            cekecek insana onu TANITMAK -- ve bunu en iyi yapan sey kisinin kendi koydugu ad.
 
     StorageSetup:
       type: object
@@ -5984,6 +6021,15 @@ components:
             **BOŞ, tek güvenli durum.** Buradaki her şey, bu diske havuz kurmanın bir şeyi yok
             edeceği anlamına geliyor.
         mounted: { type: boolean, description: Bir bölümü bir yere bağlı. }
+        label:
+          type: string
+          maxLength: 64
+          description: |
+            Kullanicinin bu diske verdigi ad. `wwn-0x5001b448b6bf6163` bir insanin ayirt
+            edebilecegi bir ad degil; "Sol yuva" oyle.
+
+            Anahtar `byId`, `kname` DEGIL: `/dev/sda` bir slot degil bir sira, ve ayni disk
+            yeniden baslatmadan sonra `sdb` olabilir -- ad o zaman yanlis diski adlandirir.
         holdsSystem:
           type: boolean
           description: |
