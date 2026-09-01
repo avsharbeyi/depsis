@@ -101,6 +101,12 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     if (owner !== undefined) {
       await owner.withoutTenant('migration-status', async (q) => {
         await q.query(`DELETE FROM sessions WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        // Konsol kayıtları da: silme süiti bir tane bırakıyor — hesabı gittikten sonra hâlâ
+        // okunabildiğini ölçmek için, ki kayıt bunun için var — ve `console_sessions`in kuruluşa
+        // bağı RESTRICT, yani kalan tek satır kuruluşun silinmesini reddediyor.
+        await q.query(`DELETE FROM console_sessions WHERE organization_id = ANY($1)`, [
+          [orgA, orgB],
+        ]);
         // Ekipler kullanıcılardan ÖNCE, kuruluştan önce: hesap açmak artık 'Herkes' ekibini de
         // tarıyor (`everyone_team`), yani bu süit çalıştıktan sonra kiracının bir ekibi var ve
         // `teams_organization_id_fkey` RESTRICT kuruluşun silinmesini reddediyor. Ürün doğru
