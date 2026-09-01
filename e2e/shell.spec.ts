@@ -93,9 +93,21 @@ test('masaüstü açılıyor: selamlama, hap göstergeler, kutucuklar ve sağ s�
     await expect(pill).not.toBeEmpty();
   }
 
+  // TELEFONDA "Dosyalar" KUTUSU YOK, ve bu bir eksiklik değil: orada ana ekranın en üstünde dosya
+  // gezgininin KENDİSİ duruyor. Özet kutusunu da çizmek, aynı adı taşıyan iki kutuyu alt alta
+  // koymak olurdu — cihazın sahibinin gördüğü ve "iki tane dosyalar var" dediği şey buydu.
+  //
+  // Test bunu proje adına bakarak ayırıyor, çünkü ikisi de doğru: geniş ekranda üç kutu, dar
+  // ekranda iki kutu ve üstünde gezginin kendisi.
+  const mobile = test.info().project.name === 'mobile-360';
   const tiles = page.locator(TILES);
-  for (const title of ['Dosyalar', 'Notlar', 'İşler']) {
+  for (const title of mobile ? ['Notlar', 'İşler'] : ['Dosyalar', 'Notlar', 'İşler']) {
     await expect(tiles.getByText(title, { exact: true })).toBeVisible();
+  }
+  if (mobile) {
+    // Ve gezginin kendisi orada: başlığı kutucukların değil, kartın kendisinin üstünde.
+    await expect(page.locator('.mfm').getByText('Dosyalar', { exact: true })).toBeVisible();
+    await expect(tiles.getByText('Dosyalar', { exact: true })).toHaveCount(0);
   }
 
   // `<aside aria-label="Cihaz durumu">`. At 360px the stylesheet turns this column into a
