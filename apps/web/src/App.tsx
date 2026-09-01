@@ -876,7 +876,13 @@ function Desktop({
                       `click`, `pointerdown` DEĞİL: listeyi kaydırmak bir tıklama üretmiyor, yani
                       parmakla kaydırmak kartı büyütmüyor. */}
                   <div className="wb" onClickCapture={() => setFilesFull(true)}>
-                    <Files notify={push} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />
+                    <Files
+                      notify={push}
+                      isAdmin={isAdmin}
+                      onUnauthenticated={onUnauthenticated}
+                      prefs={prefsLoaded ? prefs : undefined}
+                      savePrefs={save}
+                    />
                   </div>
                 </section>
               )}
@@ -1091,7 +1097,15 @@ function PaneBody({
 }): React.JSX.Element {
   switch (pane) {
     case 'files':
-      return <Files notify={notify} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />;
+      return (
+        <Files
+          notify={notify}
+          isAdmin={isAdmin}
+          onUnauthenticated={onUnauthenticated}
+          prefs={prefsLoaded ? prefs : undefined}
+          savePrefs={save}
+        />
+      );
     case 'notes':
       return <Notes notify={notify} />;
     case 'tasks':

@@ -3001,6 +3001,34 @@ label textarea,
   white-space: nowrap;
 }
 
+/* Yalnız simge taşıyan hızlı erişim düğmesi: "Dosyalarım" yazısı şeridin yarısını kaplıyordu ve
+   söylediği şey kullanıcının zaten bildiği bir şeydi. */
+.qf.ic {
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+/* Favori yıldızı. Sönükken diğer eylemlerle aynı ağırlıkta, doluyken amber: şeritte duran şeyin
+   hangisi olduğu satırda da görünsün. */
+.fav {
+  color: var(--mut);
+}
+.fav.on {
+  color: var(--warn);
+}
+
+/* Satırdaki değişme tarihi. Dar ekranda gizleniyor: 360 pikselde ad, boyut ve tarih yan yana
+   durmuyor ve üçünden feda edilecek olan ad değil. */
+.frow .sz.dt {
+  min-width: 74px;
+  text-align: right;
+}
+@media (max-width: 560px) {
+  .frow .sz.dt {
+    display: none;
+  }
+}
+
 /* ─── sign-in and setup ────────────────────────────────────────────────────── */
 
 /* Not in the reference: it opens straight onto a signed-in desktop. The galaxy still runs behind
