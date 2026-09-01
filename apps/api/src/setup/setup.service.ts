@@ -115,6 +115,21 @@ export class SetupService implements OnModuleInit {
         );
       }
 
+      // ── VE EŞİTLEME KUYRUĞA ALINIYOR ────────────────────────────────────────────────────
+      //
+      // Bir öncekinin yarısı eksikti ve sahada bedeli şu oldu: NT özeti veritabanına yazıldı,
+      // ama onu Samba'ya taşıyacak iş HİÇ kuyruğa girmedi. Sonuç, kutuda tek bir Samba hesabı
+      // olmaması — `pdbedit -L` bomboş — ve Windows'un ağ sürücüsü bağlarken "belirtilen ağ
+      // parolası geçersiz (86)" demesi. Parola doğruydu; karşılığı olan hesap yoktu.
+      //
+      // Kullanıcı oluşturma ve parola değiştirme yolları bunu zaten yapıyordu; kurucu yönetici,
+      // yani her cihazın İLK ve çoğu zaman TEK hesabı, yine atlanmıştı.
+      //
+      // PAROLA ADIMI DÜŞSE BİLE ÇALIŞIYOR, ve bu yüzden `try` bloğunun dışında: Unix hesabı ile
+      // gruplar, SMB kimliğinden bağımsız olarak var olmalı — izinleri diske yazan ACL'ler o
+      // numaraları adlandırıyor.
+      await this.identity.enqueue(row.organization_id, 'the founding administrator');
+
       this.logger.warn(`setup completed: organization ${row.organization_id}`);
 
       return { outcome: 'ok', organizationId: row.organization_id, userId: row.user_id };
