@@ -32,6 +32,13 @@ export interface FileEntryRow {
    * trashed at all.
    */
   parent_trashed?: boolean;
+  /**
+   * Klasörün doğrudan çocuk sayısı, en fazla 1000'e kadar sayılmış.
+   *
+   * Yalnız listelemede ve yalnız klasör satırlarında dolu; dosyada `null`, başka sorgularda hiç
+   * yok. `string`, çünkü `count(*)` bigint döner ve sürücü onu metin olarak veriyor.
+   */
+  child_count?: string | null;
   id: string;
   share_id: string;
   parent_id: string | null;
@@ -305,6 +312,13 @@ export interface FileEntryPage {
   items: FileEntryRow[];
   nextCursor: string | null;
   hasMore: boolean;
+  /**
+   * Bu klasördeki görünen öğe sayısı — sayfanın değil, klasörün.
+   *
+   * Yalnız `list` dolduruyor; arama ve çöp listeleri sayfa sayfa gezilen şeyler değil, ve orada
+   * bir "toplam" sorusunun karşılığı yok.
+   */
+  total?: number;
 }
 
 /**
@@ -316,6 +330,37 @@ export interface FileEntryPage {
  */
 const ENTRY_COLUMNS = `id, share_id, parent_id, kind, name, path, size_bytes, content_type,
                        trashed_at, created_at, updated_at`;
+
+/**
+ * Aynı sütunlar, artı klasörlerin DOĞRUDAN çocuk sayısı.
+ *
+ * ── NEDEN SATIRDA, NEDEN AYRI BİR İSTEKTE DEĞİL ─────────────────────────────────────────────
+ *
+ * Ekran bir klasör satırında "boş mu, kaç öğe var" göstermek istiyor. Bunu satır başına ayrı bir
+ * listeleme isteğiyle yapmak, iki yüz satırlık bir klasörde iki yüz istek demek — ve ekran bugün
+ * bunu yalnız silme onayında, en fazla on klasör için yapıyor, tam da bu yüzden.
+ *
+ * ── SAYIM SINIRLI ───────────────────────────────────────────────────────────────────────────
+ *
+ * `LIMIT 1000` içeride: on bin dosyalı bir klasörün tam sayısını üretmek, kimsenin okumadığı bir
+ * rakam için her listelemede on bin satır saymak demek. Bin ve üstü ekranda "1000+" olarak
+ * görünüyor — insanın "çok" dediği yer zaten çok daha aşağıda.
+ *
+ * ── GİZLİLİK ────────────────────────────────────────────────────────────────────────────────
+ *
+ * Sayım, listelenen klasörün İÇİNDEKİLER'i sayıyor ve o klasörü listeleme izni zaten sorulmuş
+ * oluyor. Sözleşmedeki "toplam yok" kuralı SÜZÜLMEMİŞ bir toplamla ilgili: görülemeyen satırların
+ * varlığını sızdıran bir sayı. Burada sayılan şey, kullanıcının zaten görebildiği liste.
+ */
+const ENTRY_COLUMNS_WITH_COUNT = `f.id, f.share_id, f.parent_id, f.kind, f.name, f.path,
+                       f.size_bytes, f.content_type, f.trashed_at, f.created_at, f.updated_at,
+                       CASE WHEN f.kind = 'folder' THEN (
+                         SELECT count(*) FROM (
+                           SELECT 1 FROM public.file_entries c
+                            WHERE c.parent_id = f.id AND c.trashed_at IS NULL
+                            LIMIT 1000
+                         ) capped
+                       ) ELSE NULL END AS child_count`;
 
 /**
  * The same columns plus whether the row's PARENT is in the bin.
@@ -831,12 +876,12 @@ export class FilesService {
              FROM public.file_entries
             WHERE id = $4::uuid
          )
-         SELECT ${ENTRY_COLUMNS}
-           FROM public.file_entries
-          WHERE organization_id = $1
-            AND share_id = $2
-            AND parent_id IS NOT DISTINCT FROM $3
-            AND trashed_at IS NULL
+         SELECT ${ENTRY_COLUMNS_WITH_COUNT}
+           FROM public.file_entries f
+          WHERE f.organization_id = $1
+            AND f.share_id = $2
+            AND f.parent_id IS NOT DISTINCT FROM $3
+            AND f.trashed_at IS NULL
             AND ($4::text IS NULL
                  OR EXISTS (SELECT 1 FROM cur WHERE ${order.after}))
           ORDER BY ${order.by}
@@ -845,7 +890,28 @@ export class FilesService {
       ),
     );
 
-    return page(rows, limit);
+    // ── KLASÖRÜN GERÇEK ÖĞE SAYISI ──────────────────────────────────────────────────────────
+    //
+    // Ekranın altındaki sayaç "200+ öğe" diyordu ve o "+" bir tahmin değil, bilginin yokluğuydu:
+    // sayfa iki yüz satır getiriyor ve arkasında ne olduğu sorulmuyordu. Kullanıcının sorduğu
+    // soru — "bu klasörde kaç dosya var" — bir sayfa sorusu değil.
+    //
+    // Ayrı bir COUNT, ve aynı süzgeç: listelenen klasörün görünen içeriği. Sözleşmedeki "toplam
+    // yok" kuralı SÜZÜLMEMİŞ bir toplamla ilgiliydi; bu, kullanıcının zaten sayfa sayfa
+    // gezebileceği listenin uzunluğu.
+    const totals = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ n: string }>(
+        `SELECT count(*)::text AS n
+           FROM public.file_entries
+          WHERE organization_id = $1
+            AND share_id = $2
+            AND parent_id IS NOT DISTINCT FROM $3
+            AND trashed_at IS NULL`,
+        [organizationId, shareId, parentId],
+      ),
+    );
+
+    return { ...page(rows, limit), total: Number(totals[0]?.n ?? '0') };
   }
 
   async find(organizationId: string, id: string): Promise<FileEntryRow> {

@@ -6829,6 +6829,13 @@ export interface components {
             kind: "file" | "folder";
             /** Format: int64 */
             size: number;
+            /**
+             * @description Klasorun DOGRUDAN cocuk sayisi; en fazla 1000'e kadar sayilir, o yuzden 1000 gorenen
+             *     ekran "1000+" yazmali. Yalniz klasor listelemesinde ve yalniz klasor satirlarinda
+             *     geliyor: dosyada ve arama sonuclarinda alan hic yok, cunku "sifir" ile "sorulmadi"
+             *     farkli iki sey.
+             */
+            childCount?: number;
             /** Format: date-time */
             modifiedAt: string;
             mimeType?: string;
@@ -6862,6 +6869,18 @@ export interface components {
         FileEntryPage: {
             items: components["schemas"]["FileEntry"][];
             nextCursor?: string;
+            /**
+             * @description Bu klasordeki gorunen oge sayisi -- sayfanin degil, KLASORUN. Ekranin altindaki sayac
+             *     "200+" diyordu ve o "+" bir tahmin degil, bilginin yokluguydu.
+             *
+             *     Sozlesmenin "toplam yok" kurali SUZULMEMIS bir toplamla ilgiliydi: gorulemeyen
+             *     satirlarin varligini sizdiran bir sayi. Bu, kullanicinin zaten sayfa sayfa
+             *     gezebilecegi listenin uzunlugu, ve klasoru listeleme izni cagriden once soruluyor.
+             *
+             *     Yalniz klasor listelemesinde var; arama ve cop listeleri sayfa sayfa gezilen seyler
+             *     degil.
+             */
+            total?: number;
             /**
              * @description Toplam sayı bilerek yok. Filtrelenmemiş bir sayaç, kiracının göremediği
              *     satırların varlığını sızdırır.
