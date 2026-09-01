@@ -1273,6 +1273,80 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/files/{id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Kararlı dosya kimliği. Yol asla kimlik olarak kullanılmaz (ADR-0005). */
+                id: components["parameters"]["FileId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Klasörün tamamını tek arşiv olarak indir
+         * @description Klasörü `.tar.gz` olarak indirir. Yalnız klasörler; bir dosya için 404 döner, çünkü
+         *     dosyanın kendi yolu `GET /files/{id}/content`.
+         *
+         *     ── Aralık yok, ETag yok ────────────────────────────────────────────────
+         *
+         *     `Accept-Ranges: none`. Arşiv her istekte YENİDEN üretiliyor, yani iki isteğin baytları
+         *     birebir aynı olmak zorunda değil; bir aralık isteği ikinci bir arşivin ortasından
+         *     okurdu. Aynı sebeple ETag de yok: kararlı bir kimlik iddia etmek, olmayan bir
+         *     kararlılığı söylemek olur.
+         *
+         *     ── Yetki alt ağacın TAMAMINDA aranıyor ─────────────────────────────────
+         *
+         *     Klasörün kendisinde `download` yetmiyor. ADR-0021'e göre bir alt klasör üstündekinden
+         *     daha azını verebiliyor, ve arşivi üreten `tar` dosya sistemi düzeyinde koşuyor:
+         *     içeride yetkisiz bir klasör varsa istek 403 ile reddediliyor. Arşivin bir kısmını
+         *     sessizce atlamak seçenek değil — eksiğini söylemeyen bir arşiv, eksik olduğunu
+         *     bilmeyen bir kullanıcı demek.
+         *
+         *     ── 507 ─────────────────────────────────────────────────────────────────
+         *
+         *     Arşiv üretilirken havuza yazılıyor. Klasörün toplam boyutu havuzda boş kalandan
+         *     büyükse istek `insufficient-storage` ile ve ARŞİV ÜRETİLMEDEN reddediliyor; gövde iki
+         *     sayıyı da taşıyor.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Kararlı dosya kimliği. Yol asla kimlik olarak kullanılmaz (ADR-0005). */
+                    id: components["parameters"]["FileId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Arşiv */
+                200: {
+                    headers: {
+                        "Accept-Ranges"?: string;
+                        "Content-Disposition"?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/gzip": string;
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+                507: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/file-operations": {
         parameters: {
             query?: never;
@@ -6881,6 +6955,13 @@ export interface components {
             kind: "file" | "folder";
             /** Format: int64 */
             size: number;
+            /**
+             * Format: int64
+             * @description Klasorun ALTINDAKI butun dosyalarin toplam boyutu -- dogrudan cocuklar degil, agacin
+             *     tamami. `size` bir klasorde her zaman 0 ve oyle kaliyor: satirin kendi boyutu ile
+             *     icindekilerin toplami farkli iki sey.
+             */
+            subtreeBytes?: number;
             /**
              * @description Klasorun DOGRUDAN cocuk sayisi; en fazla 1000'e kadar sayilir, o yuzden 1000 gorenen
              *     ekran "1000+" yazmali. Yalniz klasor listelemesinde ve yalniz klasor satirlarinda

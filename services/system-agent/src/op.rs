@@ -1557,6 +1557,49 @@ pub enum Request {
     #[serde(rename = "reboot_system")]
     RebootSystem {},
 
+    /// Bir klasörü tek bir arşiv olarak indirmeye açar.
+    ///
+    /// ── NEDEN ÖNCE DOSYA OLUYOR ──────────────────────────────────────────────────────────
+    ///
+    /// Arşivi üretirken aynı anda göndermek daha zarif görünüyor ama bu ajanın veri kanalı öyle
+    /// çalışmıyor: kanal OFSETLİ — karşı taraf "şuradan şu kadar" diyebiliyor, yeniden başlatma
+    /// ve aralık istekleri buna dayanıyor — ve bir sürecin çıktısında öyle bir yer yok. Arşiv
+    /// önce dosyaya yazılıyor, sonra var olan indirme yolundan iniyor.
+    ///
+    /// ── VE NEDEN GERİYE BİR ŞEY KALMIYOR ─────────────────────────────────────────────────
+    ///
+    /// Yanıt `Download`, yani `open_download`un verdiğinin AYNISI, çünkü ajan arşivi yazdıktan
+    /// hemen sonra AÇIP BAĞINI SİLİYOR. Geriye adı olmayan bir düğüm kalıyor: yalnızca o
+    /// indirmenin tanımlayıcısından okunabiliyor ve son tanımlayıcı kapandığında çekirdek onu
+    /// kendisi topluyor. İndirme yarıda kesilse, istemci ölse, cihaz elektrik kesintisiyle
+    /// yeniden başlasa bile diskte kalıcı bir çöp yok — ve bir temizleyiciye de gerek yok, çünkü
+    /// temizlenecek bir ad hiç var olmadı.
+    ///
+    /// Bunun bedeli arşivin yeniden kullanılamaması: ikinci bir indirme onu yeniden üretiyor. Bir
+    /// klasör indirmenin nadir bir iş olduğu düşünülürse, kalıcı bir ara dosyanın ömrünü
+    /// yönetmekten ucuz.
+    ///
+    /// ── `tar`, VE NEDEN `-C` ─────────────────────────────────────────────────────────────
+    ///
+    /// Arşivin içindeki yollar klasörün KENDİ adıyla başlamalı: `Fotograflar/2026/a.jpg`. `tar`
+    /// bunu `-C <üst dizin> <ad>` ile yapıyor. `zip`in dizin değiştirme seçeneği yok — ona mutlak
+    /// bir yol verilseydi arşivin içine `/proc/self/fd/7/...` diye girerdi.
+    ///
+    /// Üst dizin ajanın kendi mühürlü tanımlayıcısından geçiyor (`/proc/self/fd/N`), yeniden
+    /// çözülen bir yol değil: `setfacl`ın kullandığı kaçış kapısının aynısı, ve aynı sebeple —
+    /// arada geçen sürede yerine bir sembolik bağ konabilecek bir ad, kök yetkiyle koşan bir
+    /// `tar`a verilecek en son şey.
+    #[serde(rename = "archive_folder")]
+    ArchiveFolder {
+        share: SafeComponent,
+        /// Paylaşım içindeki klasörün yolu. Boş olamaz: paylaşımın kökünü arşivlemek, ajanın
+        /// kendi ara alanını da arşivin içine almak demek olurdu.
+        path: Vec<SafeComponent>,
+        /// Arşivin ara alandaki geçici adı. Çağıran veriyor çünkü iki eşzamanlı indirmenin aynı
+        /// adı seçmemesi onun bileceği bir şey; ad zaten yalnızca `tar` yazarken var oluyor.
+        staging_name: SafeComponent,
+    },
+
     /// Takılabilecek havuzları listeler. İşlenen YOK.
     ///
     /// ── YANMIŞ CİHAZ ─────────────────────────────────────────────────────────────────────
@@ -3179,6 +3222,10 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 39, `archive_folder` ile: bir klasörü tek dosya olarak indirebilmek. Sözleşmede klasör
+/// indirme diye bir şey YOKTU — ekranda düğme klasörlerde hiç çizilmiyor, karışık seçimde ise
+/// klasörler sessizce atlanıyordu.
+///
 /// 38, `reboot_system` ile: cihazı yeniden başlatmak. Arayüzdeki güç menüsünde "Yenile" yazan
 /// ve yalnız TARAYICI SAYFASINI tazeleyen bir düğme vardı; cihazın sahibinin oradan beklediği
 /// şey cihazın kendisinin yeniden başlaması.
@@ -3222,7 +3269,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 38;
+pub const SCHEMA_VERSION: u32 = 39;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

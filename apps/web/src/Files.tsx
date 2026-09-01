@@ -50,6 +50,24 @@ interface Loc {
 
 const ROOT: Loc = { trashed: false, trail: [] };
 
+/**
+ * Klasör satırının sağındaki cümle: kaç öğe ve ne kadar yer.
+ *
+ * İKİSİ BİRDEN, çünkü ikisi farklı sorulara cevap. "37 öğe" klasörün ne olduğunu söylüyor;
+ * "2,4 GB" onu silmenin ne kazandıracağını. Boş bir klasörde boyut yazmıyor — sıfır bayt zaten
+ * "boş" kelimesinin içinde.
+ *
+ * Sayım bin ile sınırlı, o yüzden bin gören "1000+" yazıyor. Boyut sınırsız: tek bir aralık
+ * sorgusu ve kullanıcının aradığı sayı tam olarak o.
+ */
+function folderMeta(entry: FileEntry): string {
+  if (entry.childCount === undefined) return '—';
+  if (entry.childCount === 0) return 'boş';
+  const count = `${entry.childCount}${entry.childCount >= 1000 ? '+' : ''} öğe`;
+  if (entry.subtreeBytes === undefined || entry.subtreeBytes === 0) return count;
+  return `${count} · ${formatBytes(entry.subtreeBytes)}`;
+}
+
 /** Favori şeridinde görünen ad: yalnız ilk yedi harf, gerekiyorsa kısaltma işaretiyle. */
 function shortName(name: string): string {
   const trimmed = name.trim();
@@ -1146,7 +1164,7 @@ export function Files({
   }
 
   /**
-   * A download is a plain `<a href download>`, one per file, and nothing else.
+   * A download is a plain `<a href download>`, one per entry, and nothing else.
    *
    * The session is a same-origin cookie so the browser sends it, and the server answers with
    * `Content-Disposition: attachment` — which means a multi-gigabyte file goes from the socket to
@@ -1156,17 +1174,38 @@ export function Files({
    * The anchor is built here rather than left in the row because the row's control has to be a
    * `<button>`: the stylesheet dresses `.fact button` and nothing else, and a link sitting among
    * them with no hover or disabled state reads as a dead control.
+   *
+   * ── KLASÖRLER DE İNİYOR, VE ATLANAN SÖYLENİYOR ────────────────────────────────────────────
+   *
+   * Klasör satırında indirme düğmesi hiç çizilmiyordu ve karışık bir seçimde klasörler SESSİZCE
+   * atlanıyordu: iki klasör ve bir dosya seçip indirmeye basan biri tek dosya alıyor, eksiğin
+   * farkına ancak diskte sayarsa varıyordu. Klasör artık `/archive` üzerinden tek bir `.tar.gz`
+   * olarak iniyor; yetkisi olmadığı için gerçekten atlanan bir şey kalırsa ekran onu söylüyor.
    */
   function download(list: FileEntry[]): void {
+    let skipped = 0;
     for (const entry of list) {
-      if (entry.kind !== 'file' || !can(entry, 'download')) continue;
+      if (!can(entry, 'download')) {
+        skipped += 1;
+        continue;
+      }
       const anchor = document.createElement('a');
-      anchor.href = `${API_BASE_URL}/files/${entry.id}/content`;
-      anchor.download = entry.name;
+      anchor.href =
+        entry.kind === 'folder'
+          ? `${API_BASE_URL}/files/${entry.id}/archive`
+          : `${API_BASE_URL}/files/${entry.id}/content`;
+      anchor.download = entry.kind === 'folder' ? `${entry.name}.tar.gz` : entry.name;
       anchor.rel = 'noopener';
       document.body.append(anchor);
       anchor.click();
       anchor.remove();
+    }
+    if (skipped > 0) {
+      notify('error', `${skipped} öğe indirilemedi: indirme izniniz yok.`);
+    } else if (list.some((entry) => entry.kind === 'folder')) {
+      // Bir klasörün arşivi sunucuda ÜRETİLİYOR, yani indirme hemen başlamıyor. Söylenmezse,
+      // tarayıcının bir şey yapmadığı birkaç saniye tıklamanın işe yaramadığı gibi görünüyor.
+      notify('ok', 'Klasör arşivleniyor; indirme birazdan başlayacak.');
     }
   }
 
@@ -1626,9 +1665,7 @@ export function Files({
             <button
               type="button"
               className="sb"
-              disabled={
-                !selected.some((entry) => entry.kind === 'file' && can(entry, 'download')) || busy
-              }
+              disabled={!selected.some((entry) => can(entry, 'download')) || busy}
               onClick={() => download(selected)}
             >
               ⤓ İndir
@@ -1845,13 +1882,7 @@ export function Files({
                     sorduğu şey içinde ne olduğu, ve "boş" da bir cevap — silmeden önce bakılan tek
                     şey çoğu zaman bu. Sayım bin ile sınırlı, o yüzden bin gören "1000+" yazıyor. */}
                 <span className="sz">
-                  {entry.kind !== 'folder'
-                    ? formatBytes(entry.size)
-                    : entry.childCount === undefined
-                      ? '—'
-                      : entry.childCount === 0
-                        ? 'boş'
-                        : `${entry.childCount}${entry.childCount >= 1000 ? '+' : ''} öğe`}
+                  {entry.kind !== 'folder' ? formatBytes(entry.size) : folderMeta(entry)}
                 </span>
                 {/* ── DEĞİŞME TARİHİ ────────────────────────────────────────────────────
                     Sunucu bu alanı zaten her satırda gönderiyordu ve ekran onu hiç çizmiyordu.
@@ -1949,10 +1980,10 @@ export function Files({
                           👁
                         </button>
                       )}
-                      {entry.kind === 'file' && can(entry, 'download') && (
+                      {can(entry, 'download') && (
                         <button
                           type="button"
-                          title="İndir"
+                          title={entry.kind === 'folder' ? 'Arşiv olarak indir' : 'İndir'}
                           aria-label={`${entry.name} indir`}
                           onClick={() => download([entry])}
                         >

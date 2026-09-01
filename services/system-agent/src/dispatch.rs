@@ -2041,6 +2041,127 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
+    /// Bir klasörü arşivleyip indirmeye açar.
+    ///
+    /// İKİ MÜHÜRLÜ TANIMLAYICI, iki `/proc/self/fd/N`: biri arşivlenecek klasörün ÜSTÜ, öteki ara
+    /// alan. `tar`a verilen tek göreli ad klasörün kendi adı, ve o ad çağıranın gönderdiği
+    /// `SafeComponent` — eğik çizgi, nokta nokta ve boş dize taşıyamaz.
+    ///
+    /// KÖKÜ ARŞİVLEMEK REDDEDİLİYOR: boş bir yol paylaşımın kendisi demek, ve `.depsis/` onun
+    /// içinde — arşiv ajanın ara alanını, dolayısıyla kendini içine almaya çalışırdı.
+    ///
+    /// SIRA ÖNEMLİ: yaz, aç, BAĞINI SİL, sonra kaydet. Bağ silindikten sonra dosyaya ulaşmanın tek
+    /// yolu elde tutulan tanımlayıcı; kayıt düşerse ya da indirme yarıda kalırsa çekirdek düğümü
+    /// kendisi topluyor. Adı yaşatıp sonra silmeye çalışmak, silme adımının atlanabildiği her
+    /// yolda (çökme, elektrik kesintisi) diskte artık kimsenin bilmediği bir arşiv bırakırdı.
+    fn archive_folder(
+        &self,
+        share: &str,
+        path: &[&str],
+        staging_name: &str,
+        peer: PeerIdentity,
+        correlation_id: &str,
+        reason: &str,
+    ) -> Result<Response, SeamError> {
+        let Some(paths) = self.paths else {
+            return Ok(Response::Refused {
+                reason: "no share root is configured; storage is not set up".to_string(),
+            });
+        };
+        let Some((name, parents)) = path.split_last() else {
+            return Ok(Response::Refused {
+                reason: "the share root cannot be archived".to_string(),
+            });
+        };
+
+        let mut parent_components: Vec<&str> = vec![share];
+        parent_components.extend_from_slice(parents);
+        let parent = match paths.open_dir(&parent_components) {
+            Ok(dir) => dir,
+            // Silinmiş ya da SMB üzerinden adı değişmiş bir klasör: istemcinin elindeki listenin
+            // eskimesi sıradan bir sonuç, hata değil.
+            Err(SeamError::NotFound(_)) => {
+                return Ok(Response::Refused {
+                    reason: "no such folder".to_string(),
+                })
+            }
+            Err(other) => return Err(other),
+        };
+        let parent_path = paths.command_path(&parent)?;
+
+        // Ara alan iskeleti. Yükleme yolundakiyle aynı sebep: taze bir paylaşımda `.depsis/staging`
+        // henüz yoktur, ve onu ilk isteyen kim olursa o kuruyor.
+        for (dir_parent, dir_name) in [
+            (&[share][..], STAGING_DIR[0]),
+            (&[share, STAGING_DIR[0]][..], STAGING_DIR[1]),
+        ] {
+            match paths.create_dir(dir_parent, dir_name, 0, 0) {
+                Ok(()) | Err(SeamError::AlreadyExists(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+        let staging_dir = paths.open_dir(&[share, STAGING_DIR[0], STAGING_DIR[1]])?;
+        let staging_path = paths.command_path(&staging_dir)?;
+        let out = format!("{staging_path}/{staging_name}");
+        let staging = [share, STAGING_DIR[0], STAGING_DIR[1]];
+
+        // `-c` yaz, `-z` sıkıştır, `-f` hedef, `-C` üst dizin, sonra tek bir göreli ad.
+        // Sıkıştırma AÇIK ve bu bir tercih: bir klasör çoğu zaman belge ve metin taşıyor, ve
+        // fotoğrafta harcanan işlemci zamanı ağdan kazanılandan az.
+        if let Err(error) = self.runner.run_with_timeout(
+            bin::TAR,
+            &["-czf", &out, "-C", &parent_path, name],
+            LONG_COMMAND_TIMEOUT,
+        ) {
+            // Yarım kalan arşivi bırakma. `tar` başarısız olduğunda dosya ya hiç oluşmadı ya da
+            // eksik; ikisinde de adı geride kalmamalı.
+            let _ = paths.remove_file(&staging, staging_name);
+            return Err(error);
+        }
+
+        let file = paths.open(
+            &[share, STAGING_DIR[0], STAGING_DIR[1], staging_name],
+            OpenIntent::Read,
+        )?;
+        let size = file
+            .metadata()
+            .map_err(|e| SeamError::Io(format!("stat the archive just written: {e}")))?
+            .len();
+        // Bağ burada gidiyor. Bundan sonra dosyaya ulaşmanın tek yolu `file`.
+        paths.remove_file(&staging, staging_name)?;
+
+        let token = self.tokens.token();
+        let mut registry = self
+            .transfers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let inserted = registry.insert(
+            token.clone(),
+            PendingTransfer {
+                file,
+                direction: Direction::Send,
+                share: share.to_string(),
+                staging_name: staging_name.to_string(),
+                opened_by: peer,
+                correlation_id: correlation_id.to_string(),
+                reason: reason.to_string(),
+                opened_at: std::time::Instant::now(),
+            },
+        );
+        drop(registry);
+
+        match inserted {
+            Ok(()) => Ok(Response::Download { token, size }),
+            // Kayıt kabul etmezse `file` burada düşüyor ve adsız düğüm onunla birlikte gidiyor.
+            Err(InsertError::Occupied) => Ok(Response::Refused {
+                reason: "this archive already has a reader".to_string(),
+            }),
+            Err(InsertError::Full) => Ok(Response::Refused {
+                reason: format!("too many transfers are open (limit {MAX_PENDING_TRANSFERS})"),
+            }),
+        }
+    }
+
     /// Cihazı yeniden başlatır.
     ///
     /// İŞLENENSİZ, ve argümanları burada sabit. Çağıran bir birim adı ya da gecikme verebilseydi,
@@ -3455,6 +3576,21 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     staging_name.as_str(),
                     *offset,
                     *max_bytes,
+                )
+            }
+            Request::ArchiveFolder {
+                share,
+                path,
+                staging_name,
+            } => {
+                let parts: Vec<&str> = path.iter().map(|c| c.as_str()).collect();
+                self.archive_folder(
+                    share.as_str(),
+                    &parts,
+                    staging_name.as_str(),
+                    peer,
+                    correlation_id,
+                    reason,
                 )
             }
             Request::RebootSystem {} => self.reboot_system(),

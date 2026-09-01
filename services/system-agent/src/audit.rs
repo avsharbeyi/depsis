@@ -54,6 +54,7 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::StartScrub { .. } => "start_scrub",
         Request::CopyFileToBackup { .. } => "copy_file_to_backup",
         Request::RestoreFileFromBackup { .. } => "restore_file_from_backup",
+        Request::ArchiveFolder { .. } => "archive_folder",
         Request::RebootSystem {} => "reboot_system",
         Request::ScanImportablePools {} => "scan_importable_pools",
         Request::ImportBackupPool { .. } => "import_backup_pool",

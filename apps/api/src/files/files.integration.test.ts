@@ -2085,6 +2085,29 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     expect((await controller.trash(as(alice), top.id)).id).toBe(top.id);
   });
 
+  // Klasör indirme aynı sınıftan: `tar` kök yetkiyle koşuyor ve alt ağacın tamamını okuyor, yani
+  // yalnız klasörün kendisine bakan bir denetim, çağıranın indirme hakkı OLMAYAN bir alt klasörü
+  // arşivin içine koyardı. Sızıntı silme kadar geri döndürülemez: baytlar karşı tarafa gitti.
+
+  it('refuses archiving a folder whose descendant the caller may not download', async () => {
+    const top = await folder(null, 'arsivlenecek');
+    const secret = await folder(top.id, 'arsive-girmeyecek');
+    await grantTo({ user: alice }, top.id, ['list', 'read', 'download']);
+    await grantTo({ user: alice }, secret.id, ['list', 'read']);
+
+    const response = {} as unknown as Response;
+    await expect(controller.archive(as(alice), response, top.id)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+
+    // Alt ağaç açıldığında aynı çağrı yetkiden DEĞİL, veri yuvasının kapalı olmasından düşüyor —
+    // yani reddi yapan şey ağacın şekli değil, hibenin kendisiydi.
+    await grantTo({ user: alice }, secret.id, ['list', 'read', 'download']);
+    await expect(controller.archive(as(alice), response, top.id)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
   it('lets an untouched subtree through, so the check costs nothing where nothing was narrowed', async () => {
     const top = await folder(null, 'duz-agac');
     await folder(top.id, 'alt-bir');

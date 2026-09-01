@@ -39,6 +39,14 @@ export interface FileEntryRow {
    * yok. `string`, çünkü `count(*)` bigint döner ve sürücü onu metin olarak veriyor.
    */
   child_count?: string | null;
+  /**
+   * Klasörün altındaki bütün dosyaların toplam boyutu.
+   *
+   * ALT AĞAÇ, doğrudan çocuklar değil: kullanıcının "bu klasör ne kadar yer kaplıyor" sorusu
+   * içindeki klasörleri de kapsıyor. `path` öneki üzerinden tek bir aralık sorgusu — eğik çizginin
+   * bir sonraki karakteri `0` olduğu için `[p/, p0)` tam olarak o alt ağaç.
+   */
+  subtree_bytes?: string | null;
   id: string;
   share_id: string;
   parent_id: string | null;
@@ -57,6 +65,22 @@ export interface ShareRow {
   name: string;
   dataset: string;
   read_only: boolean;
+}
+
+/**
+ * Arşivin üretilebilmesi için havuzda yer yok.
+ *
+ * İki sayıyı da taşıyor çünkü ekranda söylenecek cümle ikisi olmadan kurulamıyor: "40 GB gerekiyor,
+ * 12 GB boş" bir kullanıcının ne yapacağını bilebileceği bir cümle; "yer yok" değil.
+ */
+export class ArchiveTooLargeError extends Error {
+  constructor(
+    readonly needed: number,
+    readonly available: number,
+  ) {
+    super(`arşiv için ${needed} bayt gerekiyor, havuzda ${available} bayt boş`);
+    this.name = 'ArchiveTooLargeError';
+  }
 }
 
 /** A name the caller supplied that the filesystem or the schema will not accept. */
@@ -360,7 +384,16 @@ const ENTRY_COLUMNS_WITH_COUNT = `f.id, f.share_id, f.parent_id, f.kind, f.name,
                             WHERE c.parent_id = f.id AND c.trashed_at IS NULL
                             LIMIT 1000
                          ) capped
-                       ) ELSE NULL END AS child_count`;
+                       ) ELSE NULL END AS child_count,
+                       CASE WHEN f.kind = 'folder' THEN (
+                         SELECT coalesce(sum(d.size_bytes), 0)
+                           FROM public.file_entries d
+                          WHERE d.share_id = f.share_id
+                            AND d.kind = 'file'
+                            AND d.trashed_at IS NULL
+                            AND d.path >= f.path || '/'
+                            AND d.path < f.path || '0'
+                       ) ELSE NULL END AS subtree_bytes`;
 
 /**
  * The same columns plus whether the row's PARENT is in the bin.
@@ -2206,6 +2239,85 @@ export class FilesService {
   ): Promise<{ token: string; size: number }> {
     const response = await this.agent.call(
       { op: 'open_download', share, path: components },
+      reason,
+      correlationId,
+    );
+    const opened = expectStatus(response, 'download');
+    return { token: opened.token, size: opened.size };
+  }
+
+  /**
+   * Bir klasörün altındaki dosyaların toplam boyutu.
+   *
+   * Listeleme sorgusu bu sayıyı zaten sütun olarak üretiyor ama `find` üretmiyor — tek bir satırı
+   * okuyan her yol için alt ağaç toplamak, satırı okuyan çoğu yolun istemediği bir iş. Arşiv
+   * yolunun ona ihtiyacı var, o yüzden ayrıca soruyor.
+   *
+   * `LIKE` değil ARALIK, ve sebebi 0048 numaralı göçte yazılı: önek satırın kendi yolundan
+   * geliyor, ve içinde `%` ya da `_` olan bir klasör adı deseni jokere çevirip komşu klasörleri de
+   * toplardı.
+   */
+  async subtreeBytes(organizationId: string, id: string): Promise<number> {
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ bytes: string }>(
+        `SELECT coalesce(sum(d.size_bytes), 0)::text AS bytes
+           FROM public.file_entries f
+           JOIN public.file_entries d
+             ON d.share_id = f.share_id
+            AND d.kind = 'file'
+            AND d.trashed_at IS NULL
+            AND d.path >= f.path || '/'
+            AND d.path <  f.path || '0'
+          WHERE f.organization_id = $1 AND f.id = $2`,
+        [organizationId, id],
+      ),
+    );
+    return Number(rows[0]?.bytes ?? 0);
+  }
+
+  /**
+   * Bir klasörü arşivleyip indirmeye açar.
+   *
+   * Dönen şey `openDownload`un döndürdüğünün AYNISI — bir jeton ve bir boy — çünkü ajan arşivi
+   * yazdıktan sonra bağını siliyor ve geriye yalnızca o indirmenin okuyabildiği adsız bir düğüm
+   * kalıyor. Çağıran için ikisi arasında hiçbir fark yok: aynı veri yuvası, aynı `receive`.
+   *
+   * ── ÖNCE YER VAR MI ──────────────────────────────────────────────────────────────────────
+   *
+   * Arşiv üretilirken havuza YAZILIYOR, yani 1,5 TB'lık bir klasörü indirmek geçici olarak 1,5
+   * TB yer istiyor. Kontrol bir garanti değil ve olamaz — aradaki saniyede başka bir yükleme yeri
+   * alabilir, ajan `ENOSPC`i kendi başına da sınıflandırıyor — ama sık olan durumu çeviriyor:
+   * havuzu doldurup her yazmayı bozmadan önce, iki sayıyı ekranda söylüyor.
+   *
+   * Sıkıştırmayı HESABA KATMIYOR, yani ölçüt gerçekte olacaktan yüksek. Bu bilerek: fazla
+   * temkinli bir ret, dolmuş bir havuzdan ucuz.
+   */
+  async openArchive(
+    share: { name: string; dataset: string },
+    components: string[],
+    estimatedBytes: number,
+    correlationId: string,
+    reason: string,
+  ): Promise<{ token: string; size: number }> {
+    const pool = share.dataset.split('/')[0] ?? share.dataset;
+    const status = await this.agent
+      .call({ op: 'pool_status', pool }, reason, correlationId)
+      .catch(() => null);
+    // Ajan cevap veremediyse geçiyoruz: bu bir nezaket kontrolü, ve onu bir kapıya çevirmek
+    // havuz durumunu okuyamayan bir cihazda indirmeyi tamamen kapatırdı.
+    if (status?.status === 'pool_status' && estimatedBytes > status.available_bytes) {
+      throw new ArchiveTooLargeError(estimatedBytes, status.available_bytes);
+    }
+
+    const response = await this.agent.call(
+      {
+        op: 'archive_folder',
+        share: share.name,
+        path: components,
+        // Ad yalnızca `tar` yazarken var oluyor, ve iki eşzamanlı indirmenin çakışmaması için
+        // rastgele. Uzantısı yok: dosya adına dönüşen şey istemciye giden başlık, bu değil.
+        staging_name: `archive-${randomUUID()}`,
+      },
       reason,
       correlationId,
     );

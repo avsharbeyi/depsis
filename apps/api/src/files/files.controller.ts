@@ -40,6 +40,7 @@ import {
   PosixIdentityUnknownUserError,
 } from '../identity/posix.service.js';
 import {
+  ArchiveTooLargeError,
   CrossShareMoveError,
   DirectoryNotEmptyError,
   EntryMissingOnDiskError,
@@ -58,6 +59,7 @@ import {
   type Caller,
   type FileEntryPage,
   type FileEntryRow,
+  type ShareRow,
   type SortOrder,
 } from './files.service.js';
 
@@ -700,6 +702,86 @@ export class FilesController {
   }
 
   /**
+   * Bir klasörün tamamı, tek bir `.tar.gz` olarak.
+   *
+   * ── NEDEN VAR ────────────────────────────────────────────────────────────────────────────
+   *
+   * İndirme düğmesi klasörlerde ÇİZİLMİYORDU, ve karışık bir seçimde klasörler sessizce
+   * atlanıyordu: iki klasör ve bir dosya seçip indirmeye basan biri tek dosya alıyor, eksiğin
+   * farkına ancak diskte sayarsa varıyordu. Sessiz eksik, açık bir rettten kötü.
+   *
+   * ── ARALIK YOK, ETAG YOK ─────────────────────────────────────────────────────────────────
+   *
+   * `Accept-Ranges: none`, ve bu bir eksik değil bir ifade: arşiv her istekte YENİDEN üretiliyor,
+   * yani iki isteğin baytları birebir aynı olmak zorunda değil (gzip zaman damgası taşıyor). Bir
+   * aralık isteği ikinci bir arşivin ortasından okurdu. Aynı sebeple ETag de yok — kararlı bir
+   * kimlik iddia etmek, olmayan bir kararlılığı söylemek olurdu.
+   *
+   * ── ALT AĞACIN TAMAMINA `download` ───────────────────────────────────────────────────────
+   *
+   * ADR-0021'e göre bir alt klasör üstündekinden DAHA AZINI verebiliyor, ve `tar` kök yetkiyle
+   * koşuyor: yalnız klasörün kendisine bakan bir denetim, çağıranın içerideki bir klasörde
+   * indirme hakkı olmasa bile onu arşivin içine koyardı. Silme yolundaki `assertSubtreeAccess`
+   * tam bu yüzden var ve burada da aynı işi görüyor. Arşivin bir kısmını atlamak seçenek değil:
+   * eksiğini söylemeyen bir arşiv, eksik olduğunu bilmeyen bir kullanıcı demek.
+   */
+  @Get(':id/archive')
+  async archive(
+    @Req() request: AuthenticatedRequest,
+    @Res({ passthrough: false }) response: Response,
+    @Param('id') id: string,
+  ): Promise<void> {
+    const caller = requireSession(request);
+    requireUuid(id);
+    const entry = await this.load(caller.organizationId, id);
+    if (entry.kind !== 'folder' || entry.trashed_at !== null) throw new NotFoundException();
+
+    const share = await this.shareOfEntry(caller.organizationId, entry);
+    await this.permit(caller, share.id, id, 'download');
+    await this.files
+      .assertSubtreeAccess(caller, share.id, id, 'download')
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
+    if (!this.data.isAvailable()) {
+      throw new ServiceUnavailableException('the system agent is not reachable');
+    }
+
+    const components = await this.files
+      .componentsOf(caller.organizationId, id)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
+    // Ne kadar yer gerekeceği. `find` bu sütunu üretmiyor — tek satır okuyan her yol için alt ağaç
+    // toplamak boşa iş — o yüzden burada ayrıca soruluyor.
+    const estimate = await this.files.subtreeBytes(caller.organizationId, id);
+
+    const correlationId = randomUUID();
+    const opened = await this.files
+      .openArchive(share, components, estimate, correlationId, `GET /files/${id}/archive`)
+      .catch((error: unknown) => {
+        if (error instanceof AgentRefusedError) {
+          throw error.agentReason.includes('reader')
+            ? new ConflictException(error.agentReason)
+            : new NotFoundException();
+        }
+        throw translate(error);
+      });
+
+    response.setHeader('Accept-Ranges', 'none');
+    response.setHeader('Content-Length', String(opened.size));
+    response.setHeader('Content-Type', 'application/gzip');
+    response.setHeader(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(`${entry.name}.tar.gz`)}`,
+    );
+
+    await this.data.receive(opened.token, 0, opened.size, response);
+  }
+
+  /**
    * Gömülü küçük resim.
    *
    * `download` İZNİ İSTİYOR, `read` değil. Bir küçük resim içeriğin küçültülmüş bir kopyası: adını
@@ -840,7 +922,9 @@ export class FilesController {
   private async shareOfEntry(
     organizationId: string,
     row: { share_id: string },
-  ): Promise<{ id: string; name: string }> {
+    // Tam SATIR, daraltilmis bir alt kume degil: arsiv yolunun havuzda yer var mi diye sorabilmek
+    // icin `dataset` de gerekiyor, ve donus tipini daraltmak o alani cagirandan gizliyordu.
+  ): Promise<ShareRow> {
     try {
       return await this.files.shareFor(organizationId, row.share_id);
     } catch (error) {
@@ -1102,6 +1186,12 @@ export function toEntry(
     ...(row.child_count === undefined || row.child_count === null
       ? {}
       : { childCount: Number(row.child_count) }),
+    // Klasörün altındaki toplam boyut. `size` bir klasörde her zaman 0 ve öyle kalıyor: satırın
+    // kendi boyutu ile içindekilerin toplamı farklı iki şey, ve ikisini tek alana sıkıştırmak
+    // "bu klasör 0 bayt" diyen bir cevap üretirdi.
+    ...(row.subtree_bytes === undefined || row.subtree_bytes === null
+      ? {}
+      : { subtreeBytes: Number(row.subtree_bytes) }),
     modifiedAt: row.updated_at.toISOString(),
     ...(row.content_type === null ? {} : { mimeType: row.content_type }),
     ...(row.trashed_at === null ? {} : { trashedAt: row.trashed_at.toISOString() }),
@@ -1158,6 +1248,12 @@ export function translate(error: unknown): Error {
   // unique index excludes trashed rows, which is how the listing can show the name as free.
   if (error instanceof NameTakenByTrashedEntryError) {
     return new ProblemException('name-taken', logged(error.message, error.agentReason));
+  }
+  // 507, ve iki sayıyı da taşıyan cümlenin kendisi cevabın değeri: "arşiv için 40 GB gerekiyor,
+  // havuzda 12 GB boş" bir kullanıcının ne yapacağını bilebileceği bir cümle. Ret arşiv
+  // ÜRETİLMEDEN önce geliyor; yer bittikten sonra gelen bir hata, havuzu zaten doldurmuş olurdu.
+  if (error instanceof ArchiveTooLargeError) {
+    return new ProblemException('insufficient-storage', error.message);
   }
   if (error instanceof TrashedParentError) return new ConflictException(error.message);
   // 403 and not 404: the caller can see the entry they named — they hold `delete` on it, which is
