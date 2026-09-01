@@ -228,6 +228,8 @@ export function Files({
   // Back and forward are a real stack rather than a "previous folder" variable, because with one
   // variable going back twice returns to where you already were.
   const [history, setHistory] = useState<Loc[]>([ROOT]);
+  /** Yayımlanmayı bekleyen bir yükleme: baytlar ara alanda, karar kullanıcıda. */
+  const [clash, setClash] = useState<{ location: string; filename: string } | null>(null);
 
   /* ── FAVORİLER ────────────────────────────────────────────────────────────────────────────
      Sunucudaki tercih belgesinde duruyorlar, tarayıcıda değil: masasını televizyonda düzenleyen
@@ -235,6 +237,35 @@ export function Files({
   const favorites = prefs?.favorites ?? [];
   const canFavorite = prefs !== undefined && savePrefs !== undefined;
   const isFavorite = (id: string): boolean => favorites.some((f) => f.id === id);
+
+  /**
+   * Kullanıcının kararını sunucuya iletir.
+   *
+   * Baytlar yeniden GÖNDERİLMİYOR: yükleme oturumu ara alandaki dosyayı hâlâ tutuyor ve bu uç
+   * yalnız onu yayımlıyor. Bir gigabaytlık dosyada aradaki fark, bir saniye ile yarım saat.
+   */
+  async function resolveClash(policy: 'keep-both' | 'replace'): Promise<void> {
+    const pending = clash;
+    if (pending === null) return;
+    setClash(null);
+    const sent = await fetch(`${pending.location}/resolve`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ policy }),
+    }).catch(() => null);
+    if (sent === null || !sent.ok) {
+      notify('error', `"${pending.filename}" yayımlanamadı.`);
+      return;
+    }
+    notify(
+      'ok',
+      policy === 'replace'
+        ? `"${pending.filename}" değiştirildi; eskisi çöp kutusunda.`
+        : `"${pending.filename}" ikinci bir adla kaydedildi.`,
+    );
+    reload();
+  }
 
   async function toggleFavorite(crumb: Crumb, trail: Crumb[]): Promise<void> {
     if (prefs === undefined || savePrefs === undefined) return;
@@ -1051,6 +1082,13 @@ export function Files({
         for await (const percent of uploadFile(file, target)) setProgress({ label, percent });
       } catch (problem) {
         failed += 1;
+        // ── ÇAKIŞMA BİR HATA DEĞİL, BİR SORU ──────────────────────────────────────────
+        // Baytlar karşı tarafta ve duruyor; eksik olan tek şey kullanıcının kararı. Bunu bir
+        // bildirimle geçiştirmek, bir gigabaytı çöpe atıp "yüklenemedi" demek olurdu.
+        if (problem instanceof UploadNameClash) {
+          setClash({ location: problem.location, filename: problem.filename });
+          continue;
+        }
         notify('error', problem instanceof Error ? problem.message : `"${file.name}" yüklenemedi.`);
       }
     }
@@ -1938,6 +1976,32 @@ export function Files({
         <span className="val">{meta}</span>
       </div>
 
+      {/* ── ÇAKIŞMA BİR SORU, BİR HATA DEĞİL ────────────────────────────────────────────
+          Baytlar sunucuda ve duruyor; eksik olan tek şey kullanıcının kararı. İki seçenek de
+          veri kaybetmiyor: "değiştir" eskisini silmiyor, çöp kutusuna atıyor — üzerine yazmak
+          ürünün hiçbir katmanında yok (ADR-0008) ve "değiştir" diyen kişinin istediği şey yeni
+          dosyanın o adı alması, eskisinin geri getirilemez olması değil. */}
+      {clash !== null && (
+        <ConfirmBox
+          title="Aynı adda bir dosya var"
+          body={
+            `"${clash.filename}" adında bir dosya bu klasörde zaten duruyor. Yüklediğiniz dosya ` +
+            'sunucuda bekliyor, yeniden gönderilmeyecek. "Değiştir" eskisini silmez, çöp ' +
+            'kutusuna atar.'
+          }
+          yesLabel="İkisini de tut"
+          onYes={() => void resolveClash('keep-both')}
+          onNo={() => setClash(null)}
+        />
+      )}
+      {clash !== null && (
+        <div className="clashalt">
+          <button type="button" className="b" onClick={() => void resolveClash('replace')}>
+            Değiştir (eskisi çöpe)
+          </button>
+        </div>
+      )}
+
       {preview !== null && <Preview entry={preview} onClose={() => setPreview(null)} />}
 
       {modal.kind === 'new-folder' && (
@@ -2436,6 +2500,13 @@ async function* uploadFile(file: File, parentId: string | undefined): AsyncGener
         offset = authoritative;
         continue;
       }
+      // ── AYNI DURUM KODU, BAŞKA BİR OLAY ────────────────────────────────────────────────
+      // Ad çakışması da 409 ile geliyor ve hizalanacak bir konum taşımıyor. `code` olmadan bu
+      // dal onu "sunucu başka bir yerde" sanardı ve kullanıcı sonsuza kadar aynı yerden
+      // yüklemeyi denerdi.
+      if ((await problemCode(sent)) === 'name-taken') {
+        throw new UploadNameClash(location, file.name);
+      }
       throw await failure(sent, `"${file.name}" yüklenemedi.`);
     }
     if (!sent.ok) throw await failure(sent, `"${file.name}" yüklenemedi.`);
@@ -2446,6 +2517,38 @@ async function* uploadFile(file: File, parentId: string | undefined): AsyncGener
 
   // Yayım bu noktada olmuş demektir; not artık yalnız yanlış cevap verebilir.
   forgetUpload(key);
+}
+
+/**
+ * Hedefte aynı adda bir dosya var.
+ *
+ * KENDİ TÜRÜ, çünkü bu 409 diğer 409'la aynı şey değil: biri yüklemenin nerede kaldığını yeniden
+ * hizalamayı, bu ise kullanıcıya bir soru sormayı gerektiriyor. Ayırt edici işaret sunucunun
+ * `code` alanı — bir cümle olsaydı, cümlenin her düzeltilişi bu dalı sessizce bozardı.
+ *
+ * `location` taşınıyor çünkü çözüm baytları yeniden göndermek değil: dosya ara alanda duruyor ve
+ * aynı oturum üzerinden yayımlanacak.
+ */
+/** Sunucunun RFC 9457 gövdesindeki `code`. Gövde okunamazsa `null` — ve o zaman bu bir tahmin
+ *  değil, "bilmiyorum" olur. */
+async function problemCode(response: Response): Promise<string | null> {
+  try {
+    const body: unknown = await response.clone().json();
+    const code = (body as { code?: unknown }).code;
+    return typeof code === 'string' ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+export class UploadNameClash extends Error {
+  constructor(
+    readonly location: string,
+    readonly filename: string,
+  ) {
+    super(`"${filename}" adında bir dosya zaten var.`);
+    this.name = 'UploadNameClash';
+  }
 }
 
 /** HEAD ile oturumun gerçek yerini sorar. Ağ hatası da "devam edilemez" demektir. */

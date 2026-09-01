@@ -1433,6 +1433,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/uploads/{uploadId}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ad cakismasini kullanicinin karariyla bitir
+         * @description Cakisma YAYIMLAMA aninda, yani son parcadan SONRA ortaya cikiyor: dosya butunuyle ara
+         *     alanda duruyor. Bu yuzden cozum "yeniden yukle" degil "yayimlamayi tekrar dene" --
+         *     kullanici bir gigabayti ikinci kez gondermiyor.
+         *
+         *     `keep-both`: yeni dosya "ad (2).uzanti" ile iniyor; kopyalama yolunun kullandigi
+         *     adlandirma kuralinin aynisi.
+         *
+         *     `replace`: ESKISI COPE GIDIYOR, silinmiyor. Ustune yazmak urunun hicbir katmaninda yok ve
+         *     olmamasi bilincli (ADR-0008); "degistir" diyen kullanicinin istedigi sey yeni dosyanin o
+         *     adi almasi, eskisinin geri getirilemez olmasi degil.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    uploadId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        policy: "keep-both" | "replace";
+                    };
+                };
+            };
+            responses: {
+                /** @description Dosya yayimlandi */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["FileEntry"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/uploads/{uploadId}": {
         parameters: {
             query?: never;

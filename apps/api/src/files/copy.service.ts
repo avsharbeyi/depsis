@@ -588,6 +588,21 @@ export class CopyService {
     return rows[0] ?? null;
   }
 
+  /**
+   * Bu klasörde bu adı taşıyan satır — yükleme çakışmasını çözen yolun "eskisi hangisi" sorusu.
+   *
+   * `rowAt`in dışa açık yüzü. Ayrı bir sorgu yazmak, "aynı ad" tanımının ikinci bir kopyası
+   * demek olurdu: burada kat kıvrımı (`name_fold`) ve çöp süzgeci tek bir yerde duruyor.
+   */
+  async entryNamed(
+    organizationId: string,
+    shareId: string,
+    parentId: string | null,
+    name: string,
+  ): Promise<{ id: string } | null> {
+    return this.rowAt(organizationId, shareId, parentId, name);
+  }
+
   private async rowAt(
     organizationId: string,
     shareId: string,

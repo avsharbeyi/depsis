@@ -1,4 +1,5 @@
 import {
+  Body,
   BadRequestException,
   ConflictException,
   Controller,
@@ -16,6 +17,7 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { z } from 'zod';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 
 import { AgentService, expectStatus } from '../agent/agent.service.js';
@@ -25,8 +27,25 @@ import { ProblemException } from '../common/problem.filter.js';
 import { IdempotencyInterceptor } from '../common/idempotency.interceptor.js';
 import { DbService } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
+import { CopyService } from './copy.service.js';
 import { assertValidName, FilesService } from './files.service.js';
-import { requirePermission, requireSession, requireUuid, translate } from './files.controller.js';
+import {
+  requirePermission,
+  requireSession,
+  requireUuid,
+  toEntry,
+  translate,
+} from './files.controller.js';
+
+/**
+ * Ad çakışmasının iki çıkışı.
+ *
+ * "Üzerine yaz" YOK ve olmaması bilinçli: ADR-0008 `RENAME_NOREPLACE` ile bir yayımlamanın
+ * kullanıcının sahip olduğu bir dosyayı asla sessizce yok etmemesini garanti ediyor. `replace`
+ * eskisini çöpe atıyor — kullanıcının istediği "yeni dosya bu adı alsın", "eskisi geri
+ * getirilemez olsun" değil.
+ */
+const resolveSchema = z.object({ policy: z.enum(['keep-both', 'replace']) });
 
 interface SessionRow {
   id: string;
@@ -60,7 +79,172 @@ export class UploadsController {
     private readonly agent: AgentService,
     private readonly data: AgentDataService,
     private readonly posix: PosixIdentityService,
+    // Yalnız `freeName` için: "ad (2).uzantı" üretmenin tek yeri, ve ikinci bir kopyası
+    // ikinci bir adlandırma kuralı demek olurdu.
+    private readonly copies: CopyService,
   ) {}
+
+  /**
+   * POST /uploads/{id}/resolve — ad çakışmasını kullanıcının kararıyla bitirir.
+   *
+   * ── BAYTLAR ZATEN YÜKLENDİ ───────────────────────────────────────────────────────────────
+   *
+   * Çakışma yayımlama anında, yani son parçadan SONRA ortaya çıkıyor: dosya bütünüyle ara alanda
+   * duruyor. Bu yüzden çözüm "yeniden yükle" değil "yayımlamayı tekrar dene" — kullanıcı bir
+   * gigabaytı ikinci kez göndermiyor. Süpürücü ara alandaki dosyaya yirmi dört saat dokunmuyor,
+   * yani kararı vermek için zaman da var.
+   *
+   * ── İKİ KARAR, İKİSİ DE VERİ KAYBETMİYOR ─────────────────────────────────────────────────
+   *
+   * `keep-both`: yeni dosya "ad (2).uzantı" ile iniyor. Kopyalama yolunun kullandığı adlandırma
+   * kuralının aynısı — kullanıcının başka bir yerde gördüğü biçim.
+   *
+   * `replace`: ESKİSİ ÇÖPE GİDİYOR, silinmiyor. Üstüne yazmak ürünün hiçbir katmanında yok ve
+   * olmaması bilinçli (ADR-0008, `RENAME_NOREPLACE`); ama "değiştir" diyen kullanıcının istediği
+   * şey yeni dosyanın o adı alması, eskisinin yok olması değil. Eski satır önce boş bir ada
+   * taşınıyor — çöp diskte bir şey taşımıyor, yani ad ancak böyle serbest kalıyor — sonra çöpe
+   * atılıyor. Kullanıcı yanlış karar verdiyse çöp kutusundan geri alabiliyor.
+   */
+  @Post(':uploadId/resolve')
+  @HttpCode(200)
+  async resolve(
+    @Req() request: AuthenticatedRequest,
+    @Param('uploadId') id: string,
+    @Body() body: unknown,
+  ): Promise<ReturnType<typeof toEntry>> {
+    const session = requireSession(request);
+    requireUuid(id);
+    const uploadId = id;
+    const parsed = resolveSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('policy: keep-both ya da replace');
+
+    const upload = await this.loadSession(session.organizationId, session.userId, uploadId);
+    if (upload.file_id !== null) {
+      // Zaten yayımlanmış: ikinci bir çözüm ikinci bir dosya üretirdi.
+      throw new ProblemException('conflict', 'bu yükleme zaten tamamlandı');
+    }
+    if (Number(upload.offset_bytes) !== Number(upload.length_bytes)) {
+      throw new ProblemException('conflict', 'yükleme henüz tamamlanmadı');
+    }
+
+    const share = await this.shareFor(session.organizationId, upload.parent_id);
+    // Aynı kapı, aynı gerekçe: yükleme oluşturulurken sorulan izin burada TEKRAR soruluyor,
+    // çünkü çakışmanın çözülmesi ile yüklemenin başlaması arasında bir hak geri alınmış olabilir.
+    requirePermission(
+      await this.files.effectiveAt(session, share.id, upload.parent_id),
+      'create',
+      upload.parent_id !== null,
+    );
+
+    const correlationId = randomUUID();
+    const parentComponents =
+      upload.parent_id === null
+        ? []
+        : await this.files.componentsOf(session.organizationId, upload.parent_id);
+
+    let name = upload.filename;
+    if (parsed.data.policy === 'keep-both') {
+      name = await this.copies.freeName(
+        session.organizationId,
+        upload.share_id,
+        upload.parent_id,
+        upload.filename,
+      );
+    } else {
+      await this.moveExistingToTrash(session, upload, share, correlationId);
+    }
+
+    const uid = await this.posix
+      .posixUidFor(session.organizationId, session.userId)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
+    const bytes = await this.files
+      .publish(
+        share.name,
+        upload.staging_name,
+        [...parentComponents, name],
+        Number(upload.length_bytes),
+        uid,
+        uid,
+        correlationId,
+        `resolving the name clash on ${upload.filename}`,
+      )
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
+    const entry = await this.files
+      .recordPublishedFile(
+        session.organizationId,
+        upload.share_id,
+        upload.parent_id,
+        name,
+        bytes,
+        null,
+        session.userId,
+      )
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
+    await this.db.withTenant(session.organizationId, (db) =>
+      db.query(
+        `UPDATE public.upload_sessions
+            SET file_id = $3, completed_at = now()
+          WHERE organization_id = $1 AND id = $2`,
+        [session.organizationId, upload.id, entry.id],
+      ),
+    );
+    return toEntry(entry, await this.files.effectiveAt(session, share.id, entry.id));
+  }
+
+  /**
+   * "Değiştir"in ilk yarısı: adı tutan dosyayı boş bir ada taşıyıp çöpe atar.
+   *
+   * İKİ ADIM, ve sırası önemli. Çöpe atmak diskte hiçbir şeyi taşımıyor — yalnız satıra bir
+   * damga yazıyor — yani ad çöpe atıldıktan sonra da dolu kalır ve yayımlama yine reddedilirdi.
+   * Önce taşımak, adı gerçekten serbest bırakan tek adım.
+   */
+  private async moveExistingToTrash(
+    session: { organizationId: string; userId: string },
+    upload: SessionRow,
+    share: { id: string; name: string },
+    correlationId: string,
+  ): Promise<void> {
+    const existing = await this.copies.entryNamed(
+      session.organizationId,
+      share.id,
+      upload.parent_id,
+      upload.filename,
+    );
+    // ADI TUTAN SATIR YOKSA YAPACAK BİR ŞEY DE YOK: ad diskte SMB'den açılmış bir dosyanın
+    // elinde olabilir, ve o durumda yayımlama yine reddediliyor — ama kullanıcıya söylenen cümle
+    // "böyle bir dosya var" olmaya devam ediyor, sessiz bir başarı değil.
+    if (existing === null) return;
+
+    const parked = await this.copies.freeName(
+      session.organizationId,
+      upload.share_id,
+      upload.parent_id,
+      upload.filename,
+    );
+    await this.files
+      .rename(
+        session.organizationId,
+        existing.id,
+        parked,
+        share,
+        session.userId,
+        correlationId,
+        `parking the replaced ${upload.filename}`,
+      )
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+    await this.files.trash(session.organizationId, existing.id, session.userId);
+  }
 
   // §8's `Idempotency-Key`, on the route the contract declares it on. Without a key the request
   // behaves exactly as before; with one, a client that lost the response and retried gets the
@@ -304,16 +488,27 @@ export class UploadsController {
         throw translate(error);
       });
 
-    const bytes = await this.files.publish(
-      share.name,
-      upload.staging_name,
-      destination,
-      Number(upload.length_bytes),
-      uid,
-      uid,
-      correlationId,
-      `publishing ${upload.filename}`,
-    );
+    // ── ÇEVRİLİYOR, ve bu bir incelik değil ────────────────────────────────────────────────
+    //
+    // Ajan aynı adda bir dosya bulduğunda `RENAME_NOREPLACE` ile reddediyor — doğru davranış,
+    // ADR-0008. Ama bu çağrı, hemen üstündeki `posixUidFor` ve hemen altındaki
+    // `recordPublishedFile`ın aksine `translate` ile sarılı DEĞİLDİ: ret bir HttpException
+    // olmadığı için 500'e dönüşüyordu. Kullanıcının gördüğü şey, bütün baytları yükledikten
+    // sonra "beklenmeyen bir hata"ydı ve ne olduğunu söyleyen hiçbir cümle yoktu.
+    const bytes = await this.files
+      .publish(
+        share.name,
+        upload.staging_name,
+        destination,
+        Number(upload.length_bytes),
+        uid,
+        uid,
+        correlationId,
+        `publishing ${upload.filename}`,
+      )
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
 
     const entry = await this.files
       .recordPublishedFile(

@@ -36,6 +36,7 @@ import {
   type ShareRef,
 } from './files.service.js';
 import { SearchController } from './search.controller.js';
+import type { CopyService } from './copy.service.js';
 import { UploadsController } from './uploads.controller.js';
 
 /**
@@ -1553,6 +1554,9 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
       permissionsAgent,
       stubUploadData,
       new PosixIdentityService(pdb),
+      // Yalnız `freeName`/`entryNamed` için: bu süit çakışma çözümünü ölçmüyor, ama kurucu
+      // imzası eksiksiz olmalı.
+      {} as unknown as CopyService,
     );
   });
 

@@ -3039,6 +3039,22 @@ label textarea,
   }
 }
 
+/* Çakışma kutusunun üçüncü seçeneği.
+   `ConfirmBox` iki cevaplı bir soru soruyor — evet ve hayır — ve burada üç cevap var. Bileşene
+   üçüncü bir düğme eklemek onu her çağıran için karmaşıklaştırırdı; bu şerit yalnız bu tek yerde
+   duruyor ve kutunun hemen üstüne oturuyor. */
+.clashalt {
+  position: fixed;
+  inset: auto 0 calc(50% - 118px) 0;
+  z-index: 61;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.clashalt .b {
+  pointer-events: auto;
+}
+
 /* ─── sign-in and setup ────────────────────────────────────────────────────── */
 
 /* Not in the reference: it opens straight onto a signed-in desktop. The galaxy still runs behind
