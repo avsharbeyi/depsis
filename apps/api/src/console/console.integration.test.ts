@@ -426,11 +426,13 @@ describeConsole('console sessions, against a real PostgreSQL and a real socket',
     // A row from a process that is gone: open in the table, no socket anywhere.
     const orphan = randomUUID();
     await owner.withoutTenant('migration-status', (q) =>
-      q.query(`INSERT INTO console_sessions (id, organization_id, user_id) VALUES ($1, $2, $3)`, [
-        orphan,
-        organizationId,
-        adminB,
-      ]),
+      q.query(
+        // `username` göç 0049 ile zorunlu: kayıt kimin olduğunu artık kendi içinde taşıyor,
+        // çünkü hesap silinebiliyor ve `user_id` SET NULL olabiliyor.
+        `INSERT INTO console_sessions (id, organization_id, user_id, username)
+              VALUES ($1, $2, $3, 'konsol')`,
+        [orphan, organizationId, adminB],
+      ),
     );
 
     const page = await service.list(organizationId);

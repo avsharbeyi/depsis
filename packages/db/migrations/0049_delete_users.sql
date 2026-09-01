@@ -197,6 +197,17 @@ BEGIN
   -- Yönetici KAYBETTİREN geçişler. Artık iki tane: rolü düşüren ya da hesabı kapatan bir UPDATE,
   -- ve yöneticinin kendisini götüren bir DELETE. İkincisi 0009'da yoktu çünkü o gün hiçbir şey bir
   -- kullanıcıyı silmiyordu; 0049 sildiği için tetikleyicinin de görmesi gerekiyor.
+  --
+  -- SİLMEDE `depsis_owner` MUAF, ve bu bir gedik değil bir kapsam: kural UYGULAMANIN bir kuruluşu
+  -- kilitlemesini engelliyor, ve uygulama `depsis_app` olarak bağlanıyor. `depsis_owner` göç,
+  -- yedekleme ve operatör cerrahisi; oradaki tek meşru toplu silme bir kuruluşun TAMAMINI
+  -- kaldırmak, ve "en az bir yönetici kalsın" o işlemde anlamsız — son kullanıcıyı silmeyi
+  -- reddeden bir tetikleyici, kuruluşu silinemez yapardı. UPDATE dalı herkes için geçerli
+  -- kalıyor: orada böyle bir toplu durum yok.
+  IF TG_OP = 'DELETE' AND pg_has_role(current_user, 'depsis_owner', 'MEMBER') THEN
+    RETURN OLD;
+  END IF;
+
   IF TG_OP = 'DELETE' THEN
     losing   := OLD.role = 'admin' AND OLD.disabled_at IS NULL;
     gone_org := OLD.organization_id;

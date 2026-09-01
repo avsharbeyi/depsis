@@ -2154,10 +2154,7 @@ pub enum Request {
     ///
     /// Zaten olmayan bir hesap BAŞARI. İstenen şey hesabın kutuda olmaması, ve değil.
     #[serde(rename = "remove_posix_identity")]
-    RemovePosixIdentity {
-        uid: PosixId,
-        login: PosixName,
-    },
+    RemovePosixIdentity { uid: PosixId, login: PosixName },
 
     /// Close a share root to everybody the ACL does not name.
     ///
