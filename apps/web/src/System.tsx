@@ -63,19 +63,10 @@ export function System({
 
   return (
     <>
-      {notify !== undefined && <UpdatePanel notify={notify} />}
-      {notify !== undefined && <CertificatePanel notify={notify} />}
-      {notify !== undefined && <LicensePanel notify={notify} isAdmin={isAdmin} />}
-
-      {onProcesses !== undefined && (
-        <div className="netrow" style={{ marginBottom: 4 }}>
-          <span className="lbl">Arka plan görevleri</span>
-          <button type="button" className="b" onClick={onProcesses}>
-            ⚙ Görev yöneticisi
-          </button>
-        </div>
-      )}
-
+      {/* ── SIRA: ÖNCE CİHAZ, SONRA YAZILIM ────────────────────────────────────────────
+          Ekran sürüm, sertifika ve lisansla açılıyordu; işlemci ve bellek en alttaydı. Bu ekrana
+          bakan kişinin sorusu neredeyse her zaman "cihaz nasıl" — sürüm numarasına yılda birkaç
+          kez, sıcaklığa her bakışta ihtiyaç var. */}
       {/* ── işlemci ── */}
       <div className="syshead">İşlemci</div>
       <div className="sysgrid">
@@ -111,31 +102,10 @@ export function System({
         <p className="note">Bellek bilgisi yok.</p>
       )}
 
-      {/* ── depolama ── */}
-      <div className="syshead">Depolama havuzları</div>
-      {telemetry.pools.length === 0 ? (
-        <Empty glyph="💽" text="Havuz yapılandırılmadı" />
-      ) : (
-        telemetry.pools.map((pool) => {
-          const total = pool.used + pool.available;
-          return (
-            <div className="sysrow" key={pool.name}>
-              <span
-                className="d"
-                style={{ background: pool.health === 'ONLINE' ? 'var(--live)' : 'var(--rose)' }}
-              />
-              <span className="i">
-                <b>{pool.name}</b>
-                <span className="m">{pool.health}</span>
-              </span>
-              <span className="val m">
-                {formatBytes(pool.used)} / {formatBytes(total)}
-              </span>
-              <span className="val">{total > 0 ? Math.round((pool.used / total) * 100) : 0}%</span>
-            </div>
-          );
-        })
-      )}
+      {/* DEPOLAMA HAVUZLARI BURADAN KALDIRILDI. Havuzun doluluğu iki yerde daha yazıyordu —
+          yan sütundaki Depolama kartında ve Diskler ekranında — ve üçüncü kopyası, bu ekranı
+          okunması gereken bir liste olmaktan çıkarıp kaydırılan bir şeye çeviriyordu. Sistem
+          ekranının konusu CİHAZ: işlemci, bellek, disk sağlığı. Havuz bir depolama sorusu. */}
 
       {/* ── diskler ── */}
       <div className="syshead">Diskler</div>
@@ -145,21 +115,38 @@ export function System({
         </p>
       ) : (
         disks.map((disk) => (
-          <div className="sysrow" key={disk.id}>
+          // TEK SATIR. Disk kimliği ve sağlık durumu alt alta yazılıyordu ve her disk üç satır
+          // yer kaplıyordu; üç diskli bir kutuda liste ekranın yarısını yiyordu. Söylenen şey
+          // değişmedi, sığdığı yer değişti — ad taşarsa kısalıyor, sağlık ve sıcaklık sağda
+          // sabit duruyor.
+          <div className="sysrow tight" key={disk.id}>
             <span
               className="d"
               style={{ background: disk.healthy ? 'var(--live)' : 'var(--rose)' }}
             />
             <span className="i">
               <b className="m">{disk.id}</b>
-              <span className="m">{disk.healthy ? 'sağlıklı' : 'DİKKAT'}</span>
             </span>
+            <span className="val m">{disk.healthy ? 'sağlıklı' : 'DİKKAT'}</span>
             <span className="val">
               {typeof disk.temperatureCelsius === 'number' ? `${disk.temperatureCelsius}°C` : '—'}
             </span>
           </div>
         ))
       )}
+
+      {onProcesses !== undefined && (
+        <div className="netrow" style={{ marginBottom: 4, marginTop: 8 }}>
+          <span className="lbl">Arka plan görevleri</span>
+          <button type="button" className="b" onClick={onProcesses}>
+            ⚙ Görev yöneticisi
+          </button>
+        </div>
+      )}
+
+      {notify !== undefined && <UpdatePanel notify={notify} />}
+      {notify !== undefined && <CertificatePanel notify={notify} />}
+      {notify !== undefined && <LicensePanel notify={notify} isAdmin={isAdmin} />}
     </>
   );
 }

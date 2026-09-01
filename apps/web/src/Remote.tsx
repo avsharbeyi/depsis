@@ -242,42 +242,52 @@ export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
         </div>
       )}
 
+      {/* ── BAŞKASININ AĞINA KATILMAK, KAPALI BİR AYRINTI ──────────────────────────────────
+          Bu ürünün asıl işi KENDİ ağını kurmak; başka bir ZeroTier ağına katılmak ileri
+          kullanımın bir köşesi. Form açıkça duruyorken ekranın en görünür yeri, kullanıcıların
+          çoğunun hiç kullanmayacağı bir şeye gidiyordu — ve on altı haneli bir ağ kimliği
+          isteyen bir kutu, doğru ekranı bulduğundan emin olmayan birini durduruyor.
+
+          Kaldırılmadı, KATLANDI: özelliği silmek onu isteyenden almak olurdu. */}
       {isAdmin && (
-        <form
-          onSubmit={(event) => void join(event)}
-          style={{ display: 'flex', flexDirection: 'column', gap: 9 }}
-        >
-          <div className="lbl">Ağa katıl</div>
-          <label>
-            Ağ kimliği
-            <input
-              value={networkId}
-              onChange={(event) => setNetworkId(event.target.value)}
-              required
-              maxLength={16}
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="16 onaltılık hane"
-              style={{ fontFamily: 'var(--mono)' }}
-            />
-            <small>ZeroTier Central&apos;daki ağ kimliği; 0-9 ve a-f, tam 16 hane.</small>
-          </label>
-          <label>
-            Etiket (isteğe bağlı)
-            <input
-              value={label}
-              onChange={(event) => setLabel(event.target.value)}
-              maxLength={64}
-              autoComplete="off"
-              placeholder="ör. Ev"
-            />
-          </label>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button type="submit" className="b pri" disabled={busy}>
-              {busy ? 'Katılınıyor…' : 'Katıl'}
-            </button>
-          </div>
-        </form>
+        <details className="foldrow">
+          <summary>Başka bir ağa katıl</summary>
+          <form
+            onSubmit={(event) => void join(event)}
+            style={{ display: 'flex', flexDirection: 'column', gap: 9 }}
+          >
+            <div className="lbl">Ağa katıl</div>
+            <label>
+              Ağ kimliği
+              <input
+                value={networkId}
+                onChange={(event) => setNetworkId(event.target.value)}
+                required
+                maxLength={16}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="16 onaltılık hane"
+                style={{ fontFamily: 'var(--mono)' }}
+              />
+              <small>ZeroTier Central&apos;daki ağ kimliği; 0-9 ve a-f, tam 16 hane.</small>
+            </label>
+            <label>
+              Etiket (isteğe bağlı)
+              <input
+                value={label}
+                onChange={(event) => setLabel(event.target.value)}
+                maxLength={64}
+                autoComplete="off"
+                placeholder="ör. Ev"
+              />
+            </label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button type="submit" className="b pri" disabled={busy}>
+                {busy ? 'Katılınıyor…' : 'Katıl'}
+              </button>
+            </div>
+          </form>
+        </details>
       )}
 
       {/* Tanılama YÖNETİCİDE: uç zaten öyle, ve çalışmayacak bir bağlantıyı göstermemek. */}
@@ -288,7 +298,11 @@ export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
         <Controller notify={notify} onChanged={reload} />
       )}
 
-      {isAdmin && status !== null && status.available && <Diagnostics notify={notify} />}
+      {/* BAĞLANTI TANILAMASI KALDIRILDI. Eşlerin gecikmesini, yolunu ve sürümünü gösteren bir
+          tablo, kullanıcının HİÇBİR ŞEY yapamayacağı bir bilgi: aktarma üzerinden bağlanan bir
+          eşi doğrudan bağlanır yapmanın ekranda bir yolu yok. Okuyan kişiye yalnız endişe
+          veriyordu. Uç (`GET /remote/peers`) duruyor; bir gün bir şey yapılabilecekse ekran o
+          zaman geri gelir. */}
 
       {leaving !== null && (
         <ConfirmBox
@@ -302,122 +316,5 @@ export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
         />
       )}
     </>
-  );
-}
-
-/**
- * Bağlantı tanılaması: kimi görüyoruz ve nasıl ulaşıyoruz.
- *
- * `GET /remote` "çevrimiçi" ve "ağa katıldı" diyor, ve her baytı bir kök üzerinden AKTARILAN bir
- * bağlantı için de aynı şeyi diyor — doğru, ve bir kat daha yavaş. Kullanıcının "neden yavaş"
- * sorusunun cevabı bu tablonun `Yol` sütununda, başka hiçbir ekranda değil.
- *
- * VARSAYILAN OLARAK KAPALI ve yalnız yöneticide. Uç zaten yöneticiye kapalı; bu, çalışmayacak bir
- * bağlantıyı hiç göstermemek için. Kapalı olması da bilinçli: bir tanılama tablosu, bir şey ters
- * gittiğinde bakılan yer, her açılışta okunacak bir şey değil.
- */
-function Diagnostics({ notify }: { notify: Notify }): React.JSX.Element | null {
-  const [open, setOpen] = useState(false);
-  const [page, setPage] = useState<OpenApi.components['schemas']['RemotePeerPage'] | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const load = useCallback(async (): Promise<void> => {
-    setBusy(true);
-    const { data, error } = await api.GET('/remote/peers', {});
-    setBusy(false);
-    if (data === undefined) {
-      notify('error', problemMessage(error, 'Tanılama okunamadı.'));
-      return;
-    }
-    setPage(data);
-  }, [notify]);
-
-  if (!open) {
-    return (
-      <button
-        type="button"
-        className="lnk"
-        onClick={() => {
-          setOpen(true);
-          void load();
-        }}
-      >
-        Bağlantı tanılaması
-      </button>
-    );
-  }
-
-  const peers = page?.items ?? [];
-  // Aktarılanlar ÖNCE: tabloya bakma sebebi onlar, ve otuz satırın arasına karışmaları bakma
-  // sebebini gizlemek olurdu. Sonra gecikmeye göre — ölçülmemişler en sona.
-  const ordered = [...peers].sort((a, b) => {
-    if (a.direct !== b.direct) return a.direct ? 1 : -1;
-    return (a.latencyMs ?? Number.MAX_SAFE_INTEGER) - (b.latencyMs ?? Number.MAX_SAFE_INTEGER);
-  });
-  const relayed = peers.filter((peer) => !peer.direct).length;
-
-  return (
-    <div className="diag">
-      <div className="thead">
-        <span className="lbl">Bağlantı tanılaması</span>
-        <button type="button" className="lnk" disabled={busy} onClick={() => void load()}>
-          {busy ? 'Okunuyor…' : 'Yenile'}
-        </button>
-        <button type="button" className="lnk" onClick={() => setOpen(false)}>
-          Kapat
-        </button>
-      </div>
-
-      {page !== null && !page.available && (
-        <p className="note">ZeroTier bu kutuda çalışmıyor, yani görülecek bir eş de yok.</p>
-      )}
-      {page !== null && page.available && peers.length === 0 && (
-        <p className="note">Henüz hiçbir eş görülmedi.</p>
-      )}
-
-      {relayed > 0 && (
-        <div className="warn">
-          <span className="ic" aria-hidden>
-            ⚠
-          </span>
-          <span className="tx">
-            <b>{relayed} eşe doğrudan ulaşılamıyor.</b>
-            Trafik ZeroTier köklerinden aktarılıyor: çalışıyor, ama doğrudan bir yola göre belirgin
-            biçimde yavaş. Genellikle sebebi iki tarafın da güvenlik duvarı ya da NAT'ı; ağın
-            yönlendiricisinde UDP 9993&apos;e izin vermek çoğu durumda yetiyor.
-          </span>
-        </div>
-      )}
-
-      {ordered.length > 0 && (
-        <table className="tbl">
-          <thead>
-            <tr>
-              <th>Düğüm</th>
-              <th>Rol</th>
-              <th>Yol</th>
-              <th>Gecikme</th>
-              <th>Sürüm</th>
-            </tr>
-          </thead>
-          <tbody>
-            {ordered.map((peer) => (
-              <tr key={peer.address}>
-                <td className="m">{peer.address}</td>
-                <td>{peer.role}</td>
-                <td>
-                  <span className={peer.direct ? 'pill ok' : 'pill warn'}>
-                    {peer.direct ? 'doğrudan' : 'aktarmalı'}
-                  </span>
-                </td>
-                {/* null = HENÜZ ÖLÇÜLMEDİ, kötü bir ölçüm değil. "—" ikisini ayırt ediyor. */}
-                <td className="m">{peer.latencyMs === null ? '—' : `${peer.latencyMs} ms`}</td>
-                <td className="m">{peer.version === '' ? '—' : peer.version}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
   );
 }

@@ -1173,8 +1173,8 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
             type="button"
             className="qrbtn"
             disabled={trashed || scanBusy}
-            title="Kodu okut: kamera açılır, okunan kod aranır ve klasöre fotoğraf yüklemeye geçilir"
-            aria-label="Kodu okut ve fotoğraf yükle"
+            title="QR kodu okut: kamera açılır, okunan kod aranır ve klasöre fotoğraf yüklemeye geçilir"
+            aria-label="QR kodu okut ve fotoğraf yükle"
             onClick={() => {
               // Çözücüyü ŞİMDİ indirmeye başla: kullanıcı fotoğrafı çekerken modül yüklenir ve
               // çözme anında beklenecek tek şey çözmenin kendisi kalır.
@@ -1182,34 +1182,11 @@ export function Files({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.
               pickCode.current?.click();
             }}
           >
-            {/* ── TARAYICI KÖŞELERİ, KARE KODUN KENDİSİ DEĞİL ─────────────────────────
-                Kare kodun kendisini 18 piksele sığdırma denemeleri iki kez tutmadı: köşe
-                işaretlerinin halkaları bir pikselin altında kalıyor ve simge nokta yığınına
-                dönüşüyordu. Küçük boyda okunan şey KODUN DESENİ değil, TARAYICININ ÇERÇEVESİ —
-                dört köşedeki L'ler uzun ve kesintisiz çizgiler olduğu için piksele oturuyor.
-
-                İçeride birkaç blok var, ve işi kare kodu taklit etmek değil: çerçevenin neyi
-                çerçevelediğini söylüyorlar. */}
-            <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-              <g
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M3 8.6V5.7A2.7 2.7 0 0 1 5.7 3h2.9" />
-                <path d="M15.4 3h2.9A2.7 2.7 0 0 1 21 5.7v2.9" />
-                <path d="M21 15.4v2.9a2.7 2.7 0 0 1-2.7 2.7h-2.9" />
-                <path d="M8.6 21H5.7A2.7 2.7 0 0 1 3 18.3v-2.9" />
-              </g>
-              <g fill="currentColor">
-                <rect x="7.4" y="7.4" width="4.2" height="4.2" rx="0.9" />
-                <rect x="13.4" y="13.4" width="3.2" height="3.2" rx="0.8" />
-                <rect x="13.6" y="7.4" width="2.2" height="2.2" rx="0.6" />
-                <rect x="7.4" y="13.6" width="2.2" height="2.2" rx="0.6" />
-              </g>
-            </svg>
+            {/* ── SİMGE DEĞİL, HARFLER ────────────────────────────────────────────────
+                Kare kodu 18 piksele sığdırmanın iki denemesi de tutmadı: desen o boyda okunmuyor,
+                geriye ne olduğu anlaşılmayan bir şekil kalıyor. "QR" iki harf ve herkesin tanıdığı
+                bir kısaltma — küçük boyda bir simgenin yapamadığı şeyi yapıyor. */}
+            QR
           </button>
         </div>
         <button
