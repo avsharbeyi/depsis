@@ -655,7 +655,64 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Hesabı kalıcı olarak sil
+         * @description Hesap tamamen gider: oturumları, ikinci faktörü, ekip üyelikleri, klasör hibeleri,
+         *     yarım yüklemeleri — ve kutudaki Unix hesabı ile Samba kaydı.
+         *
+         *     ── Dosyalar kalıyor ────────────────────────────────────────────────────
+         *
+         *     Bir hesabı silmek, o hesabın yüklediği dosyaları SİLMİYOR. Öyle olsaydı bir kullanıcıyı
+         *     çıkarmanın bedeli kurumun verisi olurdu. Dosyalar yerinde duruyor; hesabın POSIX
+         *     numarası ise emekli ediliyor ve bir daha dağıtılmıyor — diskteki dosyalar hâlâ o
+         *     numarayla damgalı, ve numaranın yeniden verilmesi yeni bir kullanıcıyı o dosyaların
+         *     sahibi yapardı.
+         *
+         *     ── Parola yeniden isteniyor ────────────────────────────────────────────
+         *
+         *     `DELETE /me/mfa` ile aynı §0.5 gerekçesi: geri dönüşü olmayan bir işlem sessizce
+         *     yapılmaz.
+         *
+         *     ── Ne reddediliyor ─────────────────────────────────────────────────────
+         *
+         *     Kendi hesabını silmek 403: iki yönetici varken bile, silen kişi isteğin ortasında
+         *     oturumunu kaybeder ve geri dönemez. Son etkin yöneticiyi silmek 409, ve bunu
+         *     veritabanı tetikleyicisi uyguluyor — iki yöneticinin birbirini eşzamanlı silmesi
+         *     uygulama seviyesinde sayılamaz.
+         *
+         *     Kutuya ulaşılamıyorsa 503 ve HİÇBİR ŞEY silinmiyor. Sıra bilerek böyle: önce sistem
+         *     hesabı, sonra satır. Tersi olsaydı, DEPSIS'te artık görünmeyen bir kullanıcının SMB
+         *     parolası çalışmaya devam ederdi.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PasswordConfirmation"];
+                };
+            };
+            responses: {
+                /** @description Silindi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
         options?: never;
         head?: never;
         /**

@@ -1729,6 +1729,28 @@
       ]
     },
     {
+      "description": "Bir hesabı kutudan kaldırır: passdb kaydı, Unix hesabı, özel grubu.\n\n── NEDEN AYRI BİR İŞLEM ────────────────────────────────────────────────────────────────\n\n`sync` istenen durumu gönderiyor ama HESAPLAR için toplayıcı: listede olmayan bir hesabı\nsilmiyor, ve bu bilerek — yarım okunmuş bir tablodan hesaplanmış bir eşitleme, listede\nolmayan her hesabı uçururdu. Silme bu yüzden kendi işlemi, tek bir hesabı adıyla anıyor, ve\nyalnızca birileri o hesabın gitmesini istediğinde koşuyor.\n\n── ÖNCE SAMBA ─────────────────────────────────────────────────────────────────────────\n\nGüvenlik açısından asıl yarısı passdb kaydı: Unix hesabı `-M -s nologin` ile açılıyor ve\noturum açılamıyor, passdb kaydı ise CANLI bir SMB kimlik bilgisi. İkisinden yalnız biri\nsilinebilseydi, silinmesi gereken o olurdu — o yüzden sırası önce.\n\n── NE REDDEDİYOR ──────────────────────────────────────────────────────────────────────\n\n`uid` bir `PosixId`, yani 0 ve 300000-399999 dışındaki her şey ifade edilemiyor: ajan\n`root`u ya da `www-data`yı silmeye ÇAĞRILAMIYOR. Bunun ötesinde ad ile numaranın kutuda\nbirbirini göstermesi gerekiyor; `getent` başka bir eşleşme söylüyorsa hiçbir şey silinmiyor.\nAynı denetim `sync`in yaratmadan önce yaptığı denetim, ve burada daha önemli: yanlış hesabı\nsilmek, yanlış hesabı yaratmaktan kötü.\n\nZaten olmayan bir hesap BAŞARI. İstenen şey hesabın kutuda olmaması, ve değil.",
+      "type": "object",
+      "properties": {
+        "login": {
+          "$ref": "#/$defs/PosixName"
+        },
+        "op": {
+          "type": "string",
+          "const": "remove_posix_identity"
+        },
+        "uid": {
+          "$ref": "#/$defs/PosixId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "uid",
+        "login"
+      ]
+    },
+    {
       "description": "Close a share root to everybody the ACL does not name.\n\nWHAT WAS WRONG. `zfs create` leaves a dataset's mountpoint at ZFS's default, which is\n`0755 root:root` — `other::r-x`. `ApplyFolderAcl` cannot fix it and must not try: that\noperation deliberately never touches the `user::`/`group::`/`other::` triple, and refuses\noutright if it changes underneath, because a \"permissions applied\" reply that had quietly\nrewritten the three entries every access falls back to would be the worst kind of lie.\n\nSo nothing in the product had ever set the mode of a share root, and every share on every\nappliance was traversable by anyone: an authenticated SMB principal could list the\ntop-level names and enter the root however narrow `folder_grants` was. Descent past it was\nstill gated, because agent-created folders are 0750 with an ACL of their own — so the leak\nis enumeration and traversal of ONE directory, not the contents below it. That is a smaller\nhole than it first reads as, and still one that makes a \"private\" share list its folder\nnames to the whole appliance.\n\nAN OPERATION OF ITS OWN, not a field on `CreateDataset`. Shares that already exist are open\ntoo, and an operand at creation time would only ever fix the next one. This can be aimed at\nany share, is idempotent, and the API runs it immediately before writing the root's ACL.\n\nTHE ORDER IS LOAD-BEARING AND IT IS A POSIX RULE, not a local convention: `chmod` on a file\nthat already carries an ACL sets the MASK from the group bits rather than the `group::`\nentry. Running this AFTER an ACL would silently clamp every named entry to `r-x`. Run\nbefore, the `setfacl` that follows recomputes the mask correctly — and the gap between them\nnarrows rather than widens, which is the direction to be wrong in.\n\nNo owner operand. The root stays `root:root` and that is the right answer rather than a\nmissing one: root bypasses every ACL anyway, no DEPSIS principal should own the top of a\nshare, and giving it to the administrator who happened to create it would bake one person's\naccount into the filesystem. With `0750` and root ownership, `user::` and `group::` reach\nnobody the appliance maps, `other::` reaches nobody at all, and every real grant arrives as\na named ACL entry — which is exactly the model ADR-0004 describes.",
       "type": "object",
       "properties": {
@@ -3236,6 +3258,19 @@
       "required": [
         "status",
         "created"
+      ]
+    },
+    {
+      "description": "Hesap kutuda değil: passdb kaydı, Unix hesabı ve özel grubu gitti (ya da hiç yoktu).\n\nSAYI YOK, ve olmaması bilerek. `sync` neyi değiştirdiğini sayıyor çünkü sıfır orada\nanlamlı bir cevap — hiçbir şey değişmediyse makine zaten istenen hâlde. Burada \"kaç şey\nsilindi\" çağıranın karar veremeyeceği bir sayı: zaten olmayan bir hesap da başarı, ve ikisini\nayıran bir sayı, çağıranı olmayan bir farkı önemsemeye davet ederdi.",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "posix_identity_removed"
+        }
+      },
+      "required": [
+        "status"
       ]
     },
     {

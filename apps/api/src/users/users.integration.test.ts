@@ -61,6 +61,17 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
         new SecretBox(Buffer.from(generateKey(), 'base64')),
         new JobsService(db),
       ),
+      // Silme yolunun ajanı, ve `create`/`setPasswordHash`inkinden AYRI: silme ajana gerçekten
+      // gidiyor — kutudaki Unix hesabı ile Samba kaydı kaldırılmadan satır silinmiyor — o yüzden
+      // burada reddeden değil KABUL EDEN bir ikiz duruyor. Çağrıları toplamıyor, çünkü bu süitte
+      // ölçülen şey hangi çağrının yapıldığı değil, satırın gerçekten gitmesi.
+      {
+        isAvailable: () => true,
+        call: (request: Record<string, unknown>) =>
+          request['op'] === 'remove_posix_identity'
+            ? Promise.resolve({ status: 'posix_identity_removed' })
+            : Promise.resolve({ status: 'discarded', existed: true }),
+      } as unknown as AgentService,
     );
 
     await owner.withoutTenant('migration-status', async (q) => {
@@ -282,6 +293,85 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
       q.query(`SELECT 1 FROM public.resolve_session($1)`, [digest]),
     );
     expect(after).toHaveLength(0);
+  });
+
+  it('deletes an account, and never hands its uid to anybody else', async () => {
+    // THE assertion this feature turns on. `allocate_posix_id` is `MAX + 1` over the live rows, so
+    // deleting an account used to FREE its number — and the deleted person's files on disk still
+    // carry it. The next account created would have opened owning files it had never seen: not a
+    // permission error, not a warning, but ownership at the filesystem level.
+    const doomed = await users.create(orgA, 'gidecek', 'member', 'hash');
+    const before = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ posix_uid: number }>(`SELECT posix_uid FROM users WHERE id = $1`, [doomed.id]),
+    );
+    const uid = before[0]?.posix_uid;
+    expect(uid).toBeGreaterThanOrEqual(300000);
+
+    const removed = await users.remove(orgA, doomed.id, 'test');
+    expect(removed).toEqual({ username: 'gidecek', posixUid: uid });
+
+    await expect(users.find(orgA, doomed.id)).rejects.toBeInstanceOf(UserNotFoundError);
+
+    const retired = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM retired_posix_ids WHERE id_value = $1`,
+        [uid],
+      ),
+    );
+    expect(retired[0]?.n).toBe('1');
+
+    // Ve asıl ölçüm: sıradaki hesap o numarayı ALMIYOR. Mezar taşı olmadan burası tam olarak
+    // `uid` dönerdi.
+    const next = await users.create(orgA, 'sonraki', 'member', 'hash');
+    const after = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ posix_uid: number }>(`SELECT posix_uid FROM users WHERE id = $1`, [next.id]),
+    );
+    expect(after[0]?.posix_uid).not.toBe(uid);
+    expect(after[0]?.posix_uid).toBeGreaterThan(uid as number);
+  });
+
+  it('refuses to delete the last enabled administrator', async () => {
+    // Silme yolu 0009'un tetikleyicisinin GÖRMEDİĞİ bir yoldu: tetikleyici yalnız UPDATE
+    // üzerindeydi, çünkü o gün hiçbir şey bir kullanıcıyı silmiyordu. Göç 0049 onu DELETE'e de
+    // bağlıyor, ve ölçülen şey o bağ.
+    const only = await users.create(orgB, 'tekyonetici', 'admin', 'hash');
+    const seeded = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ id: string }>(
+        `SELECT id::text AS id FROM users
+          WHERE organization_id = $1 AND role = 'admin' AND disabled_at IS NULL AND id <> $2`,
+        [orgB, only.id],
+      ),
+    );
+    for (const row of seeded) {
+      await users.update(orgB, row.id, { role: 'member' });
+    }
+
+    await expect(users.remove(orgB, only.id, 'test')).rejects.toBeInstanceOf(LastAdminError);
+    // Ve hesap duruyor: ret, satır gitmeden geliyor.
+    expect((await users.find(orgB, only.id)).username).toBe('tekyonetici');
+  });
+
+  it('keeps a console audit row readable after its account is gone', async () => {
+    // 0013'ün RESTRICT'i bu satırı korumak içindi ve hesabı rehin tutarak koruyordu. 0049 aynı şeyi
+    // adı satırın İÇİNE yazarak koruyor: kayıt kimin olduğunu hâlâ söylüyor, hesap ise gidebiliyor.
+    const user = await users.create(orgA, 'konsolcu', 'member', 'hash');
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO console_sessions (organization_id, user_id, username, privileged)
+              VALUES ($1, $2, 'konsolcu', false)`,
+        [orgA, user.id],
+      ),
+    );
+
+    await users.remove(orgA, user.id, 'test');
+
+    const rows = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ username: string; user_id: string | null }>(
+        `SELECT username, user_id::text AS user_id FROM console_sessions WHERE username = 'konsolcu'`,
+      ),
+    );
+    expect(rows[0]?.username).toBe('konsolcu');
+    expect(rows[0]?.user_id).toBeNull();
   });
 
   it('hands the role back with the session, and the value tracks the account', async () => {

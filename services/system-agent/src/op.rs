@@ -2129,6 +2129,36 @@ pub enum Request {
         groups: Vec<PosixGroupSpec>,
     },
 
+    /// Bir hesabı kutudan kaldırır: passdb kaydı, Unix hesabı, özel grubu.
+    ///
+    /// ── NEDEN AYRI BİR İŞLEM ────────────────────────────────────────────────────────────────
+    ///
+    /// `sync` istenen durumu gönderiyor ama HESAPLAR için toplayıcı: listede olmayan bir hesabı
+    /// silmiyor, ve bu bilerek — yarım okunmuş bir tablodan hesaplanmış bir eşitleme, listede
+    /// olmayan her hesabı uçururdu. Silme bu yüzden kendi işlemi, tek bir hesabı adıyla anıyor, ve
+    /// yalnızca birileri o hesabın gitmesini istediğinde koşuyor.
+    ///
+    /// ── ÖNCE SAMBA ─────────────────────────────────────────────────────────────────────────
+    ///
+    /// Güvenlik açısından asıl yarısı passdb kaydı: Unix hesabı `-M -s nologin` ile açılıyor ve
+    /// oturum açılamıyor, passdb kaydı ise CANLI bir SMB kimlik bilgisi. İkisinden yalnız biri
+    /// silinebilseydi, silinmesi gereken o olurdu — o yüzden sırası önce.
+    ///
+    /// ── NE REDDEDİYOR ──────────────────────────────────────────────────────────────────────
+    ///
+    /// `uid` bir `PosixId`, yani 0 ve 300000-399999 dışındaki her şey ifade edilemiyor: ajan
+    /// `root`u ya da `www-data`yı silmeye ÇAĞRILAMIYOR. Bunun ötesinde ad ile numaranın kutuda
+    /// birbirini göstermesi gerekiyor; `getent` başka bir eşleşme söylüyorsa hiçbir şey silinmiyor.
+    /// Aynı denetim `sync`in yaratmadan önce yaptığı denetim, ve burada daha önemli: yanlış hesabı
+    /// silmek, yanlış hesabı yaratmaktan kötü.
+    ///
+    /// Zaten olmayan bir hesap BAŞARI. İstenen şey hesabın kutuda olmaması, ve değil.
+    #[serde(rename = "remove_posix_identity")]
+    RemovePosixIdentity {
+        uid: PosixId,
+        login: PosixName,
+    },
+
     /// Close a share root to everybody the ACL does not name.
     ///
     /// WHAT WAS WRONG. `zfs create` leaves a dataset's mountpoint at ZFS's default, which is
@@ -3060,6 +3090,15 @@ pub enum Response {
     AppDataDirReady {
         created: bool,
     },
+    /// Hesap kutuda değil: passdb kaydı, Unix hesabı ve özel grubu gitti (ya da hiç yoktu).
+    ///
+    /// SAYI YOK, ve olmaması bilerek. `sync` neyi değiştirdiğini sayıyor çünkü sıfır orada
+    /// anlamlı bir cevap — hiçbir şey değişmediyse makine zaten istenen hâlde. Burada "kaç şey
+    /// silindi" çağıranın karar veremeyeceği bir sayı: zaten olmayan bir hesap da başarı, ve ikisini
+    /// ayıran bir sayı, çağıranı olmayan bir farkı önemsemeye davet ederdi.
+    #[serde(rename = "posix_identity_removed")]
+    PosixIdentityRemoved {},
+
     /// The machine's accounts and groups now match what was asked for.
     ///
     /// Counts rather than a bare acknowledgement, and only the ones the agent CHANGED: a sync that
@@ -3222,6 +3261,10 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 40, `remove_posix_identity` ile: bir hesabı silmek. Ekranda kullanıcı yalnızca DEVRE DIŞI
+/// bırakılabiliyordu; silinebilmesi, hesabın kutudaki Unix ve Samba karşılığının da gitmesi
+/// demek — yoksa DEPSIS'ten silinmiş bir kullanıcının SMB parolası çalışmaya devam ederdi.
+///
 /// 39, `archive_folder` ile: bir klasörü tek dosya olarak indirebilmek. Sözleşmede klasör
 /// indirme diye bir şey YOKTU — ekranda düğme klasörlerde hiç çizilmiyor, karışık seçimde ise
 /// klasörler sessizce atlanıyordu.
@@ -3269,7 +3312,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 39;
+pub const SCHEMA_VERSION: u32 = 40;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

@@ -108,6 +108,7 @@ pub fn operation_name(request: &Request) -> &'static str {
         Request::CreateDirectory { .. } => "create_directory",
         Request::SecureShareRoot { .. } => "secure_share_root",
         Request::SyncPosixIdentity { .. } => "sync_posix_identity",
+        Request::RemovePosixIdentity { .. } => "remove_posix_identity",
         Request::ApplyFolderAcl { .. } => "apply_folder_acl",
         Request::ZeroTierStatus {} => "zerotier_status",
         Request::ZeroTierNetworks {} => "zerotier_networks",

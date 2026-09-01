@@ -212,6 +212,11 @@ describe('the emitted agent schema', () => {
       // behind a typed name, in the one process that can reach every tenant's data. The API walks
       // the tree from the leaves up, because the API is the side that stores it (§2.2, ADR-0006).
       'remove_entry',
+      // Bir hesabi kutudan kaldirmak. `sync_posix_identity` HESAPLAR icin toplayici — listede
+      // olmayan bir hesabi silmiyor — cunku yarim okunmus bir tablodan hesaplanmis bir esitleme
+      // aksi halde listede olmayan her hesabi ucururdu. Silme bu yuzden tek bir hesabi adiyla
+      // anan kendi islemi.
+      'remove_posix_identity',
       'replicate_dataset',
       'replicate_offsite',
       'restore_file_from_backup',
@@ -378,7 +383,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(39);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(40);
   });
 
   it('agrees with the number the agent actually reports', () => {

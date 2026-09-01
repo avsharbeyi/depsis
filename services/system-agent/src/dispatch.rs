@@ -3975,6 +3975,24 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 }
             }
 
+            Request::RemovePosixIdentity { uid, login } => {
+                // Aynı üç cevap `sync`teki gibi ve aynı sebeple: makine istenen hâlde,
+                // Samba kurulu değil, ya da ad ile numara kutuda birbirini göstermiyor.
+                match crate::identity::remove(self.runner, *uid, login) {
+                    Ok(()) => Ok(Response::PosixIdentityRemoved {}),
+                    Err(e) if e.is_unavailable() => Ok(Response::SmbUnavailable {
+                        reason: e.to_string(),
+                    }),
+                    Err(
+                        e @ (crate::identity::IdentityError::NotOurs { .. }
+                        | crate::identity::IdentityError::UidTaken { .. }),
+                    ) => Ok(Response::Refused {
+                        reason: e.to_string(),
+                    }),
+                    Err(e) => Err(SeamError::Io(e.to_string())),
+                }
+            }
+
             Request::ApplyFolderAcl {
                 share,
                 path,

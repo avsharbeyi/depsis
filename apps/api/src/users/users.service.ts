@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 
+import { AgentService } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
 import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
@@ -44,6 +45,28 @@ export class LastAdminError extends Error {
   }
 }
 
+/** Silinmek istenen hesap, isteği yapan hesabın kendisi. */
+export class CannotDeleteSelfError extends Error {
+  constructor() {
+    super('bir yönetici kendi hesabını silemez');
+    this.name = 'CannotDeleteSelfError';
+  }
+}
+
+/**
+ * Hesabın kutudaki Unix/Samba karşılığı kaldırılamadı, o yüzden satır da silinmedi.
+ *
+ * SIRA BURADA BİR TASARIM: önce kutu, sonra veritabanı. Tersi olsaydı ve ajan cevap veremeseydi,
+ * DEPSIS'te var olmayan bir kullanıcının SMB parolası çalışmaya devam ederdi — ve bunu kimse
+ * göremezdi, çünkü kullanıcı listesinde o hesap artık yok.
+ */
+export class IdentityStillOnBoxError extends Error {
+  constructor(readonly detail: string) {
+    super(`hesabın sistem üzerindeki karşılığı kaldırılamadı: ${detail}`);
+    this.name = 'IdentityStillOnBoxError';
+  }
+}
+
 /**
  * Accounts inside one organisation.
  *
@@ -64,6 +87,16 @@ export class UsersService {
      * password and the SMB password cannot end up describing different secrets.
      */
     private readonly identity: IdentitySyncService,
+    /**
+     * Silme için, ve yalnızca onun için.
+     *
+     * Hesap oluşturma ve parola değiştirme eşitlemeyi KUYRUĞA veriyor: işçi kendi ajan bağlantısıyla
+     * ve kendi yeniden denemeleriyle koşuyor, ve geciken bir Unix hesabı kimseyi tehlikeye atmıyor.
+     * Silme öyle değil — geciken bir silme, DEPSIS'ten kaldırılmış bir kullanıcının SMB parolasının
+     * çalışmaya devam etmesi demek. O yüzden bu tek işlem isteğin içinde koşuyor ve başarısız
+     * olursa satır da silinmiyor.
+     */
+    private readonly agent: AgentService,
   ) {}
 
   async list(organizationId: string): Promise<UserRow[]> {
@@ -243,6 +276,129 @@ export class UsersService {
       return row;
     } catch (error) {
       throw translateDbError(error);
+    }
+  }
+
+  /**
+   * Bir hesabı tamamen kaldırır.
+   *
+   * ── SIRA ────────────────────────────────────────────────────────────────────────────────────
+   *
+   * 1. Yarım yüklemelerin ara dosyaları atılıyor (elden geldiğince).
+   * 2. Kutudaki Unix hesabı ve Samba kaydı kaldırılıyor — BAŞARISIZ OLURSA HİÇBİR ŞEY SİLİNMİYOR.
+   * 3. Satır siliniyor, ve aynı işlemde POSIX numarası emekli ediliyor.
+   *
+   * İkinci adımın önce gelmesi bu fonksiyonun en önemli kararı. Tersi olsaydı ve ajan o an cevap
+   * veremeseydi, DEPSIS'te artık var olmayan bir kullanıcının SMB parolası çalışmaya devam eder,
+   * ve bunu kimse fark edemezdi: kullanıcı listesinde o hesap yok.
+   *
+   * Üçüncü adım başarısız olursa kutuda hesabı olmayan bir satır kalıyor — ve bu, tersinin aksine,
+   * kendi kendini onaran bir durum: bir sonraki kimlik eşitlemesi hesabı yeniden kuruyor.
+   *
+   * ── EMEKLİ NUMARA ───────────────────────────────────────────────────────────────────────────
+   *
+   * Silme ile aynı işlemde. `allocate_posix_id` bir sonraki numarayı `MAX + 1` ile buluyor, yani
+   * satır gidince numara serbest kalıyor — ve silinen kullanıcının dosyaları diskte hâlâ o
+   * numarayla damgalı. İki yazma arasında bir hesap açılabilseydi, o hesap hiç görmediği
+   * dosyaların sahibi olurdu.
+   */
+  async remove(
+    organizationId: string,
+    id: string,
+    reason: string,
+  ): Promise<{ username: string; posixUid: number | null }> {
+    const doomed = await this.find(organizationId, id);
+    const posix = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ posix_uid: number | null }>(
+        `SELECT posix_uid FROM public.users WHERE organization_id = $1 AND id = $2`,
+        [organizationId, id],
+      ),
+    );
+    const posixUid = posix[0]?.posix_uid ?? null;
+
+    await this.discardStagedUploads(organizationId, id, reason);
+
+    if (posixUid !== null) {
+      const response = await this.agent
+        .call({ op: 'remove_posix_identity', uid: posixUid, login: doomed.username }, reason)
+        .catch((error: unknown) => {
+          throw new IdentityStillOnBoxError(error instanceof Error ? error.message : String(error));
+        });
+      // `smb_unavailable` de bir RET burada, ve `sync`teki gibi bir 503 değil: Samba kurulu
+      // değilse silinecek bir kimlik bilgisi de yoktur, ama bunu ajanın kendisi söylüyor ve
+      // Unix hesabının gidip gitmediğini söylemiyor. Emin olunmayan tek durum bu.
+      if (response.status !== 'posix_identity_removed') {
+        throw new IdentityStillOnBoxError(
+          'reason' in response && typeof response.reason === 'string'
+            ? response.reason
+            : response.status,
+        );
+      }
+    }
+
+    try {
+      await this.db.withTenant(organizationId, async (db) => {
+        // Kurucu kaydı BAŞKA BİR YÖNETİCİYE devrediliyor. `system_setup.admin_user_id` yalnızca
+        // "kutuyu kim kurdu" diye tarihsel bir not değil, `isSystemAdministrator`in tek ölçütü:
+        // NULL kalsaydı konsola kimse giremezdi. Kimin devralacağı, kalan en eski açık yönetici —
+        // ve bir tane olduğu garanti, çünkü son yöneticiyi silmeyi tetikleyici zaten reddediyor.
+        await db.query(
+          `UPDATE public.system_setup
+              SET admin_user_id = (
+                    SELECT u.id FROM public.users u
+                     WHERE u.organization_id = $1 AND u.role = 'admin'
+                       AND u.disabled_at IS NULL AND u.id <> $2
+                     ORDER BY u.created_at
+                     LIMIT 1)
+            WHERE admin_user_id = $2`,
+          [organizationId, id],
+        );
+        await db.query(`DELETE FROM public.users WHERE organization_id = $1 AND id = $2`, [
+          organizationId,
+          id,
+        ]);
+        if (posixUid !== null) {
+          await db.query(
+            `INSERT INTO public.retired_posix_ids (id_value, note)
+                  VALUES ($1, $2)
+             ON CONFLICT (id_value) DO NOTHING`,
+            [posixUid, 'silinen hesap'],
+          );
+        }
+      });
+    } catch (error) {
+      throw translateDbError(error);
+    }
+
+    return { username: doomed.username, posixUid };
+  }
+
+  /**
+   * Silinecek hesabın yarım yüklemelerinin ara dosyalarını attırır.
+   *
+   * ELDEN GELDİĞİNCE, ve bu bilerek: satırları göç 0049'un CASCADE'i zaten götürüyor, geriye
+   * kalabilecek şey ara alandaki bir `.part`. Bir baytlık çöp için silme isteğini reddetmek,
+   * kullanıcıya çözemeyeceği bir engel çıkarmak olurdu — ajan o an cevap vermiyorsa bile hesabın
+   * gitmesi gerekiyor.
+   */
+  private async discardStagedUploads(
+    organizationId: string,
+    id: string,
+    reason: string,
+  ): Promise<void> {
+    const staged = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ share: string; staging_name: string }>(
+        `SELECT s.name AS share, u.staging_name
+           FROM public.upload_sessions u
+           JOIN public.shares s ON s.id = u.share_id
+          WHERE u.organization_id = $1 AND u.created_by = $2 AND u.completed_at IS NULL`,
+        [organizationId, id],
+      ),
+    );
+    for (const row of staged) {
+      await this.agent
+        .call({ op: 'discard_transfer', share: row.share, staging_name: row.staging_name }, reason)
+        .catch(() => undefined);
     }
   }
 

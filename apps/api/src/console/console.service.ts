@@ -160,19 +160,24 @@ export class ConsoleService implements OnModuleDestroy {
     let opened: { openedAt: Date; username: string };
     try {
       opened = await this.db.withTenant(organizationId, async (q) => {
-        const inserted = await q.query<{ opened_at: Date }>(
-          `INSERT INTO console_sessions (id, organization_id, user_id, privileged)
-                VALUES ($1, $2, $3, $4)
-             RETURNING opened_at`,
-          [id, organizationId, userId, connection.privileged],
-        );
+        // Ad ÖNCE okunuyor ve satıra kopyalanıyor. Kayıt kimin olduğunu artık kendi içinde
+        // taşıyor: hesap sonradan silinse de (göç 0049, `user_id` SET NULL) denetim "bu kabuğu kim
+        // açtı" sorusunu cevaplayabiliyor, ve kullanıcı adını değiştirse bile kayıt O ANKİ adı
+        // gösteriyor — sonradan bir birleştirmeyle okunan ad, bugünkü adı geçmişe yazardı.
         const names = await q.query<{ username: string }>(
           `SELECT username FROM users WHERE id = $1`,
           [userId],
         );
+        const username = names[0]?.username ?? '';
+        const inserted = await q.query<{ opened_at: Date }>(
+          `INSERT INTO console_sessions (id, organization_id, user_id, username, privileged)
+                VALUES ($1, $2, $3, $4, $5)
+             RETURNING opened_at`,
+          [id, organizationId, userId, username, connection.privileged],
+        );
         const row = inserted[0];
         if (row === undefined) throw new Error('console_sessions insert returned no row');
-        return { openedAt: row.opened_at, username: names[0]?.username ?? '' };
+        return { openedAt: row.opened_at, username };
       });
     } catch (error) {
       // The shell is already running behind that socket. Dropping the connection kills it, which
@@ -243,9 +248,11 @@ export class ConsoleService implements OnModuleDestroy {
 
     const rows = await this.db.withTenant(organizationId, (q) =>
       q.query<{ id: string; username: string; privileged: boolean; opened_at: Date }>(
-        `SELECT s.id::text AS id, u.username, s.privileged, s.opened_at
+        // `users` ile BİRLEŞTİRME YOK, ve bu bir iyileştirme değil bir düzeltme: içeriden bir
+        // birleştirme, hesabı silinmiş bir kullanıcının açık oturumunu listeden düşürürdü —
+        // denetimin göstermesi gereken en ilginç satır tam olarak o.
+        `SELECT s.id::text AS id, s.username, s.privileged, s.opened_at
            FROM console_sessions s
-           JOIN users u ON u.id = s.user_id
           WHERE s.closed_at IS NULL
           ORDER BY s.opened_at DESC`,
       ),
