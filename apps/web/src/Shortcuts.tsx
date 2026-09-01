@@ -219,6 +219,41 @@ export function Shortcuts({
   /** Set when a drag ends, so the click that follows the release does not also open the pane. */
   const draggedRef = useRef(false);
 
+  /* ─── kısayol ekleme jesti ────────────────────────────────────────────────── */
+
+  /**
+   * Boş alana BİR kez tıklamak menüyü açmıyordu — açıyordu, ve sorun da buydu.
+   *
+   * Kısayol alanı masaüstünün zeminidir: bir pencereyi kapatmak, bir sürüklemeyi bırakmak, bir
+   * menüyü kapatmak için yapılan her ıskalanmış tıklama oraya düşüyor. Tek tıklamayla açılan bir
+   * menü, cihazın sahibinin sözleriyle "sürekli o çıkıyor" demek — yani kullanıcının hiç
+   * istemediği bir pencere, en sık yaptığı hareketin karşılığı oluyordu.
+   *
+   * ÇİFT TIKLAMA ya da BASILI TUTMA. İkisi de kasıtlı olduğu belli olan, kazayla yapılmayan
+   * hareketler; ve ikisi birden var çünkü biri fare, diğeri dokunmatik ekran için. Cihazın
+   * kendi ekranı dokunmatik olabildiği için ikincisi bir incelik değil, gereklilik: dokunmatikte
+   * çift dokunma çoğu tarayıcıda yakınlaştırma demek.
+   */
+  const LONG_PRESS_MS = 500;
+  /** Parmağın bu kadar kaymasi, basılı tutmayı bir sürükleme sayıyor ve iptal ediyor. */
+  const LONG_PRESS_SLOP = 10;
+  const pressRef = useRef<{ timer: number; x: number; y: number } | null>(null);
+
+  const cancelLongPress = useCallback((): void => {
+    if (pressRef.current === null) return;
+    window.clearTimeout(pressRef.current.timer);
+    pressRef.current = null;
+  }, []);
+
+  // Bileşen giderken zamanlayıcı da gitmeli: ekran değişince açılan bir menü, artık var olmayan
+  // bir zemine ait olurdu.
+  useEffect(() => cancelLongPress, [cancelLongPress]);
+
+  const openPicker = useCallback((field: HTMLDivElement, x: number, y: number): void => {
+    const rect = field.getBoundingClientRect();
+    setPicker({ cell: cellUnderPoint(x - rect.left, y - rect.top), x, y });
+  }, []);
+
   const onPointerDown = (id: PaneId, event: React.PointerEvent<HTMLDivElement>): void => {
     if (event.button !== 0) return;
     const box = event.currentTarget.getBoundingClientRect();
@@ -325,16 +360,47 @@ export function Shortcuts({
     <div
       className="shorts"
       ref={fieldRef}
-      onClick={(event) => {
+      onDoubleClick={(event) => {
         // Only a press on the bare field opens the menu; a press that started on an icon has
         // already been handled by the icon itself.
         if (event.target !== event.currentTarget) return;
-        const rect = event.currentTarget.getBoundingClientRect();
-        setPicker({
-          cell: cellUnderPoint(event.clientX - rect.left, event.clientY - rect.top),
-          x: event.clientX,
-          y: event.clientY,
-        });
+        openPicker(event.currentTarget, event.clientX, event.clientY);
+      }}
+      onPointerDownCapture={(event) => {
+        // BASILI TUTMA, yalnız çıplak zeminde ve yalnız birincil düğmeyle. Bir simgenin üstünde
+        // başlayan basış bir sürüklemedir ve onu bu jest bölmemeli.
+        cancelLongPress();
+        if (event.target !== event.currentTarget) return;
+        if (event.button !== 0) return;
+        const field = event.currentTarget;
+        const { clientX: x, clientY: y } = event;
+        pressRef.current = {
+          x,
+          y,
+          timer: window.setTimeout(() => {
+            pressRef.current = null;
+            openPicker(field, x, y);
+          }, LONG_PRESS_MS),
+        };
+      }}
+      onPointerMoveCapture={(event) => {
+        // Kayan bir parmak basılı tutma değildir. Eşik olmadan, dokunmatik ekranın kaçınılmaz
+        // birkaç piksellik titremesi jesti her seferinde iptal ederdi.
+        const press = pressRef.current;
+        if (press === null) return;
+        if (
+          Math.abs(event.clientX - press.x) > LONG_PRESS_SLOP ||
+          Math.abs(event.clientY - press.y) > LONG_PRESS_SLOP
+        ) {
+          cancelLongPress();
+        }
+      }}
+      onPointerUpCapture={cancelLongPress}
+      onPointerCancelCapture={cancelLongPress}
+      onContextMenu={(event) => {
+        // Dokunmatikte uzun basış, tarayıcının kendi bağlam menüsünü de açıyor. İkisi üst üste
+        // binince kullanıcı iki menü görüyor ve hangisinin ürüne ait olduğunu bilemiyor.
+        if (event.target === event.currentTarget) event.preventDefault();
       }}
     >
       {layout.length === 0 && (
@@ -342,7 +408,7 @@ export function Shortcuts({
           className="thint"
           style={{ position: 'absolute', left: 2, top: 4, pointerEvents: 'none' }}
         >
-          Boş bir yere tıklayarak kısayol ekleyin.
+          Boş bir yere çift tıklayarak (ya da basılı tutarak) kısayol ekleyin.
         </span>
       )}
 
