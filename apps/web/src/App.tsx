@@ -548,7 +548,27 @@ function Desktop({
   const [pane, setPane] = useState<PaneId | null>(paneFromHash);
   const [dockOpen, setDockOpen] = useState(false);
   const [rebootAsk, setRebootAsk] = useState(false);
+  const [filesFull, setFilesFull] = useState(false);
   const mobile = useMobile();
+
+  /**
+   * Tam ekran dosya kartı Escape ile küçülüyor, ve telefondan çıkılınca kendiliğinden kapanıyor.
+   *
+   * İkincisi bir incelik değil: kart yalnız dar ekranda çiziliyor, ve açıkken pencere
+   * genişletilirse geride hiçbir şeyin çizmediği bir `fixed` katman kalırdı.
+   */
+  useEffect(() => {
+    if (!filesFull) return;
+    if (!mobile) {
+      setFilesFull(false);
+      return;
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setFilesFull(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [filesFull, mobile]);
   const [powerOpen, setPowerOpen] = useState(false);
   const { toasts, push, dismiss } = useToasts();
   const { prefs, save, loaded: prefsLoaded } = usePrefs();
@@ -827,38 +847,35 @@ function Desktop({
                   Yalnız telefonda ÇİZİLİYOR, gizlenmiyor: gizlenen bir dosya gezgini yine de
                   klasör listesini ister, yani masaüstünde kimsenin görmediği bir istek olurdu. */}
               {mobile && (
-                <section
-                  className="card mfm"
-                  role="button"
-                  tabIndex={0}
-                  aria-label="Dosyaları tam ekran aç"
-                  onClick={() => openPane('files')}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter' && event.key !== ' ') return;
-                    event.preventDefault();
-                    openPane('files');
-                  }}
-                >
+                <section className={filesFull ? 'card mfm full' : 'card mfm'}>
                   <div className="ch">
                     <Glyph tone="iris">🗂</Glyph>
                     <span className="tt">Dosyalar</span>
-                    <span className="st">tam ekran aç</span>
+                    <button
+                      type="button"
+                      className="b mfx"
+                      onClick={() => setFilesFull((full) => !full)}
+                    >
+                      {filesFull ? 'Küçült' : 'Tam ekran'}
+                    </button>
                   </div>
-                  {/* ── ÖNİZLEME, KENDİ BAŞINA BİR GEZGİN DEĞİL ──────────────────────────
-                      Kartın tamamı tek bir düğme: nereye dokunulursa dokunulsun dosyalar tam
-                      ekran açılıyor. İçerideki liste bu yüzden dokunuşu YUTMUYOR
-                      (`pointer-events: none`, stil sayfasında) — yutsaydı kartın yarısı düğme,
-                      yarısı değil olurdu ve hangi yarının hangisi olduğunu kullanıcı ancak
-                      deneyerek öğrenirdi.
+                  {/* ── DOKUNUŞ HEM İŞİNİ YAPIYOR HEM BÜYÜTÜYOR ──────────────────────────
+                      Önceki hâlde kart bir düğmeydi ve içerideki liste dokunuşu hiç almıyordu:
+                      aramaya basmak aramayı açmıyor, yalnız tam ekrana geçiyordu. İstenen şey
+                      ikisi birden.
 
-                      `inert` ve `aria-hidden` aynı cümlenin klavye ve ekran okuyucu tarafı:
-                      önizlemenin içindeki düğmeler sekme sırasında görünmüyor ve okuyucuya
-                      sayılmıyor. Onlar olmadan kart, içinde başka düğmeler barındıran bir düğme
-                      olurdu — hem erişilebilirlik taraması hem de klavye için bozuk bir şekil.
+                      YAKALAMA EVRESİNDE dinleniyor, ve karta değil bu sarmalayıcıya bağlı:
+                      olay önce buraya uğruyor, kart büyüyor, sonra kendi yoluna devam edip
+                      basılan düğmeyi çalıştırıyor. Durdurulan ya da taklit edilen bir şey yok.
 
-                      Gerçek gezgin bir dokunuş ötede ve tam ekran; burada duran şey onun canlı
-                      önizlemesi. */}
-                  <div className="wb" inert aria-hidden>
+                      VE BÜYÜYEN ŞEY AYNI ÖĞE. Ayrı bir tam ekran penceresi açsaydık o pencere
+                      YENİ bir gezgin olurdu: arama kapalı, klasör kökte, seçim boş. Burada
+                      değişen tek şey kabın stili, yani React aynı bileşeni koruyor ve az önce
+                      yapılan hareket ekranda duruyor.
+
+                      `click`, `pointerdown` DEĞİL: listeyi kaydırmak bir tıklama üretmiyor, yani
+                      parmakla kaydırmak kartı büyütmüyor. */}
+                  <div className="wb" onClickCapture={() => setFilesFull(true)}>
                     <Files notify={push} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />
                   </div>
                 </section>

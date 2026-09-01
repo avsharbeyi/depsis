@@ -82,7 +82,7 @@ export function LicensePanel({
           </span>
           <button
             type="button"
-            className="b ghost"
+            className="b"
             onClick={() => void navigator.clipboard?.writeText(status.deviceId ?? '')}
           >
             Kopyala
@@ -146,7 +146,7 @@ export function LicensePanel({
               >
                 {busy ? 'Kuruluyor…' : 'Lisansı kur'}
               </button>
-              <button type="button" className="b ghost" onClick={() => setOpen(false)}>
+              <button type="button" className="b" onClick={() => setOpen(false)}>
                 Vazgeç
               </button>
             </div>

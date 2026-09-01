@@ -194,7 +194,7 @@ export function UpdatePanel({ notify }: { notify: Notify }): React.JSX.Element |
           </button>
           <button
             type="button"
-            className="b ghost"
+            className="b"
             onClick={() => {
               setAsking(false);
               setPassword('');

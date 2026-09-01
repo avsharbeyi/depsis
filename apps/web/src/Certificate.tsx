@@ -198,7 +198,7 @@ export function CertificatePanel({ notify }: { notify: Notify }): React.JSX.Elem
             </button>
             <button
               type="button"
-              className="b ghost"
+              className="b"
               onClick={() => {
                 setOpen(false);
                 setPassword('');

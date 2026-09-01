@@ -285,7 +285,7 @@ function Kurulmamis(props: {
           {/* YANMIŞ CİHAZ YOLU, ve burada duruyor çünkü onu arayan kişi tam olarak burada
               oluyor: elinde bir yedek diski var, cihazında hiçbir şey yok. Kurulum düğmesinin
               yanına konması, "kur" diyerek diski silmesini önlüyor. */}
-          <button type="button" className="b ghost" onClick={props.onRecover}>
+          <button type="button" className="b" onClick={props.onRecover}>
             Elimde bir yedek diski var
           </button>
         </div>
@@ -366,7 +366,7 @@ function Kurulmamis(props: {
             <button type="button" className="b" disabled={busy || !ready} onClick={props.onSubmit}>
               {busy ? 'Kuruluyor…' : 'Yedek diskini kur'}
             </button>
-            <button type="button" className="b ghost" onClick={props.onCancel}>
+            <button type="button" className="b" onClick={props.onCancel}>
               Vazgeç
             </button>
           </div>
@@ -634,7 +634,7 @@ function Kilitli(props: {
           {/* ÇIKARMAK, YALNIZ KURTARMA DİSKLERİNDE. Cihazın kendi diskini "çıkarmak" ayarlarını
               da silmek olurdu; onun karşılığı kilitlemek. */}
           {target.recoveryOnly && (
-            <button type="button" className="b ghost" disabled={busy} onClick={props.onRelease}>
+            <button type="button" className="b" disabled={busy} onClick={props.onRelease}>
               Diski çıkar
             </button>
           )}
@@ -658,7 +658,7 @@ function Kilitli(props: {
           >
             {busy ? 'Açılıyor…' : 'Aç'}
           </button>
-          <button type="button" className="b ghost" onClick={props.onCancel}>
+          <button type="button" className="b" onClick={props.onCancel}>
             Vazgeç
           </button>
         </div>
@@ -764,7 +764,7 @@ function Acik(props: {
           <button type="button" className="b" disabled={busy} onClick={props.onRelease}>
             Diski çıkar
           </button>
-          <button type="button" className="b ghost" disabled={busy} onClick={props.onLock}>
+          <button type="button" className="b" disabled={busy} onClick={props.onLock}>
             Kilitle
           </button>
           <span className="note">
@@ -777,7 +777,7 @@ function Acik(props: {
           <button type="button" className="b" disabled={busy} onClick={props.onRunNow}>
             Şimdi yedek al
           </button>
-          <button type="button" className="b ghost" disabled={busy} onClick={props.onLock}>
+          <button type="button" className="b" disabled={busy} onClick={props.onLock}>
             Kilitle
           </button>
           <span className="note">
@@ -870,17 +870,13 @@ function Gezgin({ notify }: { notify: Notify }): React.JSX.Element {
           {path.length > 0 && (
             <>
               {' · '}
-              <button
-                type="button"
-                className="b ghost"
-                onClick={() => setPath((p) => p.slice(0, -1))}
-              >
+              <button type="button" className="b" onClick={() => setPath((p) => p.slice(0, -1))}>
                 ↑ yukarı
               </button>
             </>
           )}
         </span>
-        <button type="button" className="b ghost" onClick={() => setReloadKey((k) => k + 1)}>
+        <button type="button" className="b" onClick={() => setReloadKey((k) => k + 1)}>
           ⟳
         </button>
       </div>
@@ -906,7 +902,7 @@ function Gezgin({ notify }: { notify: Notify }): React.JSX.Element {
                   {entry.directory ? (
                     <button
                       type="button"
-                      className="b ghost"
+                      className="b"
                       onClick={() => setPath((p) => [...p, entry.name])}
                     >
                       {entry.name}/
