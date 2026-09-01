@@ -1915,6 +1915,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/power/reboot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cihazi yeniden baslat
+         * @description Guc menusunde "Yenile" yazan bir dugme vardi ve yalnizca TARAYICI SAYFASINI tazeliyordu.
+         *     Bir guc simgesinin altinda "yenile" yazmasi, yapmadigi bir seyi vaat etmekti.
+         *
+         *     YALNIZ KURUCU YONETICI. Kutuyu kapatmak, o kutudaki herkesin isini kesiyor.
+         *
+         *     PAROLA ISTENMIYOR, guncelleme uygulamaktan farkli olarak: yeniden baslatmak veri
+         *     kaybettirmiyor ve geri alinabilir: ekrandaki onay kutusu yetiyor. Ayni kokenden gelmesi
+         *     ise sart, cunku bu govdesi olmayan ve tek cagriyla etki eden bir islem.
+         *
+         *     202: istek systemd'ye birakildi, kapanma ondan sonra basliyor. Ajanin susmasi bu tek
+         *     islemde hata sayilmiyor: kapanma basladiysa olacak olan sey zaten bu.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Yeniden baslatma istegi kabul edildi */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/system/storage": {
         parameters: {
             query?: never;

@@ -24,7 +24,7 @@ import { useSnapshot, type Snapshot } from './snapshot.js';
 import { Tasks } from './Tasks.js';
 import { Tiles } from './Tiles.js';
 import { Transfers } from './Transfers.js';
-import { Glyph, toneRgb, Toasts, useToasts, Win, type Tone } from './ui.js';
+import { ConfirmBox, Glyph, toneRgb, Toasts, useToasts, Win, type Tone } from './ui.js';
 import { Audit } from './Audit.js';
 import { Processes } from './Processes.js';
 import { System } from './System.js';
@@ -547,6 +547,7 @@ function Desktop({
   const [failed, setFailed] = useState(false);
   const [pane, setPane] = useState<PaneId | null>(paneFromHash);
   const [dockOpen, setDockOpen] = useState(false);
+  const [rebootAsk, setRebootAsk] = useState(false);
   const mobile = useMobile();
   const [powerOpen, setPowerOpen] = useState(false);
   const { toasts, push, dismiss } = useToasts();
@@ -826,12 +827,38 @@ function Desktop({
                   Yalnız telefonda ÇİZİLİYOR, gizlenmiyor: gizlenen bir dosya gezgini yine de
                   klasör listesini ister, yani masaüstünde kimsenin görmediği bir istek olurdu. */}
               {mobile && (
-                <section className="card mfm">
+                <section
+                  className="card mfm"
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Dosyaları tam ekran aç"
+                  onClick={() => openPane('files')}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    openPane('files');
+                  }}
+                >
                   <div className="ch">
                     <Glyph tone="iris">🗂</Glyph>
                     <span className="tt">Dosyalar</span>
+                    <span className="st">tam ekran aç</span>
                   </div>
-                  <div className="wb">
+                  {/* ── ÖNİZLEME, KENDİ BAŞINA BİR GEZGİN DEĞİL ──────────────────────────
+                      Kartın tamamı tek bir düğme: nereye dokunulursa dokunulsun dosyalar tam
+                      ekran açılıyor. İçerideki liste bu yüzden dokunuşu YUTMUYOR
+                      (`pointer-events: none`, stil sayfasında) — yutsaydı kartın yarısı düğme,
+                      yarısı değil olurdu ve hangi yarının hangisi olduğunu kullanıcı ancak
+                      deneyerek öğrenirdi.
+
+                      `inert` ve `aria-hidden` aynı cümlenin klavye ve ekran okuyucu tarafı:
+                      önizlemenin içindeki düğmeler sekme sırasında görünmüyor ve okuyucuya
+                      sayılmıyor. Onlar olmadan kart, içinde başka düğmeler barındıran bir düğme
+                      olurdu — hem erişilebilirlik taraması hem de klavye için bozuk bir şekil.
+
+                      Gerçek gezgin bir dokunuş ötede ve tam ekran; burada duran şey onun canlı
+                      önizlemesi. */}
+                  <div className="wb" inert aria-hidden>
                     <Files notify={push} isAdmin={isAdmin} onUnauthenticated={onUnauthenticated} />
                   </div>
                 </section>
@@ -902,19 +929,30 @@ function Desktop({
 
       <div className={powerOpen ? 'pmenu top on' : 'pmenu top'} ref={powerMenuRef}>
         <div className="pmh">Oturum</div>
-        <button
-          type="button"
-          className="pm"
-          onClick={() => {
-            setPowerOpen(false);
-            window.location.reload();
-          }}
-        >
-          <span className="g" style={{ background: tint('cool', 0.24) }} aria-hidden>
-            ↻
-          </span>
-          Yenile
-        </button>
+        {/* ── "YENİLE" DEĞİL, "YENİDEN BAŞLAT" ────────────────────────────────────────
+            Burada "Yenile" yazıyordu ve yalnızca TARAYICI SAYFASINI tazeliyordu. Bir güç
+            simgesinin altında duran düğmenin yaptığı iş bu olamaz: cihazın sahibinin oradan
+            beklediği şey cihazın kendisinin yeniden başlaması, ve düğme yapmadığı bir şeyi
+            vaat ediyordu.
+
+            YALNIZ YÖNETİCİYE GÖSTERİLİYOR. Uç zaten kurucu yöneticiden başkasını reddediyor;
+            herkese gösterip 403 aldırmak, cihazın yapamayacağı bir şeyi vaat eden bir düğme
+            olurdu — alt bardaki yöneticiye özel pencerelerle aynı kural. */}
+        {isAdmin && (
+          <button
+            type="button"
+            className="pm"
+            onClick={() => {
+              setPowerOpen(false);
+              setRebootAsk(true);
+            }}
+          >
+            <span className="g" style={{ background: tint('cool', 0.24) }} aria-hidden>
+              ↻
+            </span>
+            Yeniden başlat
+          </button>
+        )}
         <button
           type="button"
           className="pm danger"
@@ -966,6 +1004,33 @@ function Desktop({
             onUnauthenticated={onUnauthenticated}
           />
         </Win>
+      )}
+
+      {rebootAsk && (
+        <ConfirmBox
+          title="Cihaz yeniden başlatılsın mı?"
+          body={
+            'Cihaz kapanıp yeniden açılacak. Bu sırada paylaşımlar, yüklemeler ve bu ekran ' +
+            'birkaç dakika boyunca erişilemez olacak; süren bir yükleme varsa yarıda kalır.'
+          }
+          yesLabel="Yeniden başlat"
+          danger
+          onNo={() => setRebootAsk(false)}
+          onYes={() => {
+            setRebootAsk(false);
+            void (async () => {
+              const { error } = await api.POST('/system/power/reboot', {});
+              // AJANIN SUSMASI BEKLENEN BİR SONUÇ: kapanma başladıysa cevap gelmeyebilir, ve o
+              // durumda "başlatılamadı" demek olan bitenin tam tersini söylemek olurdu. Yalnız
+              // sunucunun AÇIKÇA reddettiği durum hata sayılıyor.
+              if (error !== undefined) {
+                push('error', 'Cihaz yeniden başlatılamadı.');
+                return;
+              }
+              push('ok', 'Cihaz yeniden başlatılıyor. Birkaç dakika sonra tekrar bağlanın.');
+            })();
+          }}
+        />
       )}
 
       <Toasts toasts={toasts} dismiss={dismiss} />

@@ -2,6 +2,8 @@ import {
   Controller,
   ForbiddenException,
   Get,
+  HttpCode,
+  Post,
   Req,
   ServiceUnavailableException,
   UnauthorizedException,
@@ -9,7 +11,9 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 
-import { AgentUnavailableError } from '../agent/agent.service.js';
+import { AgentService, AgentUnavailableError } from '../agent/agent.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import { requireSameOrigin } from '../auth/origin.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import {
   SystemService,
@@ -21,7 +25,65 @@ import {
 @Controller('system')
 @UseGuards(SessionGuard)
 export class SystemController {
-  constructor(private readonly system: SystemService) {}
+  constructor(
+    private readonly system: SystemService,
+    private readonly agent: AgentService,
+    private readonly audit: AuditService,
+  ) {}
+
+  /**
+   * POST /system/power/reboot — cihazı yeniden başlat.
+   *
+   * ── NEDEN VAR ────────────────────────────────────────────────────────────────────────────
+   *
+   * Güç menüsünde "Yenile" yazan bir düğme vardı ve yalnızca TARAYICI SAYFASINI tazeliyordu.
+   * Cihazın sahibinin oradan beklediği şey cihazın kendisinin yeniden başlaması; bir güç
+   * simgesinin altında "yenile" yazması, yapmadığı bir şeyi vaat etmekti.
+   *
+   * ── YÖNETİCİ, VE AYNI KÖKEN ──────────────────────────────────────────────────────────────
+   *
+   * Kurucu yönetici dışında kimse çağıramıyor — kutuyu kapatmak, o kutudaki herkesin işini
+   * kesiyor. `requireSameOrigin`, oturum çerezini taşıyan başka bir sekmenin sessizce cihazı
+   * yeniden başlatamaması için: bu, gövdesi olmayan ve tek çağrıyla etki eden bir işlem, yani
+   * siteler arası bir isteğin en sevdiği şekil.
+   *
+   * PAROLA İSTENMİYOR, güncelleme uygulamaktan farklı olarak. Yeniden başlatmak veri
+   * kaybettirmiyor ve geri alınabilir bir şey; ekrandaki onay kutusu buna yetiyor. Diski silmek
+   * ya da sürüm değiştirmek gibi geri alınamaz işlemlerde parola istenmeye devam ediyor.
+   *
+   * ── CEVAP DÖNÜYOR, SONRA KUTU GİDİYOR ────────────────────────────────────────────────────
+   *
+   * `systemctl reboot` isteği systemd'ye bırakıp çıkıyor, yani 202 gerçekten dönüyor. Ajanın
+   * ulaşılamaz olması da bu tek işlemde bir hata değil: kapanma başlamışsa olacak olan şey zaten
+   * bu, ve kullanıcıya "yeniden başlatılamadı" demek yanlış olurdu.
+   */
+  @Post('power/reboot')
+  @HttpCode(202)
+  async reboot(@Req() request: AuthenticatedRequest): Promise<void> {
+    const session = request.depsis;
+    if (session === undefined) throw new UnauthorizedException();
+    requireSameOrigin(request);
+    if (!(await this.system.isSystemAdministrator(session.userId))) {
+      throw new ForbiddenException();
+    }
+
+    const correlationId = randomUUID();
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'system.reboot',
+      target: { kind: 'system', id: 'reboot' },
+      summary: 'Cihaz yeniden başlatılıyor.',
+      correlationId,
+    });
+
+    try {
+      await this.agent.call({ op: 'reboot_system' }, 'rebooting the appliance', correlationId);
+    } catch (error) {
+      // AJANIN SUSMASI BURADA BİR HATA DEĞİL. Kapanma başladıysa soket zaten gidiyor, ve
+      // kullanıcıya "yeniden başlatılamadı" demek, olan bitenin tam tersini söylemek olurdu.
+      if (!(error instanceof AgentUnavailableError)) throw error;
+    }
+  }
 
   /**
    * GET /system/telemetry — hardware and storage status.

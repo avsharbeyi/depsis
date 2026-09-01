@@ -112,7 +112,38 @@ export class PreferencesService {
     // `{}` and 200, not 404. "This person has not chosen a background" is the default state of
     // every new account, and an error code would make every client treat the normal case as a
     // failure it has to special-case.
-    return rows[0]?.data ?? {};
+    const stored = rows[0]?.data ?? {};
+
+    // ── ARTIK VAR OLMAYAN BİR DUVAR KÂĞIDI OKUMADA DÜŞÜYOR ────────────────────────────────
+    //
+    // SAHADA OLAN. Kullanıcı duvar kâğıdı olarak bir dosya seçmişti; o dosya sonradan yok oldu.
+    // Belge ölü kimliği taşımaya devam etti, ve yazma yolu haklı olarak "böyle bir dosya yok"
+    // diye reddetti (422). Ama bu belge BÜTÜN olarak yazılıyor: kullanıcı bir kısayolu
+    // sürüklediğinde de aynı ölü kimlik yeniden gönderiliyor ve aynı reddi alıyor. Sonuç,
+    // duvar kâğıdıyla hiç ilgisi olmayan bir işlemin — kısayol düzeni — kalıcı olarak
+    // çalışmaması, ve ekranın bunun sebebini söyleyememesi.
+    //
+    // Çıkış yolu okuma tarafında: ölü kimlik istemciye HİÇ VERİLMİYOR, yani bir sonraki yazma
+    // onu taşımıyor ve kilit kendiliğinden açılıyor. Kullanıcının gördüğü şey duvar kâğıdının
+    // varsayılana dönmesi — ki dosya gerçekten yok olduğu için ekranda zaten olan buydu.
+    //
+    // KAYIT DEĞİŞTİRİLMİYOR. Okuma bir yazma yoluna dönmemeli; satır bir sonraki gerçek yazmada
+    // zaten temiz hâliyle üstüne yazılıyor.
+    if (stored.background?.kind === 'file') {
+      const fileId = stored.background.fileId;
+      const usable =
+        fileId !== undefined &&
+        // Yazma tarafının üç kuralının aynısı: dosya var, klasör değil, ve çöpte değil.
+        (await this.files
+          .find(organizationId, fileId)
+          .then((entry) => entry.kind === 'file' && entry.trashed_at === null)
+          .catch(() => false));
+      if (!usable) {
+        const { background: _dead, ...rest } = stored;
+        return rest;
+      }
+    }
+    return stored;
   }
 
   /**

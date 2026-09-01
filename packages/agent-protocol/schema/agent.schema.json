@@ -899,6 +899,20 @@
       ]
     },
     {
+      "description": "Cihazı yeniden başlatır.\n\n── NEDEN AJANDA VE NEDEN TEK BİR İŞLEM ──────────────────────────────────────────────\n\nYeniden başlatmak kök yetki istiyor ve API'nin bunu kendi başına yapması mümkün değil.\nADR-0006 kabuk çağrısını yasakladığı için bu, adı ve argümanları burada SABİT olan kapalı\nbir işlem: `systemctl reboot`, işlenensiz. Çağıran ne bir birim adı ne bir gecikme\nveriyor — verebilseydi, \"yeniden başlat\" düğmesi cihazda herhangi bir birimi çalıştırmanın\nyolu olurdu.\n\n── CEVAP DÖNÜYOR, SONRA CİHAZ GİDİYOR ───────────────────────────────────────────────\n\n`systemctl reboot` systemd'ye bir istek bırakıp hemen çıkıyor; kapanma ondan sonra\nbaşlıyor. Yani bu işlem gerçekten cevap veriyor ve arayüz \"yeniden başlatılıyor\"\ndiyebiliyor. Cevabın gelmemesi de bir hata değil — cihaz kapanıyorsa zaten olan şey bu —\nve o ihtimali çağıran tarafın hoş görmesi gerekiyor.\n\n── KİM ÇAĞIRABİLİR ──────────────────────────────────────────────────────────────────\n\nAjan yalnız API'nin kullanıcısını tanıyor; \"hangi insan\" sorusunun cevabı API'de. Bu\nişlemi yalnız yöneticiye açmak API'nin sorumluluğu, ve orada öyle yapılıyor.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "reboot_system"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    {
       "description": "Takılabilecek havuzları listeler. İşlenen YOK.\n\n── YANMIŞ CİHAZ ─────────────────────────────────────────────────────────────────────\n\nCihazın sahibinin şartı: *\"sistem diski ve depolama diski yansa bile yedek diski eğer\nşifre biliniyorsa kullanılabilir olmalı.\"* Bu işlem o cümlenin ilk adımı: yeni bir cihaza\ntakılan diskte ne olduğunu, hiçbir parola sorulmadan, söylüyor.\n\nKimlik bilgisi TAŞIMIYOR. Havuz adı, durumu ve devralma gerekip gerekmediği; kullanıcı\nadı, kuruluş adı, paylaşım adı yok — o bilgiler diskin şifreli yarısında ve orada\nkalıyorlar.",
       "type": "object",
       "properties": {
@@ -2660,6 +2674,19 @@
         "status",
         "healthy",
         "raw"
+      ]
+    },
+    {
+      "description": "Yeniden başlatma isteği systemd'ye bırakıldı.\n\n\"Kapandı\" demiyor, çünkü kapanma bu cevaptan sonra başlıyor; söylediği şey isteğin kabul\nedildiği.",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "reboot_scheduled"
+        }
+      },
+      "required": [
+        "status"
       ]
     },
     {

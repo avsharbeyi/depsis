@@ -2022,6 +2022,15 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
+    /// Cihazı yeniden başlatır.
+    ///
+    /// İŞLENENSİZ, ve argümanları burada sabit. Çağıran bir birim adı ya da gecikme verebilseydi,
+    /// "yeniden başlat" düğmesi cihazda herhangi bir birimi çalıştırmanın yolu olurdu.
+    fn reboot_system(&self) -> Result<Response, SeamError> {
+        self.runner.run(bin::SYSTEMCTL, &["reboot"])?;
+        Ok(Response::RebootScheduled {})
+    }
+
     /// Takılabilecek havuzları listeler.
     ///
     /// HİÇ HAVUZ OLMAMASI BİR HATA DEĞİL, ve bu yalnız bir incelik değil: sağlıklı bir cihazda
@@ -3422,6 +3431,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     *max_bytes,
                 )
             }
+            Request::RebootSystem {} => self.reboot_system(),
             Request::ScanImportablePools {} => self.scan_importable_pools(),
             Request::ImportBackupPool { pool, adopt } => {
                 self.import_backup_pool(pool.as_str(), *adopt)
@@ -4997,6 +5007,29 @@ mod tests {
         );
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
         assert!(!h.meta_path().join("buyuk.txt").exists());
+    }
+
+    /// Yeniden başlatma TEK BİR KOMUT, ve argümanları çağırandan gelmiyor.
+    ///
+    /// Testin ölçtüğü şey argümanın kendisi: bir birim adı ya da gecikme çağırana açık olsaydı,
+    /// "yeniden başlat" düğmesi cihazda herhangi bir birimi çalıştırmanın yolu olurdu.
+    #[test]
+    fn yeniden_baslatma_tek_bir_komut() {
+        let h = Harness::with_share("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"reboot_system"}"#,
+            peer(API_UID),
+            "yb1",
+            "yeniden baslat",
+        );
+
+        assert!(matches!(resp, Response::RebootScheduled {}), "{resp:?}");
+        let argv = r.call(0).expect("bir komut kosmali");
+        assert_eq!(&argv[1..], ["reboot"]);
+        assert!(r.call(1).is_none(), "tek bir komut kosmali");
     }
 
     /// Aynı içerik: doğrulama "aynı" diyor ve ne kadarını okuduğunu söylüyor.

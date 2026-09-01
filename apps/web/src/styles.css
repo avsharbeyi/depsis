@@ -3260,8 +3260,28 @@ label textarea,
     gap: 8px;
     padding: 11px 13px 8px;
   }
+  /* ── SELAMLAMA VE SAĞDAKİ DÜĞMELER AYNI SATIRDA ───────────────────────────
+     Selamlama satırın tamamını kaplıyordu; geri kalan her şey ikinci satıra düşüyor ve orada da
+     sığmayınca güç düğmesi ÜÇÜNCÜ satıra kayıyordu.
+
+     Artık selamlama esniyor ve büzülebiliyor — `min-width: 0` olmadan uzun bir kullanıcı adı onu
+     yine büzülmez yapardı — zil ile iki düğme onun sağında kalıyor, ve yalnız hap göstergeler alt
+     satıra iniyor: okunması en az acil olan şey onlar. */
   .who {
-    width: 100%;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .who .n,
+  .who .s {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .top .sp {
+    display: none;
+  }
+  .top .pill {
+    order: 3;
   }
   .who .n {
     font-size: 13.5px;
@@ -3299,15 +3319,24 @@ label textarea,
      `min-height` bir taban: yatay tutulan bir telefonda `100dvh` çok kısa kalıyor ve dosya
      listesi iki satıra sıkışıyordu. */
   .mfm {
-    /* ── NEDEN BAŞLIKTAN ÇIKARMA DEĞİL DE 70dvh ──────────────────────────────
-       Başlık telefonda satır kaydırıyor ve boyu yazı tipine, kullanıcı adının uzunluğuna, dile
-       göre değişiyor; ondan çıkarma yapan bir hesap bazı cihazlarda tam kenara denk gelir, kimi
-       cihazlarda taşardı. Görünen alanın sabit bir oranı her başlık boyunda çalışıyor.
-
-       Altta kalan boşluk ayrıca İSTENEN bir şey: durum kutularının üst kenarı görünüyor ve
-       aşağıda devamı olduğunu söylüyor. */
-    height: 70dvh;
-    min-height: 320px;
+    /* ── UZUNLUK ─────────────────────────────────────────────────────────────
+       Oran yerine görünen alandan çıkarma: 70dvh kırpılmış duruyordu, çünkü kartın kendi
+       başlığı ve kenar boşlukları da o oranın içinden çıkıyordu. Buradaki sayı üst barın iki
+       satırlık hâlini ve boşlukları karşılıyor. Taban da var: yatay tutulan bir telefonda
+       görünen alan çok kısalıyor. */
+    height: calc(100dvh - 132px);
+    min-height: 380px;
+    cursor: pointer;
+  }
+  /* Kartın tamamı tek bir düğme; içerideki liste dokunuşu yutmuyor. Yutsaydı kartın yarısı
+     düğme, yarısı değil olurdu ve hangi yarının hangisi olduğunu kullanıcı ancak deneyerek
+     öğrenirdi. */
+  .mfm .wb {
+    pointer-events: none;
+  }
+  .mfm .ch .st {
+    margin-left: auto;
+    white-space: nowrap;
   }
 
   .mfm .wb {

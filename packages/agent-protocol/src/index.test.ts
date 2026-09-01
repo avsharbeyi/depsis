@@ -199,6 +199,10 @@ describe('the emitted agent schema', () => {
       'publish_samba_config',
       'publish_transfer',
       'read_smart_summary',
+      // Cihazi yeniden baslatmak. Islenensiz: cagiran bir birim adi ya da gecikme
+      // verebilseydi, "yeniden baslat" dugmesi cihazda herhangi bir birimi calistirmanin
+      // yolu olurdu. Guc menusundeki eski "Yenile" yalnizca TARAYICI sayfasini tazeliyordu.
+      'reboot_system',
       // ONE entry, never a tree. The recursive delete the permanent-delete endpoint appears to
       // need is deliberately absent: an operation whose blast radius the caller chooses is `rm -rf`
       // behind a typed name, in the one process that can reach every tenant's data. The API walks
@@ -370,7 +374,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(37);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(38);
   });
 
   it('agrees with the number the agent actually reports', () => {
