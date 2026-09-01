@@ -761,7 +761,7 @@ function Desktop({
               {/* Not rendered until the saved layout has actually been read. The field commits
                   every arrangement with a PUT of the whole preferences document, so a desk drawn
                   from placeholders is one click away from overwriting the real one — and the
-                  "Boş bir yere tıklayarak kısayol ekleyin" hint would meanwhile be asserting that
+                  "Boş bir yere çift tıklayarak kısayol ekleyin" hint would meanwhile be asserting that
                   a desk nobody has read yet is empty. */}
               {prefsLoaded ? (
                 <Shortcuts prefs={prefs} save={save} onOpen={openPane} notify={push} />
