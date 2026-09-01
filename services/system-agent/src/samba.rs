@@ -370,6 +370,24 @@ pub fn render(sections: &[Section]) -> String {
         // none of the access control §20 enforces on /files. One line per section closes that,
         // and it closes it in the file DEPSIS actually controls.
         out.push_str("\tguest ok = no\n");
+        // ── MASKELER AÇIK, KARARI ACL VERİYOR ───────────────────────────────────────────
+        //
+        // Samba'nın varsayılanı `create mask = 0744`, `directory mask = 0755` — ve bir maske
+        // yalnız bit KALDIRIYOR. Miras alınan ACL'de gruba verilmiş yazma hakkı bu maskeden
+        // geçemiyor, yani izinler ekranında verilen hak diskte hiç oluşmuyor.
+        //
+        // Debian'ın kendi `smb.conf`unda bu değerler daha da dar (`0700`) ve DEPSIS o dosyayı
+        // yazmıyor — operatörün dosyası. Bu yüzden değer BURADA, DEPSIS'in kendi bölümünde,
+        // açıkça yazılıyor: bölüm ayarı global ayarı geçersiz kılıyor.
+        //
+        // 0770, 0777 değil: "diğer" için hiçbir bit açılmıyor. Erişimi belirleyen şey kiracı ve
+        // klasör grupları; paylaşım ağacına o gruplardan birine ait olmayan bir hesabın erişimi
+        // hiçbir yoldan açılmamalı.
+        out.push_str("\tcreate mask = 0770\n");
+        out.push_str("\tdirectory mask = 0770\n");
+        // Yeni dosya ve klasörler üst klasörün ACL'ini devralıyor. `create mask` ile birlikte
+        // çalışıyor: maske neyin geçebileceğini, bu da neyin miras alınacağını söylüyor.
+        out.push_str("\tinherit acls = yes\n");
         // §6.2's grant walk, arriving at the front door.
         //
         // WHAT THIS DOES AND DOES NOT DO. Who may read which folder is enforced by the POSIX ACL
@@ -969,6 +987,31 @@ mod tests {
             valid_users: Vec::new(),
         }]);
         assert!(writable.contains("\tread only = no\n"), "got: {writable}");
+    }
+
+    /// Maskeler AÇIK yazılıyor, ve bu bir tercih değil bir zorunluluk.
+    ///
+    /// Samba'nın varsayılanı `0744`/`0755` ve bir maske yalnız bit KALDIRIYOR: miras alınan
+    /// ACL'de gruba verilmiş yazma hakkı o maskeden geçemiyor. Sahada bunun bedeli, ağ
+    /// sürücüsünden yüklenen bir klasör dolusu dosyanın `-rw-------` inmesi ve sahibinden başka
+    /// kimsenin — ikinci bir hesabın, arayüzün indirme düğmesinin — okuyamaması oldu.
+    ///
+    /// "Diğer" için hiçbir bit açılmıyor: erişimi kiracı ve klasör grupları belirliyor.
+    #[test]
+    fn maskeler_gruba_acik_digerine_kapali_yaziliyor() {
+        let text = render(&[Section {
+            name: "ev".to_string(),
+            path: "/srv/depsis/ev".to_string(),
+            read_only: false,
+            valid_users: Vec::new(),
+        }]);
+        assert!(text.contains("	create mask = 0770
+"), "got: {text}");
+        assert!(text.contains("	directory mask = 0770
+"), "got: {text}");
+        assert!(text.contains("	inherit acls = yes
+"), "got: {text}");
+        assert!(!text.contains("0777"), "got: {text}");
     }
 
     #[test]
