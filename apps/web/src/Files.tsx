@@ -515,6 +515,19 @@ export function Files({
   const [permissionsFor, setPermissionsFor] = useState<PermissionTarget | null>(null);
   const [shares, setShares] = useState<SharePick[] | null>(null);
   const [shareId, setShareId] = useState<string | undefined>(undefined);
+  /**
+   * Bu paylaşımda geri dönülecek bir nokta VAR MI.
+   *
+   * Sahibinin sözü: *"yedek diski olmadığı için dosyalardaki yedekler kısmına gerek yok, yedek
+   * diski yarattığımızda ortaya çıkan bir şey olsun o."* Düğme aslında YEDEK DİSKİNİ değil, bu
+   * paylaşımın anlık görüntülerini açıyor — ama istenen ilke düğmenin arkasında bir şey olması,
+   * ve o ilke buraya olduğu gibi uyuyor: hiç anlık görüntü yokken düğme bir şey vaat edip boş bir
+   * pencere açıyordu.
+   *
+   * `true` başlangıç değeri ve bu bilerek: cevap gelene kadar düğme DURUYOR. Tersi olsaydı,
+   * ekranın her açılışında düğme bir an yok olup sonra belirirdi.
+   */
+  const [restorable, setRestorable] = useState(true);
   const shareQuery = shareId === undefined ? {} : { shareId };
 
   useEffect(() => {
@@ -528,6 +541,27 @@ export function Files({
       cancelled = true;
     };
   }, []);
+
+  /* ── geri dönülecek bir nokta var mı ──
+     AJANA ULAŞILAMADIĞINDA DÜĞME DURUYOR, ve bu ucun kendi belgesindeki uyarının aynısı: boş
+     liste "hiç görüntü yok" demek, `available: false` ise "öğrenemedik" demek. İkisini bir
+     tutmak, bir dakikalığına düşmüş bir ajanın bütün geri dönüş noktalarını yokmuş gibi
+     göstermesi olurdu. */
+  useEffect(() => {
+    const share = shares?.find((item) => item.id === shareId) ?? shares?.[0];
+    if (share === undefined) return;
+    let cancelled = false;
+    void (async () => {
+      const { data } = await api.GET('/shares/{shareId}/snapshots', {
+        params: { path: { shareId: share.id } },
+      });
+      if (cancelled || data === undefined) return;
+      setRestorable(!data.available || data.items.length > 0);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [shares, shareId]);
 
   /* ── the listing ── */
   useEffect(() => {
@@ -1574,18 +1608,24 @@ export function Files({
           <span className="l">Çöp</span>
           <span className="c">{counts.trash ?? '—'}</span>
         </button>
-        <button
-          type="button"
-          className="qf sm"
-          disabled={shares === null || shares.length === 0}
-          title="Bu paylaşımın yedeklerine (anlık görüntülerine) göz at"
-          onClick={() => setBackups(true)}
-        >
-          <span className="g" style={tint('cool', 0.2)} aria-hidden>
-            🕘
-          </span>
-          <span className="l">Yedekler</span>
-        </button>
+        {/* GERİ DÖNÜLECEK BİR NOKTA YOKKEN HİÇ ÇİZİLMİYOR — kapalı bir düğme olarak değil, hiç.
+            Kapalı bir düğme "bir gün burada bir şey olacak" diyor ve kullanıcıyı onu açmanın
+            yolunu aramaya gönderiyor; olmayan bir düğme hiçbir şey vaat etmiyor. İlk anlık
+            görüntü alındığında kendiliğinden beliriyor. */}
+        {restorable && (
+          <button
+            type="button"
+            className="qf sm"
+            disabled={shares === null || shares.length === 0}
+            title="Bu paylaşımın yedeklerine (anlık görüntülerine) göz at"
+            onClick={() => setBackups(true)}
+          >
+            <span className="g" style={tint('cool', 0.2)} aria-hidden>
+              🕘
+            </span>
+            <span className="l">Yedekler</span>
+          </button>
+        )}
       </div>
 
       {scanBusy && (
