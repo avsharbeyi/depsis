@@ -1,7 +1,7 @@
 import { freemem, totalmem } from 'node:os';
 import { describe, expect, it } from 'vitest';
 
-import { parseMemAvailable, readMemory } from './host-metrics.js';
+import { parseMemAvailable, readCpuTemperature, readMemory } from './host-metrics.js';
 
 /**
  * A real /proc/meminfo head, from Debian 13 under WSL2. Kept verbatim, including the alignment,
@@ -85,5 +85,69 @@ describe('readMemory', () => {
     // reclaimable slab. Unclamped that is a negative "used", which no dashboard renders sensibly.
     const memory = readMemory(() => `MemAvailable: ${totalmem()} kB\n`);
     expect(memory.usedBytes).toBe(0);
+  });
+});
+
+/**
+ * İşlemci sıcaklığı, enjekte edilen okuyucularla.
+ *
+ * Okuyucular enjekte ediliyor çünkü bu testler Linux'ta da Windows'ta da koşuyor ve `/sys` yalnız
+ * birinde var — gerçek dosya sistemine bakan bir test, hedef platformda bile ölçtüğü şeyi
+ * kanıtlayamazdı (sensörün değeri testin ortasında değişiyor).
+ */
+describe('readCpuTemperature', () => {
+  const hwmon = (chip: string, milli: string) => ({
+    list: (path: string) => (path === '/sys/class/hwmon' ? ['hwmon0'] : []),
+    read: (path: string) => {
+      if (path === '/sys/class/hwmon/hwmon0/name') return chip;
+      if (path === '/sys/class/hwmon/hwmon0/temp1_input') return milli;
+      return null;
+    },
+  });
+
+  it('Intel ve AMD paket sensörünü okuyor', () => {
+    for (const chip of ['coretemp', 'k10temp']) {
+      const { list, read } = hwmon(`${chip}\n`, '41200\n');
+      expect(readCpuTemperature(read, list)).toBe(41);
+    }
+  });
+
+  it('işlemciye ait olmayan bir hwmon yongasını atlıyor', () => {
+    // `nvme` ve `acpitz` de burada görünüyor; birini işlemci diye yazmak, yanlış bir sayıyı
+    // doğru bir etiketle sunmak olurdu.
+    const { list, read } = hwmon('nvme\n', '55000\n');
+    expect(readCpuTemperature(read, list)).toBeUndefined();
+  });
+
+  it('hwmon yoksa termal bölgeye düşüyor, ama yalnız tanıdığı bölgeye', () => {
+    const list = (path: string) =>
+      path === '/sys/class/thermal' ? ['thermal_zone0', 'thermal_zone1'] : [];
+    const read = (path: string) => {
+      if (path === '/sys/class/thermal/thermal_zone0/type') return 'BAT0\n';
+      if (path === '/sys/class/thermal/thermal_zone0/temp') return '31000\n';
+      if (path === '/sys/class/thermal/thermal_zone1/type') return 'x86_pkg_temp\n';
+      if (path === '/sys/class/thermal/thermal_zone1/temp') return '47000\n';
+      return null;
+    };
+    expect(readCpuTemperature(read, list)).toBe(47);
+  });
+
+  it('sensör yoksa yok diyor, sıfır demiyor', () => {
+    // Sanal makinelerin çoğunda termal sensör hiç yok. Sıfır döndürmek, sensörü olmayan bir
+    // kutuyu buz gibi göstermek olurdu.
+    expect(
+      readCpuTemperature(
+        () => null,
+        () => [],
+      ),
+    ).toBeUndefined();
+  });
+
+  it('sürücünün saçmaladığı değerleri atıyor', () => {
+    // Kimi sürücüler sensör hazır değilken 0 ya da devasa bir sayı basıyor.
+    for (const milli of ['0\n', '-4000\n', '9999000\n', 'yok\n']) {
+      const { list, read } = hwmon('coretemp\n', milli);
+      expect(readCpuTemperature(read, list)).toBeUndefined();
+    }
   });
 });

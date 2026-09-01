@@ -4,7 +4,7 @@ import type { OpenApi } from '@depsis/contracts';
 
 import { AgentService, AgentUnavailableError } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
-import { readLoadAverage, readMemory } from './host-metrics.js';
+import { readCpuTemperature, readLoadAverage, readMemory } from './host-metrics.js';
 
 type Schemas = OpenApi.components['schemas'];
 export type Telemetry = Schemas['Telemetry'];
@@ -153,14 +153,19 @@ export class SystemService {
   async telemetry(correlationId: string): Promise<Telemetry> {
     const memory = readMemory();
     const loadAverage = readLoadAverage();
+    // İŞLEMCİ SICAKLIĞI ARTIK OKUNUYOR. Sözleşmede alan vardı, arayüzde onu çizen iki ekran
+    // vardı, ve üreten hiçbir şey yoktu — yani ekranda her zaman "—" yazıyordu. Kaynak `/sys`
+    // altındaki termal alanlar; ajana yeni bir işlem gerekmiyor, çünkü o dosyalar zaten herkes
+    // tarafından okunabilir. Sensörü olmayan bir kutuda `undefined` kalıyor.
+    const temperatureCelsius = readCpuTemperature();
 
     return {
       pools: await this.pools(correlationId),
       disks: await this.disks(correlationId),
-      // temperatureCelsius is absent on purpose: nothing in the agent's operation set reports CPU
-      // temperature. `read_smart_summary` returns a DISK temperature, which is a different sensor,
-      // and putting it here would be mislabelling a real number rather than omitting an unknown one.
-      cpu: loadAverage === undefined ? {} : { loadAverage },
+      cpu: {
+        ...(loadAverage === undefined ? {} : { loadAverage }),
+        ...(temperatureCelsius === undefined ? {} : { temperatureCelsius }),
+      },
       memory,
     };
   }

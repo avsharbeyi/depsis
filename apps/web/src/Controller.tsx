@@ -346,7 +346,11 @@ export function Controller({
                   <th>Cihaz</th>
                   <th>Durum</th>
                   <th>Adres</th>
-                  <th>Kim aldı</th>
+                  {/* "KİM ALDI" SÜTUNU KALDIRILDI. Bir üyeyi kimin yetkilendirdiği, tek
+                      yöneticili bir ev cihazında her satırda aynı adı yazan bir sütun; ve
+                      yetkilendirme kendiliğinden yapıldığında zaten kimsenin adını taşımıyor.
+                      Bilgi kayıtta duruyor: denetim defterinde her yetkilendirmenin kim
+                      tarafından yapıldığı yazılı. */}
                   <th />
                 </tr>
               </thead>
@@ -409,7 +413,6 @@ export function Controller({
                     <td className="m">
                       {member.addresses.length === 0 ? '—' : member.addresses.join(', ')}
                     </td>
-                    <td className="m">{member.authorizedBy ?? 'DEPSIS dışında'}</td>
                     <td>
                       {/* Cihazın kendi satırında yalnız ÇIKAR yok — kendi yetkisini kaldıran
                           cihaz, kendi sunduğu ağdan düşer ve geri yolu kopan bağlantının
