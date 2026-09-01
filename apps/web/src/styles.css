@@ -3326,17 +3326,25 @@ label textarea,
        görünen alan çok kısalıyor. */
     height: calc(100dvh - 132px);
     min-height: 380px;
-    cursor: pointer;
   }
-  /* Kartın tamamı tek bir düğme; içerideki liste dokunuşu yutmuyor. Yutsaydı kartın yarısı
-     düğme, yarısı değil olurdu ve hangi yarının hangisi olduğunu kullanıcı ancak deneyerek
-     öğrenirdi. */
-  .mfm .wb {
-    pointer-events: none;
+  /* Tam ekran: aynı öğe, farklı kap. Ayrı bir pencere açmak yeni bir gezgin demekti — arama
+     kapalı, klasör kökte, seçim boş. Burada değişen tek şey stil, yani az önce yapılan hareket
+     ekranda kalıyor.
+
+     `z-index: 50`, alt bar rozetinin (40) üstünde: tam ekran bir dosya gezgininin üstünde yüzen
+     bir rozet, tam ekran değildir. */
+  .mfm.full {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    height: auto;
+    min-height: 0;
+    border: none;
+    border-radius: 0;
   }
-  .mfm .ch .st {
+  .mfm .mfx {
     margin-left: auto;
-    white-space: nowrap;
+    flex: none;
   }
 
   .mfm .wb {
