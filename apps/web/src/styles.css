@@ -3419,6 +3419,18 @@ label textarea,
     right: 12px;
     top: auto;
     bottom: 12px;
+    /* TELEFONDA TEK GEZİNME YOLU BU ROZET, ve altındaki her şeyin üstünde kalmak zorunda.
+       Sayfa kayarken rozetin altına bir kart geldiğinde tıklama o karta düşüyordu — yani
+       kullanıcı dosya listesini kaydırdıktan sonra başka hiçbir ekrana geçemiyordu. Merdiven
+       zaten kurulu (alt bar 38, menü 39, rozet 40); telefonda rozeti bir basamak daha yukarı
+       almak, sayfanın kendi içeriğinin onu asla örtememesi demek. */
+    z-index: 45;
+  }
+  /* Rozet, kartın sağ alt köşesinin üstünde duruyor. Kartın son satırı onun altında kalmasın
+     diye alta bir güvenli alan bırakılıyor: örtülen bir dosya adı, kullanıcının aradığı dosya
+     olabilir. */
+  .mfm .wb {
+    padding-bottom: 62px;
   }
   .brandbox .nm {
     display: none;
