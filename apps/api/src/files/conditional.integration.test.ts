@@ -129,8 +129,10 @@ describeDb('sorting a folder', () => {
       // (`resim.JPG`, `.jpg` ile aynı grupta olmalı).
       const kind = (
         await q.query<{ id: string }>(
-          `INSERT INTO file_entries (organization_id, share_id, parent_id, kind, name, path)
-                VALUES ($1, $2, NULL, 'folder', 'tipler', '/tipler') RETURNING id::text AS id`,
+          `INSERT INTO file_entries
+             (organization_id, share_id, parent_id, kind, name, path, size_bytes, updated_at)
+           VALUES ($1, $2, NULL, 'folder', 'tipler', '/tipler', 0, now() - interval '2 day')
+           RETURNING id::text AS id`,
           [org, share],
         )
       )[0]?.id;
@@ -227,7 +229,14 @@ describeDb('sorting a folder', () => {
   it('sorts by modification time, newest first', async () => {
     // Descending, which the contract does not specify: somebody who sorts by date is asking what
     // changed last, and ascending would answer with the oldest thing in the folder.
-    expect(await namesIn('modified')).toEqual(['b.bin', 'a.bin', 'c.bin', 'zeta', 'alfa']);
+    expect(await namesIn('modified')).toEqual([
+      'b.bin',
+      'a.bin',
+      'c.bin',
+      'zeta',
+      'tipler',
+      'alfa',
+    ]);
   });
 
   it('sorts by size, largest first', async () => {
@@ -235,7 +244,7 @@ describeDb('sorting a folder', () => {
     expect(names.slice(0, 3)).toEqual(['a.bin', 'c.bin', 'b.bin']);
     // The two folders are both 0 bytes, so `id DESC` decides between them and the ids are random.
     // Asserting a fixed order there would be asserting the uuid generator's output.
-    expect(names.slice(3).sort()).toEqual(['alfa', 'zeta']);
+    expect(names.slice(3).sort()).toEqual(['alfa', 'tipler', 'zeta']);
   });
 
   it('pages every sort without repeating or skipping a row', async () => {

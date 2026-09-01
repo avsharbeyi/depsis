@@ -1550,25 +1550,6 @@ export function Files({
             </>
           )}
         </span>
-        {/* SIRALAMA, ADRES ÇUBUĞUNUN SAĞINDA. Bir dosya yöneticisinde sıra bir görünüm ayarı, bir
-            araç değil: yükleme ve silme düğmelerinin arasında durursa her ikisiyle karıştırılıyor.
-            Çöpte gizli — çöp listesi sıralanabilir bir klasör değil, ve olmayan bir seçeneği
-            kapalı göstermek de bir şey vaat etmek olurdu. */}
-        {!trashed && !searching && (
-          <select
-            className="srt"
-            aria-label="Sıralama"
-            title="Sıralama"
-            value={order}
-            onChange={(event) => setOrder(event.target.value as SortKey)}
-          >
-            {SORTS.map((item) => (
-              <option key={item.key} value={item.key}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        )}
       </div>
 
       {shares !== null && shares.length > 1 && (
@@ -2106,6 +2087,34 @@ export function Files({
 
       <div className="ffoot">
         <span className="info">{storage ?? '…'}</span>
+        {/* ── SIRALAMA, SAYACIN YANINDA ────────────────────────────────────────────────────
+            Bir GÖRÜNÜM ayarı, bir araç değil: yükleme ve silme düğmelerinin arasında dursaydı
+            her ikisiyle karıştırılırdı. Alt çubuk zaten görünümün özeti — "48 öğe" — ve sıra
+            oraya ait.
+
+            ADRES ÇUBUĞUNDA DEĞİL, ve bu ÖLÇÜLDÜ. Orada duran seçici `.path`i daraltıyordu; 360
+            piksellik bir ekranda kırıntı yolu kırpılıyor, ve kırpılan düğmenin merkezine yapılan
+            tıklama düğmeye değil onu kırpan `.path`e düşüyordu — yani "Dosyalarım"a basılamaz
+            oluyordu. Alt çubuk dar ekranda alt satıra sarıyor (`flex-wrap`), yani kimseden
+            genişlik çalmıyor.
+
+            Çöpte ve aramada gizli: ikisi de sıralanabilir bir klasör değil, ve olmayan bir
+            seçeneği kapalı göstermek de bir şey vaat etmek olurdu. */}
+        {!trashed && !searching && (
+          <select
+            className="srt"
+            aria-label="Sıralama"
+            title="Sıralama"
+            value={order}
+            onChange={(event) => setOrder(event.target.value as SortKey)}
+          >
+            {SORTS.map((item) => (
+              <option key={item.key} value={item.key}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        )}
         <span className="val">{meta}</span>
       </div>
 

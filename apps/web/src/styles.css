@@ -785,29 +785,6 @@ select.pill.bad {
   opacity: 0.35;
   cursor: default;
 }
-/* Sıralama seçici, adres çubuğunun sağ ucunda.
-   `flex: none` ve `margin-left: auto`: yol uzadıkça kısalan şey yol olmalı, seçici değil — bir
-   klasör adı kırpılabilir, "Boyut" kırpılamaz. */
-.addr .srt {
-  flex: none;
-  margin-left: auto;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid var(--edge);
-  border-radius: 999px;
-  color: var(--ink2);
-  font: inherit;
-  font-size: 11.5px;
-  padding: 3px 7px;
-  cursor: pointer;
-}
-.addr .srt:hover {
-  border-color: var(--cool);
-  color: var(--ink);
-}
-.addr .srt:focus-visible {
-  outline: 2px solid var(--cool);
-  outline-offset: 1px;
-}
 .addr .path {
   white-space: nowrap;
   overflow: hidden;
@@ -1069,6 +1046,29 @@ select.pill.bad {
   font-size: 11px;
   color: var(--mut);
   flex: 1;
+}
+
+/* Sıralama seçici, alt çubukta sayacın solunda.
+   `flex: none`: alt çubukta esneyen şey `.info` (depolama özeti), ve kısalması gereken de o —
+   bir depolama cümlesi kırpılabilir, "Boyut" kırpılamaz. */
+.ffoot .srt {
+  flex: none;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--edge);
+  border-radius: 999px;
+  color: var(--ink2);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.ffoot .srt:hover {
+  border-color: var(--cool);
+  color: var(--ink);
+}
+.ffoot .srt:focus-visible {
+  outline: 2px solid var(--cool);
+  outline-offset: 1px;
 }
 
 /* ─── right column ─────────────────────────────────────────────────────────── */
