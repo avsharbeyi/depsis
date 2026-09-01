@@ -357,11 +357,28 @@ export function Files({
   const [drag, setDrag] = useState<ReadonlySet<string> | null>(null);
   /** The folder row the pointer is currently over, for `.frow.over`. */
   const [over, setOver] = useState<string | null>(null);
-  const [counts, setCounts] = useState<{ home: string | null; trash: string | null }>({
-    home: null,
-    trash: null,
-  });
+  /**
+   * Çöpte kaç öğe var.
+   *
+   * EV SAYACI KALDIRILDI, sahibinin sözüyle: *"home simgesinde 200+ yazıyor ona gerek yok."* O
+   * sayı zaten iki yerde birden duruyordu — simgenin üstünde ve ekranın altındaki sayaçta — ve
+   * simgedeki hâli ikisinin daha kötüsüydü: `+` işareti "bilmiyoruz" demenin bir yolu, ve bir ev
+   * düğmesinin üstünde bilinmeyen bir sayı taşımasının hiçbir karşılığı yok.
+   *
+   * Çöpünki duruyor: orada `+` hâlâ dürüst bir cevap. Çöp listelemesi bir klasör değil bir süzgeç
+   * (`trashed_at` sütunu), ve sunucu ona bir toplam vermiyor.
+   */
+  const [counts, setCounts] = useState<{ trash: string | null }>({ trash: null });
   const [storage, setStorage] = useState<string | null>(null);
+  /**
+   * Hangi sıra.
+   *
+   * SUNUCUDA sıralanıyor, ekranda değil, ve bunun sebebi sayfalama: ekran bir seferde iki yüz
+   * satır getiriyor, ve elde gelen sayfayı sıralamak yalnız O SAYFAYI sıralar — üç yüz dosyalık
+   * bir klasörde "en büyük dosya" ilk iki yüzün en büyüğü olurdu. Sunucunun imleci sırayla
+   * birlikte kuruluyor, yani ikinci sayfa birincinin gerçekten devamı.
+   */
+  const [order, setOrder] = useState<SortKey>('name');
   const [reloadKey, setReloadKey] = useState(0);
 
   const bar = useRef<HTMLDivElement>(null);
@@ -578,8 +595,8 @@ export function Files({
                 query: trashed
                   ? { trashed: true, limit: PAGE, ...shareQuery }
                   : parentId === undefined
-                    ? { limit: PAGE, ...shareQuery }
-                    : { parentId, limit: PAGE },
+                    ? { limit: PAGE, sort: order, ...shareQuery }
+                    : { parentId, limit: PAGE, sort: order },
               },
             });
       if (cancelled) return;
@@ -595,7 +612,12 @@ export function Files({
         setMore(false);
         return;
       }
-      setEntries(sorted(result.data.items));
+      // ── YENİDEN SIRALAMA YALNIZ ADA GÖRE ─────────────────────────────────────────────
+      // `sorted` Türkçe harmanlamayı düzeltiyor (`İ` `I` ile, `ş` `s`den sonra) ve bunu sunucunun
+      // `name_fold`u ondan farklı yapıyor. Ama bu düzeltme SIRAYI YENİDEN KURUYOR: boyuta göre
+      // sıralanmış bir sayfaya uygulanınca sunucunun sırasını tamamen siler ve ekran "en büyük
+      // önce" derken alfabetik bir liste gösterirdi.
+      setEntries(order === 'name' ? sorted(result.data.items) : result.data.items);
       setMore(result.data.hasMore);
       setTotal(result.data.total);
       // A selection that survives a folder change acts on rows the user can no longer see.
@@ -606,21 +628,22 @@ export function Files({
     };
     // `shareId` is a dependency: switching share has to re-read, and `parentId` is cleared by the
     // handler that sets it so a folder from the old share cannot survive the switch.
-  }, [parentId, trashed, term, reloadKey, shareId, notify, onUnauthenticated]);
+  }, [parentId, trashed, term, reloadKey, shareId, order, notify, onUnauthenticated]);
 
-  /* ── the two counters in the sidebar strip ──
-     Deliberately their own pair of requests: the strip claims a number for both places at once,
-     and one of them is never the list on screen. A counter derived from whichever folder happens
-     to be open would be right on the root and stale everywhere else. */
+  /* ── çöp sayacı ──
+     Kendi isteği, ve öyle olmak zorunda: şeritteki sayı ekrandaki listeden bağımsız. Açık olan
+     klasörden türetilseydi kökte doğru, başka her yerde eski olurdu.
+
+     Ev sayacı için ikinci bir istek VARDI ve kaldırıldı — sayı ekrandan kalkınca onu getiren
+     istek de kalkıyor. */
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [home, bin] = await Promise.all([
-        api.GET('/files', { params: { query: { limit: PAGE, ...shareQuery } } }),
-        api.GET('/files', { params: { query: { trashed: true, limit: PAGE, ...shareQuery } } }),
-      ]);
+      const bin = await api.GET('/files', {
+        params: { query: { trashed: true, limit: PAGE, ...shareQuery } },
+      });
       if (cancelled) return;
-      setCounts({ home: countOf(home.data), trash: countOf(bin.data) });
+      setCounts({ trash: countOf(bin.data) });
     })();
     return () => {
       cancelled = true;
@@ -1527,6 +1550,25 @@ export function Files({
             </>
           )}
         </span>
+        {/* SIRALAMA, ADRES ÇUBUĞUNUN SAĞINDA. Bir dosya yöneticisinde sıra bir görünüm ayarı, bir
+            araç değil: yükleme ve silme düğmelerinin arasında durursa her ikisiyle karıştırılıyor.
+            Çöpte gizli — çöp listesi sıralanabilir bir klasör değil, ve olmayan bir seçeneği
+            kapalı göstermek de bir şey vaat etmek olurdu. */}
+        {!trashed && !searching && (
+          <select
+            className="srt"
+            aria-label="Sıralama"
+            title="Sıralama"
+            value={order}
+            onChange={(event) => setOrder(event.target.value as SortKey)}
+          >
+            {SORTS.map((item) => (
+              <option key={item.key} value={item.key}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       {shares !== null && shares.length > 1 && (
@@ -1573,7 +1615,6 @@ export function Files({
           <span className="g" style={tint('iris', 0.2)} aria-hidden>
             🏠
           </span>
-          <span className="c">{counts.home ?? '—'}</span>
         </button>
 
         {/* ── FAVORİLER ──────────────────────────────────────────────────────────────────
@@ -2497,6 +2538,22 @@ function destroyList(entries: FileEntry[], counts: ReadonlyMap<string, ChildCoun
   return shown;
 }
 
+/**
+ * Ekrandaki sıralama, sözleşmenin `sort` numaralandırmasının aynısı.
+ *
+ * Türetilmiş DEĞİL, elle yazılmış: üretilen tipten türetmek daha temiz görünürdü ama o tip bir
+ * sorgu parametresinin tipi, ve oradaki bir değişiklik burada sessizce yeni bir düğme yaratırdı.
+ */
+type SortKey = 'name' | 'type' | 'modified' | 'size';
+
+/** Sıralama düğmesinin seçenekleri, ekranda görünecek sırayla. */
+const SORTS: readonly { key: SortKey; label: string }[] = [
+  { key: 'name', label: 'Ad' },
+  { key: 'type', label: 'Tür' },
+  { key: 'size', label: 'Boyut' },
+  { key: 'modified', label: 'Tarih' },
+];
+
 function sorted(items: FileEntry[]): FileEntry[] {
   return [...items].sort((a, b) => {
     // Folders first, then Turkish collation: `İ` sorts with `I` and `ş` after `s`, which a
@@ -2506,8 +2563,13 @@ function sorted(items: FileEntry[]): FileEntry[] {
   });
 }
 
-/** `hasMore` is all the contract gives — there is no total, on purpose (§14) — so the counter says
- *  "200+" rather than inventing a number it was refused. */
+/**
+ * Sayfadan okunan sayı, "50+" biçiminde.
+ *
+ * YALNIZ ÇÖP İÇİN kaldı. Klasör listelemesi artık kendi toplamını gönderiyor, ama çöp bir klasör
+ * değil bir süzgeç ve orada bir toplamın karşılığı yok — `hasMore` sözleşmenin verdiği tek şey, ve
+ * `+` reddedilen bir sayıyı uydurmaktansa bilinmediğini söylemenin yolu.
+ */
 function countOf(page: FileEntryPage | undefined): string | null {
   if (page === undefined) return null;
   return `${page.items.length}${page.hasMore ? '+' : ''}`;

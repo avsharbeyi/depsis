@@ -66,6 +66,8 @@ describeDb('sorting a folder', () => {
   let files: FilesService;
   let org = '';
   let share = '';
+  /** Uzantıları birbirinden farklı dosyaların durduğu klasör. */
+  let typed = '';
 
   /** The names in the order the given sort should produce them. */
   const namesIn = async (sort: SortOrder, limit = 50): Promise<string[]> => {
@@ -115,6 +117,36 @@ describeDb('sorting a folder', () => {
            ($1, $2, NULL, 'file',   'c.bin', '/c.bin', 600,  now() - interval '9 day')`,
         [org, share],
       );
+
+      // ── TÜR SIRALAMASI KENDİ KLASÖRÜNDE ─────────────────────────────────────────────────
+      //
+      // Kökteki dosyaların üçü de `.bin`, yani orada tür sıralaması hiçbir şey ispatlamaz. Ve
+      // köke satır eklemek yukarıdaki üç sıralamanın beklediği dizileri değiştirirdi — bir
+      // ölçümü başka bir ölçümü bozarak yapmak.
+      //
+      // Buradaki adlar üç şeyi birden ölçüyor: UZANTISIZ bir dosya (`belge`), BAŞTA NOKTA taşıyan
+      // gizli bir dosya (`.gizli` — bir `gizli` dosyası DEĞİL), ve BÜYÜK HARFLİ bir uzantı
+      // (`resim.JPG`, `.jpg` ile aynı grupta olmalı).
+      const kind = (
+        await q.query<{ id: string }>(
+          `INSERT INTO file_entries (organization_id, share_id, parent_id, kind, name, path)
+                VALUES ($1, $2, NULL, 'folder', 'tipler', '/tipler') RETURNING id::text AS id`,
+          [org, share],
+        )
+      )[0]?.id;
+      typed = kind ?? '';
+      await q.query(
+        `INSERT INTO file_entries
+           (organization_id, share_id, parent_id, kind, name, path, size_bytes)
+         VALUES
+           ($1, $2, $3, 'file', 'arsiv.zip',  '/tipler/arsiv.zip',  10),
+           ($1, $2, $3, 'file', 'not.txt',    '/tipler/not.txt',    20),
+           ($1, $2, $3, 'file', 'resim2.jpg', '/tipler/resim2.jpg', 30),
+           ($1, $2, $3, 'file', 'resim.JPG',  '/tipler/resim.JPG',  40),
+           ($1, $2, $3, 'file', 'belge',      '/tipler/belge',      50),
+           ($1, $2, $3, 'file', '.gizli',     '/tipler/.gizli',     60)`,
+        [org, share, typed],
+      );
     });
 
     // A real service over a real database, with an agent that is never reached: `list` is a query
@@ -145,14 +177,51 @@ describeDb('sorting a folder', () => {
     // `kind` leads every ordering, so the two never mix — and files come first, because `kind` is
     // text and 'file' < 'folder'. That is the order this endpoint has always produced; the
     // assertion pins it so adding a sort cannot change the default listing by accident.
-    for (const sort of ['name', 'modified', 'size'] as const) {
+    for (const sort of ['name', 'type', 'modified', 'size'] as const) {
       const names = await namesIn(sort);
-      expect(names.slice(3).sort(), sort).toEqual(['alfa', 'zeta']);
+      // `tipler` de bir klasör: kökte artık üç dosya ve ÜÇ klasör var.
+      expect(names.slice(3).sort(), sort).toEqual(['alfa', 'tipler', 'zeta']);
     }
   });
 
   it('sorts by name, folded', async () => {
-    expect(await namesIn('name')).toEqual(['a.bin', 'b.bin', 'c.bin', 'alfa', 'zeta']);
+    expect(await namesIn('name')).toEqual(['a.bin', 'b.bin', 'c.bin', 'alfa', 'tipler', 'zeta']);
+  });
+
+  it('sorts by type, grouping the same extension together', async () => {
+    // Ölçülen şey GRUPLAMA, grup içindeki tam sıra değil: `.gizli` ile `belge` arasındaki sıra
+    // `name_fold`un ve harmanlamanın işi, ve onu burada sabitlemek bu testi başka bir şeyin testi
+    // yapardı. Ölçülmesi gereken, aynı uzantının bir arada ve uzantıların artan sırada olması.
+    const page = await files.list(org, share, typed, null, 50, 'type');
+    const ext = (name: string): string => {
+      const dot = name.lastIndexOf('.');
+      return dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+    };
+    const groups = page.items.map((row) => ext(row.name));
+
+    // Uzantısızlar önce (boş dize her şeyden küçük), sonra jpg, txt, zip.
+    expect(groups).toEqual(['', '', 'jpg', 'jpg', 'txt', 'zip']);
+
+    // BÜYÜK HARFLİ UZANTI KÜÇÜĞÜYLE AYNI GRUPTA. `resim.JPG` ayrı bir tür değil.
+    const names = page.items.map((row) => row.name);
+    expect(Math.abs(names.indexOf('resim.JPG') - names.indexOf('resim2.jpg'))).toBe(1);
+
+    // BAŞTA NOKTA BİR UZANTI DEĞİL: `.gizli` uzantısızlarla duruyor, `g` grubunda değil.
+    expect(names.indexOf('.gizli')).toBeLessThan(2);
+  });
+
+  it('counts the folders and the files, not just the rows', async () => {
+    // Kutunun "6 klasör · 42 dosya" diyebilmesi için. Aynı taramanın üstünde iki `FILTER`, yani
+    // üçü asla birbiriyle çelişemez — ayrı sorgular olsaydı çelişebilirlerdi.
+    const page = await files.list(org, share, typed, null, 50, 'name');
+    expect(page.total).toBe(6);
+    expect(page.folders).toBe(0);
+    expect(page.files).toBe(6);
+
+    const root = await files.list(org, share, null, null, 50, 'name');
+    expect(root.folders).toBe(3);
+    expect(root.files).toBe(3);
+    expect(root.total).toBe(6);
   });
 
   it('sorts by modification time, newest first', async () => {
@@ -174,7 +243,7 @@ describeDb('sorting a folder', () => {
     // row's sort key and compares a row value against it; if `keys`, `after` and `by` ever stop
     // agreeing, a page boundary silently repeats or drops a row — which is exactly the failure
     // cursor pagination was chosen over offset pagination to avoid.
-    for (const sort of ['name', 'modified', 'size'] as const) {
+    for (const sort of ['name', 'type', 'modified', 'size'] as const) {
       const whole = await namesIn(sort);
 
       const collected: string[] = [];
@@ -188,6 +257,29 @@ describeDb('sorting a folder', () => {
 
       expect(collected, `paging by ${sort}`).toEqual(whole);
     }
+  });
+
+  it('does not lose extensionless files past the first page of a type sort', async () => {
+    // ── `coalesce` OLMASAYDI BU TEST DÜŞERDİ ────────────────────────────────────────────────
+    //
+    // Uzantısız bir dosyada uzantı ifadesi NULL, ve `(uzantı, ...) > (c_uzantı, ...)` NULL üretir:
+    // satır ne doğru ne yanlış — SÜZÜLÜR. İmleçten sonraki her sayfa `belge` ile `.gizli`yi
+    // sessizce düşürürdü, ve ilk sayfada göründükleri için kimse fark etmezdi.
+    //
+    // Sayfa boyu 2, yani altı satır üç sayfa: uzantısızlar ilk sayfada, geri kalanı imlecin
+    // ötesinde.
+    const collected: string[] = [];
+    let cursor: string | null = null;
+    for (let guard = 0; guard < 10; guard += 1) {
+      const page = await files.list(org, share, typed, cursor, 2, 'type');
+      collected.push(...page.items.map((row) => row.name));
+      cursor = page.nextCursor;
+      if (cursor === null) break;
+    }
+
+    expect(collected.sort()).toEqual(
+      ['.gizli', 'arsiv.zip', 'belge', 'not.txt', 'resim.JPG', 'resim2.jpg'].sort(),
+    );
   });
 });
 

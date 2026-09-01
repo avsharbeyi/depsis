@@ -343,6 +343,18 @@ export interface FileEntryPage {
    * bir "toplam" sorusunun karşılığı yok.
    */
   total?: number;
+  /**
+   * Bu klasördeki klasör ve dosya sayısı, ayrı ayrı.
+   *
+   * `total` kaç şey olduğunu söylüyor, bu ikisi NE olduğunu. Ekrandaki fark küçük değil: "48 öğe"
+   * bir kullanıcıya klasöre girmeden önce hiçbir şey anlatmıyor, "6 klasör · 42 dosya" ise neyle
+   * karşılaşacağını anlatıyor.
+   *
+   * `total`la aynı sorgudan, aynı taramanın üstünde iki `FILTER` ile geliyorlar: ayrı sorgular
+   * olsaydı üçü birbiriyle çelişebilirdi.
+   */
+  folders?: number;
+  files?: number;
 }
 
 /**
@@ -407,7 +419,7 @@ const TRASH_COLUMNS = `e.id, e.share_id, e.parent_id, e.kind, e.name, e.path, e.
                        (p.id IS NOT NULL AND p.trashed_at IS NOT NULL) AS parent_trashed`;
 
 /** The orders `GET /files` offers. The contract's enum, and nothing outside it. */
-export type SortOrder = 'name' | 'modified' | 'size';
+export type SortOrder = 'name' | 'type' | 'modified' | 'size';
 
 /**
  * How each sort is expressed, as two fragments that have to agree.
@@ -441,12 +453,51 @@ export type SortOrder = 'name' | 'modified' | 'size';
  * date is asking what changed last, and somebody who sorts by size is looking for what is filling
  * the disk; ascending would answer both with the least interesting row in the folder.
  */
+/**
+ * Bir dosyanın UZANTISI, sıralanabilir bir değer olarak.
+ *
+ * ── NEDEN İFADE, NEDEN SÜTUN DEĞİL ──────────────────────────────────────────────────────────
+ *
+ * `content_type` sütunu var ama türü o söylemiyor: yüklemede tarayıcının verdiğine göre doluyor,
+ * SMB üzerinden yazılan bir dosyada hiç dolmuyor, ve `application/octet-stream` bir tür değil bir
+ * teslimiyet. Kullanıcının "tür" derken kastettiği şey adın sonundaki üç harf.
+ *
+ * ── `coalesce` ZORUNLU ──────────────────────────────────────────────────────────────────────
+ *
+ * Ve bu bir güzellik değil, imlecin doğruluğu. Uzantısı olmayan bir dosyada ifade NULL, ve
+ * `(uzantı, ...) > (c_uzantı, ...)` karşılaştırması NULL üretiyor — yani satır ne doğru ne yanlış,
+ * SÜZÜLÜYOR. İmleçten sonraki her sayfa o dosyaları sessizce düşürürdü.
+ *
+ * ── BAŞTAKİ NOKTA ───────────────────────────────────────────────────────────────────────────
+ *
+ * Desendeki ilk `.` "herhangi bir karakter" demek ve bilerek orada: `.gitignore` bir `gitignore`
+ * dosyası değil, uzantısız gizli bir dosya. Nokta'dan önce en az bir karakter arayarak ikisi
+ * ayrılıyor.
+ *
+ * Ters bölü YOK, ve bu da bilerek: bu metin bir JavaScript şablon dizesinin içinde yaşıyor, ve
+ * orada `\.` yazmak SQL'e sade bir nokta olarak ulaşır — yani "herhangi bir karakter". `[.]`
+ * kaçış gerektirmeden aynı şeyi söylüyor.
+ */
+const EXT = "coalesce(lower(substring(name from '.[.]([^.]+)$')), '')";
+const CUR_EXT = 'c_ext';
+
 const SORTS: Readonly<Record<SortOrder, { after: string; by: string }>> = {
   name: {
     // Every key ascends, so this one CAN be a single row-value comparison — and is, because it is
     // both the clearest way to say it and the shape the planner turns into an index scan.
     after: '(kind, name_fold, id) > (c_kind, c_name_fold, c_id)',
     by: 'kind, name_fold, id',
+  },
+  /**
+   * Türe göre: aynı uzantılı dosyalar bir arada, her uzantının içinde alfabetik.
+   *
+   * Her anahtar ARTAN, o yüzden `name` gibi tek bir satır-değeri karşılaştırması olabiliyor. İkinci
+   * anahtarın `name_fold` olması bir tercih: bir klasörde otuz `.jpg` varken onları rastgele bir
+   * sırada göstermek, türe göre sıralamanın çözdüğü sorunu bir kat aşağıda yeniden yaratırdı.
+   */
+  type: {
+    after: `(kind, ${EXT}, name_fold, id) > (c_kind, ${CUR_EXT}, c_name_fold, c_id)`,
+    by: `kind, ${EXT}, name_fold, id`,
   },
   modified: {
     after: 'kind > c_kind OR (kind = c_kind AND (updated_at, id) < (c_updated_at, c_id))',
@@ -905,7 +956,7 @@ export class FilesService {
       db.query<FileEntryRow>(
         `WITH cur AS (
            SELECT kind AS c_kind, name_fold AS c_name_fold, updated_at AS c_updated_at,
-                  size_bytes AS c_size_bytes, id AS c_id
+                  size_bytes AS c_size_bytes, ${EXT} AS ${CUR_EXT}, id AS c_id
              FROM public.file_entries
             WHERE id = $4::uuid
          )
@@ -932,9 +983,17 @@ export class FilesService {
     // Ayrı bir COUNT, ve aynı süzgeç: listelenen klasörün görünen içeriği. Sözleşmedeki "toplam
     // yok" kuralı SÜZÜLMEMİŞ bir toplamla ilgiliydi; bu, kullanıcının zaten sayfa sayfa
     // gezebileceği listenin uzunluğu.
+    //
+    // ── VE İKİYE AYRILMIŞ HÂLİ ──────────────────────────────────────────────────────────────
+    //
+    // "48 öğe" bir klasörün kaç şey taşıdığını söylüyor ama ne taşıdığını söylemiyor, ve sahibinin
+    // istediği ikincisi: *"ne kadar klasör ve dosya olduğu yazsın."* İki `FILTER`, aynı taramanın
+    // üstünde — ayrı sorgular olsaydı üç kez okunurdu ve üçü birbiriyle çelişebilirdi.
     const totals = await this.db.withTenant(organizationId, (db) =>
-      db.query<{ n: string }>(
-        `SELECT count(*)::text AS n
+      db.query<{ n: string; folders: string; files: string }>(
+        `SELECT count(*)::text AS n,
+                count(*) FILTER (WHERE kind = 'folder')::text AS folders,
+                count(*) FILTER (WHERE kind = 'file')::text AS files
            FROM public.file_entries
           WHERE organization_id = $1
             AND share_id = $2
@@ -944,7 +1003,12 @@ export class FilesService {
       ),
     );
 
-    return { ...page(rows, limit), total: Number(totals[0]?.n ?? '0') };
+    return {
+      ...page(rows, limit),
+      total: Number(totals[0]?.n ?? '0'),
+      folders: Number(totals[0]?.folders ?? '0'),
+      files: Number(totals[0]?.files ?? '0'),
+    };
   }
 
   async find(organizationId: string, id: string): Promise<FileEntryRow> {

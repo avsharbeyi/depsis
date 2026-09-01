@@ -785,6 +785,29 @@ select.pill.bad {
   opacity: 0.35;
   cursor: default;
 }
+/* Sıralama seçici, adres çubuğunun sağ ucunda.
+   `flex: none` ve `margin-left: auto`: yol uzadıkça kısalan şey yol olmalı, seçici değil — bir
+   klasör adı kırpılabilir, "Boyut" kırpılamaz. */
+.addr .srt {
+  flex: none;
+  margin-left: auto;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--edge);
+  border-radius: 999px;
+  color: var(--ink2);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 3px 7px;
+  cursor: pointer;
+}
+.addr .srt:hover {
+  border-color: var(--cool);
+  color: var(--ink);
+}
+.addr .srt:focus-visible {
+  outline: 2px solid var(--cool);
+  outline-offset: 1px;
+}
 .addr .path {
   white-space: nowrap;
   overflow: hidden;
