@@ -41,6 +41,20 @@ use depsis_agent::seams::{
 )]
 pub struct Openat2SafePath {
     root_display: PathBuf,
+    /// Bu kökün çocukları AYRI VERİ KÜMELERİ mi (paylaşımlar), yoksa sıradan klasörler mi?
+    ///
+    /// ── NEDEN BİR AYRIM GEREKİYOR ─────────────────────────────────────────────────────────
+    ///
+    /// İki kök var ve anlamları farklı. PAYLAŞIM kökünün her çocuğu kendi ZFS veri kümesi, yani
+    /// kendi bağlama noktası: oraya inmek bir sınır geçişi, ve `openat2` o tek adımda
+    /// `NO_XDEV`i bırakmak zorunda. YEDEK kökü ise tek bir veri kümesinin içi — çocukları
+    /// sıradan klasörler, ve hiçbir adımda sınır geçilmiyor.
+    ///
+    /// Tek kural ikisine birden dayatıldığı sürece biri hep yanlış oluyordu. Boş bileşen listesi
+    /// bunun en pahalı örneği: paylaşım kökünde anlamsız (adı olmayan bir paylaşım yok) ve
+    /// tehlikeli (üst düzey bir ad, silinebilir bir veri kümesi); yedek kökünde ise KÖKÜN
+    /// KENDİSİ, ve yedek ağacının üç işlemi onu adlamak zorunda.
+    shares_are_datasets: bool,
 }
 
 #[allow(
@@ -62,12 +76,17 @@ impl Openat2SafePath {
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self {
             root_display: path.into(),
+            // Yedek ve üstveri kökleri TEK bir veri kümesinin içi: çocukları sıradan klasörler.
+            shares_are_datasets: false,
         }
     }
 
     pub fn open_root(path: impl Into<PathBuf>) -> Result<Self, SeamError> {
         let confined = Self {
             root_display: path.into(),
+            // Paylaşım kökü: her çocuk kendi veri kümesi. İki aşamalı çözüm ve boş listenin
+            // reddi buradan geliyor.
+            shares_are_datasets: true,
         };
         // Acilabildigini ve openat2'nin calistigini BASLANGICTA bir kez kanitla; sonrasi her
         // cagrida taze bir acilis.
@@ -278,8 +297,42 @@ impl Openat2SafePath {
         // bu ayrim yokken her paylasim islemini EXDEV ile reddetti -- test ortamlarinin
         // hicbirinde paylasimlar gercek dataset degildi.
         let Some((share, rest)) = relative.split_first() else {
-            return Err(SeamError::Io("empty path".to_string()));
+            // ── BOŞ LİSTE: DÜZ KÖKTE KÖKÜN KENDİSİ, PAYLAŞIM KÖKÜNDE HÂLÂ RET ────────────
+            //
+            // Ayrım `shares_are_datasets`te ve gerekçesi struct'ın belgesinde. Kısaca: yedek
+            // ağacının üç işlemi (`backup_create_directory`, `backup_write_meta`,
+            // `backup_list_directory`) kökün kendisini adlamak zorunda ve üçü de gerçek
+            // çekirdekte `empty path` ile düşüyordu — yedek diski özelliğinin tamamı bu yüzden
+            // hiç çalışmadı.
+            //
+            // Paylaşım kökünde ret DURUYOR, ve `an_empty_component_list_is_still_refused_by_the_
+            // directory_opener` testi onu ölçmeye devam ediyor. O testin belgesi sebebini yazmış:
+            // boş liste orada çözülseydi `remove_dir`a da ulaşırdı ve üst düzey bir ad — yani bir
+            // PAYLAŞIMIN veri kümesi — root olarak koşan bir süreçte silinebilir hâle gelirdi.
+            // Yedek kökünde üst düzey bir ad sıradan bir klasör, ve onu silmek gezginin işi.
+            if self.shares_are_datasets {
+                return Err(SeamError::Io("empty path".to_string()));
+            }
+            let fd = rustix::fs::openat(&root, ".", oflags | rustix::fs::OFlags::CLOEXEC, mode)
+                .map_err(|e| classify_openat2(".", e))?;
+            return Ok(std::fs::File::from(fd));
         };
+        // DÜZ KÖKTE GEÇİŞ YOK. Yedek ağacı tek bir veri kümesinin içi, yani hiçbir adımda bağlama
+        // sınırı geçilmiyor: tam kümeyle, `NO_XDEV` dahil çözülüyor. Paylaşım kökündeki gevşetme
+        // oraya taşınsaydı, kimsenin ihtiyaç duymadığı bir izin verilmiş olurdu.
+        if !self.shares_are_datasets {
+            let joined = relative.join("/");
+            let fd = rustix::fs::openat2(
+                &root,
+                OsStr::new(&joined).as_bytes(),
+                oflags | rustix::fs::OFlags::CLOEXEC,
+                mode,
+                Self::resolve_flags(),
+            )
+            .map_err(|e| classify_openat2(&joined, e))?;
+            return Ok(std::fs::File::from(fd));
+        }
+
         if rest.is_empty() {
             let fd = rustix::fs::openat2(
                 &root,
@@ -720,12 +773,10 @@ impl SafePath for Openat2SafePath {
 
     /// The shares root itself, read through the SAME descriptor everything else is anchored to.
     ///
-    /// `open_dir(&[])` is deliberately NOT the route. `openat2` here always takes the first
-    /// component as the SHARE NAME — each share is its own dataset and therefore its own mount —
-    /// so an empty component list has no meaning down there and is refused. Special-casing it
-    /// inside `open_dir` would also reach `remove_file`, `remove_dir` and `create_dir`, which
-    /// resolve their parent through the same method: the root would become a deletable parent in
-    /// a process running as root. This asks the question instead of handing out the descriptor.
+    /// `open_dir(&[])` PAYLAŞIM KÖKÜNDE hâlâ bu yolun yerini almıyor: orada boş bileşen listesi
+    /// reddediliyor, çünkü üst düzey bir ad bir PAYLAŞIMIN veri kümesi ve onu genel bir üst-dizin
+    /// çözümünden silinebilir kılmak istemiyoruz. Yedek kökü düz bir ağaç ve orada boş liste kökün
+    /// kendisi — ayrımın tamamı `Openat2SafePath::shares_are_datasets` belgesinde.
     ///
     /// `root_fd()` is not a second route into the tree. It is the anchor `openat2` already uses
     /// as its `dirfd` on every call in this file, opened with `DIRECTORY` and `CLOEXEC`, and it
@@ -999,50 +1050,17 @@ impl CommandRunner for ExecRunner {
         args: &[&str],
         timeout: std::time::Duration,
     ) -> Result<String, SeamError> {
-        // ZAMAN AŞIMI, ve sahada ödenmiş bedeli var: USB'deki disk bir anlığına düşünce ZFS
-        // havuzu ASKIYA aldı, askıdaki havuza dokunan `zfs` komutu D durumunda asılı kaldı, ve
-        // ajanın SIRALI kontrol soketi o tek komutun arkasında sonsuza dek bekledi — sahibin
-        // gördüğü şey "depolama ve sistem ajanları yanıt vermiyor"du, oysa asılı olan tek bir
-        // alt süreçti. Bir komutun asılması artık O KOMUTUN hatasıdır, cihazın felci değil.
-        //
-        // İki dakika: dkms kurulumları buradan geçmiyor (onlar firstboot'un işi) ve buradan
-        // geçen en uzun meşru iş — büyük bir `zfs send` dilimi, bir scrub başlatması — on
-        // saniyeler mertebesinde. Süre dolunca çocuk öldürülür ve hata, neyin dolduğunu söyler.
-        let mut child = Self::hardened(program, args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| SeamError::Io(format!("spawn {program}: {e}")))?;
+        self.exec(program, args, timeout, true)
+    }
 
-        let until = std::time::Instant::now() + timeout;
-        loop {
-            match child.try_wait() {
-                Err(e) => return Err(SeamError::Io(format!("wait {program}: {e}"))),
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() >= until => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(SeamError::Io(format!(
-                        "{program} {} saniyede yanıt vermedi ve öldürüldü — askıya alınmış bir                          havuz (zpool status: SUSPENDED) en bilinen sebep",
-                        timeout.as_secs()
-                    )));
-                }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
-            }
-        }
-        let out = child
-            .wait_with_output()
-            .map_err(|e| SeamError::Io(format!("wait {program}: {e}")))?;
-
-        if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        } else {
-            Err(SeamError::Command {
-                program: program.to_string(),
-                status: out.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            })
-        }
+    /// Çıkış kodunu HATA saymayan koşucu — gerekçesi seam'in belgesinde.
+    ///
+    /// Gövde `run_with_timeout`unkinin aynısı ve öyle olmak zorunda: boruları ayrı iş
+    /// parçacıklarında okumak ve zaman aşımında çocuğu öldürmek — doğru yapılması gereken zor
+    /// kısım — tek bir yerde durmalı. Değişen tek şey son adım, ve onu `exec` bir bayrakla
+    /// alıyor.
+    fn run_capturing(&self, program: &str, args: &[&str]) -> Result<String, SeamError> {
+        self.exec(program, args, Self::RUN_TIMEOUT, false)
     }
 
     /// Bir sırrı stdin'den geçirerek koşar — `zfs load-key` ve `zfs create -o keyformat=passphrase`.
@@ -1204,6 +1222,102 @@ impl CommandRunner for ExecRunner {
             });
         }
         Ok(String::from_utf8_lossy(&read_out.stdout).into_owned())
+    }
+}
+
+impl ExecRunner {
+    /// Bir komutu koşturmanın TEK gövdesi.
+    ///
+    /// ── BORULAR AYRI İŞ PARÇACIKLARINDA OKUNUYOR, VE BU BİR ZORUNLULUK ─────────────────────
+    ///
+    /// Önceki hâli boruları HİÇ OKUMADAN `try_wait` döngüsüne giriyordu. Linux'ta bir borunun
+    /// tamponu 64 KiB: o kadar çıktı üreten bir komut yazarken bloke oluyor, hiç çıkmıyor,
+    /// `try_wait` sonsuza kadar `None` dönüyor, ve süre dolunca komut ÖLDÜRÜLÜYORDU. Yani zaman
+    /// aşımı koruması, çıktısı büyük her komutu düzenli olarak öldüren bir tuzağa dönüşmüştü.
+    ///
+    /// En görünür kurbanı çok dosyalı bir yedek turundaki `zfs diff -H -F`: iki bin değişiklik
+    /// yüz kilobayttan fazla üretiyor, yani tur her seferinde aynı yerde ölüyordu. Ama tuzak bu
+    /// gövdenin TAMAMINDA — `run` da buradan geçiyor.
+    ///
+    /// İki iş parçacığı, iki boru: `stdout` ve `stderr` AYRI okunmalı. Tek bir parçacıkta sırayla
+    /// okumak, öteki borunun dolup çocuğu bloke ettiği aynı kilidi kurardı.
+    ///
+    /// ── `fail_on_status` ──────────────────────────────────────────────────────────────────
+    ///
+    /// Yalnız son adımı değiştiriyor. `true` iken sıfırdan farklı çıkış bir `SeamError::Command`
+    /// ve `zfs`, `setfacl`, `useradd` için doğrusu bu. `false` iken çıkış kodu yalnızca bir sayı
+    /// ve stdout her hâlükârda dönüyor — `smartctl` için, çünkü orada çıkış kodu bir hata değil
+    /// cevabın kendisi.
+    fn exec(
+        &self,
+        program: &str,
+        args: &[&str],
+        timeout: std::time::Duration,
+        fail_on_status: bool,
+    ) -> Result<String, SeamError> {
+        let mut child = Self::hardened(program, args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| SeamError::Io(format!("spawn {program}: {e}")))?;
+
+        let mut stdout = child.stdout.take();
+        let mut stderr = child.stderr.take();
+        let out_reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(pipe) = stdout.as_mut() {
+                let _ = std::io::Read::read_to_end(pipe, &mut buf);
+            }
+            buf
+        });
+        let err_reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(pipe) = stderr.as_mut() {
+                let _ = std::io::Read::read_to_end(pipe, &mut buf);
+            }
+            buf
+        });
+
+        let until = std::time::Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait() {
+                Err(e) => return Err(SeamError::Io(format!("wait {program}: {e}"))),
+                Ok(Some(status)) => break status,
+                Ok(None) if std::time::Instant::now() >= until => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Okuyucular BEKLENİYOR: öldürülen çocuğun boruları kapanıyor ve iki
+                    // `read_to_end` dosya sonuyla bitiyor. Beklemeden dönmek, bu fonksiyonun
+                    // ajanın ömrü boyunca binlerce kez koştuğu düşünülürse, iş parçacığı
+                    // biriktirmek olurdu.
+                    let _ = out_reader.join();
+                    let _ = err_reader.join();
+                    return Err(SeamError::Io(format!(
+                        "{program} {} saniyede yanıt vermedi ve öldürüldü — askıya alınmış bir                          havuz (zpool status: SUSPENDED) en bilinen sebep",
+                        timeout.as_secs()
+                    )));
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            }
+        };
+
+        // Çocuk çıktı, yani boruların yazan ucu kapandı ve iki okuyucu da dosya sonuna varıyor.
+        let stdout = out_reader
+            .join()
+            .map_err(|_| SeamError::Io(format!("{program}: stdout reader panicked")))?;
+        let stderr = err_reader
+            .join()
+            .map_err(|_| SeamError::Io(format!("{program}: stderr reader panicked")))?;
+
+        if status.success() || !fail_on_status {
+            Ok(String::from_utf8_lossy(&stdout).into_owned())
+        } else {
+            Err(SeamError::Command {
+                program: program.to_string(),
+                status: status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
+            })
+        }
     }
 }
 
@@ -2028,6 +2142,75 @@ mod tests {
         assert!(split_envelope("null").is_err());
     }
 
+    /// DÜZ bir kökte boş bileşen listesi KÖKÜN KENDİSİ — gerçek çekirdeğe karşı.
+    ///
+    /// ── BU TESTİN VAR OLMA SEBEBİ ─────────────────────────────────────────────────────────
+    ///
+    /// Aynı tuzak bu depoda İKİ KEZ kuruldu. Birincisi paylaşım kökündeydi ve sahada ödendi
+    /// (`the_shares_root_can_be_asked_whether_it_is_empty`in belgesi o vakanın kaydı). İkincisi
+    /// YEDEK AĞACINDA kuruldu ve hiç yakalanmadı, çünkü yedek diski olan bir cihaz henüz yoktu:
+    /// `backup_create_directory` tek bileşenli bir yolda üst dizini boş dilim yapıyor,
+    /// `backup_write_meta` `publish(&[], …)` çağırıyor, `backup_list_directory` kökü listelemek
+    /// istiyor. Üçü de gerçek çekirdekte ilk adımda düşüyordu ve sahte katmanda geçiyordu.
+    ///
+    /// Bir dispatcher testi bunu yine yakalayamazdı: koştuğu katman cevabı verenin ta kendisi.
+    ///
+    /// `at()` ile kuruluyor, `open_root` ile DEĞİL: ayrım tam olarak bu — yedek kökü düz bir
+    /// ağaç, paylaşım kökünün çocukları ayrı veri kümeleri.
+    #[test]
+    fn an_empty_component_list_opens_a_plain_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Openat2SafePath::at(dir.path());
+
+        // Kökün kendisi bir dizin olarak açılabiliyor.
+        let root = paths.open_dir(&[]).expect("boş liste düz kökü açar");
+        assert!(root.metadata().expect("stat").is_dir());
+    }
+
+    /// Ve üst dizini boş olan bir OLUŞTURMA çalışıyor — yedek ağacının ilk adımı tam bu.
+    ///
+    /// Sahiplik ATANMIYOR: `create_dir(…, 0, 0)` root'a chown ediyor ve test ayrıcalıksız
+    /// koşuyor. Ölçülen şey üst dizinin çözülebilmesi, chown'un çalışması değil — o, ajanın
+    /// gerçekten root olarak koştuğu kutunun işi.
+    #[test]
+    fn a_plain_root_is_a_usable_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Openat2SafePath::at(dir.path());
+        let me = rustix::process::getuid().as_raw();
+
+        paths
+            .create_dir(&[], "Dosyalar", me, rustix::process::getgid().as_raw())
+            .expect("kökün altında klasör açılabilir");
+        assert!(dir.path().join("Dosyalar").is_dir());
+
+        // İkinci kez AlreadyExists, `Io("empty path")` değil: çağıran ikisini ayırt edebilmeli.
+        assert!(
+            matches!(
+                paths.create_dir(&[], "Dosyalar", me, rustix::process::getgid().as_raw()),
+                Err(SeamError::AlreadyExists(_))
+            ),
+            "var olan bir klasör AlreadyExists vermeli"
+        );
+    }
+
+    /// Düz kök listelenebiliyor — `backup_list_directory`nin ilk çağrısı.
+    #[test]
+    fn a_plain_root_can_be_listed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("Belgeler")).expect("mkdir");
+        std::fs::write(dir.path().join("not.txt"), b"x").expect("write");
+        let paths = Openat2SafePath::at(dir.path());
+
+        let mut names: Vec<String> = paths
+            .list_entries(&[])
+            .expect("boş liste kökü listeler")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["Belgeler".to_string(), "not.txt".to_string()]);
+    }
+
     /// The shares root's own emptiness, against a real kernel — the question the appliance could
     /// not answer for a whole release.
     ///
@@ -2124,6 +2307,12 @@ mod tests {
     /// it would also reach `remove_file`, `remove_dir` and `create_dir` — they resolve their
     /// parent through the same method — and the shares root would become a deletable parent in a
     /// process running as root. This test is what makes that change loud instead of silent.
+    ///
+    /// VE BİR KEZ GÜRÜLTÜ ÇIKARDI. Yedek ağacının üç işlemi kökün kendisini adlamak zorundaydı ve
+    /// gerçek çekirdekte düşüyordu; ilk onarım denemesi boş listeyi HER KÖKTE çözülür yaptı, ve bu
+    /// test onu düşürdü. Doğru cevap ikisini ayırmak oldu: paylaşım kökünün çocukları ayrı veri
+    /// kümeleri (`shares_are_datasets: true`) ve orada ret DURUYOR — bu test onu ölçmeye devam
+    /// ediyor; yedek kökü düz bir ağaç ve orada boş liste kökün kendisi.
     #[test]
     fn an_empty_component_list_is_still_refused_by_the_directory_opener() {
         let dir = tempfile::tempdir().expect("tempdir");
