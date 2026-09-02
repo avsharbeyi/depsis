@@ -7,6 +7,7 @@ import {
   ForbiddenException,
   Get,
   HttpCode,
+  Logger,
   Query,
   Patch,
   Post,
@@ -111,6 +112,8 @@ const patchBody = z
 @Controller('backups/target')
 @UseGuards(SessionGuard)
 export class BackupTargetController {
+  private readonly logger = new Logger(BackupTargetController.name);
+
   constructor(
     private readonly targets: BackupTargetService,
     private readonly runs: BackupRunService,
@@ -144,6 +147,26 @@ export class BackupTargetController {
     } catch (error) {
       throw this.translate(error);
     }
+
+    // ── ZİNCİRLERİ KURULDUĞU ANDA TOHUMLA ─────────────────────────────────────────────────
+    //
+    // Tur, budama ve doğrulama zincirleri YALNIZ `BackupRunService.onModuleInit`te
+    // tohumlanıyordu, yani var olan satırlar için API her açıldığında. Yedek diskini kuran
+    // kullanıcı için bunun anlamı şuydu: sihirbaz bitiyor, ekran "6 saatte bir" diyor, ve API
+    // yeniden başlayana kadar TEK BİR YEDEK ALINMIYOR. Sahibinin göreceği hâliyle "kurdum ama
+    // hiçbir şey olmuyor".
+    //
+    // `ON CONFLICT DO NOTHING` üçünde de var, yani açılıştaki tohumla çakışmıyor: hangisi önce
+    // gelirse zincir ondan başlıyor.
+    //
+    // HATA YUTULUYOR ama SESSİZ DEĞİL. Hedef kuruldu ve satırı yazıldı; kuyruğa yazamamak onu
+    // geri almak için sebep değil, ve bir sonraki açılış zaten tohumluyor. Kaydedilmemesi
+    // gereken tek şey, sessizce hiç denenmemiş olması.
+    await this.runs.seedChains(session.organizationId).catch((error: unknown) => {
+      this.logger.error(
+        `yedek zincirleri tohumlanamadı: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
 
     // DENETİM KAYDINDA PAROLA YOK — yalnız hangi havuzun yedek diski yapıldığı.
     await this.audit.record(session.organizationId, {

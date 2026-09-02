@@ -141,17 +141,20 @@ export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
   if (!status.available) {
     return (
       <>
-        <Empty glyph="🌐" text="Uzak erişim kurulu değil." />
+        {/* ── BU EKRAN BİR ZAMANLAR TERMİNAL KOMUTU VERİYORDU ────────────────────────────
+            "DEPSIS ZeroTier'i paketlemez, indirmez ve kurmaz" diyip iki `sudo apt` satırı
+            gösteriyordu. O cümle ADR-0020'nin ilk hâlinden kalmaydı ve ADR sahada revize edildi:
+            cihaz ZeroTier ile birlikte geliyor, kurulumu ISO'nun ilk açılışı yapıyor
+            (`deploy/iso/firstboot.sh`). Sahibi uzaktan erişimi açmak isteyince karşısına terminal
+            çıkması, bu üründe bir özelliğin eksik olması demek.
+
+            Geriye kalan tek durum, kurulumun BAŞARISIZ olması — ve o zaman söylenecek şey bir
+            komut değil, ne olduğu. */}
+        <Empty glyph="🌐" text="Uzak erişim şu an kullanılamıyor." />
         <div className="note">
-          DEPSIS ZeroTier&apos;i paketlemez, indirmez ve kurmaz — bir ürünün kurulum betiği kök
-          kabuğa uzaktan bir betik boşaltmamalı. Kurmak isterseniz imzalı apt deposundan:
-          <span className="val" style={{ display: 'block', marginTop: 6 }}>
-            sudo apt install zerotier-one
-          </span>
-          <span className="val" style={{ display: 'block' }}>
-            sudo systemctl enable --now zerotier-one
-          </span>
-          Kurulduktan sonra bu pencere düğüm kimliğini ve ağları gösterir.
+          ZeroTier bu cihazla birlikte kuruluyor; şu an yanıt vermiyor. Çoğu zaman servis
+          başlatılamamıştır ve cihazı yeniden başlatmak yeterlidir. Sürerse kurulum sırasında
+          indirilememiş olabilir — <b>Sistem</b> ekranındaki günlükler sebebini yazıyor.
         </div>
       </>
     );
