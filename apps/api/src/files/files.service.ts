@@ -1824,6 +1824,82 @@ export class FilesService {
    * sets one flag on one row, so its children are unreachable rather than trashed — and
    * `parent_id`'s `ON DELETE RESTRICT` would refuse to leave them behind in any case.
    */
+  /**
+   * Bir dizinde veritabanının bilmediği ne varsa siler, ve kaç şey sildiğini söyler.
+   *
+   * ── NEDEN VAR ───────────────────────────────────────────────────────────────────────────────
+   *
+   * `purge` yalnız satırı olan şeyleri siliyor, ajan ise boş olmayan bir dizini silmiyor. Aradaki
+   * boşlukta kalan bir dosya, çöpteki klasörü kalıcı olarak silinemez yapıyordu — ve kullanıcının
+   * arayüzde ne onu görmesinin ne de temizlemesinin bir yolu vardı.
+   *
+   * ── SINIRLAR ────────────────────────────────────────────────────────────────────────────────
+   *
+   * DERİNLİK SINIRI VAR. Ajanın listelemesi bir yanıt sınırıyla kırpılabiliyor ve bir bağ döngüsü
+   * teorik olarak mümkün; sekiz seviye, bir çöp klasörünün altında beklenenden fazlası, ve
+   * aşıldığında sessizce durmak yerine sayı eksik dönüyor — çağıran o zaman `rmdir`ın yine
+   * çakışmasıyla dürüst bir 409 alıyor.
+   *
+   * `.depsis` BURAYA GELMİYOR: ajan onu kendi ağacı sayıp reddediyor, ve bu doğru — ara alan
+   * kullanıcının çöpünün konusu değil.
+   */
+  private async sweepUnknown(
+    share: ShareRef,
+    parts: readonly string[],
+    correlationId: string,
+    reason: string,
+    depth: number,
+  ): Promise<number> {
+    if (depth >= 8) return 0;
+    const listing = await this.agent.call(
+      { op: 'list_directory', share: share.name, path: [...parts] },
+      reason,
+      correlationId,
+    );
+    if (listing.status !== 'listing') return 0;
+
+    let removed = 0;
+    for (const entry of listing.entries) {
+      const child = [...parts, entry.name];
+      if (entry.directory) {
+        removed += await this.sweepUnknown(share, child, correlationId, reason, depth + 1);
+      }
+      const response = await this.agent.call(
+        {
+          op: 'remove_entry',
+          share: share.name,
+          path: child,
+          directory: entry.directory,
+        },
+        reason,
+        correlationId,
+      );
+      if (response.status === 'removed' || response.status === 'not_found') {
+        removed += 1;
+        this.logger.warn(
+          `${share.name}/${child.join('/')}: veritabanının bilmediği bir öğe, kalıcı silme ` +
+            'sırasında diskten kaldırıldı',
+        );
+      }
+    }
+    return removed;
+  }
+
+  /** Bir düğümün satırını ve ona bağlı yükleme oturumlarını siler. */
+  private async dropRows(organizationId: string, id: string): Promise<void> {
+    await this.db.withTenant(organizationId, async (db) => {
+      await db.query(
+        `DELETE FROM public.upload_sessions
+          WHERE organization_id = $1 AND (parent_id = $2 OR file_id = $2)`,
+        [organizationId, id],
+      );
+      await db.query(`DELETE FROM public.file_entries WHERE organization_id = $1 AND id = $2`, [
+        organizationId,
+        id,
+      ]);
+    });
+  }
+
   async purge(
     organizationId: string,
     id: string,
@@ -1867,6 +1943,40 @@ export class FilesService {
         reason,
         correlationId,
       );
+      // ── DOLU BİR KLASÖR ARTIK ÇIKMAZ SOKAK DEĞİL ────────────────────────────────────────
+      //
+      // Ajan boş olmayan bir dizini silmiyor (`rmdir`, özyinelemeli değil ve öyle kalmalı), ve bu
+      // döngü yalnız VERİTABANININ BİLDİĞİ satırları siliyor. İkisi bir araya gelince sahada bir
+      // kilit oluştu: çöpteki bir klasörün içinde DEPSIS'in hiç indekslemediği bir dosya vardı,
+      // kalıcı silme her seferinde 409 dönüyordu, ve kullanıcının arayüzde ne o dosyayı görmesinin
+      // ne de klasörü temizlemesinin bir yolu vardı. Tek çıkış ağ sürücüsünden elle silmekti —
+      // yani bu ürünün kabul etmediği türden bir çıkış.
+      //
+      // Dosyanın neden bilinmediği ayrı bir hikâye ve aynı köke çıkıyor: uzlaştırma yürüyüşü
+      // ÇÖPTEKİ klasörlerin içine bakmıyor (`trashed_at IS NULL`), ve zaten uzun süre hiç
+      // koşmamıştı.
+      //
+      // İNDEKSLEMİYORUZ, SİLİYORUZ. Satır yaratıp sonra silmek `IndexerService`e bağımlılık
+      // isterdi (ve o zaten `FilesService`e bağlı — döngü), üstelik saniyeler ömürlü satırlar
+      // üretirdi. Ajana "bu dizinde ne var" diye sorup her birini silmek aynı sonucu veriyor:
+      // kullanıcı zaten "bu klasörü ve içindekileri kalıcı olarak sil" dedi.
+      //
+      // SESSİZ DEĞİL: silinen her ad günlüğe yazılıyor, çünkü bunlar veritabanının hiç bilmediği
+      // ve kullanıcının hiç görmediği dosyalar.
+      if (response.status === 'conflict' && node.kind === 'folder') {
+        const swept = await this.sweepUnknown(share, node.parts, correlationId, reason, 0);
+        if (swept > 0) {
+          const retry = await this.agent.call(
+            { op: 'remove_entry', share: share.name, path: node.parts, directory: true },
+            reason,
+            correlationId,
+          );
+          if (retry.status === 'removed' || retry.status === 'not_found') {
+            await this.dropRows(organizationId, node.id);
+            continue;
+          }
+        }
+      }
       if (response.status === 'conflict') throw new DirectoryNotEmptyError(response.reason);
       // `not_found` beside `removed`, and it is the line that makes a retry work: an entry that is
       // already gone is the end state this call exists to produce, so the row goes too. Refusing

@@ -1373,6 +1373,56 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     );
   }
 
+  it('purges a folder holding a file the database never indexed', async () => {
+    // ── SAHADAN GELEN KİLİT ───────────────────────────────────────────────────────────────
+    //
+    // Cihazın sahibi çöp kutusundaki bir klasörü silemiyordu. Sebep şuydu: klasörün içinde
+    // DEPSIS'in hiç indekslemediği bir dosya vardı (indeksleme haftalarca ölüydü), ajan boş
+    // olmayan bir dizini silmiyor, ve bu uç yalnız SATIRI OLAN şeyleri siliyordu. Sonuç 409, her
+    // seferinde — ve kullanıcının arayüzde ne o dosyayı görmesinin ne de klasörü temizlemesinin
+    // bir yolu vardı. Tek çıkış ağ sürücüsünden elle silmekti.
+    //
+    // Ölçülen şey KİLİDİN AÇILMASI: ajan ilk `rmdir`da çakışma diyor, uç dizini listeleyip
+    // bilmediği öğeyi siliyor, ve ikinci `rmdir` geçiyor.
+    const folder = await mkdir(orgA, shareA, null, 'icinde-bilinmeyen-var');
+    await files.trash(orgA, folder.id, userA);
+
+    let emptied = false;
+    const calls: string[] = [];
+    const purging = withAgent((request) => {
+      const op = String(request['op']);
+      calls.push(op);
+      if (op === 'list_directory') {
+        // Diskte duran, veritabanının bilmediği dosya.
+        return {
+          status: 'listing',
+          truncated: false,
+          entries: emptied
+            ? []
+            : [{ name: 'kayip.mp4', directory: false, size: 12, modified_unix: 1_700_000_000 }],
+        };
+      }
+      if (op === 'remove_entry') {
+        // Dosyanın silinmesi dizini boşaltıyor; ondan SONRAKİ rmdir geçiyor.
+        if (Array.isArray(request['path']) && request['path'].length === 2) {
+          emptied = true;
+          return { status: 'removed' };
+        }
+        return emptied
+          ? { status: 'removed' }
+          : { status: 'conflict', reason: 'still has entries in it' };
+      }
+      return { status: 'removed' };
+    });
+
+    await purging.files.purge(orgA, folder.id, shareRefA(), 'cid-bilinmeyen', 'test');
+
+    // Klasör gerçekten gitti.
+    await expect(files.find(orgA, folder.id)).rejects.toBeInstanceOf(EntryNotFoundError);
+    // Ve yol gerçekten kullanıldı: çakışmadan sonra listelendi.
+    expect(calls).toContain('list_directory');
+  });
+
   it('purges a folder that was once an upload target, instead of wedging on its sessions', async () => {
     // The worst shape a bug in this endpoint can take, and it was reachable through the public
     // API alone. `upload_sessions.parent_id` is ON DELETE RESTRICT and nothing ever removed those
