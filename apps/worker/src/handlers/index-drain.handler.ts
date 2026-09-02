@@ -30,6 +30,14 @@ export function indexDrainHandler(indexer: IndexerService): JobHandler {
       throw new Error('a files.index-drain job must belong to an organisation');
     }
 
+    // ARDIL ÖNCE — `reconcile.handler`daki gerekçenin aynısı. Hızlı yolun zinciri koptuğunda
+    // belirtisi daha da sinsi: kuyruk dolmaya devam ediyor, kimse okumuyor, ve dosyalar yalnız
+    // on beş dakikalık yürüyüşle geliyor. O yürüyüşün zinciri de koptuysa hiç gelmiyorlar.
+    await indexer.scheduleDrain(
+      organizationId,
+      new Date(Date.now() + IndexerService.DRAIN_INTERVAL_MS),
+    );
+
     const batch = await indexer.queued(organizationId, IndexerService.DRAIN_BATCH);
     let discovered = 0;
     let removed = 0;
@@ -69,11 +77,10 @@ export function indexDrainHandler(indexer: IndexerService): JobHandler {
 
     // Straight back when the batch was full — there is more waiting, and this is the fast path.
     // Otherwise at the poll interval, which is short because an empty queue costs one query.
-    const next =
-      batch.length >= IndexerService.DRAIN_BATCH
-        ? new Date()
-        : new Date(Date.now() + IndexerService.DRAIN_INTERVAL_MS);
-    await indexer.scheduleDrain(organizationId, next);
+    // Kuyrukta iş kaldıysa sıradaki tur hemen; yukarıdaki ardıl bekleme süresine bakıyor.
+    if (batch.length >= IndexerService.DRAIN_BATCH) {
+      await indexer.hurryUpDrain(organizationId);
+    }
     await report(1);
 
     if (failed > 0) {
