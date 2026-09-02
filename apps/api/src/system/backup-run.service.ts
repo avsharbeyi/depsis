@@ -545,16 +545,24 @@ export class BackupRunService {
 
   async onModuleInit(): Promise<void> {
     try {
-      const rows = await this.db.withoutTenant('migration-status', (q) =>
-        q.query<{ id: string }>(
-          `SELECT organization_id::text AS id FROM public.backup_targets WHERE enabled`,
-        ),
-      );
-      for (const row of rows) {
-        await this.seedChains(row.id);
+      // KİRACILAR `tenantIds()` İLE, sonra her biri KENDİ bağlamında sorgulanıyor.
+      //
+      // Eskiden `backup_targets` doğrudan `withoutTenant` ile okunuyordu ve tablo kiracıya ait:
+      // RLS bağlamsız sorguya sıfır satır döndürüyordu, hata vermiyordu, ve yedek zincirleri
+      // gerçek bir cihazda açılışta hiç kurulmuyordu. Gerekçenin tamamı `DbService.tenantIds`de.
+      let seeded = 0;
+      for (const organizationId of await this.db.tenantIds()) {
+        const rows = await this.db.withTenant(organizationId, (q) =>
+          q.query<{ id: string }>(
+            `SELECT organization_id::text AS id FROM public.backup_targets WHERE enabled`,
+          ),
+        );
+        if (rows.length === 0) continue;
+        await this.seedChains(organizationId);
+        seeded += 1;
       }
-      if (rows.length > 0) {
-        this.logger.log(`yedek turu ${rows.length} kiracı için tohumlandı`);
+      if (seeded > 0) {
+        this.logger.log(`yedek turu ${seeded} kiracı için tohumlandı`);
       }
     } catch (error) {
       this.logger.error(

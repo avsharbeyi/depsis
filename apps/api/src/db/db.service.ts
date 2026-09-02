@@ -244,6 +244,33 @@ export class DbService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Bu kutudaki kiracıların kimlikleri — AÇILIŞTA, kiracı bağlamı henüz yokken.
+   *
+   * ── NEDEN AYRI BİR YOL ──────────────────────────────────────────────────────────────────────
+   *
+   * `withoutTenant` ile `SELECT id FROM organizations` yazmak akla yatkın görünüyor ve SESSİZCE
+   * YANLIŞ: `organizations` üzerindeki `depsis_app` politikası `id = current_organization_id()`,
+   * ve bağlam yokken bu NULL — sorgu sıfır satır döndürüyor, hata vermiyor. Boş bir liste bir
+   * hata değil, o yüzden çağıran hiçbir şey fark etmiyor.
+   *
+   * Sahada bunun bedeli ödendi: kendini zamanlayan HER zincir — dizin turu, yedek turu, gecikme
+   * taraması, çöp budama — ilk halkasını açılışta kuruyor, ve o halka hiç kurulmuyordu. Zincirler
+   * yalnız bir kez başka bir yerden başlatıldıklarında yaşıyor, ve bir kez koptuklarında bir daha
+   * hiç başlamıyorlardı. Cihazda dizin turu iki buçuk saat boyunca hiç koşmamıştı, kuyruk tamamen
+   * boştu, ve tek bir hata satırı yoktu.
+   *
+   * `all_organization_ids()` bu soruyu cevaplayan SECURITY DEFINER fonksiyonu; gerekçesi göç
+   * 0055'te. Kimliği elde tutmak satırı okunabilir yapmıyor — kiracıya ait her okuma yine
+   * `withTenant` içinde ve yine RLS altında yapılmalı.
+   */
+  async tenantIds(): Promise<string[]> {
+    const rows = await this.withoutTenant('migration-status', (q) =>
+      q.query<{ id: string }>(`SELECT public.all_organization_ids()::text AS id`),
+    );
+    return rows.map((row) => row.id);
+  }
+
+  /**
    * Startup-only, and outside any transaction.
    *
    * Used by `onModuleInit` before the module is usable at all, where neither `withTenant` nor

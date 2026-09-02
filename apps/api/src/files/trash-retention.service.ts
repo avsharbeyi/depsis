@@ -306,15 +306,26 @@ export class TrashRetentionService implements OnModuleInit {
     return { purged, failed, bytes, more: roots.length >= TrashRetentionService.BATCH };
   }
 
-  /** Every organisation with a policy worth running. Used by the boot-time re-seed. */
+  /**
+   * Saklama süresi ayarlanmış kiracılar. Açılıştaki yeniden tohumlama bunu kullanıyor.
+   *
+   * KİRACILAR ÖNCE, sonra her biri KENDİ bağlamında. Eskiden `organization_settings` doğrudan
+   * `withoutTenant` ile okunuyordu ve tablo kiracıya ait: RLS bağlamsız sorguya sıfır satır
+   * döndürüyor, hata vermiyor, ve çöp budama zinciri gerçek bir cihazda hiç kurulmuyordu.
+   * Bkz. `DbService.tenantIds`.
+   */
   async organizationsWithPolicy(): Promise<string[]> {
-    const rows = await this.db.withoutTenant('migration-status', (q) =>
-      q.query<{ id: string }>(
-        `SELECT organization_id::text AS id FROM public.organization_settings
-          WHERE trash_retention_days IS NOT NULL`,
-      ),
-    );
-    return rows.map((row) => row.id);
+    const found: string[] = [];
+    for (const organizationId of await this.db.tenantIds()) {
+      const rows = await this.db.withTenant(organizationId, (q) =>
+        q.query<{ id: string }>(
+          `SELECT 1::text AS id FROM public.organization_settings
+            WHERE trash_retention_days IS NOT NULL LIMIT 1`,
+        ),
+      );
+      if (rows.length > 0) found.push(organizationId);
+    }
+    return found;
   }
 
   /**
