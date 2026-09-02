@@ -1456,6 +1456,22 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             .map_err(|e| SeamError::Io(format!("stat source: {e}")))?
             .len();
 
+        // ── İSKELETİ İLK KULLANAN KURAR ─────────────────────────────────────────────────────
+        //
+        // Kopyalama, `<paylaşım>/.depsis/staging`in var olduğunu VARSAYIYORDU, ve onu kuran tek
+        // yer yükleme yoluydu (`open_transfer`). Hiç web yüklemesi görmemiş bir paylaşıma —
+        // örneğin yalnız SMB üzerinden doldurulmuş bir paylaşıma — yapılan ilk kopyalama
+        // `no such file: .depsis/staging/…` ile düşüyordu.
+        for (parent, name) in [
+            (&[share][..], STAGING_DIR[0]),
+            (&[share, STAGING_DIR[0]][..], STAGING_DIR[1]),
+        ] {
+            match paths.create_dir(parent, name, 0, 0) {
+                Ok(()) | Err(SeamError::AlreadyExists(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+
         let staged = [share, STAGING_DIR[0], STAGING_DIR[1], staging_name];
         // `Append`, not `CreateNew`: this call may be the second or the twentieth on one staging
         // file. O_APPEND also means the kernel resolves the write position at every write, so a
@@ -1827,6 +1843,22 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             .map_err(|e| SeamError::Io(format!("stat source: {e}")))?
             .len();
 
+        // ── ARA ALAN İSKELETİNİ İLK KULLANAN KURAR ──────────────────────────────────────────
+        //
+        // Yedek kökünde `.depsis/staging`i kuran HİÇBİR KOD YOKTU, ve burası onun var olduğunu
+        // varsayıyordu: yeni kurulmuş bir yedek diskinde ilk tur, ilk dosyada
+        // `NotFound(".depsis")` ile düşüyordu. Canlı taraftaki yükleme yolu bu iskeleti kendi
+        // kuruyor ve gerekçesini yazmış; burada aynısı gerekiyordu ve yoktu.
+        for (parent, name) in [
+            (&[][..], STAGING_DIR[0]),
+            (&[STAGING_DIR[0]][..], STAGING_DIR[1]),
+        ] {
+            match backup.create_dir(parent, name, 0, 0) {
+                Ok(()) | Err(SeamError::AlreadyExists(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+
         let staged = [STAGING_DIR[0], STAGING_DIR[1], staging_name];
         let mut staging_file = backup.open(&staged, OpenIntent::Append)?;
         let staged_len = staging_file
@@ -1969,6 +2001,19 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         // ARA ALAN CANLI TARAFTA. Yayımlama `renameat2` ile yapılıyor ve o, iki farklı dosya
         // sistemi arasında `EXDEV` ile düşer — yedek diski ayrı bir havuz, yani ayrı bir dosya
         // sistemi. Ara alanın hedefle aynı tarafta olması bir tercih değil, bir zorunluluk.
+        // Aynı iskelet, aynı gerekçe: geri getirme CANLI tarafta ara alan açıyor, ve hiç web
+        // yüklemesi görmemiş bir paylaşımda o iskelet yok. Bir felaketten sonra geri dönmeye
+        // çalışan biri için en kötü zamanda düşecek bir varsayımdı.
+        for (parent, name) in [
+            (&[share][..], STAGING_DIR[0]),
+            (&[share, STAGING_DIR[0]][..], STAGING_DIR[1]),
+        ] {
+            match live.create_dir(parent, name, 0, 0) {
+                Ok(()) | Err(SeamError::AlreadyExists(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+
         let staged = [share, STAGING_DIR[0], STAGING_DIR[1], staging_name];
         let mut staging_file = live.open(&staged, OpenIntent::Append)?;
         let staged_len = staging_file
@@ -3757,9 +3802,18 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 // Built from a validated single component, so the caller cannot reach outside
                 // /dev/disk/by-id or smuggle a flag (risk R1).
                 let path = format!("/dev/disk/by-id/{}", disk_by_id.as_str());
+                // ── ÇIKIŞ KODU BURADA BİR CEVAP ────────────────────────────────────────
+                //
+                // `smartctl` SMART uyarılarını çıkış kodunun BİTLERİYLE bildiriyor: `-H -A` ile
+                // 3. bit (8) "disk arızalanıyor", 4. bit (16) "bir öznitelik eşiğin altında".
+                // `run` sıfırdan farklı çıkışı hata sayıp stdout'u atıyordu, yani SAĞLIKLI disk
+                // okunuyor ARIZALI disk okunamıyordu — özelliğin var olma sebebinin tam tersi.
+                //
+                // `run_capturing` raporu her hâlükârda veriyor; `smart::parse` zaten
+                // `smart_status.passed`ı okuyor ve okunamayan çıktıyı `healthy: false` sayıyor.
                 let out = self
                     .runner
-                    .run(bin::SMARTCTL, &["-H", "-A", "--json=c", &path])?;
+                    .run_capturing(bin::SMARTCTL, &["-H", "-A", "--json=c", &path])?;
                 let summary = crate::smart::parse(&out);
                 Ok(Response::Smart {
                     healthy: summary.healthy,

@@ -481,6 +481,32 @@ pub trait CommandRunner {
         self.run(program, args)
     }
 
+    /// `run`, ama ÇIKIŞ KODU BİR HATA DEĞİL BİR CEVAP.
+    ///
+    /// ── NEDEN VAR ────────────────────────────────────────────────────────────────────────
+    ///
+    /// `smartctl` yüzünden, ve orada bu bir tercih değil zorunluluk: araç SMART uyarılarını
+    /// çıkış kodunun BİTLERİYLE bildiriyor. `-H -A` ile 3. bit (8) "disk arızalanıyor", 4. bit
+    /// (16) "bir öznitelik eşiğin altında", 5. bit (32) "geçmişte altına düşmüş" demek — ve
+    /// rapor yine de stdout'ta, eksiksiz.
+    ///
+    /// `run` sıfırdan farklı çıkışı hata sayıp stdout'u ATIYOR. Sonuç, özelliğin var olma
+    /// sebebinin tersi: SAĞLIKLI disk okunuyor, ARIZALI disk okunamıyor. Cihazın sahibine
+    /// "diskin ölüyor" demesi gereken tek yol, tam da o an bir hataya dönüşüyordu.
+    ///
+    /// ── NEDEN AYRI BİR METOT ────────────────────────────────────────────────────────────
+    ///
+    /// `run`ın davranışı doğru ve öyle kalmalı: `zfs`, `setfacl`, `useradd` için sıfırdan farklı
+    /// bir çıkış gerçekten bir hata, ve onu sessizce yutmak yarım kalmış bir işi başarılı
+    /// göstermek olurdu. Ayrımı çağrı yerine bırakmak, "bu komutta çıkış kodu ne anlama geliyor"
+    /// sorusunu komutu bilen tek yerde cevaplatıyor.
+    ///
+    /// VARSAYILAN `run`A DÜŞÜYOR: sahte koşucular zaten çıkış kodu üretmiyor, ve `run`ları
+    /// istenen çıktıyı döndürüyor.
+    fn run_capturing(&self, program: &str, args: &[&str]) -> Result<String, SeamError> {
+        self.run(program, args)
+    }
+
     /// `run`, ama bir SIR stdin'den geçiyor.
     ///
     /// ── neden argv değil ─────────────────────────────────────────────────────────────────
