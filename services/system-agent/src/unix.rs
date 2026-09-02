@@ -41,6 +41,20 @@ use depsis_agent::seams::{
 )]
 pub struct Openat2SafePath {
     root_display: PathBuf,
+    /// Bu kökün çocukları AYRI VERİ KÜMELERİ mi (paylaşımlar), yoksa sıradan klasörler mi?
+    ///
+    /// ── NEDEN BİR AYRIM GEREKİYOR ─────────────────────────────────────────────────────────
+    ///
+    /// İki kök var ve anlamları farklı. PAYLAŞIM kökünün her çocuğu kendi ZFS veri kümesi, yani
+    /// kendi bağlama noktası: oraya inmek bir sınır geçişi, ve `openat2` o tek adımda
+    /// `NO_XDEV`i bırakmak zorunda. YEDEK kökü ise tek bir veri kümesinin içi — çocukları
+    /// sıradan klasörler, ve hiçbir adımda sınır geçilmiyor.
+    ///
+    /// Tek kural ikisine birden dayatıldığı sürece biri hep yanlış oluyordu. Boş bileşen listesi
+    /// bunun en pahalı örneği: paylaşım kökünde anlamsız (adı olmayan bir paylaşım yok) ve
+    /// tehlikeli (üst düzey bir ad, silinebilir bir veri kümesi); yedek kökünde ise KÖKÜN
+    /// KENDİSİ, ve yedek ağacının üç işlemi onu adlamak zorunda.
+    shares_are_datasets: bool,
 }
 
 #[allow(
@@ -62,12 +76,17 @@ impl Openat2SafePath {
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self {
             root_display: path.into(),
+            // Yedek ve üstveri kökleri TEK bir veri kümesinin içi: çocukları sıradan klasörler.
+            shares_are_datasets: false,
         }
     }
 
     pub fn open_root(path: impl Into<PathBuf>) -> Result<Self, SeamError> {
         let confined = Self {
             root_display: path.into(),
+            // Paylaşım kökü: her çocuk kendi veri kümesi. İki aşamalı çözüm ve boş listenin
+            // reddi buradan geliyor.
+            shares_are_datasets: true,
         };
         // Acilabildigini ve openat2'nin calistigini BASLANGICTA bir kez kanitla; sonrasi her
         // cagrida taze bir acilis.
@@ -277,30 +296,43 @@ impl Openat2SafePath {
         // paylasimin ICINDEKI her adim tam kumeyle, NO_XDEV dahil, yurur. Ilk gercek ZFS kutusu
         // bu ayrim yokken her paylasim islemini EXDEV ile reddetti -- test ortamlarinin
         // hicbirinde paylasimlar gercek dataset degildi.
-        // ── BOŞ BİLEŞEN LİSTESİ KÖKÜN KENDİSİ ───────────────────────────────────────────────
-        //
-        // Uzun süre burası `Io("empty path")` diyordu, ve bu SAHTE KATMANDA farklı davranıyordu:
-        // ikizi boş listeyi kabul edip kök dizini listeliyordu. Fark bir kez sahada ödendi —
-        // `share_root_status` her gerçek kutuda "boş değil" dedi, `prepare_share_root` `empty
-        // path` ile düştü, sihirbaz kendi kutucuğunu gizledi ve kutu tek bir paylaşım açamadı.
-        // Bu dosyadaki `the_shares_root_can_be_asked_whether_it_is_empty` testi o vakanın kaydı.
-        //
-        // Aynı tuzak YEDEK AĞACINDA yeniden kurulmuştu, ve orada hiç yakalanmadı çünkü yedek
-        // diski olan bir cihaz henüz yoktu: `backup_create_directory(["Dosyalar"])` üst dizini boş
-        // dilim yapıyor, `backup_write_meta` `publish(&[], …)` çağırıyor, `backup_list_directory`
-        // kökü listelemek istiyor. Üçü de gerçek çekirdekte ilk adımda düşüyordu.
-        //
-        // Kökün kendisini açmak bir sınır geçişi DEĞİL: `RESOLVE_BENEATH`in altından çıkmıyor,
-        // hiçbir bileşen çözülmüyor, ve dönen tanıtıcı ajanın zaten tuttuğu köke bakıyor. Yani
-        // burada gevşetilen bir güvenlik kısıtı yok — kaldırılan şey, ifade edilemeyen bir soruydu.
-        //
-        // `oflags` YİNE DE UYGULANIYOR: kök bir dizin, ve onu `O_WRONLY` ile açmaya çalışan bir
-        // çağrı çekirdekten `EISDIR` alıyor. Sessizce dizin açmak, isteyeni yanıltmak olurdu.
         let Some((share, rest)) = relative.split_first() else {
+            // ── BOŞ LİSTE: DÜZ KÖKTE KÖKÜN KENDİSİ, PAYLAŞIM KÖKÜNDE HÂLÂ RET ────────────
+            //
+            // Ayrım `shares_are_datasets`te ve gerekçesi struct'ın belgesinde. Kısaca: yedek
+            // ağacının üç işlemi (`backup_create_directory`, `backup_write_meta`,
+            // `backup_list_directory`) kökün kendisini adlamak zorunda ve üçü de gerçek
+            // çekirdekte `empty path` ile düşüyordu — yedek diski özelliğinin tamamı bu yüzden
+            // hiç çalışmadı.
+            //
+            // Paylaşım kökünde ret DURUYOR, ve `an_empty_component_list_is_still_refused_by_the_
+            // directory_opener` testi onu ölçmeye devam ediyor. O testin belgesi sebebini yazmış:
+            // boş liste orada çözülseydi `remove_dir`a da ulaşırdı ve üst düzey bir ad — yani bir
+            // PAYLAŞIMIN veri kümesi — root olarak koşan bir süreçte silinebilir hâle gelirdi.
+            // Yedek kökünde üst düzey bir ad sıradan bir klasör, ve onu silmek gezginin işi.
+            if self.shares_are_datasets {
+                return Err(SeamError::Io("empty path".to_string()));
+            }
             let fd = rustix::fs::openat(&root, ".", oflags | rustix::fs::OFlags::CLOEXEC, mode)
                 .map_err(|e| classify_openat2(".", e))?;
             return Ok(std::fs::File::from(fd));
         };
+        // DÜZ KÖKTE GEÇİŞ YOK. Yedek ağacı tek bir veri kümesinin içi, yani hiçbir adımda bağlama
+        // sınırı geçilmiyor: tam kümeyle, `NO_XDEV` dahil çözülüyor. Paylaşım kökündeki gevşetme
+        // oraya taşınsaydı, kimsenin ihtiyaç duymadığı bir izin verilmiş olurdu.
+        if !self.shares_are_datasets {
+            let joined = relative.join("/");
+            let fd = rustix::fs::openat2(
+                &root,
+                OsStr::new(&joined).as_bytes(),
+                oflags | rustix::fs::OFlags::CLOEXEC,
+                mode,
+                Self::resolve_flags(),
+            )
+            .map_err(|e| classify_openat2(&joined, e))?;
+            return Ok(std::fs::File::from(fd));
+        }
+
         if rest.is_empty() {
             let fd = rustix::fs::openat2(
                 &root,
@@ -741,31 +773,10 @@ impl SafePath for Openat2SafePath {
 
     /// The shares root itself, read through the SAME descriptor everything else is anchored to.
     ///
-    /// ── BU YORUMUN ESKİ HÂLİ, VE NEDEN DEĞİŞTİ ────────────────────────────────────────────
-    ///
-    /// Burada uzun süre şu yazıyordu: *"`open_dir(&[])` bilerek bu yol DEĞİL... boş bileşen
-    /// listesi orada bir anlam taşımıyor ve reddediliyor. `open_dir` içinde özel durum yapmak
-    /// `remove_file`, `remove_dir` ve `create_dir`a da ulaşırdı — kök, root olarak koşan bir
-    /// süreçte SİLİNEBİLİR BİR ÜST DİZİN hâline gelirdi."*
-    ///
-    /// Endişe gerçekti ve kayda değer. Ama boş listeyi reddetmenin bedeli ondan büyük çıktı: aynı
-    /// tuzak iki kez kuruldu. Birincisi paylaşım kökündeydi ve sahada ödendi (aşağıdaki testin
-    /// belgesi onun kaydı). İkincisi YEDEK AĞACINDAYDI — `backup_create_directory`,
-    /// `backup_write_meta` ve `backup_list_directory` hepsi kökün kendisini adlamak zorunda, ve
-    /// üçü de gerçek çekirdekte ilk adımda düşüyordu. Yedek diski özelliğinin tamamı bu yüzden
-    /// hiç çalışmadı.
-    ///
-    /// Karar: boş liste artık KÖKÜN KENDİSİ. Endişenin karşılığı şu üç şeyle veriliyor:
-    ///
-    ///   * `RESOLVE_BENEATH` hâlâ her şeyi sınırlıyor; kökün kendisi silinemiyor, yalnız
-    ///     İÇİNDEKİ bir ad silinebiliyor.
-    ///   * Kökün içindeki bir adı silmek, iki ağacın da GERÇEKTEN ihtiyaç duyduğu bir işlem:
-    ///     yedek gezgininde üst düzey bir klasörü silmek sıradan bir iş.
-    ///   * Paylaşım kökünde ona ulaşan bir çağıran yok ve olamaz: `remove_entry` yolun başına
-    ///     her zaman paylaşım adını koyuyor, yani üst dizin hiçbir zaman boş olmuyor.
-    ///
-    /// Bu fonksiyon YİNE DE duruyor: "boş mu" sorusu, tanıtıcıyı elden ele geçirmeden sorulabilen
-    /// bir soru, ve aşağıdaki filtre gerekçesi hâlâ geçerli.
+    /// `open_dir(&[])` PAYLAŞIM KÖKÜNDE hâlâ bu yolun yerini almıyor: orada boş bileşen listesi
+    /// reddediliyor, çünkü üst düzey bir ad bir PAYLAŞIMIN veri kümesi ve onu genel bir üst-dizin
+    /// çözümünden silinebilir kılmak istemiyoruz. Yedek kökü düz bir ağaç ve orada boş liste kökün
+    /// kendisi — ayrımın tamamı `Openat2SafePath::shares_are_datasets` belgesinde.
     ///
     /// `root_fd()` is not a second route into the tree. It is the anchor `openat2` already uses
     /// as its `dirfd` on every call in this file, opened with `DIRECTORY` and `CLOEXEC`, and it
@@ -2131,50 +2142,64 @@ mod tests {
         assert!(split_envelope("null").is_err());
     }
 
-    /// Boş bir bileşen listesi KÖKÜN KENDİSİ — gerçek çekirdeğe karşı.
+    /// DÜZ bir kökte boş bileşen listesi KÖKÜN KENDİSİ — gerçek çekirdeğe karşı.
     ///
     /// ── BU TESTİN VAR OLMA SEBEBİ ─────────────────────────────────────────────────────────
     ///
     /// Aynı tuzak bu depoda İKİ KEZ kuruldu. Birincisi paylaşım kökündeydi ve sahada ödendi
-    /// (aşağıdaki testin belgesi onun kaydı). İkincisi YEDEK AĞACINDA kuruldu ve hiç
-    /// yakalanmadı, çünkü yedek diski olan bir cihaz henüz yoktu: `backup_create_directory`
-    /// tek bileşenli bir yolda üst dizini boş dilim yapıyor, `backup_write_meta` `publish(&[], …)`
-    /// çağırıyor, `backup_list_directory` kökü listelemek istiyor. Üçü de gerçek çekirdekte ilk
-    /// adımda düşüyordu ve sahte katmanda geçiyordu.
+    /// (`the_shares_root_can_be_asked_whether_it_is_empty`in belgesi o vakanın kaydı). İkincisi
+    /// YEDEK AĞACINDA kuruldu ve hiç yakalanmadı, çünkü yedek diski olan bir cihaz henüz yoktu:
+    /// `backup_create_directory` tek bileşenli bir yolda üst dizini boş dilim yapıyor,
+    /// `backup_write_meta` `publish(&[], …)` çağırıyor, `backup_list_directory` kökü listelemek
+    /// istiyor. Üçü de gerçek çekirdekte ilk adımda düşüyordu ve sahte katmanda geçiyordu.
     ///
     /// Bir dispatcher testi bunu yine yakalayamazdı: koştuğu katman cevabı verenin ta kendisi.
+    ///
+    /// `at()` ile kuruluyor, `open_root` ile DEĞİL: ayrım tam olarak bu — yedek kökü düz bir
+    /// ağaç, paylaşım kökünün çocukları ayrı veri kümeleri.
     #[test]
-    fn an_empty_component_list_opens_the_root_itself() {
+    fn an_empty_component_list_opens_a_plain_root() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let paths = Openat2SafePath::open_root(dir.path()).expect("root");
+        let paths = Openat2SafePath::at(dir.path());
 
         // Kökün kendisi bir dizin olarak açılabiliyor.
-        let root = paths.open_dir(&[]).expect("boş liste kökü açar");
+        let root = paths.open_dir(&[]).expect("boş liste düz kökü açar");
         assert!(root.metadata().expect("stat").is_dir());
+    }
 
-        // Ve üst dizini boş olan bir oluşturma çalışıyor — yedek ağacının ilk adımı tam bu.
+    /// Ve üst dizini boş olan bir OLUŞTURMA çalışıyor — yedek ağacının ilk adımı tam bu.
+    ///
+    /// Sahiplik ATANMIYOR: `create_dir(…, 0, 0)` root'a chown ediyor ve test ayrıcalıksız
+    /// koşuyor. Ölçülen şey üst dizinin çözülebilmesi, chown'un çalışması değil — o, ajanın
+    /// gerçekten root olarak koştuğu kutunun işi.
+    #[test]
+    fn a_plain_root_is_a_usable_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Openat2SafePath::at(dir.path());
+        let me = rustix::process::getuid().as_raw();
+
         paths
-            .create_dir(&[], "Dosyalar", 0, 0)
+            .create_dir(&[], "Dosyalar", me, rustix::process::getgid().as_raw())
             .expect("kökün altında klasör açılabilir");
         assert!(dir.path().join("Dosyalar").is_dir());
 
         // İkinci kez AlreadyExists, `Io("empty path")` değil: çağıran ikisini ayırt edebilmeli.
         assert!(
             matches!(
-                paths.create_dir(&[], "Dosyalar", 0, 0),
+                paths.create_dir(&[], "Dosyalar", me, rustix::process::getgid().as_raw()),
                 Err(SeamError::AlreadyExists(_))
             ),
             "var olan bir klasör AlreadyExists vermeli"
         );
     }
 
-    /// Boş kök listelenebiliyor — `backup_list_directory`nin ilk çağrısı.
+    /// Düz kök listelenebiliyor — `backup_list_directory`nin ilk çağrısı.
     #[test]
-    fn the_root_itself_can_be_listed() {
+    fn a_plain_root_can_be_listed() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(dir.path().join("Belgeler")).expect("mkdir");
         std::fs::write(dir.path().join("not.txt"), b"x").expect("write");
-        let paths = Openat2SafePath::open_root(dir.path()).expect("root");
+        let paths = Openat2SafePath::at(dir.path());
 
         let mut names: Vec<String> = paths
             .list_entries(&[])
@@ -2282,6 +2307,12 @@ mod tests {
     /// it would also reach `remove_file`, `remove_dir` and `create_dir` — they resolve their
     /// parent through the same method — and the shares root would become a deletable parent in a
     /// process running as root. This test is what makes that change loud instead of silent.
+    ///
+    /// VE BİR KEZ GÜRÜLTÜ ÇIKARDI. Yedek ağacının üç işlemi kökün kendisini adlamak zorundaydı ve
+    /// gerçek çekirdekte düşüyordu; ilk onarım denemesi boş listeyi HER KÖKTE çözülür yaptı, ve bu
+    /// test onu düşürdü. Doğru cevap ikisini ayırmak oldu: paylaşım kökünün çocukları ayrı veri
+    /// kümeleri (`shares_are_datasets: true`) ve orada ret DURUYOR — bu test onu ölçmeye devam
+    /// ediyor; yedek kökü düz bir ağaç ve orada boş liste kökün kendisi.
     #[test]
     fn an_empty_component_list_is_still_refused_by_the_directory_opener() {
         let dir = tempfile::tempdir().expect("tempdir");
