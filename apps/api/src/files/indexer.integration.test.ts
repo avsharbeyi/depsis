@@ -173,6 +173,91 @@ describeDb('reconciling a share with the disk', () => {
     return rows[0]?.id ?? '';
   }
 
+  it('keeps walking when ONE folder cannot be listed', async () => {
+    // ── SAHADAN GELEN ARIZA ───────────────────────────────────────────────────────────────
+    //
+    // `listing` ajan 'listing'/'not_found' dışında bir şey söylediğinde fırlatıyor, ve fırlayan
+    // hata BÜTÜN turu bitiriyordu: adı ajanın kabul etmediği bir karakter taşıyan tek bir klasör,
+    // izinleri bozulmuş tek bir dizin, ya da tam o an silinmiş bir yol — hepsi paylaşımın
+    // tamamının indekslenmesini durduruyordu.
+    //
+    // Sahibinin bildirdiği belirti buydu: "samba ile yükleniyor, arayüzde görünmüyor."
+    const disk: Disk = new Map([
+      [
+        '',
+        {
+          entries: [
+            { name: 'saglam', directory: true, size: 0 },
+            { name: 'bozuk', directory: true, size: 0 },
+          ],
+        },
+      ],
+      ['saglam', { entries: [{ name: 'gorunmeli.txt', directory: false, size: 7 }] }],
+      // 'bozuk' diskte YOK — ama `not_found` değil, ajan başka bir şey söylüyor (aşağıda).
+    ]);
+
+    const agent = {
+      isAvailable: () => true,
+      call: (request: AgentRequest): Promise<AgentResponse> => {
+        if (request.op !== 'list_directory') {
+          return Promise.resolve<AgentResponse>({ status: 'ok', schema_version: 10 });
+        }
+        if (request.path.join('/') === 'bozuk') {
+          // Ajanın reddi: 'listing' de değil 'not_found' da değil. Eski hâlde bu, turu bitiren
+          // bir istisnaya dönüşüyordu.
+          return Promise.resolve<AgentResponse>({ status: 'refused', reason: 'okunamadı' });
+        }
+        const found = disk.get(request.path.join('/'));
+        if (found === undefined) {
+          return Promise.resolve<AgentResponse>({ status: 'not_found', reason: 'gone' });
+        }
+        return Promise.resolve<AgentResponse>({
+          status: 'listing',
+          truncated: false,
+          entries: found.entries.map((entry) => ({
+            name: entry.name,
+            directory: entry.directory,
+            size: entry.size,
+            modified_unix: 1_700_000_000,
+          })),
+        });
+      },
+    } as unknown as AgentService;
+
+    const service = new IndexerService(
+      db,
+      agent,
+      new FilesService(db, agent, new PosixIdentityService(db), new JobsService(db)),
+    );
+
+    // Tur DÜŞMÜYOR, ve okunabilen tarafın dosyası dizine giriyor.
+    await service.reconcile(org, share, held, 'test');
+    await service.reconcile(org, share, held, 'test');
+
+    expect(await paths()).toContain('/saglam/gorunmeli.txt');
+  });
+
+  it('still fails the pass when NOTHING can be listed', async () => {
+    // Tek bir klasörün okunamaması bir klasör sorunu; hiçbirinin okunamaması bir KESİNTİ. İkisini
+    // aynı saymak, ajanı kapalı bir cihazda "0 klasör tarandı, her şey yolunda" demek olurdu — ve
+    // indeksin boş kalması normal görünürdü.
+    const agent = {
+      isAvailable: () => true,
+      call: (request: AgentRequest): Promise<AgentResponse> =>
+        request.op === 'list_directory'
+          ? Promise.resolve<AgentResponse>({ status: 'refused', reason: 'ajan kapalı' })
+          : Promise.resolve<AgentResponse>({ status: 'ok', schema_version: 10 }),
+    } as unknown as AgentService;
+
+    const service = new IndexerService(
+      db,
+      agent,
+      new FilesService(db, agent, new PosixIdentityService(db), new JobsService(db)),
+    );
+
+    await expect(service.reconcile(org, share, held, 'test')).rejects.toThrow(/yanıt vermiyor/);
+  });
+
   it('writes a row for a file DEPSIS has never seen — the SMB write', async () => {
     // The acceptance criterion, in one test. Before this, a file created from Windows was invisible
     // to the web interface, to search and to the permission walk.

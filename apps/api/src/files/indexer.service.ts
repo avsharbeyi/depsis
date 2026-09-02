@@ -197,6 +197,8 @@ export class IndexerService implements OnModuleInit {
     const seen = new Set<string>(queue.map((f) => f.id).filter((id): id is string => id !== null));
     /** Bu turda gerçekten listelenen klasörler; damgaları sonunda tek yazmayla vuruluyor. */
     const scannedIds: string[] = [];
+    /** Listelenemeyen klasör sayısı — hepsi düştüyse bu bir kesinti, biri düştüyse bir klasör. */
+    let unreadable = 0;
 
     while (queue.length > 0 && result.scanned < IndexerService.BATCH) {
       const folder = queue.shift();
@@ -208,7 +210,30 @@ export class IndexerService implements OnModuleInit {
         return { ...result, more: true };
       }
 
-      const listing = await this.listing(share.name, folder.components, reason);
+      // ── TEK BİR KLASÖR BÜTÜN TURU DÜŞÜRMESİN ──────────────────────────────────────────
+      //
+      // `listing` ajan 'listing' ya da 'not_found' dışında bir şey söylediğinde fırlatıyor, ve
+      // fırlayan hata bütün turu bitiriyordu: bir tek okunamayan klasör — adı ajanın kabul
+      // etmediği bir karakter taşıyan, izinleri bozulmuş, ya da tam o an silinmiş — bütün
+      // paylaşımın indekslenmesini durduruyordu.
+      //
+      // Atlanan klasör SAYILIYOR ve aşağıda değerlendiriliyor: hepsi düştüyse bu bir klasör
+      // sorunu değil bir KESİNTİ, ve o zaman fırlatmak doğru — sessizce "tarandı" demek,
+      // ajanı kapalı bir cihazda indeksi boş göstermek olurdu.
+      let listing: Awaited<ReturnType<typeof this.listing>>;
+      try {
+        listing = await this.listing(share.name, folder.components, reason);
+      } catch (error) {
+        unreadable += 1;
+        this.logger.warn(
+          `could not list '${folder.components.join('/')}': ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        // Damgası VURULMUYOR: bir sonraki turda yeniden denensin. Vurulsaydı, geçici bir
+        // sebeple okunamayan bir klasör sıranın en sonuna düşerdi.
+        continue;
+      }
       result.scanned += 1;
       if (listing !== 'gone' && listing.truncated) result.truncated += 1;
 
@@ -225,6 +250,18 @@ export class IndexerService implements OnModuleInit {
     }
 
     await this.markScanned(organizationId, scannedIds);
+
+    // HİÇBİRİ OKUNAMADIYSA BU BİR KESİNTİ. Ajan kapalıyken sessizce "0 klasör tarandı, her şey
+    // yolunda" demek, indeksin boş kalmasını normal göstermek olurdu — ve tam bu yüzden
+    // fırlatılıyor: iş başarısız sayılsın, kuyruk yeniden denesin.
+    if (result.scanned === 0 && unreadable > 0) {
+      throw new Error(`hiçbir klasör listelenemedi (${unreadable} denendi); ajan yanıt vermiyor`);
+    }
+    if (unreadable > 0) {
+      this.logger.warn(
+        `${unreadable} folder(s) could not be listed this pass; they will be retried next time`,
+      );
+    }
     await report(1);
 
     // "Devam" artık kuyruğun boş olup olmamasına değil, DİSKTE bu turda okunmamış bir klasör
@@ -674,14 +711,46 @@ export class IndexerService implements OnModuleInit {
     return Number(rows[0]?.n ?? '0');
   }
 
+  /**
+   * Kaç kez yeniden denenecek.
+   *
+   * ÜÇ AZDI, ve azlığı sahada ödendi. Kuyruk hızlı yeniden deniyor, yani bir AJAN YENİDEN
+   * BAŞLAMASI — ki her DEPSIS güncellemesinde oluyor — üç denemeyi saniyeler içinde tüketiyor.
+   * Ardından iş kalıcı olarak ölüyordu ve ağ sürücüsünden yazılan dosyalar bir daha hiç
+   * indekslenmiyordu.
+   *
+   * Ardıl artık işten ÖNCE kuruluyor, yani ölen bir iş zinciri kırmıyor; bu sayı yine de
+   * `identity.sync`inkiyle aynı yapıldı ve aynı gerekçeyle: burada terk edilen şey, kullanıcının
+   * ağ sürücüsüne koyduğu ve arayüzde hiç göremediği bir dosya.
+   */
+  static readonly MAX_ATTEMPTS = 20;
+
   /** Put a pass on the queue, unless one is already waiting for this share. */
   async schedule(organizationId: string, shareId: string, runAfter: Date): Promise<void> {
     await this.db.withTenant(organizationId, (q) =>
       q.query(
         `INSERT INTO public.job_queue (organization_id, kind, payload, run_after, max_attempts)
-         VALUES ($1, $2, jsonb_build_object('shareId', $3::text), $4, 3)
+         VALUES ($1, $2, jsonb_build_object('shareId', $3::text), $4, $5)
          ON CONFLICT DO NOTHING`,
-        [organizationId, RECONCILE_KIND, shareId, runAfter],
+        [organizationId, RECONCILE_KIND, shareId, runAfter, IndexerService.MAX_ATTEMPTS],
+      ),
+    );
+  }
+
+  /**
+   * Bekleyen turu ÖNE ÇEKER: daha okunacak klasör kaldığında.
+   *
+   * `schedule` bunu yapamaz çünkü `ON CONFLICT DO NOTHING` — zaten bekleyen bir satır varken
+   * hiçbir şey yapmıyor, ve ardıl artık işten önce kurulduğu için o satır her zaman var.
+   * Öne çekmek ayrı bir yazma olmak zorunda.
+   */
+  async hurryUp(organizationId: string, shareId: string): Promise<void> {
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `UPDATE public.job_queue SET run_after = now()
+          WHERE organization_id = $1 AND kind = $2 AND status = 'queued'
+            AND payload ->> 'shareId' = $3`,
+        [organizationId, RECONCILE_KIND, shareId],
       ),
     );
   }
@@ -691,9 +760,20 @@ export class IndexerService implements OnModuleInit {
     await this.db.withTenant(organizationId, (q) =>
       q.query(
         `INSERT INTO public.job_queue (organization_id, kind, payload, run_after, max_attempts)
-         VALUES ($1, $2, '{}'::jsonb, $3, 3)
+         VALUES ($1, $2, '{}'::jsonb, $3, $4)
          ON CONFLICT DO NOTHING`,
-        [organizationId, INDEX_DRAIN_KIND, runAfter],
+        [organizationId, INDEX_DRAIN_KIND, runAfter, IndexerService.MAX_ATTEMPTS],
+      ),
+    );
+  }
+
+  /** Bekleyen boşaltma turunu öne çeker. `hurryUp` ile aynı gerekçe. */
+  async hurryUpDrain(organizationId: string): Promise<void> {
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `UPDATE public.job_queue SET run_after = now()
+          WHERE organization_id = $1 AND kind = $2 AND status = 'queued'`,
+        [organizationId, INDEX_DRAIN_KIND],
       ),
     );
   }

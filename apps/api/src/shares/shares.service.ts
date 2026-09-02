@@ -12,6 +12,7 @@ import {
   type SmbPrincipal,
 } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
+import { RECONCILE_KIND } from '../files/indexer.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { OrganizationsService } from '../organizations/organizations.service.js';
 import {
@@ -378,6 +379,27 @@ export class SharesService {
 
       return share;
     });
+
+    // ── YENİ PAYLAŞIMIN DİZİN ZİNCİRİ, ŞİMDİ ────────────────────────────────────────────────
+    //
+    // Uzlaştırma yürüyüşü yalnız API AÇILIŞINDA tohumlanıyordu — o an var olan paylaşımlar için.
+    // Sonradan açılan bir paylaşımın hiç zinciri olmuyordu, yani o paylaşıma ağ sürücüsünden
+    // yazılan dosyalar API yeniden başlayana kadar hiç indekslenmiyordu.
+    //
+    // Yedek zincirlerinde aynı hata vardı ve aynı şekilde onarıldı: kuran uç, kurduğu anda
+    // tohumluyor.
+    //
+    // HATA YUTULUYOR: paylaşım oluşturuldu ve satırı yazıldı; kuyruğa yazamamak onu geri almak
+    // için sebep değil, ve bir sonraki açılış zaten tohumluyor.
+    try {
+      await this.jobs.enqueue(organizationId, RECONCILE_KIND, { shareId: row.id });
+    } catch (error) {
+      this.logger.error(
+        `'${row.name}' için dizin yürüyüşü tohumlanamadı: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
 
     return {
       share: {

@@ -31,6 +31,29 @@ export function reconcileHandler(indexer: IndexerService): JobHandler {
     }
     const shareId = parseShareId(job.payload);
 
+    // ── ARDIL ÖNCE, İŞ SONRA ────────────────────────────────────────────────────────────────
+    //
+    // Bu satır aşağıdaydı ve SAHADA ÖDENDİ. Zincir yalnız BAŞARILI bir turdan sonra devam
+    // ediyordu; `max_attempts` 3, ve bir ajan yeniden başlaması üç denemeyi saniyeler içinde
+    // tüketiyor. Sonuç: iş kalıcı olarak ölüyor, kimse ardılını kurmuyor, ve ağ sürücüsünden
+    // yazılan dosyalar API yeniden başlayana kadar BİR DAHA HİÇ indekslenmiyor.
+    //
+    // Belirtisi tam olarak sahibinin bildirdiği şeydi: "samba ile yükleniyor, arayüzde
+    // görünmüyor; arayüzden yükleyince sambada görünüyor." İkinci yön çalışıyor çünkü o yol
+    // satırı yükleme anında kendisi yazıyor — dizine hiç ihtiyacı yok.
+    //
+    // Ardıl önce kurulunca bir turun düşmesi yalnız O TURU kaybettiriyor. Kısmi tekillik indeksi
+    // (`job_queue_one_scheduled_reconcile`) `status = 'queued'` üzerinde, ve koşan iş 'queued'
+    // değil — yani bu ekleme çakışmıyor.
+    //
+    // `remote.authorize` ve `tasks.overdue-sweep` aynı kalıbı zaten kullanıyordu; eksik olan
+    // buydu.
+    await indexer.schedule(
+      organizationId,
+      shareId,
+      new Date(Date.now() + IndexerService.INTERVAL_MS),
+    );
+
     const result = await indexer.reconcile(
       organizationId,
       shareId,
@@ -61,8 +84,12 @@ export function reconcileHandler(indexer: IndexerService): JobHandler {
       );
     }
 
-    const next = result.more ? new Date() : new Date(Date.now() + IndexerService.INTERVAL_MS);
-    await indexer.schedule(organizationId, shareId, next);
+    // Daha okunacak klasör kaldıysa SIRADAKİ TUR HEMEN. Yukarıda zaten bir ardıl kuruldu ve o
+    // on beş dakika sonrasına bakıyor; burada `run_after`ı öne çekiyoruz. `ON CONFLICT DO NOTHING`
+    // eklemeyi değil GÜNCELLEMEYİ engellediği için ayrı bir yol gerekiyor.
+    if (result.more) {
+      await indexer.hurryUp(organizationId, shareId);
+    }
     await report(1);
   };
 }
