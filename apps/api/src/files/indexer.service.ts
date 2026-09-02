@@ -691,8 +691,37 @@ export class IndexerService implements OnModuleInit {
    * safe: there is no path from here to a destructive agent call.
    */
   private async forget(organizationId: string, id: string): Promise<number> {
-    const rows = await this.db.withTenant(organizationId, (q) =>
-      q.query<{ n: string }>(
+    const rows = await this.db.withTenant(organizationId, async (q) => {
+      // ── YÜKLEME OTURUMLARI ÖNCE ─────────────────────────────────────────────────────────
+      //
+      // `upload_sessions` `file_entries`e İKİ kez bağlı ve ikisi de bu silmeyi engelliyordu:
+      //
+      //   `file_id`   ON DELETE SET NULL, ama `upload_sessions_completion_pair` NULL bir
+      //               `file_id`i dolu bir `completed_at` yanında reddediyordu. Göç 0054 kuralı
+      //               gerçeğe uydurdu, yani bu yarı artık kendi kendine çalışıyor.
+      //   `parent_id` ON DELETE RESTRICT, ve bu BİLEREK öyle: bir klasörü silmek, ona yapılmakta
+      //               olan yüklemeleri sessizce koparmamalı. Silen taraf temizlemek zorunda.
+      //
+      // Sahada bunun bedeli ölçüldü: web'den yüklenmiş bir dosya ağ sürücüsünden silinince
+      // uzlaştırma turu bu kısıta çarpıp ölüyordu — ve tur ölünce ağdan yazılan hiçbir dosya
+      // indekslenmiyordu. Cihazda diskte 2044, dizinde 1702 öğe vardı.
+      //
+      // Oturum SİLİNİYOR, koparılmıyor: bir oturum bir dosyaya YAPILAN transferin kaydı, ve
+      // dosya diskte yoksa oturum hiçbir şeyi tarif etmiyor. Kalıcı silme yolu aynı kararı aynı
+      // gerekçeyle veriyor.
+      await q.query(
+        `WITH RECURSIVE tree AS (
+           SELECT id FROM public.file_entries WHERE organization_id = $1 AND id = $2
+           UNION ALL
+           SELECT c.id FROM public.file_entries c JOIN tree t ON c.parent_id = t.id
+            WHERE c.organization_id = $1
+         )
+         DELETE FROM public.upload_sessions
+          WHERE organization_id = $1
+            AND (parent_id IN (SELECT id FROM tree) OR file_id IN (SELECT id FROM tree))`,
+        [organizationId, id],
+      );
+      return q.query<{ n: string }>(
         `WITH RECURSIVE tree AS (
            SELECT id FROM public.file_entries WHERE organization_id = $1 AND id = $2
            UNION ALL
@@ -706,8 +735,8 @@ export class IndexerService implements OnModuleInit {
          )
          SELECT count(*)::text AS n FROM gone`,
         [organizationId, id],
-      ),
-    );
+      );
+    });
     return Number(rows[0]?.n ?? '0');
   }
 
