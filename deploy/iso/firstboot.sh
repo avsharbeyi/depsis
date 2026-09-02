@@ -181,7 +181,10 @@ cat <<DONE
   DEPSIS hazır.
 
   Tarayıcıdan açın:   https://${IP:-<bu-kutunun-ip-adresi>}/
-  Sahiplenme jetonu:  sudo journalctl -u depsis-api | grep -B2 -A2 token
+
+  İlk açılan ekran sizden yönetici hesabını oluşturmanızı isteyecek.
+  Başka hiçbir şey yapmanız gerekmiyor.
+
   Kurtarma anahtarı:  /etc/depsis/secret.key — cihaz DIŞINA yedekleyin;
                       kaybolursa iki adımlı doğrulama kayıtları geri gelmez.
   ────────────────────────────────────────────────────────────

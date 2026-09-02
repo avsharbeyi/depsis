@@ -527,6 +527,22 @@ export class BackupRunService {
    * `ON CONFLICT DO NOTHING`: zaten bekleyen bir tur varken hiçbir şey yapmıyor. Tohum olmasaydı,
    * zincirin bir kez kopması onu kalıcı olarak durdururdu.
    */
+  /**
+   * Bir kiracının üç zincirini birden başlatır: tur, budama, doğrulama.
+   *
+   * AÇILIŞTAN AYRI BİR ÇAĞIRAN VAR, ve olması gerekiyordu: hedefi kuran uç. Yalnız açılışta
+   * tohumlandığı sürece, yedek diskini yeni kuran kullanıcı API yeniden başlayana kadar hiç
+   * yedek almıyordu — ekran "6 saatte bir" derken.
+   *
+   * Üçü de `ON CONFLICT DO NOTHING`, yani iki çağıranın çakışması diye bir şey yok: hangisi önce
+   * gelirse zincir ondan başlıyor.
+   */
+  async seedChains(organizationId: string): Promise<void> {
+    await this.scheduleNext(organizationId, new Date());
+    await this.schedulePurge(organizationId, new Date());
+    await this.scheduleVerify(organizationId, new Date());
+  }
+
   async onModuleInit(): Promise<void> {
     try {
       const rows = await this.db.withoutTenant('migration-status', (q) =>
@@ -535,9 +551,7 @@ export class BackupRunService {
         ),
       );
       for (const row of rows) {
-        await this.scheduleNext(row.id, new Date());
-        await this.schedulePurge(row.id, new Date());
-        await this.scheduleVerify(row.id, new Date());
+        await this.seedChains(row.id);
       }
       if (rows.length > 0) {
         this.logger.log(`yedek turu ${rows.length} kiracı için tohumlandı`);

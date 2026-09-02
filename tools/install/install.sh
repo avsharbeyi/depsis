@@ -278,12 +278,17 @@ preflight() {
 
   # ── ZeroTier ──
   #
-  # ADR-0020: paketlemiyoruz, kurmuyoruz. Varlığı bir yapılandırma kararı, ve `zerotier-one`ın
+  # ADR-0020 REVİZE EDİLDİ: kurulumu ilk açılış yapıyor (`deploy/iso/firstboot.sh`), çünkü sahibi
+  # uzaktan erişimi açmak isteyince karşısına terminal çıkması bir eksikti. `zerotier-one`ın
   # kendisi controller — ayrı bir servis yok.
+  #
+  # Burası yine de KURMUYOR: bu betik var olan bir Debian'a DEPSIS'i kuruyor, ve ağ katmanı
+  # ekleme kararı ISO'nun kararı. Eksikse söylenen şey artık "DEPSIS onu kurmaz" değil, nerede
+  # kurulduğu.
   if command -v zerotier-cli >/dev/null 2>&1; then
     ok 'zerotier-one kurulu — uzaktan erişim ve kendi ağını kurma açılabilir'
   else
-    same 'zerotier-one kurulu değil — uzaktan erişim uçları 503 döner (ADR-0020: DEPSIS onu kurmaz)'
+    same 'zerotier-one yok — uzaktan erişim uçları 503 döner (DEPSIS ISO ile kurulduğunda ilk açılış onu kurar)'
   fi
 
   [ "$fatal" -eq 0 ] || die 'ön kontroller geçmedi; yukarıdaki ✗ satırlarını giderip yeniden çalıştırın'
