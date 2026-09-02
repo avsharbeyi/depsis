@@ -2119,6 +2119,36 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     expect((await controller.trash(as(alice), top.id)).id).toBe(top.id);
   });
 
+  it('refuses a user id where an entry id belongs, which is how the clash flow broke', async () => {
+    // ── YEDİNCİ ARGÜMAN ───────────────────────────────────────────────────────────────────
+    //
+    // `recordPublishedFile`ın son parametresi `copiedFromEntryId` ve `file_entries(id)`e yabancı
+    // anahtar. Ad çakışmasını çözen uç bir süre oraya `session.userId` geçiriyordu: her çakışma
+    // çözümü 23503 ile düşüyordu — üstelik dosya ajan tarafından paylaşıma YAYIMLANDIKTAN sonra.
+    // Kullanıcı hata görüyordu, yeni dosya diskteydi, "değiştir" seçildiyse eskisi çöpteydi, ve
+    // DEPSIS'in dizininde ikisi de yoktu.
+    //
+    // Ölçülen şey KISITIN KENDİSİ. Yanlış argümanı geçen çağrı yolunun düzeltildiğini tip sistemi
+    // söyleyemez — iki alan da `string` — ama veritabanı söyleyebilir, ve söylediğini burada
+    // yazıya döküyoruz: bir kullanıcı kimliği bu alana giremez.
+    await expect(
+      pfiles.recordPublishedFile(org, share, null, 'yanlis-kaynak.txt', 4, null, admin),
+    ).rejects.toThrow();
+
+    // Ve kontrol: aynı çağrı `null` ile geçiyor. Çakışmayı çözen bir yükleme bir kopya değil,
+    // kullanıcının gönderdiği yeni bir dosya — alanın söylemesi gereken şey bu.
+    const entry = await pfiles.recordPublishedFile(
+      org,
+      share,
+      null,
+      'dogru-kaynak.txt',
+      4,
+      null,
+      null,
+    );
+    expect(entry.name).toBe('dogru-kaynak.txt');
+  });
+
   it('needs create in the destination folder to begin an upload', async () => {
     const parent = await folder(null, 'yukleme-hedefi-p');
     await grantTo({ user: alice }, parent.id, ['list', 'read']);

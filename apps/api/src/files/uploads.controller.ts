@@ -183,7 +183,15 @@ export class UploadsController {
         name,
         bytes,
         null,
-        session.userId,
+        // YEDİNCİ ARGÜMAN `copiedFromEntryId`, VE BURADA HİÇBİR ŞEY. Bir süre burada
+        // `session.userId` duruyordu: sütun `file_entries(id)`e yabancı anahtar, yani her
+        // çakışma çözümü 23503 ile düşüyordu — üstelik dosya ajan tarafından paylaşıma
+        // YAYIMLANDIKTAN sonra. Kullanıcı hata görüyordu, yeni dosya diskteydi, "değiştir"
+        // seçildiyse eskisi çöpteydi, ve DEPSIS'in dizininde ikisi de yoktu.
+        //
+        // Bu satır bir kopya DEĞİL: çakışmayı çözen bir yükleme, kullanıcının gönderdiği yeni
+        // bir dosya. `null` alanın söylediği şey bu.
+        null,
       )
       .catch((error: unknown) => {
         throw translate(error);

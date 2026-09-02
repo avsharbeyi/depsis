@@ -119,59 +119,15 @@ export class AppsController {
     }
   }
 
-  @Post(':slug')
-  @UseGuards(AdminGuard)
-  async install(
-    @Req() request: AuthenticatedRequest,
-    @Param('slug') slug: string,
-    @Body() body: unknown,
-  ): Promise<Schemas['App']> {
-    requireSameOrigin(request);
-    const session = requireSession(request);
-    const name = slugSchema.safeParse(slug);
-    if (!name.success) throw new NotFoundException();
-
-    const parsed = installSchema.safeParse(body);
-    if (!parsed.success) {
-      throw new BadRequestException('mounts must be a list of {target, shareId}');
-    }
-
-    try {
-      const view = await this.apps.install(
-        session.organizationId,
-        session.userId,
-        name.data,
-        parsed.data.mounts,
-      );
-      return toApp(view);
-    } catch (error) {
-      throw translate(error);
-    }
-  }
-
-  @Patch(':slug')
-  @UseGuards(AdminGuard)
-  async setState(
-    @Req() request: AuthenticatedRequest,
-    @Param('slug') slug: string,
-    @Body() body: unknown,
-  ): Promise<Schemas['App']> {
-    requireSameOrigin(request);
-    const organizationId = requireOrganization(request);
-    const name = slugSchema.safeParse(slug);
-    if (!name.success) throw new NotFoundException();
-
-    const parsed = stateSchema.safeParse(body);
-    if (!parsed.success) throw new BadRequestException("state must be 'running' or 'stopped'");
-
-    try {
-      const view = await this.apps.setState(organizationId, name.data, parsed.data.state);
-      return toApp(view);
-    } catch (error) {
-      throw translate(error);
-    }
-  }
-
+  // ── SIRA YÜK TAŞIYOR: SABİT YOL, PARAMETRELİ OLANIN ÜSTÜNDE ───────────────────────────
+  //
+  // Nest rotaları SINIFTAKİ BİLDİRİM SIRASIYLA kaydediyor, ve `:slug` her şeyi yakalıyor —
+  // `custom` dahil. Bu blok aşağıdayken `POST /apps/custom` hiçbir zaman ona ulaşmadı:
+  // `install` çalıştı, `slug` 'custom' oldu, gövde `installSchema`ya uymadığı için 400 döndü.
+  // Ekrandaki "Özel uygulama ekle" formu hiç çalışmamıştı.
+  //
+  // Aynı dosyadaki `@Delete('custom/:slug')` doğru sırada duruyor — yani bu bir kalıp değil,
+  // bir gözden kaçma. Yeni bir SABİT yol eklerken kuralı tekrar etmek gerekiyor.
   @Post('custom')
   @UseGuards(AdminGuard)
   async addCustom(
@@ -224,6 +180,59 @@ export class AppsController {
         tag: row.tag,
         containerPort: row.container_port,
       };
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Post(':slug')
+  @UseGuards(AdminGuard)
+  async install(
+    @Req() request: AuthenticatedRequest,
+    @Param('slug') slug: string,
+    @Body() body: unknown,
+  ): Promise<Schemas['App']> {
+    requireSameOrigin(request);
+    const session = requireSession(request);
+    const name = slugSchema.safeParse(slug);
+    if (!name.success) throw new NotFoundException();
+
+    const parsed = installSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new BadRequestException('mounts must be a list of {target, shareId}');
+    }
+
+    try {
+      const view = await this.apps.install(
+        session.organizationId,
+        session.userId,
+        name.data,
+        parsed.data.mounts,
+      );
+      return toApp(view);
+    } catch (error) {
+      throw translate(error);
+    }
+  }
+
+  @Patch(':slug')
+  @UseGuards(AdminGuard)
+  async setState(
+    @Req() request: AuthenticatedRequest,
+    @Param('slug') slug: string,
+    @Body() body: unknown,
+  ): Promise<Schemas['App']> {
+    requireSameOrigin(request);
+    const organizationId = requireOrganization(request);
+    const name = slugSchema.safeParse(slug);
+    if (!name.success) throw new NotFoundException();
+
+    const parsed = stateSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException("state must be 'running' or 'stopped'");
+
+    try {
+      const view = await this.apps.setState(organizationId, name.data, parsed.data.state);
+      return toApp(view);
     } catch (error) {
       throw translate(error);
     }
