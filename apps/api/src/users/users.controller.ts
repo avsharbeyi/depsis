@@ -298,8 +298,21 @@ export class UsersController {
       // them — it joins `users` and checks `disabled_at` — so this is not what closes the hole; it
       // is what makes the rows say what happened, so an audit does not have to infer a revocation
       // from a column on another table.
+      // ── KAPATMANIN İKİ YARISI ─────────────────────────────────────────────────────────
+      //
+      // Web oturumları ve SMB parolası. Uzun süre yalnız ilki yapılıyordu, ve denetim kaydı
+      // "oturumları sonlandırıldı" derken kapatılan kişi Windows'tan girmeye devam ediyordu:
+      // kimlik eşitlemesi devre dışı kullanıcıyı listeden çıkarıyor ama ajanın eşitlemesi
+      // hesap SİLMİYOR, yani listeden çıkmak kutudan çıkmak değil.
+      //
+      // `revokeSmb` HİÇ ATMIYOR: ajana ulaşılamazsa işi kuyruğa veriyor ve `false` dönüyor.
+      // İlk hâli 503 atıyordu ve e2e onu yakaladı — ajan düştüğünde yönetici hesabı
+      // kapatamıyordu, ki bu düzeltilmeye çalışılan hatadan kötü. Kapatma her zaman
+      // tamamlanmalı; değişen tek şey kesmenin ne zaman olduğu.
+      let smbCut = true;
       if (parsed.data.disabled === true) {
         await this.sessions.revokeAllForUser(session.organizationId, id);
+        smbCut = await this.users.revokeSmb(session.organizationId, row.username);
       }
       // Kayıt iptalden SONRA: özet "oturumları sonlandırıldı" diyor, ve bunu ancak olduktan
       // sonra diyebilir.
@@ -309,7 +322,9 @@ export class UsersController {
           action: parsed.data.disabled ? 'user.disabled' : 'user.enabled',
           target: { kind: 'user', id: row.id, label: row.username },
           summary: parsed.data.disabled
-            ? `'${row.username}' hesabı kapatıldı; oturumları sonlandırıldı.`
+            ? smbCut
+              ? `'${row.username}' hesabı kapatıldı; oturumları sonlandırıldı ve ağ paylaşımı erişimi kesildi.`
+              : `'${row.username}' hesabı kapatıldı ve oturumları sonlandırıldı; ağ paylaşımı erişimi ajana ulaşılamadığı için KUYRUĞA ALINDI.`
             : `'${row.username}' hesabı yeniden açıldı.`,
         });
       }

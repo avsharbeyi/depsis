@@ -143,6 +143,35 @@ pub fn private_group_name(uid: PosixId) -> String {
     format!("depsis-p-{}", uid.get())
 }
 
+/// SMB kimlik bilgisini düşürür, hesabı bırakır.
+///
+/// ── NEDEN `remove` DEĞİL ────────────────────────────────────────────────────────────────────
+///
+/// Bir hesabı DEVRE DIŞI bırakmak geri alınabilir bir iş, ve ekran da öyle söylüyor:
+/// "istendiğinde geri açılır". Geri alınabilir bir işlemin karşılığı, geri alınabilir bir etki
+/// olmalı. `remove` Unix hesabını ve özel grubu da siliyor — geri açmak onları yeniden kurmayı
+/// beklemek demek, ve o arada kullanıcının dosyalarının sahibi kutuda adı olmayan bir numara.
+///
+/// Kesilmesi gereken şey zaten bir tane: passdb kaydı. Unix hesabı `-M -s nologin` ile açılıyor,
+/// yani onunla oturum açılamıyor; CANLI olan tek kimlik bilgisi SMB parolası. Onu düşürmek
+/// erişimi tam olarak kesiyor, ve geri açmak bir sonraki eşitlemede mühürlü özetin yeniden
+/// içe aktarılmasından ibaret.
+///
+/// ── ZATEN YOKSA BAŞARI ──────────────────────────────────────────────────────────────────────
+///
+/// İstenen şey hesabın SMB'ye girememesi, ve giremiyor. Hiç parola belirlememiş bir kullanıcının
+/// passdb kaydı da yok; bunu hata saymak, hiç SMB kullanmamış birini devre dışı bırakmayı
+/// başarısız kılardı.
+pub fn revoke_smb<R: CommandRunner>(runner: &R, login: &PosixName) -> Result<(), IdentityError> {
+    if !Path::new(PDBEDIT).exists() {
+        return Err(IdentityError::SambaMissing(PDBEDIT.to_string()));
+    }
+    // Çıkış kodu YOK SAYILIYOR, ve `remove`daki ile aynı sebeple: kaydı olmayan bir kullanıcıda
+    // `pdbedit -x` sıfırdan farklı dönüyor, ve o "başarısızlık" istenen durumun ta kendisi.
+    let _ = runner.run(PDBEDIT, &["-x", "-u", login.as_str()]);
+    Ok(())
+}
+
 /// Take an account off the machine: Samba first, then Unix, then its private group.
 ///
 /// ── WHY IT IS NOT `sync`'S JOB ──────────────────────────────────────────────────────────────

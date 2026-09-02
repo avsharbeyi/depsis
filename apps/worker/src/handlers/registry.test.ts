@@ -46,6 +46,7 @@ describe('the worker consumes every kind the API enqueues', () => {
       'files.reconcile',
       'files.restore-snapshot',
       'files.trash.purge',
+      'identity.revoke-smb',
       'identity.sync',
       'permissions.apply',
       // Aga katilan cihazlarin kendiliginden yetkilendirilmesi. Yirmi saniyede bir zincirleniyor;

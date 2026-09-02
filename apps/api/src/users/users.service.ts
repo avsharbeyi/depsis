@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 
 import { AgentService } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
@@ -76,6 +76,8 @@ export class IdentityStillOnBoxError extends Error {
  */
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     private readonly db: DbService,
     /**
@@ -273,9 +275,80 @@ export class UsersService {
       );
       const row = rows[0];
       if (!row) throw new UserNotFoundError();
+
+      // ── KAPATMAK SMB'Yİ DE KESER ────────────────────────────────────────────────────────
+      //
+      // Kesmiyordu, ve bu denetimde çıkan en ciddi bulgu oldu. Kimlik eşitlemesi devre dışı
+      // kullanıcıyı listeden ÇIKARIYOR (`identity-sync.service.ts`, `disabled_at IS NULL`) —
+      // ama ajanın eşitlemesi hesaplar için TOPLAYICI: listede olmayanı silmiyor. Yani listeden
+      // çıkmak kutudan çıkmak değildi. Kapatılan hesabın Samba parolası çalışmaya devam
+      // ediyordu, üstelik denetim kaydı "oturumları sonlandırıldı" derken.
+      //
+      // KESME BURADA DEĞİL, DENETLEYİCİDE — ve sıra bunu gerektiriyor. Burada çağrılsaydı ve
+      // ajana ulaşılamasaydı, atılan hata oturum iptalini ve denetim kaydını da atlardı: hesap
+      // kapanmış ama oturumları açık, ve olan bitenin hiçbir kaydı yok. Denetleyici önce satırı
+      // kapatıyor, sonra oturumları iptal ediyor, sonra SMB'yi kesiyor, ve denetim kaydına
+      // GERÇEKTEN ne olduğunu yazıyor.
+      //
+      // Geri açmak eşitlemeyi kuyruğa veriyor: mühürlü SMB özeti veritabanında duruyor ve bir
+      // sonraki eşitleme onu yeniden içe aktarıyor. Unix hesabı hiç silinmediği için dosyaların
+      // sahipliği de hiç değişmedi.
+      if (changes.disabled === false) {
+        await this.identity.enqueue(organizationId, `re-enabling '${row.username}'`);
+      }
       return row;
     } catch (error) {
       throw translateDbError(error);
+    }
+  }
+
+  /**
+   * Bir hesabın SMB kimlik bilgisini düşürür: ÖNCE HEMEN, olmazsa KUYRUKTAN.
+   *
+   * ── NEDEN İKİ YOL ───────────────────────────────────────────────────────────────────────────
+   *
+   * Bir hesabı kapatmanın sebebi çoğu zaman aciliyet — ele geçirilmiş bir hesap, işten ayrılmış
+   * biri — ve "birazdan kesilecek" bir erişim kesilmemiş erişimdir. O yüzden ilk deneme isteğin
+   * İÇİNDE.
+   *
+   * Ama ilk hâli YALNIZ bu denemeydi ve yanlıştı, ve e2e onu yakaladı: ajana ulaşılamadığında
+   * istek 503 dönüyordu, yani ajan düştüğünde yönetici bir hesabı KAPATAMIYORDU. Düzeltilmeye
+   * çalışılan hatadan kötü bir durum — kapatma, kutunun sağlığından bağımsız olarak her zaman
+   * yapılabilmeli.
+   *
+   * O yüzden başarısızlık bir ret değil bir KUYRUK: iş `identity.revoke-smb` olarak yazılıyor ve
+   * işçi ajan geri gelene kadar yeniden deniyor. Kapatma her hâlükârda tamamlanıyor; değişen tek
+   * şey kesmenin ne zaman olduğu, ve denetim kaydı hangisi olduğunu yazıyor.
+   *
+   * ── NE BAŞARI SAYILIYOR ─────────────────────────────────────────────────────────────────────
+   *
+   * `smb_unavailable` da başarı, ve bu bir gedik değil: Samba kurulu değilse düşürülecek bir
+   * kimlik bilgisi de yok, ve o cihazda kapatılan hesabın SMB erişimi zaten yok.
+   *
+   * Dönen değer, kesmenin ANINDA olup olmadığı — çağıran bunu denetim kaydına yazıyor.
+   */
+  async revokeSmb(organizationId: string, username: string): Promise<boolean> {
+    try {
+      const response = await this.agent.call(
+        { op: 'revoke_smb_credential', login: username },
+        `disabling the account '${username}'`,
+      );
+      if (response.status === 'smb_credential_revoked' || response.status === 'smb_unavailable') {
+        return true;
+      }
+      throw new Error(
+        'reason' in response && typeof response.reason === 'string'
+          ? response.reason
+          : response.status,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `could not revoke SMB for '${username}' in the request; queueing a retry: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      await this.identity.enqueueRevokeSmb(organizationId, username);
+      return false;
     }
   }
 

@@ -32,6 +32,7 @@ import { indexDrainHandler, INDEX_DRAIN_KIND } from './index-drain.handler.js';
 import { reconcileHandler, RECONCILE_KIND } from './reconcile.handler.js';
 import { trashPurgeHandler, TRASH_PURGE_KIND } from './trash-purge.handler.js';
 import { identitySyncHandler, IDENTITY_SYNC_KIND } from './identity-sync.handler.js';
+import { revokeSmbHandler, REVOKE_SMB_KIND } from './revoke-smb.handler.js';
 import { snapshotHandler, SNAPSHOT_KIND } from './snapshot.handler.js';
 import { overdueSweepHandler, OVERDUE_SWEEP_KIND } from './overdue-sweep.handler.js';
 import { offsiteHandler, OFFSITE_KIND } from './offsite.handler.js';
@@ -68,6 +69,9 @@ export function registerHandlers(
   // handler needs the queue it was claimed from.
   worker.register(APPLY_ACL_KIND, applyAclHandler(services.acl, services.jobs));
   worker.register(IDENTITY_SYNC_KIND, identitySyncHandler(services.identity));
+  // Kapatılan bir hesabın SMB kimlik bilgisini düşürmenin AĞI. Asıl deneme isteğin içinde; bu
+  // yalnız ajan o an düşükken yazılıyor, ve kesmenin er geç olmasını garanti ediyor.
+  worker.register(REVOKE_SMB_KIND, revokeSmbHandler(services.identity));
   // No `jobs` here, unlike the ACL walk: a copy runs the whole tree in ONE job and reports
   // between nodes, so there is no successor to enqueue. The chained version made the id the user
   // was handed report `succeeded` while most of the work had not happened.

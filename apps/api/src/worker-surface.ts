@@ -124,6 +124,7 @@ export { AclApplyModule } from './permissions/apply-acl.module.js';
 export { AclApplyService, type ApplyAclPayload } from './permissions/apply-acl.service.js';
 export {
   IDENTITY_SYNC_KIND,
+  REVOKE_SMB_KIND,
   IDENTITY_SYNC_MAX_ATTEMPTS,
   IdentitySyncService,
 } from './identity/identity-sync.service.js';

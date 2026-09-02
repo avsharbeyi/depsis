@@ -3975,6 +3975,18 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 }
             }
 
+            Request::RevokeSmbCredential { login } => {
+                // İki cevap, üç değil: burada "ad ile numara birbirini göstermiyor" diye bir ret
+                // yok, çünkü silinen şey bir hesap değil bir kimlik bilgisi ve geri getirilebilir.
+                match crate::identity::revoke_smb(self.runner, login) {
+                    Ok(()) => Ok(Response::SmbCredentialRevoked {}),
+                    Err(e) if e.is_unavailable() => Ok(Response::SmbUnavailable {
+                        reason: e.to_string(),
+                    }),
+                    Err(e) => Err(SeamError::Io(e.to_string())),
+                }
+            }
+
             Request::RemovePosixIdentity { uid, login } => {
                 // Aynı üç cevap `sync`teki gibi ve aynı sebeple: makine istenen hâlde,
                 // Samba kurulu değil, ya da ad ile numara kutuda birbirini göstermiyor.

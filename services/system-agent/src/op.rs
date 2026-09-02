@@ -2129,6 +2129,31 @@ pub enum Request {
         groups: Vec<PosixGroupSpec>,
     },
 
+    /// Bir hesabın SMB kimlik bilgisini düşürür; hesabın kendisi kalır.
+    ///
+    /// ── NEDEN AYRI, VE NEDEN `remove_posix_identity` DEĞİL ─────────────────────────────────
+    ///
+    /// İkisi iki farklı ürün kararının karşılığı. Hesabı SİLMEK geri alınamaz, ve karşılığı
+    /// `remove_posix_identity`: passdb kaydı, Unix hesabı, özel grup, hepsi gider. Hesabı DEVRE
+    /// DIŞI bırakmak geri alınabilir, ve ekran da öyle söylüyor — o yüzden etkisi de geri
+    /// alınabilir olmalı.
+    ///
+    /// Kesilmesi gereken şey zaten bir tane. Unix hesabı `-M -s nologin` ile açılıyor ve onunla
+    /// oturum açılamıyor; CANLI olan tek kimlik bilgisi SMB parolası. Bu işlem onu düşürüyor,
+    /// hesabı ve numarasını bırakıyor: kullanıcının dosyalarının sahibi kutuda adı olan bir
+    /// numara olarak kalıyor, ve hesap geri açıldığında bir sonraki kimlik eşitlemesi mühürlü
+    /// özeti yeniden içe aktarıyor.
+    ///
+    /// ── NE İSTEMİYOR ───────────────────────────────────────────────────────────────────────
+    ///
+    /// `uid` YOK, ve olmaması bilinçli: `pdbedit` hesabı adıyla anıyor, ve burada silinen şey bir
+    /// hesap değil bir kimlik bilgisi. Yanlış adı vermenin en kötü sonucu, var olmayan bir
+    /// kullanıcının olmayan parolasını düşürmeye çalışmak — `remove_posix_identity`nin ad ile
+    /// numaranın birbirini göstermesini şart koşmasının sebebi orada silinen şeyin geri
+    /// gelmemesi, burada ise geliyor.
+    #[serde(rename = "revoke_smb_credential")]
+    RevokeSmbCredential { login: PosixName },
+
     /// Bir hesabı kutudan kaldırır: passdb kaydı, Unix hesabı, özel grubu.
     ///
     /// ── NEDEN AYRI BİR İŞLEM ────────────────────────────────────────────────────────────────
@@ -3087,6 +3112,10 @@ pub enum Response {
     AppDataDirReady {
         created: bool,
     },
+    /// SMB kimlik bilgisi düşürüldü (ya da hiç yoktu). Hesabın kendisi duruyor.
+    #[serde(rename = "smb_credential_revoked")]
+    SmbCredentialRevoked {},
+
     /// Hesap kutuda değil: passdb kaydı, Unix hesabı ve özel grubu gitti (ya da hiç yoktu).
     ///
     /// SAYI YOK, ve olmaması bilerek. `sync` neyi değiştirdiğini sayıyor çünkü sıfır orada
@@ -3258,6 +3287,12 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 41, `revoke_smb_credential` ile: bir hesabı DEVRE DIŞI bırakmanın SMB erişimini gerçekten
+/// kesmesi. Kesmiyordu: kimlik eşitlemesi devre dışı kullanıcıyı listeden ÇIKARIYOR, ve ajanın
+/// eşitlemesi hesap SİLMİYOR — yani listeden çıkmak kutudan çıkmak değildi. Kapatılan hesabın
+/// Samba parolası çalışmaya devam ediyordu, üstelik denetim kaydı "oturumları sonlandırıldı"
+/// derken.
+///
 /// 40, `remove_posix_identity` ile: bir hesabı silmek. Ekranda kullanıcı yalnızca DEVRE DIŞI
 /// bırakılabiliyordu; silinebilmesi, hesabın kutudaki Unix ve Samba karşılığının da gitmesi
 /// demek — yoksa DEPSIS'ten silinmiş bir kullanıcının SMB parolası çalışmaya devam ederdi.
@@ -3309,7 +3344,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 40;
+pub const SCHEMA_VERSION: u32 = 41;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

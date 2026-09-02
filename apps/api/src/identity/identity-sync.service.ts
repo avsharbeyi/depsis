@@ -10,6 +10,19 @@ import { JobsService } from '../jobs/jobs.service.js';
 export const IDENTITY_SYNC_KIND = 'identity.sync';
 
 /**
+ * Bir hesabın SMB kimlik bilgisini düşüren işin türü.
+ *
+ * `identity.sync`ten AYRI, ve ayrı olmak zorunda: eşitleme istenen durumu gönderiyor ve hesaplar
+ * için TOPLAYICI — listede olmayanı silmiyor. Kaldırmayı eşitlemeye yaptırmak, eşitlemenin
+ * listede olmayan HER hesabı uçurması demek olurdu.
+ *
+ * PAYLOAD BİR AD TAŞIYOR, ve bu da eşitlemenin tersi: burada iş tek bir hesap hakkında. Eşitlemenin
+ * payload'ı boş çünkü o bütün durumu okuyor; bunun payload'ı dolu çünkü hangi hesabın kesileceğini
+ * başka söyleyecek bir şey yok.
+ */
+export const REVOKE_SMB_KIND = 'identity.revoke-smb';
+
+/**
  * How many times the queue retries a sync before giving up.
  *
  * The same budget `permissions.apply` uses and for the same reason: the queue's default of five
@@ -88,6 +101,54 @@ export class IdentitySyncService {
    * membership edit — has already committed and is correct; refusing it after the fact would be
    * worse than a filesystem that is briefly behind.
    */
+  /**
+   * Bir hesabın SMB kimlik bilgisini düşürmeyi kuyruğa verir.
+   *
+   * İSTEK İÇİNDEKİ DENEME BAŞARISIZ OLDUĞUNDA çağrılıyor, onun yerine değil: kapatmanın anlamı
+   * erişimin HEMEN kesilmesi, ve kuyruk yalnız ajanın o an ulaşılamaz olduğu durumun ağı.
+   *
+   * Hata burada da yutuluyor, `enqueue` ile aynı gerekçeyle: hesap zaten kapandı ve web tarafı
+   * güvende. Kuyruğa yazamamak, kapatmayı geri almak için bir sebep değil.
+   */
+  async enqueueRevokeSmb(organizationId: string, username: string): Promise<void> {
+    try {
+      await this.jobs.enqueue(
+        organizationId,
+        REVOKE_SMB_KIND,
+        { username },
+        { maxAttempts: IDENTITY_SYNC_MAX_ATTEMPTS },
+      );
+    } catch (error) {
+      this.logger.error(
+        `could not queue the SMB revocation for '${username}': ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Kuyruktan gelen düşürme. `UsersService.revokeSmb` ile aynı çağrı, aynı kabul kümesi.
+   *
+   * İDEMPOTENT, ve at-least-once bir kuyruk bunu gerektiriyor (§17): zaten düşürülmüş bir kimlik
+   * bilgisinde `pdbedit -x` sıfırdan farklı dönüyor ve ajan onu başarı sayıyor — istenen şey
+   * hesabın SMB'ye girememesi, ve giremiyor.
+   */
+  async revokeSmbNow(username: string, reason: string): Promise<void> {
+    const response = await this.agent.call(
+      { op: 'revoke_smb_credential', login: username },
+      reason,
+    );
+    if (response.status === 'smb_credential_revoked' || response.status === 'smb_unavailable') {
+      return;
+    }
+    throw new Error(
+      'reason' in response && typeof response.reason === 'string'
+        ? response.reason
+        : response.status,
+    );
+  }
+
   async enqueue(organizationId: string, why: string): Promise<void> {
     try {
       await this.jobs.enqueue(
