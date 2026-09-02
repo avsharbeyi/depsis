@@ -1729,6 +1729,24 @@
       ]
     },
     {
+      "description": "Bir hesabın SMB kimlik bilgisini düşürür; hesabın kendisi kalır.\n\n── NEDEN AYRI, VE NEDEN `remove_posix_identity` DEĞİL ─────────────────────────────────\n\nİkisi iki farklı ürün kararının karşılığı. Hesabı SİLMEK geri alınamaz, ve karşılığı\n`remove_posix_identity`: passdb kaydı, Unix hesabı, özel grup, hepsi gider. Hesabı DEVRE\nDIŞI bırakmak geri alınabilir, ve ekran da öyle söylüyor — o yüzden etkisi de geri\nalınabilir olmalı.\n\nKesilmesi gereken şey zaten bir tane. Unix hesabı `-M -s nologin` ile açılıyor ve onunla\noturum açılamıyor; CANLI olan tek kimlik bilgisi SMB parolası. Bu işlem onu düşürüyor,\nhesabı ve numarasını bırakıyor: kullanıcının dosyalarının sahibi kutuda adı olan bir\nnumara olarak kalıyor, ve hesap geri açıldığında bir sonraki kimlik eşitlemesi mühürlü\nözeti yeniden içe aktarıyor.\n\n── NE İSTEMİYOR ───────────────────────────────────────────────────────────────────────\n\n`uid` YOK, ve olmaması bilinçli: `pdbedit` hesabı adıyla anıyor, ve burada silinen şey bir\nhesap değil bir kimlik bilgisi. Yanlış adı vermenin en kötü sonucu, var olmayan bir\nkullanıcının olmayan parolasını düşürmeye çalışmak — `remove_posix_identity`nin ad ile\nnumaranın birbirini göstermesini şart koşmasının sebebi orada silinen şeyin geri\ngelmemesi, burada ise geliyor.",
+      "type": "object",
+      "properties": {
+        "login": {
+          "$ref": "#/$defs/PosixName"
+        },
+        "op": {
+          "type": "string",
+          "const": "revoke_smb_credential"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "login"
+      ]
+    },
+    {
       "description": "Bir hesabı kutudan kaldırır: passdb kaydı, Unix hesabı, özel grubu.\n\n── NEDEN AYRI BİR İŞLEM ────────────────────────────────────────────────────────────────\n\n`sync` istenen durumu gönderiyor ama HESAPLAR için toplayıcı: listede olmayan bir hesabı\nsilmiyor, ve bu bilerek — yarım okunmuş bir tablodan hesaplanmış bir eşitleme, listede\nolmayan her hesabı uçururdu. Silme bu yüzden kendi işlemi, tek bir hesabı adıyla anıyor, ve\nyalnızca birileri o hesabın gitmesini istediğinde koşuyor.\n\n── ÖNCE SAMBA ─────────────────────────────────────────────────────────────────────────\n\nGüvenlik açısından asıl yarısı passdb kaydı: Unix hesabı `-M -s nologin` ile açılıyor ve\noturum açılamıyor, passdb kaydı ise CANLI bir SMB kimlik bilgisi. İkisinden yalnız biri\nsilinebilseydi, silinmesi gereken o olurdu — o yüzden sırası önce.\n\n── NE REDDEDİYOR ──────────────────────────────────────────────────────────────────────\n\n`uid` bir `PosixId`, yani 0 ve 300000-399999 dışındaki her şey ifade edilemiyor: ajan\n`root`u ya da `www-data`yı silmeye ÇAĞRILAMIYOR. Bunun ötesinde ad ile numaranın kutuda\nbirbirini göstermesi gerekiyor; `getent` başka bir eşleşme söylüyorsa hiçbir şey silinmiyor.\nAynı denetim `sync`in yaratmadan önce yaptığı denetim, ve burada daha önemli: yanlış hesabı\nsilmek, yanlış hesabı yaratmaktan kötü.\n\nZaten olmayan bir hesap BAŞARI. İstenen şey hesabın kutuda olmaması, ve değil.",
       "type": "object",
       "properties": {
@@ -3258,6 +3276,19 @@
       "required": [
         "status",
         "created"
+      ]
+    },
+    {
+      "description": "SMB kimlik bilgisi düşürüldü (ya da hiç yoktu). Hesabın kendisi duruyor.",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "smb_credential_revoked"
+        }
+      },
+      "required": [
+        "status"
       ]
     },
     {

@@ -67,10 +67,18 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
       // ölçülen şey hangi çağrının yapıldığı değil, satırın gerçekten gitmesi.
       {
         isAvailable: () => true,
-        call: (request: Record<string, unknown>) =>
-          request['op'] === 'remove_posix_identity'
-            ? Promise.resolve({ status: 'posix_identity_removed' })
-            : Promise.resolve({ status: 'discarded', existed: true }),
+        call: (request: Record<string, unknown>) => {
+          switch (request['op']) {
+            case 'remove_posix_identity':
+              return Promise.resolve({ status: 'posix_identity_removed' });
+            // Kapatma yolunun ajan çağrısı. Devre dışı bırakmak artık SMB kimlik bilgisini de
+            // düşürüyor, ve bu süitteki her `update(..., { disabled: true })` buradan geçiyor.
+            case 'revoke_smb_credential':
+              return Promise.resolve({ status: 'smb_credential_revoked' });
+            default:
+              return Promise.resolve({ status: 'discarded', existed: true });
+          }
+        },
       } as unknown as AgentService,
     );
 
@@ -299,6 +307,75 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
       q.query(`SELECT 1 FROM public.resolve_session($1)`, [digest]),
     );
     expect(after).toHaveLength(0);
+  });
+
+  it('cuts SMB when an account is disabled, not just the web sessions', async () => {
+    // ── BU SÜİTİN EN ÖNEMLİ ÖLÇÜMÜ ────────────────────────────────────────────────────────
+    //
+    // Uzun süre kesilmiyordu. Kimlik eşitlemesi devre dışı kullanıcıyı listeden ÇIKARIYOR
+    // (`disabled_at IS NULL`), ama ajanın eşitlemesi hesaplar için TOPLAYICI — listede olmayanı
+    // silmiyor. Yani listeden çıkmak kutudan çıkmak değildi: kapatılan hesabın Samba parolası
+    // çalışmaya devam ediyordu, üstelik denetim kaydı "oturumları sonlandırıldı" derken.
+    //
+    // Ölçülen şey ÇAĞRININ KENDİSİ, çünkü bu katmanın verebileceği tek dürüst cevap o: parolanın
+    // gerçekten düştüğünü ancak gerçek bir `pdbedit` söyleyebilir, ve onu ajanın kendi süiti
+    // ölçüyor. Burada yanlış gidebilecek şey çağrının HİÇ YAPILMAMASI — ve tam olarak o olmuştu.
+    const calls: Record<string, unknown>[] = [];
+    const watched = new UsersService(
+      db,
+      new IdentitySyncService(
+        db,
+        {
+          isAvailable: () => false,
+          call: () => Promise.reject(new Error('unused')),
+        } as unknown as AgentService,
+        new SecretBox(Buffer.from(generateKey(), 'base64')),
+        new JobsService(db),
+      ),
+      {
+        isAvailable: () => true,
+        call: (request: Record<string, unknown>) => {
+          calls.push(request);
+          return Promise.resolve({ status: 'smb_credential_revoked' });
+        },
+      } as unknown as AgentService,
+    );
+
+    const user = await watched.create(orgA, 'kapatilacak', 'member', 'hash');
+    await watched.update(orgA, user.id, { disabled: true });
+    await watched.revokeSmb('kapatilacak');
+
+    expect(calls).toContainEqual({ op: 'revoke_smb_credential', login: 'kapatilacak' });
+  });
+
+  it('leaves the account and its uid in place when it is only disabled', async () => {
+    // Kapatmak GERİ ALINABİLİR, ve etkisi de öyle olmalı: silmenin aksine Unix hesabı, özel grup
+    // ve POSIX numarası duruyor. Numara emekli edilseydi hesabı geri açmak, kullanıcıyı kendi
+    // dosyalarının sahibi olmayan yeni bir numarayla geri getirirdi.
+    const user = await users.create(orgA, 'gecici-kapali', 'member', 'hash');
+    const before = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ posix_uid: number }>(`SELECT posix_uid FROM users WHERE id = $1`, [user.id]),
+    );
+
+    await users.update(orgA, user.id, { disabled: true });
+    await users.update(orgA, user.id, { disabled: false });
+
+    const after = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ posix_uid: number; disabled_at: Date | null }>(
+        `SELECT posix_uid, disabled_at FROM users WHERE id = $1`,
+        [user.id],
+      ),
+    );
+    expect(after[0]?.posix_uid).toBe(before[0]?.posix_uid);
+    expect(after[0]?.disabled_at).toBeNull();
+
+    const retired = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM retired_posix_ids WHERE id_value = $1`,
+        [before[0]?.posix_uid],
+      ),
+    );
+    expect(retired[0]?.n).toBe('0');
   });
 
   it('deletes an account, and never hands its uid to anybody else', async () => {

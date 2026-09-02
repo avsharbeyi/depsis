@@ -221,6 +221,10 @@ describe('the emitted agent schema', () => {
       'replicate_offsite',
       'restore_file_from_backup',
       'restore_from_snapshot',
+      // Bir hesabin SMB parolasini dusurmek, hesabi birakarak. `remove_posix_identity`den ayri
+      // olmasinin sebebi urun karari: silmek geri alinamaz, DEVRE DISI birakmak alinabilir — ve
+      // geri alinabilir bir islemin etkisi de geri alinabilir olmali.
+      'revoke_smb_credential',
       'scan_importable_pools',
       // The one operation that touches a share root's MODE, and the reason it is separate from
       // `create_dataset`. `zfs create` leaves a mountpoint at 0755 root:root and `apply_folder_acl`
@@ -383,7 +387,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(40);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(41);
   });
 
   it('agrees with the number the agent actually reports', () => {

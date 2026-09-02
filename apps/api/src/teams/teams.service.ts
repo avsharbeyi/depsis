@@ -333,7 +333,7 @@ export class TeamsService {
     userId: string,
     teamAdmin: boolean,
   ): Promise<TeamMemberRow> {
-    return this.db.withTenant(organizationId, async (db) => {
+    const added = await this.db.withTenant(organizationId, async (db) => {
       await findWithin(db, organizationId, teamId);
 
       const users = await db.query<{ username: string }>(
@@ -355,6 +355,18 @@ export class TeamsService {
       if (!row) throw new Error('the membership row was not returned');
       return { ...row, username: user.username };
     });
+
+    // ── EKLEMEK DE EŞİTLER ──────────────────────────────────────────────────────────────────
+    //
+    // Etmiyordu, ve asimetrinin kendisi kazara olduğunu söylüyordu: `remove` ve `removeMember`
+    // eşitliyor, `putMember` eşitlemiyordu. Bir ekibe yetki verip sonra kullanıcıyı ekleyince
+    // arayüz erişimi olduğunu gösteriyor, ağ paylaşımı ona kapalı kalıyordu — çünkü
+    // klasör ACL'i yetkiyi EKİBİN Unix grubuna veriyor ve kullanıcı o gruba hiç girmemiş oluyor.
+    //
+    // İşlemden SONRA, içinde değil: `enqueue` kendi kiracı işlemini açıyor. Bu depodaki her
+    // enqueue çağrısının kullandığı sıra.
+    await this.syncIdentity(organizationId, 'a team membership change');
+    return added;
   }
 
   /**

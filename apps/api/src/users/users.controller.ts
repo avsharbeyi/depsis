@@ -29,6 +29,7 @@ import { SessionService } from '../auth/session.service.js';
 import {
   CannotDeleteSelfError,
   IdentityStillOnBoxError,
+  SmbStillOpenError,
   UsernameTakenError,
   LastAdminError,
   UserNotFoundError,
@@ -298,8 +299,27 @@ export class UsersController {
       // them — it joins `users` and checks `disabled_at` — so this is not what closes the hole; it
       // is what makes the rows say what happened, so an audit does not have to infer a revocation
       // from a column on another table.
+      // ── KAPATMANIN İKİ YARISI ─────────────────────────────────────────────────────────
+      //
+      // Web oturumları ve SMB parolası. Uzun süre yalnız ilki yapılıyordu, ve denetim kaydı
+      // "oturumları sonlandırıldı" derken kapatılan kişi Windows'tan girmeye devam ediyordu:
+      // kimlik eşitlemesi devre dışı kullanıcıyı listeden çıkarıyor ama ajanın eşitlemesi
+      // hesap SİLMİYOR, yani listeden çıkmak kutudan çıkmak değil.
+      //
+      // SIRA: satır kapandı (yukarıda), oturumlar gitti, sonra SMB. Ajana ulaşılamazsa
+      // `smbCut` false kalıyor ve İKİSİ de olacak: denetim kaydı ne olduğunu doğru yazacak,
+      // ve çağıran 503 alacak — ama hesap kapalı kalacak, çünkü kapatmanın yapılan yarısını
+      // geri almak kimsenin işine yaramaz.
+      let smbCut = true;
+      let smbDetail = '';
       if (parsed.data.disabled === true) {
         await this.sessions.revokeAllForUser(session.organizationId, id);
+        try {
+          await this.users.revokeSmb(row.username);
+        } catch (error) {
+          smbCut = false;
+          smbDetail = error instanceof Error ? error.message : String(error);
+        }
       }
       // Kayıt iptalden SONRA: özet "oturumları sonlandırıldı" diyor, ve bunu ancak olduktan
       // sonra diyebilir.
@@ -309,10 +329,14 @@ export class UsersController {
           action: parsed.data.disabled ? 'user.disabled' : 'user.enabled',
           target: { kind: 'user', id: row.id, label: row.username },
           summary: parsed.data.disabled
-            ? `'${row.username}' hesabı kapatıldı; oturumları sonlandırıldı.`
+            ? smbCut
+              ? `'${row.username}' hesabı kapatıldı; oturumları sonlandırıldı ve ağ paylaşımı erişimi kesildi.`
+              : `'${row.username}' hesabı kapatıldı ve oturumları sonlandırıldı, ama AĞ PAYLAŞIMI ERİŞİMİ KESİLEMEDİ: ${smbDetail}`
             : `'${row.username}' hesabı yeniden açıldı.`,
         });
       }
+      // Kayıt YAZILDIKTAN SONRA fırlatılıyor: 503 almadan önce olan biten defterde durmalı.
+      if (!smbCut) throw new SmbStillOpenError(smbDetail);
       return toUser(row);
     } catch (error) {
       throw translate(error);
@@ -349,6 +373,13 @@ function translate(error: unknown): Error {
   // 503 ve 500 DEĞİL: silme başarısız oldu çünkü kutuya ulaşılamadı, ve bu geçici bir durum —
   // çağıranın yapması gereken şey yeniden denemek. Hesap olduğu gibi duruyor.
   if (error instanceof IdentityStillOnBoxError) {
+    return new ServiceUnavailableException(error.message);
+  }
+  // 503, ve HESAP KAPANMIŞ OLARAK. Satır kapandı ve web oturumları iptal edildi; kesilemeyen tek
+  // şey Samba parolası. Çağıranın bunu bilmesi gerekiyor — yarım kapatılmış bir hesabı tam
+  // kapatılmış göstermek, bu hatanın ta kendisiydi — ama isteği "başarısız" saymak da yanlış
+  // olurdu: yönetici tekrar denediğinde kapatma zaten yapılmış olacak ve aynı yol yeniden koşacak.
+  if (error instanceof SmbStillOpenError) {
     return new ServiceUnavailableException(error.message);
   }
   return error instanceof Error ? error : new Error(String(error));

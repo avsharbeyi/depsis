@@ -695,6 +695,10 @@ export type AgentRequest =
     }
   | {
       login: PosixName;
+      op: 'revoke_smb_credential';
+    }
+  | {
+      login: PosixName;
       op: 'remove_posix_identity';
       uid: PosixId;
     }
@@ -1438,6 +1442,9 @@ export type AgentResponse =
   | {
       created: boolean;
       status: 'app_data_dir_ready';
+    }
+  | {
+      status: 'smb_credential_revoked';
     }
   | {
       status: 'posix_identity_removed';

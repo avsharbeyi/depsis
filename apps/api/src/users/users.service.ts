@@ -45,6 +45,20 @@ export class LastAdminError extends Error {
   }
 }
 
+/**
+ * Hesap kapatıldı ama SMB kimlik bilgisi düşürülemedi.
+ *
+ * Satır kapandı ve web oturumları iptal edilecek, yani hesap arayüzden giremiyor. Kesilemeyen
+ * şey Samba parolası, ve çağıranın bunu BİLMESİ gerekiyor: yarım kapatılmış bir hesabı tam
+ * kapatılmış gibi göstermek, bu denetimin ortaya çıkardığı hatanın ta kendisiydi.
+ */
+export class SmbStillOpenError extends Error {
+  constructor(readonly detail: string) {
+    super(`hesap kapatıldı ama ağ paylaşımı erişimi kesilemedi: ${detail}`);
+    this.name = 'SmbStillOpenError';
+  }
+}
+
 /** Silinmek istenen hesap, isteği yapan hesabın kendisi. */
 export class CannotDeleteSelfError extends Error {
   constructor() {
@@ -273,9 +287,56 @@ export class UsersService {
       );
       const row = rows[0];
       if (!row) throw new UserNotFoundError();
+
+      // ── KAPATMAK SMB'Yİ DE KESER ────────────────────────────────────────────────────────
+      //
+      // Kesmiyordu, ve bu denetimde çıkan en ciddi bulgu oldu. Kimlik eşitlemesi devre dışı
+      // kullanıcıyı listeden ÇIKARIYOR (`identity-sync.service.ts`, `disabled_at IS NULL`) —
+      // ama ajanın eşitlemesi hesaplar için TOPLAYICI: listede olmayanı silmiyor. Yani listeden
+      // çıkmak kutudan çıkmak değildi. Kapatılan hesabın Samba parolası çalışmaya devam
+      // ediyordu, üstelik denetim kaydı "oturumları sonlandırıldı" derken.
+      //
+      // KESME BURADA DEĞİL, DENETLEYİCİDE — ve sıra bunu gerektiriyor. Burada çağrılsaydı ve
+      // ajana ulaşılamasaydı, atılan hata oturum iptalini ve denetim kaydını da atlardı: hesap
+      // kapanmış ama oturumları açık, ve olan bitenin hiçbir kaydı yok. Denetleyici önce satırı
+      // kapatıyor, sonra oturumları iptal ediyor, sonra SMB'yi kesiyor, ve denetim kaydına
+      // GERÇEKTEN ne olduğunu yazıyor.
+      //
+      // Geri açmak eşitlemeyi kuyruğa veriyor: mühürlü SMB özeti veritabanında duruyor ve bir
+      // sonraki eşitleme onu yeniden içe aktarıyor. Unix hesabı hiç silinmediği için dosyaların
+      // sahipliği de hiç değişmedi.
+      if (changes.disabled === false) {
+        await this.identity.enqueue(organizationId, `re-enabling '${row.username}'`);
+      }
       return row;
     } catch (error) {
       throw translateDbError(error);
+    }
+  }
+
+  /**
+   * Bir hesabın SMB kimlik bilgisini düşürür.
+   *
+   * `remove_posix_identity` DEĞİL: o Unix hesabını ve özel grubu da siliyor, ve devre dışı
+   * bırakmak geri alınabilir bir iş — ekran da öyle söylüyor. Geri alınabilir bir işlemin etkisi
+   * de geri alınabilir olmalı, ve kesilmesi gereken zaten tek bir şey var: Unix hesabıyla oturum
+   * açılamıyor (`-M -s nologin`), canlı olan tek kimlik bilgisi Samba parolası.
+   *
+   * `smb_unavailable` BAŞARI sayılıyor, ve bu bir gedik değil: Samba kurulu değilse düşürülecek
+   * bir kimlik bilgisi de yok, ve o cihazda kapatılan hesabın SMB erişimi zaten yok.
+   */
+  async revokeSmb(username: string): Promise<void> {
+    const response = await this.agent
+      .call({ op: 'revoke_smb_credential', login: username }, `disabling the account '${username}'`)
+      .catch((error: unknown) => {
+        throw new SmbStillOpenError(error instanceof Error ? error.message : String(error));
+      });
+    if (response.status !== 'smb_credential_revoked' && response.status !== 'smb_unavailable') {
+      throw new SmbStillOpenError(
+        'reason' in response && typeof response.reason === 'string'
+          ? response.reason
+          : response.status,
+      );
     }
   }
 
