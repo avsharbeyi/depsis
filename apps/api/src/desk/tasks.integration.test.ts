@@ -98,6 +98,31 @@ describeDb('the job board, against a real PostgreSQL', () => {
     await db?.onModuleDestroy();
   });
 
+  it('records a description change, and does not take the rest of the edit down with it', async () => {
+    // ── SESSİZCE KAYBOLAN DENETİM KAYDI ───────────────────────────────────────────────────
+    //
+    // `diff()` `field: 'description'` üretiyor ama şemadaki `task_activity_field_known` kısıtı
+    // o adı tanımıyordu (0030). Kayıt TEK BİR çok satırlı INSERT (`unnest`) olduğu için, kısıtı
+    // çiğneyen tek alan bütün ifadeyi düşürüyordu: açıklamayla BİRLİKTE değişen durum, öncelik
+    // ve atanan da gidiyordu. Üstüne `record()` hatayı yutup yalnız günlüğe yazıyor — yani
+    // düzenleme başarılı görünüyor ve aktivite akışında hiçbir şey çıkmıyordu.
+    //
+    // Bu test iki şeyi birden ölçüyor, ve ikincisi asıl olan: açıklamanın YAZILDIĞI, ve aynı
+    // istekteki öteki değişikliklerin de HAYATTA KALDIĞI.
+    const task = await tasks.create(orgA, deniz, 'yönergeli iş', emre);
+
+    await tasks.update(orgA, task.id, {
+      description: 'önce şunu yap, sonra bunu',
+      status: 'in_progress',
+    });
+
+    const rows = await tasks.activity(orgA, task.id);
+    const fields = rows.map((row) => row.field);
+    expect(fields).toContain('description');
+    // Ve beraberindeki: eskiden bu satır da kısıt yüzünden gidiyordu.
+    expect(fields).toContain('status');
+  });
+
   it('lets only the creator, the assignee or an administrator delete a job', async () => {
     // KAPANAN DELIK. `DELETE /tasks/{id}` hicbir sahiplik sinamasi yapmiyordu: herhangi bir uye
     // herhangi bir meslektasinin isini siliyordu, ve `task_activity`'nin ON DELETE CASCADE'i
