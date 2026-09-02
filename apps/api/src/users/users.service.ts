@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 
 import { AgentService } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
@@ -45,20 +45,6 @@ export class LastAdminError extends Error {
   }
 }
 
-/**
- * Hesap kapatıldı ama SMB kimlik bilgisi düşürülemedi.
- *
- * Satır kapandı ve web oturumları iptal edilecek, yani hesap arayüzden giremiyor. Kesilemeyen
- * şey Samba parolası, ve çağıranın bunu BİLMESİ gerekiyor: yarım kapatılmış bir hesabı tam
- * kapatılmış gibi göstermek, bu denetimin ortaya çıkardığı hatanın ta kendisiydi.
- */
-export class SmbStillOpenError extends Error {
-  constructor(readonly detail: string) {
-    super(`hesap kapatıldı ama ağ paylaşımı erişimi kesilemedi: ${detail}`);
-    this.name = 'SmbStillOpenError';
-  }
-}
-
 /** Silinmek istenen hesap, isteği yapan hesabın kendisi. */
 export class CannotDeleteSelfError extends Error {
   constructor() {
@@ -90,6 +76,8 @@ export class IdentityStillOnBoxError extends Error {
  */
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     private readonly db: DbService,
     /**
@@ -315,28 +303,52 @@ export class UsersService {
   }
 
   /**
-   * Bir hesabın SMB kimlik bilgisini düşürür.
+   * Bir hesabın SMB kimlik bilgisini düşürür: ÖNCE HEMEN, olmazsa KUYRUKTAN.
    *
-   * `remove_posix_identity` DEĞİL: o Unix hesabını ve özel grubu da siliyor, ve devre dışı
-   * bırakmak geri alınabilir bir iş — ekran da öyle söylüyor. Geri alınabilir bir işlemin etkisi
-   * de geri alınabilir olmalı, ve kesilmesi gereken zaten tek bir şey var: Unix hesabıyla oturum
-   * açılamıyor (`-M -s nologin`), canlı olan tek kimlik bilgisi Samba parolası.
+   * ── NEDEN İKİ YOL ───────────────────────────────────────────────────────────────────────────
    *
-   * `smb_unavailable` BAŞARI sayılıyor, ve bu bir gedik değil: Samba kurulu değilse düşürülecek
-   * bir kimlik bilgisi de yok, ve o cihazda kapatılan hesabın SMB erişimi zaten yok.
+   * Bir hesabı kapatmanın sebebi çoğu zaman aciliyet — ele geçirilmiş bir hesap, işten ayrılmış
+   * biri — ve "birazdan kesilecek" bir erişim kesilmemiş erişimdir. O yüzden ilk deneme isteğin
+   * İÇİNDE.
+   *
+   * Ama ilk hâli YALNIZ bu denemeydi ve yanlıştı, ve e2e onu yakaladı: ajana ulaşılamadığında
+   * istek 503 dönüyordu, yani ajan düştüğünde yönetici bir hesabı KAPATAMIYORDU. Düzeltilmeye
+   * çalışılan hatadan kötü bir durum — kapatma, kutunun sağlığından bağımsız olarak her zaman
+   * yapılabilmeli.
+   *
+   * O yüzden başarısızlık bir ret değil bir KUYRUK: iş `identity.revoke-smb` olarak yazılıyor ve
+   * işçi ajan geri gelene kadar yeniden deniyor. Kapatma her hâlükârda tamamlanıyor; değişen tek
+   * şey kesmenin ne zaman olduğu, ve denetim kaydı hangisi olduğunu yazıyor.
+   *
+   * ── NE BAŞARI SAYILIYOR ─────────────────────────────────────────────────────────────────────
+   *
+   * `smb_unavailable` da başarı, ve bu bir gedik değil: Samba kurulu değilse düşürülecek bir
+   * kimlik bilgisi de yok, ve o cihazda kapatılan hesabın SMB erişimi zaten yok.
+   *
+   * Dönen değer, kesmenin ANINDA olup olmadığı — çağıran bunu denetim kaydına yazıyor.
    */
-  async revokeSmb(username: string): Promise<void> {
-    const response = await this.agent
-      .call({ op: 'revoke_smb_credential', login: username }, `disabling the account '${username}'`)
-      .catch((error: unknown) => {
-        throw new SmbStillOpenError(error instanceof Error ? error.message : String(error));
-      });
-    if (response.status !== 'smb_credential_revoked' && response.status !== 'smb_unavailable') {
-      throw new SmbStillOpenError(
+  async revokeSmb(organizationId: string, username: string): Promise<boolean> {
+    try {
+      const response = await this.agent.call(
+        { op: 'revoke_smb_credential', login: username },
+        `disabling the account '${username}'`,
+      );
+      if (response.status === 'smb_credential_revoked' || response.status === 'smb_unavailable') {
+        return true;
+      }
+      throw new Error(
         'reason' in response && typeof response.reason === 'string'
           ? response.reason
           : response.status,
       );
+    } catch (error) {
+      this.logger.warn(
+        `could not revoke SMB for '${username}' in the request; queueing a retry: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      await this.identity.enqueueRevokeSmb(organizationId, username);
+      return false;
     }
   }
 

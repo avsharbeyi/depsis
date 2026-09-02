@@ -29,7 +29,6 @@ import { SessionService } from '../auth/session.service.js';
 import {
   CannotDeleteSelfError,
   IdentityStillOnBoxError,
-  SmbStillOpenError,
   UsernameTakenError,
   LastAdminError,
   UserNotFoundError,
@@ -306,20 +305,14 @@ export class UsersController {
       // kimlik eşitlemesi devre dışı kullanıcıyı listeden çıkarıyor ama ajanın eşitlemesi
       // hesap SİLMİYOR, yani listeden çıkmak kutudan çıkmak değil.
       //
-      // SIRA: satır kapandı (yukarıda), oturumlar gitti, sonra SMB. Ajana ulaşılamazsa
-      // `smbCut` false kalıyor ve İKİSİ de olacak: denetim kaydı ne olduğunu doğru yazacak,
-      // ve çağıran 503 alacak — ama hesap kapalı kalacak, çünkü kapatmanın yapılan yarısını
-      // geri almak kimsenin işine yaramaz.
+      // `revokeSmb` HİÇ ATMIYOR: ajana ulaşılamazsa işi kuyruğa veriyor ve `false` dönüyor.
+      // İlk hâli 503 atıyordu ve e2e onu yakaladı — ajan düştüğünde yönetici hesabı
+      // kapatamıyordu, ki bu düzeltilmeye çalışılan hatadan kötü. Kapatma her zaman
+      // tamamlanmalı; değişen tek şey kesmenin ne zaman olduğu.
       let smbCut = true;
-      let smbDetail = '';
       if (parsed.data.disabled === true) {
         await this.sessions.revokeAllForUser(session.organizationId, id);
-        try {
-          await this.users.revokeSmb(row.username);
-        } catch (error) {
-          smbCut = false;
-          smbDetail = error instanceof Error ? error.message : String(error);
-        }
+        smbCut = await this.users.revokeSmb(session.organizationId, row.username);
       }
       // Kayıt iptalden SONRA: özet "oturumları sonlandırıldı" diyor, ve bunu ancak olduktan
       // sonra diyebilir.
@@ -331,12 +324,10 @@ export class UsersController {
           summary: parsed.data.disabled
             ? smbCut
               ? `'${row.username}' hesabı kapatıldı; oturumları sonlandırıldı ve ağ paylaşımı erişimi kesildi.`
-              : `'${row.username}' hesabı kapatıldı ve oturumları sonlandırıldı, ama AĞ PAYLAŞIMI ERİŞİMİ KESİLEMEDİ: ${smbDetail}`
+              : `'${row.username}' hesabı kapatıldı ve oturumları sonlandırıldı; ağ paylaşımı erişimi ajana ulaşılamadığı için KUYRUĞA ALINDI.`
             : `'${row.username}' hesabı yeniden açıldı.`,
         });
       }
-      // Kayıt YAZILDIKTAN SONRA fırlatılıyor: 503 almadan önce olan biten defterde durmalı.
-      if (!smbCut) throw new SmbStillOpenError(smbDetail);
       return toUser(row);
     } catch (error) {
       throw translate(error);
@@ -373,13 +364,6 @@ function translate(error: unknown): Error {
   // 503 ve 500 DEĞİL: silme başarısız oldu çünkü kutuya ulaşılamadı, ve bu geçici bir durum —
   // çağıranın yapması gereken şey yeniden denemek. Hesap olduğu gibi duruyor.
   if (error instanceof IdentityStillOnBoxError) {
-    return new ServiceUnavailableException(error.message);
-  }
-  // 503, ve HESAP KAPANMIŞ OLARAK. Satır kapandı ve web oturumları iptal edildi; kesilemeyen tek
-  // şey Samba parolası. Çağıranın bunu bilmesi gerekiyor — yarım kapatılmış bir hesabı tam
-  // kapatılmış göstermek, bu hatanın ta kendisiydi — ama isteği "başarısız" saymak da yanlış
-  // olurdu: yönetici tekrar denediğinde kapatma zaten yapılmış olacak ve aynı yol yeniden koşacak.
-  if (error instanceof SmbStillOpenError) {
     return new ServiceUnavailableException(error.message);
   }
   return error instanceof Error ? error : new Error(String(error));

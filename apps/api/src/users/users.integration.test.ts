@@ -343,7 +343,7 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
 
     const user = await watched.create(orgA, 'kapatilacak', 'member', 'hash');
     await watched.update(orgA, user.id, { disabled: true });
-    await watched.revokeSmb('kapatilacak');
+    await watched.revokeSmb(orgA, 'kapatilacak');
 
     expect(calls).toContainEqual({ op: 'revoke_smb_credential', login: 'kapatilacak' });
   });

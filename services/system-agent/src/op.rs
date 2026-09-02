@@ -2152,9 +2152,7 @@ pub enum Request {
     /// numaranın birbirini göstermesini şart koşmasının sebebi orada silinen şeyin geri
     /// gelmemesi, burada ise geliyor.
     #[serde(rename = "revoke_smb_credential")]
-    RevokeSmbCredential {
-        login: PosixName,
-    },
+    RevokeSmbCredential { login: PosixName },
 
     /// Bir hesabı kutudan kaldırır: passdb kaydı, Unix hesabı, özel grubu.
     ///
