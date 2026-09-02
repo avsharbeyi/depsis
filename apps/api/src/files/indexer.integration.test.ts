@@ -301,6 +301,59 @@ describeDb('reconciling a share with the disk', () => {
     expect(await paths()).toEqual([]);
   });
 
+  it('forgets a file that arrived through an upload, whose session still names it', async () => {
+    // ── SAHADAN GELEN ARIZA, YENİDEN ÜRETİLMİŞ ────────────────────────────────────────────
+    //
+    // Cihazın sahibi ağ sürücüsünden yüklediği dosyaların arayüzde hiç görünmediğini bildirdi.
+    // Cihazda dizinde 1702, diskte 2044 öğe vardı, ve uzlaştırma turu şununla ölüyordu:
+    //
+    //   "upload_sessions" tablosuna girilen yeni satır "upload_sessions_completion_pair"
+    //   check kısıtlamasını ihlal ediyor
+    //
+    // Sebep iki şema kuralının çelişmesiydi: `file_id` ON DELETE SET NULL, ama eski CHECK dolu
+    // bir `completed_at` yanında NULL bir `file_id`i yasaklıyordu. Yani web'den yüklenmiş bir
+    // dosyayı ağ sürücüsünden silmek, o satırı silmeye çalışan turu öldürüyordu — ve tur ölünce
+    // ağdan yazılan hiçbir dosya bir daha indekslenmiyordu.
+    //
+    // Ölçülen şey turun HAYATTA KALMASI: dosya dizinden düşüyor, ve aynı turda keşfedilen yeni
+    // dosya dizine giriyor.
+    const before: Disk = new Map([
+      ['', { entries: [{ name: 'yuklenen.txt', directory: false, size: 5 }] }],
+    ]);
+    await indexer(before).reconcile(org, share, held, 'test');
+
+    const entry = await db.withTenant(org, (q) =>
+      q.query<{ id: string }>(
+        `SELECT id::text AS id FROM file_entries WHERE share_id = $1 AND name = 'yuklenen.txt'`,
+        [share],
+      ),
+    );
+    const fileId = entry[0]?.id;
+    expect(fileId).toBeDefined();
+
+    // Web'den yüklenmiş gibi: TAMAMLANMIŞ bir oturum, o dosyayı adlıyor.
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO upload_sessions
+           (organization_id, share_id, parent_id, created_by, filename, staging_name,
+            length_bytes, offset_bytes, file_id, completed_at)
+         VALUES ($1, $2, NULL, $3, 'yuklenen.txt', 'stg-yuklenen', 5, 5, $4, now())`,
+        [org, share, admin, fileId],
+      ),
+    );
+
+    // Dosya ağ sürücüsünden silindi, ve aynı anda yenisi yazıldı.
+    const after: Disk = new Map([
+      ['', { entries: [{ name: 'yeni-gelen.txt', directory: false, size: 9 }] }],
+    ]);
+    await indexer(after).reconcile(org, share, held, 'test');
+
+    const paths_ = await paths();
+    expect(paths_).not.toContain('/yuklenen.txt');
+    // ASIL ÖLÇÜM: tur ölmediği için sıradaki dosya da geldi.
+    expect(paths_).toContain('/yeni-gelen.txt');
+  });
+
   it('removes a whole subtree when its folder is gone', async () => {
     const folder = await row(null, 'folder', 'eski', '/eski');
     await row(folder, 'file', 'a.txt', '/eski/a.txt', 3);
