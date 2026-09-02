@@ -146,12 +146,19 @@ export class IndexerService implements OnModuleInit {
     }
   }
 
-  /** Every organisation on the box. Untenanted because the question is about the box. */
+  /**
+   * Bu kutudaki kiracılar.
+   *
+   * Eskiden `withoutTenant` ile doğrudan `organizations` okunuyordu, ve bu SESSİZCE SIFIR SATIR
+   * döndürüyordu: tablonun `depsis_app` politikası `id = current_organization_id()` ve bağlam
+   * yokken bu NULL. Yani aşağıdaki döngü hiç dönmüyor, hiçbir zincir kurulmuyor, ve hata da
+   * çıkmıyordu — boş bir liste bir hata değil.
+   *
+   * Sahada ölçüldü: cihazda dizin turu iki buçuk saat boyunca hiç koşmadı, kuyruk tamamen boştu,
+   * ve ağ sürücüsünden yazılan 343 dosya arayüzde hiç görünmedi.
+   */
   private async organizations(): Promise<string[]> {
-    const rows = await this.db.withoutTenant('migration-status', (q) =>
-      q.query<{ id: string }>(`SELECT id::text AS id FROM public.organizations`),
-    );
-    return rows.map((row) => row.id);
+    return this.db.tenantIds();
   }
 
   /**

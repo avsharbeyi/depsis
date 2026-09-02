@@ -517,10 +517,11 @@ export class RemoteService {
    */
   async onModuleInit(): Promise<void> {
     try {
-      const rows = await this.db.withoutTenant('migration-status', (q) =>
-        q.query<{ id: string }>(`SELECT id::text AS id FROM public.organizations`),
-      );
-      for (const row of rows) await this.scheduleAuthorize(row.id, new Date());
+      // `tenantIds()` ile, `withoutTenant` + `organizations` ile DEĞİL: ikincisi RLS altında
+      // sessizce sıfır satır döndürüyordu ve bu zincir hiç kurulmuyordu. Bkz. `DbService.tenantIds`.
+      for (const organizationId of await this.db.tenantIds()) {
+        await this.scheduleAuthorize(organizationId, new Date());
+      }
     } catch (error) {
       this.logger.error(
         `yetkilendirme zinciri tohumlanamadı: ${

@@ -212,15 +212,24 @@ export class BackupSchedulesService {
     }
   }
 
+  /**
+   * Etkin zamanlaması olan kiracılar.
+   *
+   * KİRACILAR ÖNCE, sonra her biri KENDİ bağlamında. Eskiden tablo doğrudan `withoutTenant` ile
+   * okunuyordu ve kiracıya ait: RLS bağlamsız sorguya sıfır satır döndürüyor, hata vermiyor, ve
+   * bu zincir gerçek bir cihazda hiç kurulmuyordu. Bkz. `DbService.tenantIds`.
+   */
   private async organizationsWithSchedules(): Promise<string[]> {
-    const rows = await this.db.withoutTenant('migration-status', (q) =>
-      q.query<{ id: string }>(
-        `SELECT DISTINCT organization_id::text AS id
-           FROM public.backup_schedules
-          WHERE enabled`,
-      ),
-    );
-    return rows.map((row) => row.id);
+    const found: string[] = [];
+    for (const organizationId of await this.db.tenantIds()) {
+      const rows = await this.db.withTenant(organizationId, (q) =>
+        q.query<{ id: string }>(
+          `SELECT 1::text AS id FROM public.backup_schedules WHERE enabled LIMIT 1`,
+        ),
+      );
+      if (rows.length > 0) found.push(organizationId);
+    }
+    return found;
   }
 
   async scheduleTick(organizationId: string, runAfter: Date): Promise<void> {

@@ -82,18 +82,25 @@ export class NotificationsService implements OnModuleInit {
   }
 
   /**
-   * Taranmaya değer her kiracı: son tarihi olan ve hâlâ açık bir işi olanlar.
+   * Son tarihi olan açık işi olan kiracılar.
    *
-   * Kiracı bağlamı DIŞINDA, çünkü açılışta oturum yok ve bu sorgunun tam işi kiracıları saymak.
+   * KİRACILAR ÖNCE, sonra her biri KENDİ bağlamında. Eskiden `tasks` doğrudan `withoutTenant` ile
+   * okunuyordu ve kiracıya ait: RLS bağlamsız sorguya sıfır satır döndürüyor, hata vermiyor, ve bu
+   * zincir gerçek bir cihazda hiç kurulmuyordu. Bkz. `DbService.tenantIds`.
    */
   private async organizationsWithTasks(): Promise<string[]> {
-    const rows = await this.db.withoutTenant('migration-status', (q) =>
-      q.query<{ id: string }>(
-        `SELECT DISTINCT organization_id::text AS id FROM public.tasks
-          WHERE due_at IS NOT NULL AND status <> 'done' AND status <> 'cancelled'`,
-      ),
-    );
-    return rows.map((row) => row.id);
+    const found: string[] = [];
+    for (const organizationId of await this.db.tenantIds()) {
+      const rows = await this.db.withTenant(organizationId, (q) =>
+        q.query<{ id: string }>(
+          `SELECT 1::text AS id FROM public.tasks
+            WHERE due_at IS NOT NULL AND status <> 'done' AND status <> 'cancelled'
+            LIMIT 1`,
+        ),
+      );
+      if (rows.length > 0) found.push(organizationId);
+    }
+    return found;
   }
 
   /**
