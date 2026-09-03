@@ -94,6 +94,15 @@ export class IndexerService implements OnModuleInit {
    * the path a person is waiting on: a file saved from Word should appear in the web interface in
    * seconds, not at the next quarter hour.
    */
+  /**
+   * Bir dizin için en fazla kaç sayfa istenir.
+   *
+   * Kırk sayfa × 5.000 = iki yüz bin girdi. Bir klasörde bundan fazlasını bu ürün desteklemiyor,
+   * ve desteklemediğini SÖYLEMEK zorunda: tavan aşıldığında liste `truncated: true` dönüyor ve
+   * o klasörün altında hiçbir şey silinmiyor.
+   */
+  static readonly MAX_PAGES = 40;
+
   static readonly DRAIN_BATCH = 200;
 
   /**
@@ -320,6 +329,20 @@ export class IndexerService implements OnModuleInit {
     shareId: string,
     started: Date,
   ): Promise<boolean> {
+    // ── "DEVAM" BİR TUR DEĞİL, BİR ARALIK SORUSU ────────────────────────────────────────────
+    //
+    // Bu sorgu `scanned_at < started` diyordu — yani "BU TURDA okunmamış bir klasör var mı". Bir
+    // paylaşımda BATCH'ten (500) fazla klasör olduğu anda cevabı SONSUZA KADAR evet: her tur 500
+    // tanesini damgalıyor, geri kalanın damgası hep bu turun başlangıcından eski kalıyor.
+    //
+    // Sonuç bir dönme oldu ve sahada ölçüldü: on beş dakikada bir koşması gereken iş, yirmi
+    // dakikada 684 kez koştu — saniyede yarım tur, aralıksız, her turda ajanı ve veritabanını
+    // dolaşarak.
+    //
+    // Doğru soru "bu turda okunmadı mı" değil, "BİR TURLUK SÜREDİR okunmadı mı". Öyle sorulunca
+    // taze bir ağaçta cevap hayır oluyor ve zincir kendi aralığında dinleniyor; gerçekten
+    // arkada kalmış bir ağaçta ise evet, ve arka arkaya koşmak tam da istenen şey.
+    const cutoff = new Date(started.getTime() - IndexerService.INTERVAL_MS);
     const rows = await this.db.withTenant(organizationId, (q) =>
       q.query<{ left: boolean }>(
         `SELECT EXISTS (
@@ -327,7 +350,7 @@ export class IndexerService implements OnModuleInit {
             WHERE share_id = $1::uuid AND kind = 'folder' AND trashed_at IS NULL
               AND (scanned_at IS NULL OR scanned_at < $2)
          ) AS "left"`,
-        [shareId, started],
+        [shareId, cutoff],
       ),
     );
     return rows[0]?.left === true;
@@ -580,23 +603,66 @@ export class IndexerService implements OnModuleInit {
         truncated: boolean;
       }
   > {
-    const response = await this.agent.call(
-      { op: 'list_directory', share: shareName, path: [...components] },
-      reason,
-    );
-    if (response.status === 'not_found') return 'gone';
-    if (response.status !== 'listing') {
-      throw new Error(`the agent answered '${response.status}' to a listing of ${shareName}`);
+    // ── SAYFALAR TOPLANIYOR ─────────────────────────────────────────────────────────────────
+    //
+    // Ajanın tek bir cevabı `MAX_LISTING` (5.000) satırda kesiliyor, ve o sınır kalıyor: bir yanıt
+    // kontrol soketinde tek bir satır. Değişen şey, sınıra çarpıldığında YAPACAK BİR ŞEY olması.
+    //
+    // Sahada bunun bedeli ölçüldü: 20.246 klasörlük bir paylaşım kökü dizine yalnız 11.941 satırla
+    // girdi ve hiçbir zaman tamamlanamadı. Yürüyüş her üç saniyede bir koşuyor, her seferinde aynı
+    // ilk 5.000'i görüyor, ve "bu klasörde daha var" diye uyarıp duruyordu. Sayaç kalıcı olarak
+    // yanlış, dosyalar kalıcı olarak eksikti.
+    //
+    // İmleç bir AD, ofset değil: sayfalar arasında bir dosya eklenirse ofset kayar ve aradaki her
+    // ad ya iki kez ya hiç dönerdi. Ajan girdileri ada göre bayt sırasıyla veriyor, yani sıra iki
+    // çağrı arasında sabit.
+    //
+    // TAVAN VAR ve dürüst: `MAX_PAGES` sayfadan sonra durup `truncated: true` diyoruz. Sonsuz bir
+    // döngü, adı sürekli değişen bir dizinde teorik olarak mümkün, ve bir klasörde iki yüz bin
+    // girdi bu ürünün desteklemediği bir şey — ama desteklemediğini SÖYLEMEK zorunda.
+    const entries: Array<{
+      name: string;
+      directory: boolean;
+      size: number;
+      modified_unix: number;
+    }> = [];
+    let after: string | undefined;
+
+    for (let page = 0; page < IndexerService.MAX_PAGES; page += 1) {
+      const response = await this.agent.call(
+        {
+          op: 'list_directory',
+          share: shareName,
+          path: [...components],
+          ...(after === undefined ? {} : { after }),
+        },
+        reason,
+      );
+      // `not_found` yalnız İLK sayfada 'gone' demek. Sonraki sayfada, dizin okunurken silinmiş
+      // demek — ve o zaman elimizdeki kısmı vermek, silinmiş bir dizini boş sanmaktan iyi.
+      if (response.status === 'not_found') {
+        if (page === 0) return 'gone';
+        break;
+      }
+      if (response.status !== 'listing') {
+        throw new Error(`the agent answered '${response.status}' to a listing of ${shareName}`);
+      }
+      for (const entry of response.entries) {
+        entries.push({
+          name: entry.name,
+          directory: entry.directory,
+          size: entry.size,
+          modified_unix: entry.modified_unix,
+        });
+      }
+      if (!response.truncated) return { entries, truncated: false };
+      const last = response.entries[response.entries.length - 1];
+      // Kırpıldı ama girdi yok: ilerleyecek bir imleç kalmadı, ve döngüye girmemek gerekiyor.
+      if (last === undefined) break;
+      after = last.name;
     }
-    return {
-      entries: response.entries.map((entry) => ({
-        name: entry.name,
-        directory: entry.directory,
-        size: entry.size,
-        modified_unix: entry.modified_unix,
-      })),
-      truncated: response.truncated,
-    };
+
+    return { entries, truncated: true };
   }
 
   /**

@@ -134,6 +134,10 @@ describe('the API and its contract describe the same system', () => {
       onModuleDestroy: () => Promise.resolve(),
       withTenant: () => Promise.resolve([]),
       withoutTenant: () => Promise.resolve([{ done: true }]),
+      // Açılışta zincirleri kuran her servis bunu çağırıyor. Boş liste doğru cevap: bu süitin
+      // ölçtüğü şey rota sözleşmesi, ve tohumlanacak bir kiracı olmadığında hiçbir iş kuyruğa
+      // girmiyor. Olmadığında altı servis birden yakalanmış bir hata günlüğe yazıyordu.
+      tenantIds: () => Promise.resolve([]),
     };
 
     // Likewise the agent: left as itself it would try to open a Unix socket while this test

@@ -270,6 +270,104 @@ describeDb('reconciling a share with the disk', () => {
     expect(await paths()).toEqual(['/windows.docx']);
   });
 
+  it('reads a directory with more entries than one listing can carry', async () => {
+    // ── SAHADAN GELEN ARIZA ───────────────────────────────────────────────────────────────
+    //
+    // Cihazın paylaşım kökünde 20.246 klasör vardı. Ajanın tek bir cevabı `MAX_LISTING` (5.000)
+    // satırda kesiliyor, ve çağıranın yapacak bir şeyi yoktu: dizin yalnız 11.941 satırla doldu
+    // ve HİÇBİR ZAMAN tamamlanamadı. Yürüyüş her üç saniyede bir koşup her seferinde aynı ilk
+    // 5.000'i görüyor, "bu klasörde daha var" diye uyarıp duruyordu. Sayaç kalıcı olarak yanlış,
+    // dosyalar kalıcı olarak eksikti.
+    //
+    // Ölçülen şey: bir sayfadan uzun bir dizinin TAMAMININ dizine girmesi.
+    const total = 12_000;
+    const names = Array.from({ length: total }, (_, i) => `k${String(i).padStart(6, '0')}.txt`);
+    // Ajan gibi: ada göre bayt sırası, `after`dan kesin olarak sonrası, sayfa başına en fazla
+    // `PAGE` satır ve daha varsa `truncated`.
+    const PAGE = 5_000;
+    let calls = 0;
+    const agent = {
+      isAvailable: () => true,
+      call: (request: AgentRequest): Promise<AgentResponse> => {
+        if (request.op !== 'list_directory') {
+          return Promise.resolve<AgentResponse>({ status: 'ok', schema_version: 10 });
+        }
+        if (request.path.length > 0) {
+          return Promise.resolve<AgentResponse>({
+            status: 'listing',
+            truncated: false,
+            entries: [],
+          });
+        }
+        calls += 1;
+        const after = (request as { after?: string }).after;
+        const rest = names.filter((n) => after === undefined || n > after).sort();
+        const page = rest.slice(0, PAGE);
+        return Promise.resolve<AgentResponse>({
+          status: 'listing',
+          truncated: rest.length > PAGE,
+          entries: page.map((name) => ({
+            name,
+            directory: false,
+            size: 4,
+            modified_unix: 1_700_000_000,
+          })),
+        });
+      },
+    } as unknown as AgentService;
+
+    const service = new IndexerService(
+      db,
+      agent,
+      new FilesService(db, agent, new PosixIdentityService(db), new JobsService(db)),
+    );
+    const result = await service.reconcile(org, share, held, 'test');
+
+    expect(result.discovered).toBe(total);
+    // Üç sayfa: 5.000 + 5.000 + 2.000.
+    expect(calls).toBe(3);
+    // Ve kırpılmış SAYILMIYOR — kırpılmış sayılsaydı bu klasörün altında hiçbir şey silinemezdi.
+    expect(result.truncated).toBe(0);
+  });
+
+  it('rests between passes instead of spinning when a share is bigger than one batch', async () => {
+    // `hasUnscanned` "BU TURDA okunmamış klasör var mı" diye soruyordu, ve bir paylaşımda
+    // BATCH'ten fazla klasör olduğu anda cevabı sonsuza kadar evet oluyordu: her tur 500 tanesini
+    // damgalıyor, geri kalanın damgası hep bu turun başlangıcından eski kalıyor.
+    //
+    // Sahada ölçüldü: on beş dakikada bir koşması gereken iş, yirmi dakikada 684 kez koştu.
+    //
+    // Burada BATCH'ten fazla klasör kuruluyor ve iki tur koşuluyor; ikinci turun `more`u false
+    // olmalı, çünkü hepsi AZ ÖNCE okundu.
+    const many: Disk = new Map([
+      [
+        '',
+        {
+          entries: Array.from({ length: 600 }, (_, i) => ({
+            name: `d${String(i).padStart(4, '0')}`,
+            directory: true,
+            size: 0,
+          })),
+        },
+      ],
+    ]);
+    for (let i = 0; i < 600; i += 1) {
+      many.set(`d${String(i).padStart(4, '0')}`, { entries: [] });
+    }
+
+    const service = indexer(many);
+    let more = true;
+    let passes = 0;
+    while (more && passes < 12) {
+      more = (await service.reconcile(org, share, held, 'test')).more;
+      passes += 1;
+    }
+
+    // Hepsi okunduğunda zincir DİNLENİYOR. Eski hâlde bu döngü 12'de tükenirdi.
+    expect(more).toBe(false);
+    expect(passes).toBeLessThan(12);
+  });
+
   it('walks into folders it discovers', async () => {
     const disk: Disk = new Map([
       ['', { entries: [{ name: 'proje', directory: true, size: 0 }] }],

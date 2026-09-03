@@ -593,6 +593,10 @@
         },
         "share": {
           "$ref": "#/$defs/SafeComponent"
+        },
+        "after": {
+          "description": "Bu addan SONRAKİLERİ ver — sayfalama imleci.\n\n── NEDEN VAR ────────────────────────────────────────────────────────────────────\n\nBir listeleme `MAX_LISTING` satırda kesiliyor, çünkü bir yanıt kontrol soketinde tek\nbir satır. O sınır kalıyor, ama sınıra çarpan çağıranın YAPACAK BİR ŞEYİ olmalıydı ve\nyoktu: sahada 20.246 klasörlük bir paylaşım kökü, dizinde yalnız yarısıyla göründü ve\nhiçbir zaman tamamlanamadı. Sayaç kalıcı olarak yanlıştı ve dosyalar kalıcı olarak\neksikti.\n\n── NEDEN AD, NEDEN OFSET DEĞİL ──────────────────────────────────────────────────\n\nSıra numarası bir dizini iki çağrı arasında değişmediği varsayımına dayanır, ve o\nvarsayım bir NAS'ta yanlış: sayfalar arasında bir dosya eklenirse ofset kayar ve\naradaki her ad ya iki kez ya hiç dönmez. Ad ise kendi başına duruyor — silinmiş bir\naddan sonrası hâlâ iyi tanımlı.\n\nSıra bunun için SABİT: girdiler ada göre bayt sırasıyla veriliyor. `readdir`ın kendi\nsırası dosya sistemine ait ve iki çağrı arasında aynı kalacağının garantisi yok.",
+          "$ref": "#/$defs/SafeComponent"
         }
       },
       "additionalProperties": false,
