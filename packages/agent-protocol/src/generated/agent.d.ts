@@ -287,12 +287,6 @@ export type AgentRequest =
       to: SafeComponent[];
     }
   | {
-      op: 'list_directory';
-      /**
-       * Relative to the share root. Empty means the share root itself.
-       */
-      path: SafeComponent[];
-      share: SafeComponent;
       /**
        * Bu addan SONRAKİLERİ ver — sayfalama imleci.
        *
@@ -315,6 +309,12 @@ export type AgentRequest =
        * sırası dosya sistemine ait ve iki çağrı arasında aynı kalacağının garantisi yok.
        */
       after?: SafeComponent | null;
+      op: 'list_directory';
+      /**
+       * Relative to the share root. Empty means the share root itself.
+       */
+      path: SafeComponent[];
+      share: SafeComponent;
     }
   | {
       op: 'snapshot_entries';
