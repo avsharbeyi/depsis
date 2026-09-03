@@ -270,6 +270,108 @@ describeDb('reconciling a share with the disk', () => {
     expect(await paths()).toEqual(['/windows.docx']);
   });
 
+  it('reads a directory with more entries than one listing can carry', async () => {
+    // ── SAHADAN GELEN ARIZA ───────────────────────────────────────────────────────────────
+    //
+    // Cihazın paylaşım kökünde 20.246 klasör vardı. Ajanın tek bir cevabı `MAX_LISTING` (5.000)
+    // satırda kesiliyor, ve çağıranın yapacak bir şeyi yoktu: dizin yalnız 11.941 satırla doldu
+    // ve HİÇBİR ZAMAN tamamlanamadı. Yürüyüş her üç saniyede bir koşup her seferinde aynı ilk
+    // 5.000'i görüyor, "bu klasörde daha var" diye uyarıp duruyordu.
+    //
+    // ── NEDEN YİRMİ BİN SATIRLA ÖLÇÜLMÜYOR ────────────────────────────────────────────────
+    //
+    // Ölçülen şey SAYFA SINIRINI GEÇEBİLMEK, ve o mantık sayfa boyu üç olduğunda da beş bin
+    // olduğunda da aynı. Gerçek sayıyla kurulan bir test, bu süite on iki bin satır ve saniyeler
+    // ekler — ve ölçtüğü şeyi bir gram daha kesin ölçmez.
+    const all = ['a.txt', 'b.txt', 'c.txt', 'd.txt', 'e.txt', 'f.txt', 'g.txt'];
+    const PAGE = 3;
+    const pages: Array<string | undefined> = [];
+
+    const agent = {
+      isAvailable: () => true,
+      call: (request: AgentRequest): Promise<AgentResponse> => {
+        if (request.op !== 'list_directory') {
+          return Promise.resolve<AgentResponse>({ status: 'ok', schema_version: 10 });
+        }
+        if (request.path.length > 0) {
+          return Promise.resolve<AgentResponse>({
+            status: 'listing',
+            truncated: false,
+            entries: [],
+          });
+        }
+        // Ajan gibi: ada göre sıralı, `after`dan KESİN OLARAK sonrası, sayfa başına en fazla
+        // `PAGE`, ve daha varsa `truncated`.
+        const after = (request as { after?: string }).after;
+        pages.push(after);
+        const rest = all.filter((name) => after === undefined || name > after);
+        return Promise.resolve<AgentResponse>({
+          status: 'listing',
+          truncated: rest.length > PAGE,
+          entries: rest.slice(0, PAGE).map((name) => ({
+            name,
+            directory: false,
+            size: 4,
+            modified_unix: 1_700_000_000,
+          })),
+        });
+      },
+    } as unknown as AgentService;
+
+    const service = new IndexerService(
+      db,
+      agent,
+      new FilesService(db, agent, new PosixIdentityService(db), new JobsService(db)),
+    );
+    const result = await service.reconcile(org, share, held, 'test');
+
+    // Yedisi de girdi — eski hâlde yalnız ilk üçü girer ve orada kalırdı.
+    expect(result.discovered).toBe(all.length);
+    expect((await paths()).sort()).toEqual(all.map((n) => `/${n}`).sort());
+
+    // Üç sayfa, ve imleç HER SEFERİNDE bir önceki sayfanın son adı.
+    expect(pages).toEqual([undefined, 'c.txt', 'f.txt']);
+
+    // Ve KIRPILMIŞ SAYILMIYOR: kırpılmış sayılsaydı bu klasörün altında hiçbir şey silinemezdi.
+    expect(result.truncated).toBe(0);
+  });
+
+  it('rests between passes instead of spinning when a share is bigger than one batch', async () => {
+    // `hasUnscanned` "BU TURDA okunmamış klasör var mı" diye soruyordu, ve bir paylaşımda
+    // BATCH'ten fazla klasör olduğu anda cevabı sonsuza kadar evet oluyordu: her tur BATCH
+    // tanesini damgalıyor, geri kalanın damgası hep bu turun başlangıcından eski kalıyor.
+    //
+    // Sahada ölçüldü: on beş dakikada bir koşması gereken iş, yirmi dakikada 684 kez koştu.
+    const count = IndexerService.BATCH + 40;
+    const many: Disk = new Map([
+      [
+        '',
+        {
+          entries: Array.from({ length: count }, (_, i) => ({
+            name: `d${String(i).padStart(4, '0')}`,
+            directory: true,
+            size: 0,
+          })),
+        },
+      ],
+    ]);
+    for (let i = 0; i < count; i += 1) {
+      many.set(`d${String(i).padStart(4, '0')}`, { entries: [] });
+    }
+
+    const service = indexer(many);
+    let more = true;
+    let passes = 0;
+    while (more && passes < 10) {
+      more = (await service.reconcile(org, share, held, 'test')).more;
+      passes += 1;
+    }
+
+    // Hepsi AZ ÖNCE okundu, yani zincir dinleniyor. Eski hâlde bu döngü 10'da tükenirdi.
+    expect(more).toBe(false);
+    expect(passes).toBeLessThan(10);
+  });
+
   it('walks into folders it discovers', async () => {
     const disk: Disk = new Map([
       ['', { entries: [{ name: 'proje', directory: true, size: 0 }] }],

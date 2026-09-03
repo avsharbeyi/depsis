@@ -1356,6 +1356,27 @@ pub enum Request {
         share: SafeComponent,
         /// Relative to the share root. Empty means the share root itself.
         path: Vec<SafeComponent>,
+        /// Bu addan SONRAKİLERİ ver — sayfalama imleci.
+        ///
+        /// ── NEDEN VAR ────────────────────────────────────────────────────────────────────
+        ///
+        /// Bir listeleme `MAX_LISTING` satırda kesiliyor, çünkü bir yanıt kontrol soketinde tek
+        /// bir satır. O sınır kalıyor, ama sınıra çarpan çağıranın YAPACAK BİR ŞEYİ olmalıydı ve
+        /// yoktu: sahada 20.246 klasörlük bir paylaşım kökü, dizinde yalnız yarısıyla göründü ve
+        /// hiçbir zaman tamamlanamadı. Sayaç kalıcı olarak yanlıştı ve dosyalar kalıcı olarak
+        /// eksikti.
+        ///
+        /// ── NEDEN AD, NEDEN OFSET DEĞİL ──────────────────────────────────────────────────
+        ///
+        /// Sıra numarası bir dizini iki çağrı arasında değişmediği varsayımına dayanır, ve o
+        /// varsayım bir NAS'ta yanlış: sayfalar arasında bir dosya eklenirse ofset kayar ve
+        /// aradaki her ad ya iki kez ya hiç dönmez. Ad ise kendi başına duruyor — silinmiş bir
+        /// addan sonrası hâlâ iyi tanımlı.
+        ///
+        /// Sıra bunun için SABİT: girdiler ada göre bayt sırasıyla veriliyor. `readdir`ın kendi
+        /// sırası dosya sistemine ait ve iki çağrı arasında aynı kalacağının garantisi yok.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<SafeComponent>,
     },
 
     /// List ONE directory inside ONE snapshot of a share.
@@ -3287,6 +3308,11 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 42, `list_directory`ye `after` ile: 5.000'den fazla girdisi olan bir dizinin TAMAMI
+/// okunabilsin. Sınır kalıyor — bir yanıt tek bir satır — ama artık sayfalanabiliyor. Sahada
+/// 20.246 klasörlük bir paylaşım kökü dizine yalnız yarısıyla girdi ve hiçbir zaman
+/// tamamlanamadı: sayaç kalıcı olarak yanlış, dosyalar kalıcı olarak eksikti.
+///
 /// 41, `revoke_smb_credential` ile: bir hesabı DEVRE DIŞI bırakmanın SMB erişimini gerçekten
 /// kesmesi. Kesmiyordu: kimlik eşitlemesi devre dışı kullanıcıyı listeden ÇIKARIYOR, ve ajanın
 /// eşitlemesi hesap SİLMİYOR — yani listeden çıkmak kutudan çıkmak değildi. Kapatılan hesabın
@@ -3344,7 +3370,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 41;
+pub const SCHEMA_VERSION: u32 = 42;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

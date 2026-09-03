@@ -1690,6 +1690,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         share: &str,
         path: &[&str],
         snapshot: Option<&str>,
+        after: Option<&str>,
     ) -> Result<Response, SeamError> {
         let Some(paths) = self.paths else {
             return Ok(Response::Refused {
@@ -1734,6 +1735,19 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             }
             Err(other) => return Err(other),
         };
+
+        // ── SABİT SIRA, SONRA SAYFA ─────────────────────────────────────────────────────────
+        //
+        // `readdir`ın sırası dosya sistemine ait ve iki çağrı arasında aynı kalacağının garantisi
+        // yok. Sayfalama bir ADLA yürüdüğü için sıranın sabit olması şart: ada göre bayt sırası,
+        // her çağrıda aynı.
+        let mut found = found;
+        found.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+        if let Some(cursor) = after {
+            // KESİN OLARAK SONRASI. İmlecin kendisini de vermek, her sayfanın son satırını bir
+            // sonrakinde tekrar etmek olurdu.
+            found.retain(|entry| entry.name.as_bytes() > cursor.as_bytes());
+        }
 
         let truncated = found.len() > crate::op::MAX_LISTING;
         let entries = found
@@ -3893,9 +3907,14 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 })
             }
 
-            Request::ListDirectory { share, path } => {
+            Request::ListDirectory { share, path, after } => {
                 let parts: Vec<&str> = path.iter().map(|c| c.as_str()).collect();
-                self.list_directory(share.as_str(), &parts, None)
+                self.list_directory(
+                    share.as_str(),
+                    &parts,
+                    None,
+                    after.as_ref().map(SafeComponent::as_str),
+                )
             }
 
             Request::SnapshotEntries {
@@ -3904,7 +3923,10 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 path,
             } => {
                 let parts: Vec<&str> = path.iter().map(|c| c.as_str()).collect();
-                self.list_directory(share.as_str(), &parts, Some(snapshot.as_str()))
+                // Anlık görüntü listelemesi sayfalanmıyor: geçmiş bir sürüme bakan kişi tek bir
+                // klasöre bakıyor, ve o klasörün beş binden fazla girdisi varsa kırpma cevabı
+                // hâlâ dürüst. Sayfalama, indeksin TAM olmak zorunda olduğu yol için var.
+                self.list_directory(share.as_str(), &parts, Some(snapshot.as_str()), None)
             }
 
             Request::RestoreFromSnapshot {
