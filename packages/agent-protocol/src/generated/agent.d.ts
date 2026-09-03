@@ -294,13 +294,27 @@ export type AgentRequest =
       path: SafeComponent[];
       share: SafeComponent;
       /**
-       * A single path component under a share root — never a path, never absolute.
+       * Bu addan SONRAKİLERİ ver — sayfalama imleci.
        *
-       * ADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access
-       * to `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle
-       * `/` or `..` through, so this type refuses them rather than sanitising.
+       * ── NEDEN VAR ────────────────────────────────────────────────────────────────────
+       *
+       * Bir listeleme `MAX_LISTING` satırda kesiliyor, çünkü bir yanıt kontrol soketinde tek
+       * bir satır. O sınır kalıyor, ama sınıra çarpan çağıranın YAPACAK BİR ŞEYİ olmalıydı ve
+       * yoktu: sahada 20.246 klasörlük bir paylaşım kökü, dizinde yalnız yarısıyla göründü ve
+       * hiçbir zaman tamamlanamadı. Sayaç kalıcı olarak yanlıştı ve dosyalar kalıcı olarak
+       * eksikti.
+       *
+       * ── NEDEN AD, NEDEN OFSET DEĞİL ──────────────────────────────────────────────────
+       *
+       * Sıra numarası bir dizini iki çağrı arasında değişmediği varsayımına dayanır, ve o
+       * varsayım bir NAS'ta yanlış: sayfalar arasında bir dosya eklenirse ofset kayar ve
+       * aradaki her ad ya iki kez ya hiç dönmez. Ad ise kendi başına duruyor — silinmiş bir
+       * addan sonrası hâlâ iyi tanımlı.
+       *
+       * Sıra bunun için SABİT: girdiler ada göre bayt sırasıyla veriliyor. `readdir`ın kendi
+       * sırası dosya sistemine ait ve iki çağrı arasında aynı kalacağının garantisi yok.
        */
-      after?: string;
+      after?: SafeComponent | null;
     }
   | {
       op: 'snapshot_entries';

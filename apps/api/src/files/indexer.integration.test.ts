@@ -276,16 +276,17 @@ describeDb('reconciling a share with the disk', () => {
     // Cihazın paylaşım kökünde 20.246 klasör vardı. Ajanın tek bir cevabı `MAX_LISTING` (5.000)
     // satırda kesiliyor, ve çağıranın yapacak bir şeyi yoktu: dizin yalnız 11.941 satırla doldu
     // ve HİÇBİR ZAMAN tamamlanamadı. Yürüyüş her üç saniyede bir koşup her seferinde aynı ilk
-    // 5.000'i görüyor, "bu klasörde daha var" diye uyarıp duruyordu. Sayaç kalıcı olarak yanlış,
-    // dosyalar kalıcı olarak eksikti.
+    // 5.000'i görüyor, "bu klasörde daha var" diye uyarıp duruyordu.
     //
-    // Ölçülen şey: bir sayfadan uzun bir dizinin TAMAMININ dizine girmesi.
-    const total = 12_000;
-    const names = Array.from({ length: total }, (_, i) => `k${String(i).padStart(6, '0')}.txt`);
-    // Ajan gibi: ada göre bayt sırası, `after`dan kesin olarak sonrası, sayfa başına en fazla
-    // `PAGE` satır ve daha varsa `truncated`.
-    const PAGE = 5_000;
-    let calls = 0;
+    // ── NEDEN YİRMİ BİN SATIRLA ÖLÇÜLMÜYOR ────────────────────────────────────────────────
+    //
+    // Ölçülen şey SAYFA SINIRINI GEÇEBİLMEK, ve o mantık sayfa boyu üç olduğunda da beş bin
+    // olduğunda da aynı. Gerçek sayıyla kurulan bir test, bu süite on iki bin satır ve saniyeler
+    // ekler — ve ölçtüğü şeyi bir gram daha kesin ölçmez.
+    const all = ['a.txt', 'b.txt', 'c.txt', 'd.txt', 'e.txt', 'f.txt', 'g.txt'];
+    const PAGE = 3;
+    const pages: Array<string | undefined> = [];
+
     const agent = {
       isAvailable: () => true,
       call: (request: AgentRequest): Promise<AgentResponse> => {
@@ -299,14 +300,15 @@ describeDb('reconciling a share with the disk', () => {
             entries: [],
           });
         }
-        calls += 1;
+        // Ajan gibi: ada göre sıralı, `after`dan KESİN OLARAK sonrası, sayfa başına en fazla
+        // `PAGE`, ve daha varsa `truncated`.
         const after = (request as { after?: string }).after;
-        const rest = names.filter((n) => after === undefined || n > after).sort();
-        const page = rest.slice(0, PAGE);
+        pages.push(after);
+        const rest = all.filter((name) => after === undefined || name > after);
         return Promise.resolve<AgentResponse>({
           status: 'listing',
           truncated: rest.length > PAGE,
-          entries: page.map((name) => ({
+          entries: rest.slice(0, PAGE).map((name) => ({
             name,
             directory: false,
             size: 4,
@@ -323,27 +325,29 @@ describeDb('reconciling a share with the disk', () => {
     );
     const result = await service.reconcile(org, share, held, 'test');
 
-    expect(result.discovered).toBe(total);
-    // Üç sayfa: 5.000 + 5.000 + 2.000.
-    expect(calls).toBe(3);
-    // Ve kırpılmış SAYILMIYOR — kırpılmış sayılsaydı bu klasörün altında hiçbir şey silinemezdi.
+    // Yedisi de girdi — eski hâlde yalnız ilk üçü girer ve orada kalırdı.
+    expect(result.discovered).toBe(all.length);
+    expect((await paths()).sort()).toEqual(all.map((n) => `/${n}`).sort());
+
+    // Üç sayfa, ve imleç HER SEFERİNDE bir önceki sayfanın son adı.
+    expect(pages).toEqual([undefined, 'c.txt', 'f.txt']);
+
+    // Ve KIRPILMIŞ SAYILMIYOR: kırpılmış sayılsaydı bu klasörün altında hiçbir şey silinemezdi.
     expect(result.truncated).toBe(0);
   });
 
   it('rests between passes instead of spinning when a share is bigger than one batch', async () => {
     // `hasUnscanned` "BU TURDA okunmamış klasör var mı" diye soruyordu, ve bir paylaşımda
-    // BATCH'ten fazla klasör olduğu anda cevabı sonsuza kadar evet oluyordu: her tur 500 tanesini
-    // damgalıyor, geri kalanın damgası hep bu turun başlangıcından eski kalıyor.
+    // BATCH'ten fazla klasör olduğu anda cevabı sonsuza kadar evet oluyordu: her tur BATCH
+    // tanesini damgalıyor, geri kalanın damgası hep bu turun başlangıcından eski kalıyor.
     //
     // Sahada ölçüldü: on beş dakikada bir koşması gereken iş, yirmi dakikada 684 kez koştu.
-    //
-    // Burada BATCH'ten fazla klasör kuruluyor ve iki tur koşuluyor; ikinci turun `more`u false
-    // olmalı, çünkü hepsi AZ ÖNCE okundu.
+    const count = IndexerService.BATCH + 40;
     const many: Disk = new Map([
       [
         '',
         {
-          entries: Array.from({ length: 600 }, (_, i) => ({
+          entries: Array.from({ length: count }, (_, i) => ({
             name: `d${String(i).padStart(4, '0')}`,
             directory: true,
             size: 0,
@@ -351,21 +355,21 @@ describeDb('reconciling a share with the disk', () => {
         },
       ],
     ]);
-    for (let i = 0; i < 600; i += 1) {
+    for (let i = 0; i < count; i += 1) {
       many.set(`d${String(i).padStart(4, '0')}`, { entries: [] });
     }
 
     const service = indexer(many);
     let more = true;
     let passes = 0;
-    while (more && passes < 12) {
+    while (more && passes < 10) {
       more = (await service.reconcile(org, share, held, 'test')).more;
       passes += 1;
     }
 
-    // Hepsi okunduğunda zincir DİNLENİYOR. Eski hâlde bu döngü 12'de tükenirdi.
+    // Hepsi AZ ÖNCE okundu, yani zincir dinleniyor. Eski hâlde bu döngü 10'da tükenirdi.
     expect(more).toBe(false);
-    expect(passes).toBeLessThan(12);
+    expect(passes).toBeLessThan(10);
   });
 
   it('walks into folders it discovers', async () => {
