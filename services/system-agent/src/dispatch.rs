@@ -8349,7 +8349,8 @@ mod tests {
         )
         .expect("stage");
 
-        let download = r#"{"op":"open_download","share":"alice","path":[".depsis","staging","live.part"]}"#;
+        let download =
+            r#"{"op":"open_download","share":"alice","path":[".depsis","staging","live.part"]}"#;
         match call(&h, download) {
             Response::Refused { reason } => assert!(reason.contains(".depsis"), "{reason}"),
             other => panic!("expected a refusal, got {other:?}"),

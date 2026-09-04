@@ -568,6 +568,23 @@ export type AgentRequest =
       op: 'backup_write_meta';
     }
   | {
+      /**
+       * Bu addan SONRAKİLERİ ver — `ListDirectory`dekiyle aynı imleç.
+       *
+       * ── NEDEN BURADA DA GEREKLİ ──────────────────────────────────
+       *
+       * Bu listeleme de `MAX_LISTING` satırda kesiliyor, ve kesilmenin bedeli burada canlı
+       * taraftakinden ağır. Saklama süresi dolmuş silinenleri budayan tur, kesilmiş bir
+       * listeleme gördüğünde o dizini ATLIYOR; dizin küçülmediği için bir sonraki tur aynı
+       * kararı veriyor. İmleçsiz, 5.000'den fazla dosya taşıyan bir `silinenler/<gün>`
+       * klasörü yedek diskinde KALICI olarak duruyor — ve kurtarma gezgininden bakan sahibi
+       * de yalnız ilk 5.000 adı görüyor, kalanını hiç geri getiremiyor.
+       *
+       * Ad, ofset değil — gerekçesi `ListDirectory::after` ile birebir aynı. Sıra bunun için
+       * SABİT: girdiler ada göre bayt sırasıyla veriliyor, çünkü `readdir`ın kendi sırası
+       * dosya sistemine ait ve iki çağrı arasında aynı kalacağının garantisi yok.
+       */
+      after?: EntryName | null;
       op: 'backup_list_directory';
       path: EntryName[];
     }
