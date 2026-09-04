@@ -983,7 +983,10 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         //
         // OKUNAMAZSA REDDEDİLİYOR, geçilmiyor: "havuzları soramadım" ile "bu disk bir havuzun
         // üyesi değil" aynı cevaba indiğinde, sorunun sorulmadığı her durum bir silme izni olurdu.
-        let members = match self.runner.run(bin::ZPOOL, &crate::disks::pool_members_argv()) {
+        let members = match self
+            .runner
+            .run(bin::ZPOOL, &crate::disks::pool_members_argv())
+        {
             Ok(out) => crate::disks::parse_pool_members(&out),
             Err(e) => {
                 return Ok(Response::Refused {
@@ -5094,7 +5097,10 @@ mod tests {
         );
         match resp {
             Response::Refused { ref reason } => {
-                assert!(reason.contains("tank"), "ret havuzun adını taşımalı: {reason}");
+                assert!(
+                    reason.contains("tank"),
+                    "ret havuzun adını taşımalı: {reason}"
+                );
             }
             other => panic!("canlı bir havuz üyesi silinmeye gitti: {other:?}"),
         }
@@ -5115,17 +5121,17 @@ mod tests {
             "operator wiped a disk",
         );
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
-        assert!(no_wipe_ran(&r), "okunamayan bir havuz listesi silme izni değil");
+        assert!(
+            no_wipe_ran(&r),
+            "okunamayan bir havuz listesi silme izni değil"
+        );
     }
 
     #[test]
     fn wiping_a_removable_stick_is_allowed_but_the_system_disk_never_is() {
         // Çıkarılabilirlik havuz İÇİN ret sebebi, silme için değil: USB bellek silinebilir.
-        let r = MockCommandRunner::with_responses([
-            WIPE_DISKS.into(),
-            String::new(),
-            String::new(),
-        ]);
+        let r =
+            MockCommandRunner::with_responses([WIPE_DISKS.into(), String::new(), String::new()]);
         let s = MemorySink::default();
         let h = Harness::bare();
         let resp = agent(&r, &s, &h).handle(
