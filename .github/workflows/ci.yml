@@ -389,8 +389,11 @@ jobs:
             }
 
             // DÜŞEN TESTİN ADI. Çıkış kodu tek başına işi kırmızıya çevirir ama hangi testin
-            // düştüğünü söylemez — vitest'in kendi çıktısı /dev/null'a gidiyor, geriye yalnız bu
-            // rapor kalıyor. Kapı bu yüzden "atlandı"nın yanında "failed"e de bakıyor.
+            // düştüğünü söylemez: vitest kendi çıktısını /dev/null yoluna yazıyor, geriye yalnız
+            // bu rapor kalıyor. (Bu blok kabukta TEK TIRNAK içinde; buraya bir kesme işareti
+            // koymak dizeyi orada bitirir ve betiğin geri kalanı argümanlara dağılır — bir kez
+            // oldu, kapı raporu bir Türkçe kelime adında arayarak düştü.)
+            // Kapı bu yüzden "atlandı"nın yanında "failed" durumuna da bakıyor.
             const failed = tests.filter((a) => a.status === "failed");
             if (failed.length > 0) {
               console.error("::error::" + failed.length + " test düştü");
