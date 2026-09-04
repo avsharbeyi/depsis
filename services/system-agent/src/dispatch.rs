@@ -4376,7 +4376,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     network_id,
                     member,
                     *authorized,
-                    label.as_ref().map(crate::op::SafeComponent::as_str),
+                    label.as_ref().map(SafeComponent::as_str),
                 ) {
                     Ok(updated) => Ok(Response::ZeroTierMemberUpdated {
                         member: describe_member(&updated, &node.node_id),
