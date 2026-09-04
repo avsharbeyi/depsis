@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 
 import { DbService } from '../db/db.service.js';
 
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'dead';
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'dead' | 'cancelled';
 
 export interface Job {
   id: string;
@@ -225,6 +225,31 @@ export class JobsService implements OnModuleInit {
       createdAt: row.created_at,
       lastError: row.last_error,
     }));
+  }
+
+  /**
+   * Stop a job the caller no longer wants. True when there was one to stop.
+   *
+   * §5.1 asks for it and there was no way to do it: a thousand-file copy started on the wrong
+   * folder ran to the end while the destination filled up, and the only remedy was to clean up
+   * afterwards.
+   *
+   * ONE STATEMENT IN THE DATABASE, not a flag the worker is asked to notice. `cancel_job` moves
+   * the row out of `job_queue` into `job_history` as `cancelled`, which makes the three cases one
+   * case: a queued job is never claimed (the row is gone), a running job's next `heartbeat_job`
+   * finds no row and returns false — which every handler already treats as "stop" — and a job
+   * whose worker crashed needs no reaping, because there is nothing left to reclaim. A
+   * `cancel_requested_at` column would have needed all three paths taught about it separately,
+   * and the third would have left a `running` row nothing could ever finish.
+   *
+   * `withTenant`, so row level security decides whose job this is. A job in another organisation
+   * is not found — the same answer as one that does not exist.
+   */
+  async cancel(organizationId: string, jobId: string): Promise<boolean> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ cancelled: boolean | null }>(`SELECT public.cancel_job($1) AS cancelled`, [jobId]),
+    );
+    return rows[0]?.cancelled === true;
   }
 
   // ─── the worker's side ──────────────────────────────────────────────────────

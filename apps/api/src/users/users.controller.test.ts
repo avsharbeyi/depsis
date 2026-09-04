@@ -1,4 +1,9 @@
-import { UnauthorizedException } from '@nestjs/common';
+import {
+  ConflictException,
+  NotFoundException,
+  UnauthorizedException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AuditService } from '../audit/audit.service.js';
@@ -22,12 +27,25 @@ import type { UsersService } from './users.service.js';
 
 const PASSWORD = 'yoneticinin-parolasi';
 
+/**
+ * Gerçek uuid'ler, 'u-1' gibi kısa etiketler değil.
+ *
+ * Bu rotalar artık id'nin biçimini denetliyor: bozuk bir id PostgreSQL'e `uuid` olarak gidiyordu ve
+ * 22P02 ile 500 üretiyordu — bozuk bir bağlantı için hata sayfası, ve ayrıca bozuk bir id'yi başka
+ * kiracının satırını adlandıran geçerli bir id'den ayıran bir fark.
+ */
+const ADMIN = '11111111-1111-4111-8111-111111111111';
+const TARGET = '22222222-2222-4222-8222-222222222222';
+
 function harness(options: { passwordOk?: boolean } = {}): {
   controller: UsersController;
   requirePassword: ReturnType<typeof vi.fn>;
   verify: ReturnType<typeof vi.fn>;
   open: ReturnType<typeof vi.fn>;
   remove: ReturnType<typeof vi.fn>;
+  create: ReturnType<typeof vi.fn>;
+  clearMfa: ReturnType<typeof vi.fn>;
+  revokeAllForUser: ReturnType<typeof vi.fn>;
 } {
   const requirePassword = vi.fn();
   requirePassword.mockImplementation((_org: string, _user: string, given: string) =>
@@ -42,11 +60,21 @@ function harness(options: { passwordOk?: boolean } = {}): {
     .fn()
     .mockResolvedValue({ token: 'tek-kullanimlik', expiresAt: new Date('2026-01-01T00:00:00Z') });
   const remove = vi.fn().mockResolvedValue({ username: 'silinen', posixUid: 300007 });
+  const create = vi.fn().mockResolvedValue({
+    id: TARGET,
+    username: 'yeni',
+    email: null,
+    role: 'member',
+    disabled_at: null,
+    created_at: new Date('2025-01-01T00:00:00Z'),
+  });
+  const clearMfa = vi.fn().mockResolvedValue(undefined);
+  const revokeAllForUser = vi.fn().mockResolvedValue(0);
 
   const users = {
     find: () =>
       Promise.resolve({
-        id: 'u-2',
+        id: TARGET,
         username: 'hedef',
         email: null,
         role: 'member',
@@ -54,31 +82,33 @@ function harness(options: { passwordOk?: boolean } = {}): {
         created_at: new Date('2025-01-01T00:00:00Z'),
       }),
     remove,
+    create,
+    clearMfa,
   } as unknown as UsersService;
 
   const controller = new UsersController(
     users,
     { verify, hash: () => Promise.resolve('argon2') } as unknown as PasswordService,
     { require: requirePassword } as unknown as ReauthService,
-    { revokeAllForUser: () => Promise.resolve(0) } as unknown as SessionService,
+    { revokeAllForUser } as unknown as SessionService,
     { open } as unknown as PasswordResetService,
     { record: () => Promise.resolve() } as unknown as AuditService,
   );
-  return { controller, requirePassword, verify, open, remove };
+  return { controller, requirePassword, verify, open, remove, create, clearMfa, revokeAllForUser };
 }
 
 function request(): AuthenticatedRequest {
   return {
     headers: {},
-    depsis: { userId: 'u-1', organizationId: 'o-1', sessionId: 's-1', role: 'admin' },
+    depsis: { userId: ADMIN, organizationId: 'o-1', sessionId: 's-1', role: 'admin' },
   } as unknown as AuthenticatedRequest;
 }
 
 describe('POST /users/{id}/password-reset', () => {
   it('asks the shared re-authentication, never the hasher', async () => {
     const h = harness();
-    const ticket = await h.controller.openPasswordReset(request(), 'u-2', { password: PASSWORD });
-    expect(h.requirePassword).toHaveBeenCalledWith('o-1', 'u-1', PASSWORD, expect.anything());
+    const ticket = await h.controller.openPasswordReset(request(), TARGET, { password: PASSWORD });
+    expect(h.requirePassword).toHaveBeenCalledWith('o-1', ADMIN, PASSWORD, expect.anything());
     expect(h.verify).not.toHaveBeenCalled();
     expect(ticket.token).toBe('tek-kullanimlik');
   });
@@ -86,7 +116,7 @@ describe('POST /users/{id}/password-reset', () => {
   it('opens no ticket when the password is wrong', async () => {
     const h = harness({ passwordOk: false });
     await expect(
-      h.controller.openPasswordReset(request(), 'u-2', { password: 'yanlis' }),
+      h.controller.openPasswordReset(request(), TARGET, { password: 'yanlis' }),
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(h.open).not.toHaveBeenCalled();
   });
@@ -95,8 +125,8 @@ describe('POST /users/{id}/password-reset', () => {
 describe('DELETE /users/{id}', () => {
   it('asks the shared re-authentication, never the hasher', async () => {
     const h = harness();
-    await h.controller.remove(request(), 'u-2', { password: PASSWORD });
-    expect(h.requirePassword).toHaveBeenCalledWith('o-1', 'u-1', PASSWORD, expect.anything());
+    await h.controller.remove(request(), TARGET, { password: PASSWORD });
+    expect(h.requirePassword).toHaveBeenCalledWith('o-1', ADMIN, PASSWORD, expect.anything());
     expect(h.verify).not.toHaveBeenCalled();
     expect(h.remove).toHaveBeenCalled();
   });
@@ -104,8 +134,86 @@ describe('DELETE /users/{id}', () => {
   it('deletes nothing when the password is wrong', async () => {
     const h = harness({ passwordOk: false });
     await expect(
-      h.controller.remove(request(), 'u-2', { password: 'yanlis' }),
+      h.controller.remove(request(), TARGET, { password: 'yanlis' }),
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(h.remove).not.toHaveBeenCalled();
+  });
+});
+
+describe('a malformed id on the account routes', () => {
+  // 500 DEĞİL. Bozuk id doğrudan `WHERE id = $2` (uuid) sorgusuna gidiyordu ve PostgreSQL'in
+  // 22P02'si eşlenmediği için hata sayfası oluyordu — üstelik geçerli ama başka kiracıya ait bir
+  // id'den farklı cevap vererek, RLS'in silmek istediği ayrımı geri getiriyordu.
+  it('is "no such account" rather than a fault, and nothing is written', async () => {
+    const h = harness();
+    await expect(
+      h.controller.remove(request(), 'abc', { password: PASSWORD }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    await expect(h.controller.update(request(), 'abc', { disabled: true })).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    await expect(
+      h.controller.openPasswordReset(request(), 'abc', { password: PASSWORD }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(h.remove).not.toHaveBeenCalled();
+    expect(h.open).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /users with a system account name', () => {
+  /**
+   * 'backup' adlı tek bir hesap, o kiracının BÜTÜN kimlik eşitlemesini kalıcı olarak düşürüyor:
+   * ajan her koşuda `getent passwd backup` ile kutunun kendi hesabını buluyor, uid 34 DEPSIS'in
+   * aralığında olmadığı için "bu login makineye ait" deyip eşitlemenin tamamını reddediyor. O
+   * günden sonra açılan hiçbir hesap SMB'ye giremiyor, ve hesabı silmek de aynı kontrole takılıp
+   * 503 dönüyor.
+   */
+  it('is refused before the row exists, with a sentence that says why', async () => {
+    const h = harness();
+    await expect(
+      h.controller.create(request(), {
+        username: 'backup',
+        password: 'bu-parola-yeterince-uzun',
+      }),
+    ).rejects.toBeInstanceOf(UnprocessableEntityException);
+    expect(h.create).not.toHaveBeenCalled();
+  });
+
+  it('still creates an ordinary account', async () => {
+    const h = harness();
+    const created = await h.controller.create(request(), {
+      username: 'backupcu',
+      password: 'bu-parola-yeterince-uzun',
+    });
+    expect(created.username).toBe('yeni');
+    expect(h.create).toHaveBeenCalled();
+  });
+});
+
+describe('DELETE /users/{id}/mfa', () => {
+  it('clears the second factor and ends the target’s sessions', async () => {
+    const h = harness();
+    await h.controller.resetMfa(request(), TARGET, { password: PASSWORD });
+    expect(h.requirePassword).toHaveBeenCalledWith('o-1', ADMIN, PASSWORD, expect.anything());
+    expect(h.clearMfa).toHaveBeenCalledWith('o-1', TARGET);
+    // Kaldırmanın sebebi çoğu zaman "o hesaba başkası ulaşmış olabilir" şüphesi; açık kalan bir
+    // oturum tam o şüpheyi taşıyor.
+    expect(h.revokeAllForUser).toHaveBeenCalledWith('o-1', TARGET);
+  });
+
+  it('clears nothing when the password is wrong', async () => {
+    const h = harness({ passwordOk: false });
+    await expect(
+      h.controller.resetMfa(request(), TARGET, { password: 'yanlis' }),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(h.clearMfa).not.toHaveBeenCalled();
+  });
+
+  it('refuses the administrator’s own account, which /me/mfa handles', async () => {
+    const h = harness();
+    await expect(
+      h.controller.resetMfa(request(), ADMIN, { password: PASSWORD }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(h.clearMfa).not.toHaveBeenCalled();
   });
 });

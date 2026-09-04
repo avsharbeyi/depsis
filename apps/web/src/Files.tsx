@@ -94,6 +94,22 @@ export function folderBody(
   return shareId === undefined ? { name } : { name, shareId };
 }
 
+/**
+ * Sunucunun ad tekliği için kullandığı katlama (`public.fold_identity`), JavaScript'te.
+ *
+ * Büyük/küçük harf VE Türkçe i ailesi: veritabanı önce `İ`, `I` ve `ı`yı `i`ye çeviriyor, sonra
+ * küçültüyor — ve sıra önemli, çünkü JavaScript'te `'İ'.toLowerCase()` bir `i` artı birleşen nokta
+ * üretiyor, yani önce küçültmek iki tarafı ayırırdı.
+ *
+ * AKSANLAR KORUNUYOR: `Çağrı` ile `Cagri` sunucuda iki ayrı ad (`fold_identity` arama
+ * normalleştirmesi değil), ve burada da öyle olmalı — yoksa istemci sunucunun kabul edeceği bir adı
+ * "zaten var" sanıp var olmayan bir klasörü benimsemeye çalışırdı.
+ */
+export function foldName(value: string): string {
+  const dotless = value.normalize('NFKC').replace(/[İIı]/g, 'i');
+  return dotless.toLowerCase();
+}
+
 /** Sözleşmenin bir sayfada izin verdiği en büyük sayı. Sayfanın devamı artık imleçle geliyor
  *  ("Daha fazla göster"), ama sayfa yine de tavana kadar isteniyor: bir klasörü açan kişinin
  *  düğmeye hiç basmadan görebildiği satır sayısı ne kadar çoksa o kadar iyi. */
@@ -232,19 +248,109 @@ function suffix(name: string): string {
 }
 
 /**
+ * Düz metin olarak gösterilebilecek uzantılar.
+ *
+ * LİSTE, TAHMİN DEĞİL: `mimeType` sözleşmede isteğe bağlı ve ajan onu her zaman doldurmuyor, yani
+ * türe bakan bir kontrol aynı dosyayı bazen açar bazen açmazdı (`typeOf` da aynı sebeple uzantıya
+ * bakıyor). `html` ve `svg` bilerek YOK: ikisi de metin olarak gösterilebilir ama bir gün birinin
+ * "önizlemeyi zenginleştirelim" diye bunları çizmesi, kiracının yüklediği bir belgeyi oturumun
+ * kökeninde çalıştırmak olurdu. İçerik burada `<pre>` içinde METİN — React kaçırıyor.
+ */
+const TEXTUAL: ReadonlySet<string> = new Set([
+  'txt',
+  'md',
+  'markdown',
+  'csv',
+  'tsv',
+  'log',
+  'json',
+  'xml',
+  'yml',
+  'yaml',
+  'ini',
+  'cfg',
+  'conf',
+  'sql',
+  'srt',
+  'vtt',
+]);
+
+/**
  * Whether the browser can show this file without downloading it first, and as what.
  *
  * `svg` is excluded from the picture list on purpose even though every browser renders it: an SVG
  * is a document that can carry script, and putting one in an `<img>` on the same origin as the
  * session cookie is a decision this screen has no reason to make. It still downloads normally.
+ *
+ * ── RESİM VE VİDEONUN ÖTESİ ─────────────────────────────────────────────────────────────────
+ *
+ * §5.1 PDF, metin ve sesi de istiyor, ve üçü de tarayıcının elindekiyle açılıyor: ses bir
+ * `<audio>` (medya öğeleri `Content-Disposition`ı umursamıyor), metin bir `Range` isteğiyle gelen
+ * ilk 256 kB, PDF ise yeni bir sekme — çerçeveye alınamamasının gerekçesi `openPdfTab`te yazılı.
+ * Ofis belgeleri (docx/xlsx/pptx) hâlâ yok: onları çizmek tarayıcıda bir belge motoru demek.
  */
-function previewAs(entry: FileEntry): 'image' | 'video' | null {
+export function previewAs(entry: FileEntry): 'image' | 'video' | 'audio' | 'text' | 'pdf' | null {
   if (entry.kind !== 'file') return null;
   const ext = suffix(entry.name);
   if (ext === 'svg') return null;
   if (KINDS[0]?.ext.has(ext) === true) return 'image';
   if (KINDS[1]?.ext.has(ext) === true) return 'video';
+  if (KINDS[2]?.ext.has(ext) === true) return 'audio';
+  if (ext === 'pdf') return 'pdf';
+  if (TEXTUAL.has(ext)) return 'text';
   return null;
+}
+
+/* ─── seçim ─────────────────────────────────────────────────────────────────── */
+
+/** Bir tıklamanın seçime ne yaptığını belirleyen iki tuş. */
+export interface Modifiers {
+  /** Shift: çapadan bu satıra kadarki aralık. */
+  range: boolean;
+  /** Ctrl / Cmd: aralık mevcut seçime EKLENİYOR, onun yerine geçmiyor. */
+  add: boolean;
+}
+
+const NO_MODIFIERS: Modifiers = { range: false, add: false };
+
+/** Fare ya da klavye olayından değiştiriciler. macOS'ta Ctrl'ün karşılığı Cmd. */
+function mods(event: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }): Modifiers {
+  return { range: event.shiftKey, add: event.ctrlKey || event.metaKey };
+}
+
+/**
+ * Bir satıra tıklandığında seçimin yeni hâli.
+ *
+ * SAF, ve bunun bir sebebi var: aralık seçimi ekrandaki satır SIRASINA bağlı, yani listenin o
+ * andaki hâlini bilmeden doğrulanamaz. Ayrı bir işlev olarak kalınca hem ölçülebiliyor hem de
+ * "hangi satırlar" sorusu tek bir yerde cevaplanıyor.
+ *
+ * Çapa listede yoksa (klasör değişmiş, satır silinmiş) aralık İSTEĞİ TEKİLE düşüyor: olmayan bir
+ * çapadan başlayan aralık, kullanıcının hiç görmediği satırları seçmek olurdu.
+ */
+export function nextSelection(
+  ids: readonly string[],
+  current: ReadonlySet<string>,
+  id: string,
+  anchorId: string | null,
+  modifiers: Modifiers,
+): ReadonlySet<string> {
+  if (modifiers.range && anchorId !== null) {
+    const from = ids.indexOf(anchorId);
+    const to = ids.indexOf(id);
+    if (from !== -1 && to !== -1) {
+      const span = ids.slice(Math.min(from, to), Math.max(from, to) + 1);
+      // Ctrl aralığı mevcut seçime EKLİYOR; yalnız Shift ise aralık seçimin kendisi oluyor —
+      // her masaüstü dosya yöneticisinin davranışı, ve kas hafızası bunu bekliyor.
+      const next = modifiers.add ? new Set(current) : new Set<string>();
+      for (const row of span) next.add(row);
+      return next;
+    }
+  }
+  const next = new Set(current);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
 }
 
 /** The `.g` squares in this card are sized by their parent's rule (`.qf .g`, `.um .g`, `.frow .g`),
@@ -416,6 +522,8 @@ export function Files({
   /** Kaçıncı listeleme yürürlükte. Yalnız "daha fazla" için: gecikmiş bir sayfanın kendi
    *  klasörüne mi döndüğünü ayırt eden tek şey, ve state olsaydı cevabı beklerken eskimiş olurdu. */
   const listRun = useRef(0);
+  /** Shift aralığının başladığı satır: son TEKİL seçim. Çizimi etkilemediği için ref. */
+  const rangeAnchor = useRef<string | null>(null);
   const bar = useRef<HTMLDivElement>(null);
   const pickFile = useRef<HTMLInputElement>(null);
   const pickDir = useRef<HTMLInputElement>(null);
@@ -582,6 +690,27 @@ export function Files({
   const [restorable, setRestorable] = useState(true);
   const shareQuery = shareId === undefined ? {} : { shareId };
 
+  /**
+   * Ekranın ADINI BİLDİĞİ paylaşım — bilmiyorsa `null`.
+   *
+   * "Varsayılan" seçiliyken listeyi sunucu seçiyor ve seçimi `ORDER BY created_at LIMIT 1`, yani
+   * EN ESKİ paylaşım. Buradaki liste ise ada göre geliyor (`ORDER BY fold_identity(name), id`), o
+   * yüzden `shares[0]` "varsayılan" değil "alfabetik ilk"tir. İkisi bir sanıldığında ekran bir
+   * paylaşımın dosyalarını gösterirken "Yedekler" düğmesi BAŞKA bir paylaşımın anlık görüntülerini
+   * açıyor, ve oradan yapılan bir geri yükleme yanlış paylaşımın köküne iniyordu — sunucu bunu
+   * reddetmiyor, çünkü kökte hedef `null`.
+   *
+   * TAHMİN ETMEK YERİNE SUSMAK. Tek paylaşım varsa varsayılan da odur; birden fazlası varken
+   * hangisinin varsayılan olduğunu sözleşme söylemiyor (`Share` şemasında `isDefault` yok), ve
+   * bilmediği bir paylaşıma nişan almış bir düğme, cevabını söyleyen bir düğmeden kötü.
+   */
+  const currentShare = ((): SharePick | null => {
+    if (shares === null) return null;
+    const named = shares.find((item) => item.id === shareId);
+    if (named !== undefined) return named;
+    return shares.length === 1 ? (shares[0] ?? null) : null;
+  })();
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -600,12 +729,14 @@ export function Files({
      tutmak, bir dakikalığına düşmüş bir ajanın bütün geri dönüş noktalarını yokmuş gibi
      göstermesi olurdu. */
   useEffect(() => {
-    const share = shares?.find((item) => item.id === shareId) ?? shares?.[0];
-    if (share === undefined) return;
+    // Hangi paylaşım olduğu bilinmiyorsa SORULMUYOR: alfabetik ilk paylaşımın görüntülerini sayıp
+    // ekranda duran başka bir paylaşım hakkında karar vermek, düğmeyi yanlış yerde açıp kapatırdı.
+    const askedShareId = currentShare?.id;
+    if (askedShareId === undefined) return undefined;
     let cancelled = false;
     void (async () => {
       const { data } = await api.GET('/shares/{shareId}/snapshots', {
-        params: { path: { shareId: share.id } },
+        params: { path: { shareId: askedShareId } },
       });
       if (cancelled || data === undefined) return;
       setRestorable(!data.available || data.items.length > 0);
@@ -613,7 +744,7 @@ export function Files({
     return () => {
       cancelled = true;
     };
-  }, [shares, shareId]);
+  }, [currentShare]);
 
   /**
    * Listenin bir sayfası: `from` yoksa ilk sayfa, varsa imleçten devamı.
@@ -1227,17 +1358,61 @@ export function Files({
     if (data !== undefined) return data.id;
     // 409 is the ordinary case, not a fault: the user is re-uploading a folder they already have,
     // or two files from the same subdirectory raced. Adopt the existing folder and carry on.
+    return findFolder(name, parent);
+  }
+
+  /**
+   * 409'dan sonra: bu adı bu klasörde zaten tutan klasörü bul.
+   *
+   * ── BİREBİR AD KARŞILAŞTIRMASI YANLIŞ CEVAP VERİYORDU ───────────────────────────────────────
+   *
+   * Sunucu ad tekliğini `fold_identity` ile soruyor: büyük/küçük harf ve Türkçe i ailesi katlanmış.
+   * Yani "FOTOĞRAFLAR" varken "fotoğraflar" 409 alıyor, ama `item.name === name` hiçbir satırı
+   * tutmuyordu — `ensureChain` `null` dönüyor ve klasördeki ÜÇ YÜZ fotoğrafın her biri "klasör
+   * kurulamadı" ile düşüyordu. Karşılaştırma artık sunucunun sorduğu soruyu soruyor (`foldName`).
+   *
+   * ── VE ARAMA, LİSTELEME DEĞİL ───────────────────────────────────────────────────────────────
+   *
+   * Listeleme `kind`i ARTAN sıralıyor (`file` < `folder`), yani klasörler dosyalardan SONRA
+   * geliyor: iki yüzden çok dosyası olan bir üst klasörde aranan klasör ilk sayfada hiç
+   * görünmüyor. `/search` ada göre soruyor ve önek eşleşmelerini başa alıyor, yani kalabalık
+   * klasörde de tek istekte cevap veriyor. Listeleme yine de duruyor — aramanın normalleştirmesi
+   * aksan atıyor ve tek harflik/boşluklu adlarda beklenmedik davranabiliyor; bulunamazsa eski yol
+   * ikinci bir şans.
+   */
+  async function findFolder(name: string, parent: string | undefined): Promise<string | null> {
+    const wanted = foldName(name);
+    const here = (item: FileEntry): boolean =>
+      item.kind === 'folder' &&
+      foldName(item.name) === wanted &&
+      // Arama BÜTÜN alt ağacı tarıyor: aynı adlı bir torun, aranan kardeş değil.
+      (parent === undefined ? item.parentId === null : item.parentId === parent);
+
+    if (name.trim() !== '') {
+      const hits = await api.GET('/search', {
+        params: {
+          query: {
+            q: name,
+            limit: PAGE,
+            ...shareQuery,
+            ...(parent === undefined ? {} : { scope: parent }),
+          },
+        },
+      });
+      const hit = hits.data?.items.find(here);
+      if (hit !== undefined) return hit.id;
+    }
+
     const listing = await api.GET('/files', {
       params: {
         query:
           parent === undefined ? { limit: PAGE, ...shareQuery } : { parentId: parent, limit: PAGE },
       },
     });
-    const match = listing.data?.items.find((item) => item.kind === 'folder' && item.name === name);
-    return match?.id ?? null;
+    return listing.data?.items.find(here)?.id ?? null;
   }
 
-  async function runUploads(list: File[], keepPaths: boolean): Promise<void> {
+  async function runUploads(list: Upload[]): Promise<void> {
     if (trashed) {
       notify('error', 'Çöp kutusuna yükleme yapılamaz.');
       return;
@@ -1247,16 +1422,12 @@ export function Files({
     const cache = new Map<string, string>();
     let failed = 0;
 
-    for (const [index, file] of list.entries()) {
+    for (const [index, { file, segments }] of list.entries()) {
       const label = list.length === 1 ? file.name : `${index + 1}/${list.length} · ${file.name}`;
       setProgress({ label, percent: 0 });
 
       let target = parentId;
-      if (keepPaths) {
-        const segments = file.webkitRelativePath
-          .split('/')
-          .slice(0, -1)
-          .filter((s) => s !== '');
+      if (segments.length > 0) {
         const resolved = await ensureChain(segments, cache);
         if (resolved === null) {
           failed += 1;
@@ -1289,7 +1460,7 @@ export function Files({
       notify(
         'ok',
         done === 1 && list[0] !== undefined
-          ? `"${list[0].name}" yüklendi.`
+          ? `"${list[0].file.name}" yüklendi.`
           : `${done} dosya yüklendi.`,
       );
     }
@@ -1311,25 +1482,36 @@ export function Files({
     event.target.value = '';
     if (files.length === 0) return;
     setMenuOpen(false);
-    void runUploads(files, keepPaths);
+    void runUploads(uploadsOf(files, keepPaths));
   }
 
   /* ── selection ── */
 
   const selected = (entries ?? []).filter((entry) => sel.has(entry.id));
+  /** Ekrandaki her satır seçili mi — "Tümünü seç" düğmesinin iki yüzü buradan ayrılıyor. */
+  const allPicked =
+    entries !== null && entries.length > 0 && entries.every((entry) => sel.has(entry.id));
 
-  function toggle(id: string): void {
-    setSel((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  /**
+   * Bir satıra tıklandı.
+   *
+   * ── ÜÇ TIKLAMA, ÜÇ ANLAM ────────────────────────────────────────────────────────────────
+   * Düz tıklama tekil (bu ekran kutu işaretleme kipinde çalışıyor, o yüzden düz tıklama seçimi
+   * SİLMİYOR, ekliyor/çıkarıyor), Ctrl/Cmd de tekil ama açıkça, Shift ise ÇAPADAN buraya kadar
+   * olan aralık. Üç yüz fotoğraflı bir klasörü başka bir paylaşıma taşımak, aralık seçimi olmadan
+   * üç yüz ayrı tıklama demekti (§5.1).
+   */
+  function toggle(id: string, modifiers: Modifiers = NO_MODIFIERS): void {
+    const ids = (entries ?? []).map((entry) => entry.id);
+    setSel((current) => nextSelection(ids, current, id, rangeAnchor.current, modifiers));
+    // Aralık çapayı YERİNDE bırakıyor: Shift'i basılı tutan biri aralığı büyütüp küçültebilmeli.
+    if (!modifiers.range) rangeAnchor.current = id;
   }
 
   function stopPicking(): void {
     setPicking(false);
     setSel(new Set());
+    rangeAnchor.current = null;
   }
 
   /**
@@ -1454,8 +1636,24 @@ export function Files({
         if (!hasFiles(event.dataTransfer)) return;
         event.preventDefault();
         setDragOver(false);
-        const dropped = Array.from(event.dataTransfer.files);
-        if (dropped.length > 0) void runUploads(dropped, false);
+        // ── BIRAKILAN KLASÖR ARTIK GERÇEKTEN GEZİLİYOR ────────────────────────────────────
+        // `dataTransfer.files` bir klasörü 0 BAYTLIK BİR DOSYA gibi veriyor. Eski hâl onun için
+        // bir yükleme oturumu açıyor, tek bayt göndermiyor, yayım hiç olmuyor ve ekran
+        // "Tatil 2025 yüklendi" diyordu — listede hiçbir şey yokken.
+        //
+        // Girdiler ŞİMDİ, senkron okunuyor: `dataTransfer` ilk `await`ten sonra boşalıyor ve
+        // yürüyüş elinde boş bir listeyle kalırdı.
+        const items = dropItems(event.dataTransfer);
+        void (async () => {
+          const { uploads, blind } = await collectDrop(items);
+          if (blind > 0) {
+            notify(
+              'error',
+              'Klasörler bu tarayıcıda sürüklenerek yüklenemiyor; "Yükle › Klasör yükle" kullanın.',
+            );
+          }
+          if (uploads.length > 0) await runUploads(uploads);
+        })();
       }}
     >
       {/* No `.ch` title row: the window this screen lives in already carries the glyph and the
@@ -1510,6 +1708,30 @@ export function Files({
         >
           ☑ Seç
         </button>
+        {/* ── "TÜMÜNÜ SEÇ", VE SÖZÜ EKRANDAKİ KADAR ────────────────────────────────────────
+            Yalnız seçim kipinde çiziliyor: kutular görünmezken "tümü" neyin tümü olduğunu
+            söylemiyor. Kapsadığı şey EKRANDAKİ satırlar — klasör iki yüzden kalabalıksa devamı
+            henüz getirilmemiş olabilir, ve o zaman düğme bunu `title`ında söylüyor. "Klasördeki
+            her şey" demek, kullanıcının hiç görmediği satırları da işleme sokmak olurdu. */}
+        {picking && (
+          <button
+            type="button"
+            className="mk"
+            disabled={entries === null || entries.length === 0}
+            aria-pressed={allPicked}
+            title={
+              more
+                ? 'Yüklenmiş satırların tümünü seçer; gerisi için önce "Daha fazla göster".'
+                : 'Bu klasördeki her şeyi seçer.'
+            }
+            onClick={() => {
+              setSel(allPicked ? new Set() : new Set((entries ?? []).map((row) => row.id)));
+              rangeAnchor.current = null;
+            }}
+          >
+            ☑ {allPicked ? 'Seçimi bırak' : 'Tümünü seç'}
+          </button>
+        )}
         {trashed ? (
           <button
             type="button"
@@ -1757,7 +1979,19 @@ export function Files({
             className="qf sm"
             disabled={shares === null || shares.length === 0}
             title="Bu paylaşımın yedeklerine (anlık görüntülerine) göz at"
-            onClick={() => setBackups(true)}
+            onClick={() => {
+              // Yedekler paylaşıma göre saklanıyor, ve "Varsayılan" seçiliyken hangi paylaşımın
+              // kastedildiğini bu ekran bilmiyor. Bir paylaşım tahmin edip onun görüntülerini
+              // açmak, geri yüklemeyi yanlış paylaşımın köküne göndermek demekti.
+              if (currentShare === null) {
+                notify(
+                  'error',
+                  'Önce yukarıdan bir paylaşım seçin: yedekler paylaşıma göre tutulur.',
+                );
+                return;
+              }
+              setBackups(true);
+            }}
           >
             <span className="g" style={tint('cool', 0.2)} aria-hidden>
               🕘
@@ -1953,11 +2187,13 @@ export function Files({
         ) : (
           entries.map((entry) => {
             const type = typeOf(entry);
+            /** Bu satır önizlenebiliyorsa NASIL — düğmenin hem varlığı hem davranışı buradan. */
+            const shows = previewAs(entry);
             const chosenRow = sel.has(entry.id);
             const opens = !picking && !trashed && entry.kind === 'folder';
-            const activate = (): void => {
+            const activate = (modifiers: Modifiers): void => {
               if (picking) {
-                toggle(entry.id);
+                toggle(entry.id, modifiers);
                 return;
               }
               if (!opens) return;
@@ -2027,7 +2263,7 @@ export function Files({
                   if (moving.length === 1) void move(moving, entry.id, entry.name);
                   else setModal({ kind: 'move-drop', entries: moving, target: entry });
                 }}
-                onClick={clickable ? activate : undefined}
+                onClick={clickable ? (event) => activate(mods(event)) : undefined}
                 onKeyDown={
                   clickable
                     ? (event) => {
@@ -2035,7 +2271,8 @@ export function Files({
                         // to be swallowed or the list scrolls out from under the row.
                         if (event.key !== 'Enter' && event.key !== ' ') return;
                         event.preventDefault();
-                        activate();
+                        // Shift+Enter de bir aralık: klavyeyle gezen biri aynı işi yapabilmeli.
+                        activate(mods(event));
                       }
                     : undefined
                 }
@@ -2047,7 +2284,7 @@ export function Files({
                   aria-pressed={chosenRow}
                   onClick={(event) => {
                     event.stopPropagation();
-                    toggle(entry.id);
+                    toggle(entry.id, mods(event));
                   }}
                 >
                   ✓
@@ -2149,12 +2386,17 @@ export function Files({
                           ⇄
                         </button>
                       )}
-                      {previewAs(entry) !== null && (
+                      {/* `download`, `read` DEĞİL: önizleme de içeriği okuyor ve uç tam olarak o
+                          izni istiyor. Onsuz düğme bir 403 açardı — PDF'te bir sekme dolusu hata
+                          gövdesi olarak. §6.2: sunucunun reddedeceği bir şey teklif edilmiyor. */}
+                      {shows !== null && can(entry, 'download') && (
                         <button
                           type="button"
-                          title="Görüntüle"
+                          // PDF pencerede DEĞİL, yeni bir sekmede açılıyor ve düğme bunu önceden
+                          // söylüyor: sekmenin habersiz açılması tıklamanın kaçırılmasıdır.
+                          title={shows === 'pdf' ? 'Yeni sekmede görüntüle' : 'Görüntüle'}
                           aria-label={`${entry.name} görüntüle`}
-                          onClick={() => setPreview(entry)}
+                          onClick={() => (shows === 'pdf' ? openPdfTab(entry) : setPreview(entry))}
                         >
                           👁
                         </button>
@@ -2427,10 +2669,10 @@ export function Files({
         </Win>
       )}
 
-      {backups && shares !== null && shares[0] !== undefined && (
+      {backups && currentShare !== null && (
         <History
-          shareId={(shares.find((it) => it.id === shareId) ?? shares[0]).id}
-          shareName={(shares.find((it) => it.id === shareId) ?? shares[0]).name}
+          shareId={currentShare.id}
+          shareName={currentShare.name}
           destinationId={parentId ?? null}
           destinationLabel={last?.name ?? 'paylaşımın kökü'}
           onClose={() => setBackups(false)}
@@ -2612,13 +2854,100 @@ function Preview({ entry, onClose }: { entry: FileEntry; onClose: () => void }):
           // Controls but no autoplay: this window is opened to check WHICH file something is, and
           // a video that starts talking the moment it appears is startling in a room with people.
           <video src={source} controls style={PREVIEW_MEDIA} />
+        ) : kind === 'audio' ? (
+          // Aynı gerekçeyle otomatik çalmıyor. Ses öğesi `Content-Disposition: attachment`ı yok
+          // sayıyor — indirmeyi başlatan tarayıcının GEZİNMESİ, bir medya öğesinin kaynağı değil —
+          // ve CSP'nin `media-src 'self'` kuralı aynı kökene zaten izin veriyor.
+          <audio src={source} controls style={PREVIEW_AUDIO} />
+        ) : kind === 'text' ? (
+          <TextHead entry={entry} />
         ) : (
+          // PDF buraya HİÇ GELMİYOR: satırdaki düğme onu yeni bir sekmede açıyor (`openPdfTab`), ve
+          // geri kalan tek önizlenebilir tür resim.
           <img src={source} alt={entry.name} style={PREVIEW_MEDIA} />
         )}
       </div>
       <div className="note">{formatBytes(entry.size)}</div>
     </Win>
   );
+}
+
+/** Metin önizlemesinin okuduğu en büyük parça. */
+const TEXT_HEAD_BYTES = 256 * 1024;
+
+/**
+ * Bir metin dosyasının BAŞI.
+ *
+ * İLK 256 kB, VE `Range` İLE: bir günlük dosyası gigabaytlarca olabiliyor, oysa bu pencerenin
+ * sorduğu soru "bu dosya ne" ve cevabı ilk ekranında duruyor. Tamamını çekmek, bakmak için açılan
+ * bir pencerede sekmenin belleğini doldurmak olurdu.
+ *
+ * `fetch`, `<iframe>` DEĞİL: uç `Content-Disposition: attachment` gönderiyor (kiracının HTML'i =
+ * depolanmış XSS) ve bir çerçeve onu indirme olarak açardı. İstek ise başlığı umursamıyor ve gelen
+ * baytlar burada METİN olarak, `<pre>` içinde çiziliyor.
+ *
+ * Kesilen yerde bir UTF-8 karakteri ikiye bölünebiliyor; sonuçtaki tek bir "�", eksik olanın
+ * söylendiği bir önizlemede kabul edilebilir bir bedel.
+ */
+function TextHead({ entry }: { entry: FileEntry }): React.JSX.Element {
+  const [text, setText] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    const stop = new AbortController();
+    void (async () => {
+      try {
+        const answer = await fetch(`${API_BASE_URL}/files/${entry.id}/content`, {
+          credentials: 'same-origin',
+          headers: { range: `bytes=0-${TEXT_HEAD_BYTES - 1}` },
+          signal: stop.signal,
+        });
+        if (!answer.ok) {
+          setFailed(true);
+          return;
+        }
+        const body = await answer.text();
+        if (stop.signal.aborted) return;
+        setText(body);
+      } catch {
+        // İptal de buraya düşüyor, ve iptal bir hata değil: pencere kapandığı için okuma bitti.
+        if (!stop.signal.aborted) setFailed(true);
+      }
+    })();
+    return () => stop.abort();
+  }, [entry.id]);
+
+  if (failed) return <div className="note">Dosya okunamadı.</div>;
+  if (text === null) return <div className="note">Yükleniyor…</div>;
+  return (
+    <pre style={PREVIEW_TEXT}>
+      {text}
+      {entry.size > TEXT_HEAD_BYTES ? '\n\n… (yalnız ilk 256 kB gösteriliyor)' : ''}
+    </pre>
+  );
+}
+
+/**
+ * PDF'i yeni bir sekmede açar.
+ *
+ * ── NEDEN ÇERÇEVE DEĞİL ─────────────────────────────────────────────────────────────────────
+ *
+ * nginx her yanıta `frame-ancestors 'none'` ve `X-Frame-Options: DENY` yazıyor (deploy/nginx),
+ * yani API'nin kendi kökeninden gelen bir belge bu sayfanın İÇİNE gömülemez — bir `<iframe>`
+ * sessizce boş kalırdı, ve boş kalan bir önizleme hiç olmayandan kötü. Üst düzey bir sekmede o
+ * kuralların ikisi de geçerli değil ve tarayıcının kendi PDF görüntüleyicisi dosyayı açıyor.
+ *
+ * `?inline=1` olmadan uç `attachment` gönderiyor ve sekme dosyayı indirip kapanırdı; o bayrağın
+ * neden yalnız `.pdf`te açıldığı files.controller.ts'te yazılı.
+ */
+function openPdfTab(entry: FileEntry): void {
+  const anchor = document.createElement('a');
+  anchor.href = `${API_BASE_URL}/files/${entry.id}/content?inline=1`;
+  anchor.target = '_blank';
+  anchor.rel = 'noopener noreferrer';
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
 }
 
 /** The reference's own preview geometry (11px radius, 340px cap, over a dark plate); the stylesheet
@@ -2637,6 +2966,22 @@ const PREVIEW_MEDIA: React.CSSProperties = {
   maxHeight: 340,
   borderRadius: 11,
   display: 'block',
+};
+
+/** Ses çubuğu resim gibi kırpılmıyor: kısa kalırsa denetimleri sığmıyor, bu yüzden tam genişlik. */
+const PREVIEW_AUDIO: React.CSSProperties = { width: '100%', display: 'block' };
+
+/** Metnin kendi penceresi: aynı 340 piksellik tavan, ama kaydırma metnin içinde. */
+const PREVIEW_TEXT: React.CSSProperties = {
+  margin: 0,
+  width: '100%',
+  maxHeight: 340,
+  overflow: 'auto',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  textAlign: 'left',
+  fontSize: 12,
+  lineHeight: 1.5,
 };
 
 /* ─── helpers ───────────────────────────────────────────────────────────────── */
@@ -2739,6 +3084,153 @@ function countOf(page: FileEntryPage | undefined): string | null {
   return `${page.items.length}${page.hasMore ? '+' : ''}`;
 }
 
+/* ─── bırakılanı yüklenebilir hâle getirmek ─────────────────────────────────── */
+
+/**
+ * Yüklenecek tek bir iş: dosya, ve hedefin ALTINDA açılması gereken klasör zinciri.
+ *
+ * `webkitRelativePath` YERİNE bir dizi, çünkü artık iki kaynak var: "Klasör yükle" seçicisi o
+ * alanı dolduruyor, sürükle-bırak ise `FileSystemEntry` ağacını geziyor ve oradan gelen `File`
+ * nesnelerinde o alan boş. Yol bilgisini dosyanın kendisinden değil yanından taşımak, ikisini tek
+ * bir yükleme döngüsünde buluşturuyor.
+ */
+export interface Upload {
+  file: File;
+  segments: string[];
+}
+
+/** `webkitRelativePath`ten dosyanın ÜSTÜNDEKİ klasörler; dosya adının kendisi atılıyor. */
+export function pathSegments(relative: string): string[] {
+  return relative
+    .split('/')
+    .slice(0, -1)
+    .filter((part) => part !== '');
+}
+
+/** Dosya seçicisinden gelenler. `keepPaths` yalnız "Klasör yükle" seçicisinde doğru. */
+export function uploadsOf(files: readonly File[], keepPaths: boolean): Upload[] {
+  return files.map((file) => ({
+    file,
+    segments: keepPaths ? pathSegments(file.webkitRelativePath) : [],
+  }));
+}
+
+/**
+ * Bırakılan bir öğe.
+ *
+ * `entry` varsa tarayıcı klasörün İÇİNİ gezdirebiliyor demektir. Yoksa elde yalnız düz bir `File`
+ * var, ve orada bir klasör 0 baytlık türsüz bir dosyadan ayırt edilemiyor.
+ */
+type DropItem = { kind: 'entry'; entry: FileSystemEntry } | { kind: 'file'; file: File };
+
+/**
+ * Bırakma anında, `await`ten ÖNCE okunması gereken şey.
+ *
+ * `DataTransfer` olay işleyicisi döner dönmez boşalıyor: bir `await`ten sonra `items` boş bir
+ * liste. Bu yüzden girdi nesneleri burada senkron alınıyor; yürüyüş sonra, elde duran girdilerle.
+ */
+function dropItems(transfer: DataTransfer): DropItem[] {
+  const items = Array.from(transfer.items).filter((item) => item.kind === 'file');
+  const first = items[0];
+  // Girdi API'si olmayan tarayıcıda elde yalnız düz dosya listesi var.
+  if (first === undefined || typeof first.webkitGetAsEntry !== 'function') {
+    return Array.from(transfer.files).map((file): DropItem => ({ kind: 'file', file }));
+  }
+  const out: DropItem[] = [];
+  for (const item of items) {
+    const entry = item.webkitGetAsEntry();
+    if (entry !== null) {
+      out.push({ kind: 'entry', entry });
+      continue;
+    }
+    // Girdisi verilemeyen ama dosyası olan bir öğe: yine de yüklenebilir.
+    const file = item.getAsFile();
+    if (file !== null) out.push({ kind: 'file', file });
+  }
+  return out;
+}
+
+/** Sürükle-bırakta inilecek en derin klasör. Kendine bağlanan bir ağaçta turun bitmesi şart. */
+const DROP_MAX_DEPTH = 24;
+
+/**
+ * Bırakılanları yüklenecek işlere çevirir — klasörleri gezerek.
+ *
+ * `blind`: klasör olup olmadığı ANLAŞILAMAYAN öğe sayısı. Girdi API'si olmayan bir tarayıcıda
+ * klasör de boş dosya da 0 bayt ve türsüz görünüyor; ikisini de yüklenmiş saymak, kullanıcıya
+ * olmayan bir şey için "yüklendi" demekti. Sayılıyor, ve çağıran onu söylüyor.
+ */
+async function collectDrop(items: DropItem[]): Promise<{ uploads: Upload[]; blind: number }> {
+  const uploads: Upload[] = [];
+  let blind = 0;
+  for (const item of items) {
+    if (item.kind === 'file') {
+      if (item.file.size === 0 && item.file.type === '') blind += 1;
+      else uploads.push({ file: item.file, segments: [] });
+      continue;
+    }
+    await walkEntry(item.entry, [], uploads);
+  }
+  return { uploads, blind };
+}
+
+/** Bir girdiyi — dosyaysa kendisini, klasörse altındaki her dosyayı — listeye ekler. */
+async function walkEntry(
+  entry: FileSystemEntry,
+  segments: string[],
+  into: Upload[],
+): Promise<void> {
+  if (entry.isFile) {
+    const file = await entryFile(entry as FileSystemFileEntry);
+    if (file !== null) into.push({ file, segments });
+    return;
+  }
+  if (!entry.isDirectory || segments.length >= DROP_MAX_DEPTH) return;
+  const children = await readAllEntries((entry as FileSystemDirectoryEntry).createReader());
+  for (const child of children) {
+    await walkEntry(child, [...segments, entry.name], into);
+  }
+}
+
+/**
+ * Bir klasörün BÜTÜN girdileri.
+ *
+ * `readEntries` her çağrıda yalnız bir küme veriyor — Chrome'da yüz — ve boş küme sonun kendisi.
+ * Tek çağrı yapan bir kod, yüzden çok dosyalı bir klasörün gerisini sessizce düşürürdü.
+ *
+ * Okuma hatası turu bitirmiyor: o ana kadar okunanlar yükleniyor, çünkü okunabilmiş dosyaları
+ * cezalandırmak kullanıcıya hiçbir şey kazandırmıyor.
+ */
+function readAllEntries(reader: FileSystemDirectoryReader): Promise<FileSystemEntry[]> {
+  const all: FileSystemEntry[] = [];
+  return new Promise((resolve) => {
+    const step = (): void => {
+      reader.readEntries(
+        (batch) => {
+          if (batch.length === 0) {
+            resolve(all);
+            return;
+          }
+          all.push(...batch);
+          step();
+        },
+        () => resolve(all),
+      );
+    };
+    step();
+  });
+}
+
+/** Girdinin `File` hâli; okunamıyorsa `null` (izin kalkmış, dosya silinmiş). */
+function entryFile(entry: FileSystemFileEntry): Promise<File | null> {
+  return new Promise((resolve) => {
+    entry.file(
+      (file) => resolve(file),
+      () => resolve(null),
+    );
+  });
+}
+
 /**
  * Five mebibytes. Small enough that a dropped connection loses little, large enough that a gigabyte
  * is two hundred requests rather than two thousand.
@@ -2760,6 +3252,16 @@ async function* uploadFile(
   parentId: string | undefined,
   shareId: string | undefined,
 ): AsyncGenerator<number> {
+  // ── SIFIR BAYT SESSİZCE "YÜKLENDİ" OLAMAZ ──────────────────────────────────────────────────
+  //
+  // Yayım son PATCH'in İÇİNDE oluyor ve sunucu 0 baytlık bir PATCH'i reddediyor (`Content-Length`
+  // pozitif olmalı). Yani sıfır baytlık bir dosyada aşağıdaki döngü hiç dönmüyor: oturum açık
+  // kalıyor, hiçbir şey yayımlanmıyor, üreteç sorunsuz bitiyor ve ekran "yüklendi" diyordu.
+  // Sunucu tarafı düzelene kadar (uzunluk 0 ise POST'tan sonra hemen yayımlamak) doğru cevap ret.
+  if (file.size === 0) {
+    throw new Error(`"${file.name}" 0 bayt: boş dosyalar bu sürümde yüklenemiyor.`);
+  }
+
   // ── KÖKE YÜKLEMEDE PAYLAŞIM ────────────────────────────────────────────────────────────────
   // Bir üst klasör varsa paylaşımı o belirliyor; kökte belirleyen hiçbir şey yoktu ve sunucu
   // `parentId` gelmeyince kiracının VARSAYILAN paylaşımını seçiyordu. Yani "Arşiv" seçiliyken

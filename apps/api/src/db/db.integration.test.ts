@@ -153,6 +153,27 @@ describeDb('tenant context, against a real PostgreSQL', () => {
     expect(rows[0]?.v).toBe(orgA);
   });
 
+  it('lists every tenant WITHOUT a tenant context, which nothing else can do', async () => {
+    if (orgA === '' || orgB === '')
+      return expect.unreachable('two seeded organizations are required');
+
+    // Kendini zamanlayan her zincirin ilk halkası buna bağlı, ve bu yolun ÇALIŞTIĞINI ölçen hiçbir
+    // şey yoktu: tek test sahte bir DbService ile `Promise.resolve([])` döndürüyordu — yani tam
+    // olarak arızanın kendisini. `all_organization_ids()`in EXECUTE hakkı `depsis_app`ten alınır
+    // ya da sahibi `depsis_owner` olmayan bir role geçerse fonksiyon sıfır satır döner, hata
+    // vermez, ve dizin turu, yedek turu ve çöp budama açılışta yine hiç başlamaz.
+    const ids = await db.tenantIds();
+    expect(ids).toContain(orgA);
+    expect(ids).toContain(orgB);
+
+    // Ve olumsuz kontrol, hemen yanında: aynı bağlantıda aynı tabloyu düz okumak SIFIR satır
+    // döndürüyor. İkisi yan yana durmazsa yukarıdaki iddia "RLS gevşemiş" hâlinde de geçerdi.
+    const direct = await db.withoutTenant('health-check', (q) =>
+      q.query<{ id: string }>(`SELECT id::text AS id FROM organizations`),
+    );
+    expect(direct, 'a context-free read of the table itself must still see nothing').toEqual([]);
+  });
+
   it('refuses to start against the migration owner', async () => {
     if (OWNER_URL === undefined || OWNER_URL === '')
       return expect.unreachable('DEPSIS_TEST_OWNER_DATABASE_URL is required');

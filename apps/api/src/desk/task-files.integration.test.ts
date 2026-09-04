@@ -222,7 +222,15 @@ describeDb('görev–dosya bağı, §7 kuralıyla', () => {
     try {
       const page = await links.list(caller(ayse), taskId);
       expect(page.items.map((i) => i.name)).toEqual(['sir.txt']);
-      expect(page.hidden).toBe(1);
+      // SIFIR, ve bir zamanlar 1 idi: `hidden` "izniniz olmadığı için göremediğiniz" sayısı, ve
+      // arayüz onu tam o cümleyle basıyor. Çöp bir izin durumu değil — kendi çöpüne attığı
+      // dosyayı "başkasının gizli dosyası" gibi görmek, sildiğini sanan kişiye anlamsız bir
+      // cümle okutmaktı.
+      expect(page.hidden).toBe(0);
+
+      // İzin yüzünden gizlenen satır hâlâ sayılıyor: Veli 'sir.txt'i göremiyor, ve çöpteki
+      // dosyanın onun sayısını düşürmemesi gerekiyor.
+      expect((await links.list(caller(veli), taskId)).hidden).toBe(1);
 
       const baska = await tasks.create(org, ayse, 'çöpten bağlama', null);
       await expect(links.link(caller(ayse), baska.id, acikDosya)).rejects.toBeInstanceOf(

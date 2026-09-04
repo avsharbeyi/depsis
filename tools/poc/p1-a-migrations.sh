@@ -561,62 +561,41 @@ assert_eq 'a bare unique index is INVISIBLE to a pg_constraint audit' '0' "$CONS
 assert_eq 'the same index IS visible in pg_index'                    '1' "$INDEX_SEES"
 _db -c "DROP TABLE public.p1a_audit_probe" >/dev/null 2>&1
 
-# The audit as it must actually be written: every unique or exclusion INDEX, however created, whose
-# key omits organization_id, minus an explicit allow-list.
-BAD_KEYS=$(_db -c "
-  SELECT coalesce(string_agg(i.relname, ', '), '')
-    FROM pg_index x
-    JOIN pg_class i ON i.oid = x.indexrelid
-    JOIN pg_class t ON t.oid = x.indrelid
-    JOIN pg_namespace n ON n.oid = t.relnamespace
-   WHERE n.nspname = 'public'
-     AND (x.indisunique OR x.indisexclusion)
-     AND pg_get_indexdef(i.oid) NOT LIKE '%organization_id%'
-     -- A single-column key on a uuid is not an existence oracle, and that is the actual reason
-     -- rather than a naming convention: provoking a collision means presenting a value that already
-     -- exists, and a uuid cannot be guessed. Expressed against the COLUMN TYPE, because an earlier
-     -- version keyed on the column being called `id` and would have wrongly exempted a
-     -- `UNIQUE (external_id)` on a caller-chosen string while wrongly flagging a legitimate
-     -- `PRIMARY KEY (user_id)`.
-     AND NOT (
-       x.indnatts = 1
-       AND EXISTS (
-         SELECT 1 FROM pg_attribute a
-          WHERE a.attrelid = t.oid AND a.attnum = x.indkey[0] AND a.atttypid = 'uuid'::regtype
-       )
-     )
-     -- The named exceptions. Each is argued in the migration that creates it; anything joining
-     -- this list needs its own argument, not an analogy to these.
-     AND i.relname NOT IN ('organizations_slug_key',
-                           'sessions_token_hash_key',
-                           'pending_logins_token_hash_key',
-                           -- A singleton key on a boolean, not an identifier. The only value it
-                           -- can hold is true, so a violation says only that setup is already
-                           -- complete, which the unauthenticated status endpoint answers anyway.
-                           -- Argued in full in migration 0005.
-                           'system_setup_pkey',
-                           'depsis_migrations_pkey')
-" || echo ERR)
-if [ -z "$BAD_KEYS" ]; then
-  pass 'every unique/exclusion index either includes organization_id or is on the allow-list'
-else
-  unexpected "unique index without organization_id: $BAD_KEYS" \
-             'a 23505 on this index tells one tenant that another tenant holds the value'
-fi
+# THE AUDIT ITSELF LIVES IN tools/ci/migration-check.sh, NOT HERE.
+#
+# It used to be repeated in this file, allow-list and all, and the copy rotted: the list here still
+# named the five exceptions of migration 0005 while the schema had grown a dozen more (license_pkey,
+# console_commands_pkey, the app-catalogue and POSIX-id keys, retired_posix_ids_pkey), so a re-run
+# of P1-A reported them all as UNEXPECTED — a tenant-isolation alarm with no tenant-isolation
+# problem behind it. Two copies of a security allow-list means the one nobody runs is the one that
+# is wrong, and the one that runs is the CI gate: `bash tools/ci/migration-check.sh`, on every push.
+#
+# What stays here is the finding the CI gate is BUILT ON and cannot restate: that a bare
+# `CREATE UNIQUE INDEX` is invisible to a pg_constraint audit, measured just above.
+note 'the unique-index/organization_id audit runs in CI' \
+     'tools/ci/migration-check.sh holds the single allow-list; this PoC no longer keeps a copy'
 
 # ── identity folding ──
 #
 # The measured reason `lower(email)` was not good enough: on the ICU database bootstrap.sql
 # creates, lower('İsmail') is i + U+0307 + smail, which is NOT lower('ismail').
+#
+# EVERY INSERT CARRIES A USERNAME, AND A DIFFERENT ONE. Migration 0010 made `username` NOT NULL
+# with no default, so the two-column inserts this section used to write failed on the NOT NULL and
+# took the whole run down through common.sh's ERR trap before §10 was ever reached. The usernames
+# have to differ from each other as well: `users_org_username_key UNIQUE (organization_id,
+# username_folded)` would otherwise raise the 23505 these assertions look for, and every one of
+# them would pass for the wrong reason — measuring the username key while claiming to measure the
+# address fold.
 ORG=$(_db -c "SET ROLE depsis_owner;
               INSERT INTO organizations (slug,name) VALUES ('p1a','P1A') RETURNING id;" | tail -1)
-_db -c "SET ROLE depsis_owner;
-        INSERT INTO users (organization_id,email)
-        VALUES ('$ORG','ismail@firma.test');" >/dev/null 2>&1
+_db_lax "SET ROLE depsis_owner;
+         INSERT INTO users (organization_id,username,email)
+         VALUES ('$ORG','ismail_a','ismail@firma.test');" >/dev/null
 
 DUP_TR=$(_db_lax "SET ROLE depsis_owner;
-                  INSERT INTO users (organization_id,email)
-                  VALUES ('$ORG','İsmail@firma.test');")
+                  INSERT INTO users (organization_id,username,email)
+                  VALUES ('$ORG','ismail_b','İsmail@firma.test');")
 if grep -qi 'duplicate key\|23505' <<<"$DUP_TR"; then
   pass 'the Turkish dotted capital I is folded: İsmail@ collides with ismail@ in one tenant'
 else
@@ -625,8 +604,8 @@ else
 fi
 
 DUP_ASCII=$(_db_lax "SET ROLE depsis_owner;
-                     INSERT INTO users (organization_id,email)
-                     VALUES ('$ORG','ISMAIL@FIRMA.TEST');")
+                     INSERT INTO users (organization_id,username,email)
+                     VALUES ('$ORG','ismail_c','ISMAIL@FIRMA.TEST');")
 if grep -qi 'duplicate key\|23505' <<<"$DUP_ASCII"; then
   pass 'plain ASCII case folding still works'
 else
@@ -640,16 +619,16 @@ fi
 # when the fold worked and the insert was correctly refused, ON_ERROR_STOP aborted the whole run —
 # a passing behaviour presented as a crash.
 _db_lax "SET ROLE depsis_owner;
-         INSERT INTO users (organization_id,email)
-         VALUES ('$ORG','jose@firma.test');" >/dev/null
+         INSERT INTO users (organization_id,username,email)
+         VALUES ('$ORG','jose_a','jose@firma.test');" >/dev/null
 
 _db_lax "SET ROLE depsis_owner;
-         INSERT INTO users (organization_id,email)
-         VALUES ('$ORG',U&'jos\00e9@firma.test');" >/dev/null
+         INSERT INTO users (organization_id,username,email)
+         VALUES ('$ORG','jose_b',U&'jos\00e9@firma.test');" >/dev/null
 
 DUP_NFD=$(_db_lax "SET ROLE depsis_owner;
-                   INSERT INTO users (organization_id,email)
-                   VALUES ('$ORG',U&'jose\0301@firma.test');")
+                   INSERT INTO users (organization_id,username,email)
+                   VALUES ('$ORG','jose_c',U&'jose\0301@firma.test');")
 if grep -qi 'duplicate key\|23505' <<<"$DUP_NFD"; then
   pass 'the decomposed (NFD) spelling collides with the precomposed (NFC) one'
 else
@@ -659,8 +638,9 @@ fi
 # And the negative control: folding must NOT merge genuinely different people. P0-H measured that
 # the SEARCH normaliser collides Çağrı with Cagri, which is correct for search and fatal here.
 DISTINCT=$(_db_lax "SET ROLE depsis_owner;
-                    INSERT INTO users (organization_id,email)
-                    VALUES ('$ORG','cagri@firma.test'),('$ORG','çağrı@firma.test');")
+                    INSERT INTO users (organization_id,username,email)
+                    VALUES ('$ORG','cagri_a','cagri@firma.test'),
+                           ('$ORG','cagri_b','çağrı@firma.test');")
 if grep -qi 'duplicate key\|23505' <<<"$DISTINCT"; then
   unexpected 'fold_identity merged cagri@ with çağrı@' \
              'accent stripping in an identity key merges two different people into one account'

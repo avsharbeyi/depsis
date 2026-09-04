@@ -18,6 +18,32 @@ const CHOICES: ReadonlyArray<{ days: number | null; label: string }> = [
 ];
 
 /**
+ * Kaydet düğmesinin ne yapacağı — ve NE ZAMAN HİÇBİR ŞEY YAPMAYACAĞI.
+ *
+ * ÖNİZLEME KAYDETMENİN FRENİ, ve fren yalnız EKRANDAKİ SEÇİMİN fiyatı elde varken tutuyor.
+ * Düğme eskiden seçim değişir değişmez etkinleşiyordu; fiyat ise 200 ms sonra, bir ağ
+ * gidiş-dönüşünün ardından geliyordu. Aradaki boşlukta "Süresiz"in sıfırı ekranda duruyor,
+ * `willDelete` false çıkıyor ve onay kutusu HİÇ ÇIKMADAN kayıt gidiyordu — sunucu da kaydı alır
+ * almaz süpürücüyü çalıştırıyor. Klavyeyle seçip Tab+Enter yapan biri, çöpteki her şeyi
+ * geri getirilemez biçimde silmiş oluyordu.
+ *
+ * `priced` yalnız EKRANDAKİ gün sayısı için fiyat varken dolu; başka bir günün fiyatı ile
+ * karşılaştırmak, fiyatın hiç olmamasıyla aynı şey.
+ */
+export type SaveAction = 'blocked' | 'save' | 'confirm';
+
+export function trashSaveAction(input: {
+  busy: boolean;
+  changed: boolean;
+  considering: number | null;
+  priced: { days: number | null; entries: number } | null;
+}): SaveAction {
+  if (input.busy || !input.changed) return 'blocked';
+  if (input.priced === null || input.priced.days !== input.considering) return 'blocked';
+  return input.considering !== null && input.priced.entries > 0 ? 'confirm' : 'save';
+}
+
+/**
  * §7's retention policy, on the screen where its effect is visible.
  *
  * IN THE BIN AND NOT IN A SETTINGS PANE. This control starts deleting user data permanently, on a
@@ -44,7 +70,13 @@ export function TrashPolicyBar({
 }): React.JSX.Element | null {
   const [policy, setPolicy] = useState<Policy | null>(null);
   const [considering, setConsidering] = useState<number | null>(null);
-  const [preview, setPreview] = useState<Policy['impact'] | null>(null);
+  /** Fiyat, HANGİ GÜN İÇİN hesaplandığıyla birlikte: ayrı tutulan iki değer birbirinden kayar. */
+  const [priced, setPriced] = useState<{ days: number | null; impact: Policy['impact'] } | null>(
+    null,
+  );
+  const [priceFailed, setPriceFailed] = useState(false);
+  /** Fiyat isteğini aynı gün için yeniden başlatan sayaç — seçimi değiştirmek tek yol olmamalı. */
+  const [priceKey, setPriceKey] = useState(0);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
@@ -59,7 +91,7 @@ export function TrashPolicyBar({
       if (!alive || data === undefined) return;
       setPolicy(data);
       setConsidering(data.retentionDays ?? null);
-      setPreview(data.impact);
+      setPriced({ days: data.retentionDays ?? null, impact: data.impact });
     })();
     return () => {
       alive = false;
@@ -69,20 +101,36 @@ export function TrashPolicyBar({
   // Re-priced on every choice, before anything is saved. Debounced only lightly: this is a click,
   // not a keystroke, and the number has to be on screen before a hand reaches the save button.
   useEffect(() => {
-    if (!isAdmin || considering === null) {
-      setPreview({ entries: 0, files: 0, bytes: 0, oldestTrashedAt: null });
+    if (!isAdmin) return undefined;
+    setPriceFailed(false);
+    if (considering === null) {
+      // "Süresiz"in fiyatı ağa sorulmadan bilinir: hiçbir şey silinmez.
+      setPriced({ days: null, impact: { entries: 0, files: 0, bytes: 0, oldestTrashedAt: null } });
       return undefined;
     }
+    // ÖNCE ESKİ RAKAM DÜŞÜYOR. Ekranda duran sayı bir önceki seçimin fiyatıdır, ve onu yeni
+    // seçimin yanında bırakmak yalnız yanlış bir sayı göstermek değil, Kaydet'e o sayıya göre
+    // karar verdirmekti.
+    setPriced(null);
+    let alive = true;
     const timer = setTimeout(() => {
       void (async () => {
         const { data } = await api.GET('/system/trash-policy', {
           params: { query: { days: considering } },
         });
-        if (data !== undefined) setPreview(data.impact);
+        if (!alive) return;
+        if (data === undefined) {
+          setPriceFailed(true);
+          return;
+        }
+        setPriced({ days: considering, impact: data.impact });
       })();
     }, 200);
-    return () => clearTimeout(timer);
-  }, [considering, isAdmin]);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [considering, isAdmin, priceKey]);
 
   if (!isAdmin) return null;
 
@@ -98,7 +146,7 @@ export function TrashPolicyBar({
       return;
     }
     setPolicy(data);
-    setPreview(data.impact);
+    setPriced({ days: data.retentionDays ?? null, impact: data.impact });
     notify(
       'ok',
       data.retentionDays === null
@@ -110,7 +158,14 @@ export function TrashPolicyBar({
   }
 
   const changed = (policy?.retentionDays ?? null) !== considering;
-  const willDelete = considering !== null && (preview?.entries ?? 0) > 0;
+  // Yalnız EKRANDAKİ seçimin fiyatı; başka bir günün fiyatı burada `null` sayılıyor.
+  const impact = priced !== null && priced.days === considering ? priced.impact : null;
+  const action = trashSaveAction({
+    busy,
+    changed,
+    considering,
+    priced: priced === null ? null : { days: priced.days, entries: priced.impact.entries },
+  });
 
   return (
     <>
@@ -135,17 +190,31 @@ export function TrashPolicyBar({
         <span className="val">
           {considering === null
             ? 'hiçbir şey silinmez'
-            : `${preview?.entries ?? 0} öğe · ${formatBytes(preview?.bytes ?? 0)}`}
+            : impact === null
+              ? priceFailed
+                ? 'hesaplanamadı'
+                : 'hesaplanıyor…'
+              : `${impact.entries} öğe · ${formatBytes(impact.bytes)}`}
         </span>
         <button
           type="button"
           className="b"
-          disabled={busy || !changed}
-          onClick={() => (willDelete ? setConfirming(true) : void save())}
+          disabled={action === 'blocked'}
+          onClick={() => (action === 'confirm' ? setConfirming(true) : void save())}
         >
           {busy ? 'Kaydediliyor…' : 'Kaydet'}
         </button>
       </div>
+
+      {priceFailed && (
+        <p className="note warn">
+          Bu sürenin kaç öğeyi sileceği hesaplanamadı. Kaç şeyin gideceğini görmeden bu politikayı
+          açmak, çöp kutusunu görmeden boşaltmaktır.{' '}
+          <button type="button" className="lnk" onClick={() => setPriceKey((key) => key + 1)}>
+            Yeniden dene
+          </button>
+        </p>
+      )}
 
       {considering !== null && (
         <p className="note">
@@ -154,7 +223,9 @@ export function TrashPolicyBar({
         </p>
       )}
 
-      {confirming && (
+      {/* `impact` OLMADAN ÇİZİLMİYOR: rakamsız bir onay kutusu, onayladığı şeyi söylemiyor
+          demektir — ve bu kutunun tek işi o rakamı göstermek. */}
+      {confirming && impact !== null && (
         <ConfirmBox
           title="Kalıcı silmeyi aç"
           danger
@@ -162,12 +233,12 @@ export function TrashPolicyBar({
           // neither is recoverable. The oldest date is there so a policy can be judged against what
           // is actually in the bin rather than against an abstraction.
           body={
-            `${preview?.entries ?? 0} öğe (${preview?.files ?? 0} dosya, ` +
-            `${formatBytes(preview?.bytes ?? 0)}) ${considering} günden eski. ` +
+            `${impact.entries} öğe (${impact.files} dosya, ` +
+            `${formatBytes(impact.bytes)}) ${considering} günden eski. ` +
             `Kaydettiğiniz anda kalıcı olarak silinecekler; geri getirmenin yolu yok.` +
-            (preview?.oldestTrashedAt == null
+            (impact.oldestTrashedAt == null
               ? ''
-              : ` En eskisi ${new Date(preview.oldestTrashedAt).toLocaleDateString('tr')} tarihinde atılmış.`)
+              : ` En eskisi ${new Date(impact.oldestTrashedAt).toLocaleDateString('tr')} tarihinde atılmış.`)
           }
           yesLabel="Sil ve politikayı aç"
           onYes={() => void save()}

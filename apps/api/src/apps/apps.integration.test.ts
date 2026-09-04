@@ -11,6 +11,7 @@ import {
   AlreadyInstalledError,
   AppNotInCatalogueError,
   AppsService,
+  CustomAppInvalidError,
   MountTargetError,
   NotInstalledError,
   RootfulRuntimeError,
@@ -277,6 +278,52 @@ describeDb('the catalogue is a boundary, against a real PostgreSQL', () => {
     await expect(apps.install(orgA, adminA, 'my-own-image', [])).rejects.toBeInstanceOf(
       AppNotInCatalogueError,
     );
+  });
+
+  it('refuses a custom app whose slug is already the catalogue’s', async () => {
+    // Tek kısıt `(organization_id, slug)` idi, katalogla çapraz denetim yoktu: 'jellyfin' kısa
+    // adıyla eklenen özel uygulama 201 dönüyor, `GET /apps` listesine ikinci bir 'jellyfin' kartı
+    // olarak giriyor, ve `requireCatalogue` önce kataloğa baktığı için `POST /apps/jellyfin` her
+    // zaman katalog sürümünü kuruyordu — eklenen uygulama hiç kurulamaz, sebebi de görünmezdi.
+    await expect(
+      apps.addCustom(orgA, adminA, {
+        name: 'Benim Jellyfin’im',
+        slug: 'jellyfin',
+        icon: '📦',
+        image: 'docker.io/library/alpine',
+        tag: '3.20',
+        containerPort: 8096,
+        env: {},
+        volumes: [],
+      }),
+    ).rejects.toBeInstanceOf(CustomAppInvalidError);
+
+    // Ve satır gerçekten yazılmadı: hata mesajı doğru olup INSERT'in yine de olması, listedeki
+    // gölge kartı aynen bırakırdı.
+    const rows = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM app_custom WHERE organization_id = $1 AND slug = 'jellyfin'`,
+        [orgA],
+      ),
+    );
+    expect(rows[0]?.n).toBe('0');
+  });
+
+  it('still accepts a custom slug the catalogue does not use', async () => {
+    // Denetimin fazla geniş olmadığının kanıtı: kataloğun kullanmadığı bir kısa ad geçmeli, yoksa
+    // "özel uygulama ekle" özelliği tamamen kapanmış olurdu.
+    const row = await apps.addCustom(orgA, adminA, {
+      name: 'Kendi Aracım',
+      slug: 'kendi-aracim',
+      icon: '📦',
+      image: 'docker.io/library/alpine',
+      tag: '3.20',
+      containerPort: 8080,
+      env: {},
+      volumes: [],
+    });
+    expect(row.slug).toBe('kendi-aracim');
+    await apps.removeCustom(orgA, 'kendi-aracim');
   });
 
   it('refuses a mount point the catalogue does not describe', async () => {

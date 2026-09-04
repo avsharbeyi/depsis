@@ -144,7 +144,7 @@ pub fn snapshot(proc_root: &Path, passwd: &str) -> (Vec<ProcessInfo>, bool) {
         let mut args: String = cmdline
             .split(|b| *b == 0)
             .filter(|part| !part.is_empty())
-            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .map(|part| mask_credentials(&String::from_utf8_lossy(part)))
             .collect::<Vec<_>>()
             .join(" ");
         if args.len() > 200 {
@@ -163,6 +163,34 @@ pub fn snapshot(proc_root: &Path, passwd: &str) -> (Vec<ProcessInfo>, bool) {
         });
     }
     (out, truncated)
+}
+
+/// Bir argümandaki `şema://kullanıcı:parola@sunucu` biçimindeki parolayı yıldızlar.
+///
+/// ── NEDEN BURADA ─────────────────────────────────────────────────────────────────────────
+///
+/// Bu liste EKRANA çıkıyor ve API günlüğüne düşüyor, ve içindeki argv'lerin hepsi DEPSIS'in
+/// çalıştırdığı komutlara ait değil: kutudaki üçüncü taraf her süreç de burada. Ajanın kendi
+/// komutlarında parolanın argv'ye hiç konmaması birinci savunma (`dbdump::split_password`); bu,
+/// onun ikincisi — ve tek başına yeterli olduğu iddiasında değil, çünkü `/proc/<pid>/cmdline`
+/// kutudaki her yerel hesaba zaten açık. Burada kapatılan şey, sırrın DEPSIS ARAYÜZÜNDE ve
+/// DEPSIS GÜNLÜĞÜNDE görünmesi.
+///
+/// Yalnız `://` taşıyan ve `@`si olan parçalara dokunuluyor: bir yol, bir birim adı ya da içinde
+/// iki nokta geçen sıradan bir argüman değişmeden geçiyor.
+fn mask_credentials(arg: &str) -> String {
+    let Some((scheme, rest)) = arg.split_once("://") else {
+        return arg.to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let Some((userinfo, host)) = authority.rsplit_once('@') else {
+        return arg.to_string();
+    };
+    let Some((user, _)) = userinfo.split_once(':') else {
+        return arg.to_string();
+    };
+    format!("{scheme}://{user}:***@{host}{tail}")
 }
 
 /// Kapatma kararı: sinyal GÖNDERİLMEDEN önce, taze /proc okumasıyla.
@@ -318,5 +346,43 @@ mod tests {
         assert!(check_kill(tmp.path(), 999, "hayalet")
             .unwrap_err()
             .contains("bitmiş olabilir"));
+    }
+
+    #[test]
+    fn a_password_in_a_url_argument_never_reaches_the_screen() {
+        // Bu liste ekrana çıkıyor ve API günlüğüne düşüyor. Kutudaki HERHANGİ bir süreç argv'sinde
+        // parolalı bir URL taşıyabilir, ve onu olduğu gibi taşımak sırrı DEPSIS arayüzünde
+        // görünür kılardı.
+        let tmp = tempfile::tempdir().unwrap();
+        fake_proc(
+            tmp.path(),
+            300,
+            "pg_dump",
+            b"pg_dump\0--dbname\0postgres://depsis:PAROLA@localhost/depsis\0",
+            1000,
+            512,
+        );
+
+        let (list, _) = snapshot(tmp.path(), PASSWD);
+        let found = list.iter().find(|p| p.pid == 300).expect("süreç listede");
+        assert!(!found.args.contains("PAROLA"), "{}", found.args);
+        // Ve geri kalanı okunur kalıyor: hangi süreç, hangi veritabanı.
+        let masked = "postgres://depsis:***@localhost/depsis";
+        assert!(found.args.contains(masked), "{}", found.args);
+    }
+
+    #[test]
+    fn an_ordinary_argument_with_a_colon_is_left_alone() {
+        // Maskeleme yalnız `şema://kullanıcı:parola@sunucu` biçimine bakıyor. İçinde iki nokta
+        // geçen sıradan bir argümanı değiştirmek, ekranı okunmaz kılardı.
+        assert_eq!(mask_credentials("--time=00:30"), "--time=00:30");
+        assert_eq!(
+            mask_credentials("https://depsis.example.org/x"),
+            "https://depsis.example.org/x"
+        );
+        assert_eq!(
+            mask_credentials("postgres://depsis@localhost/depsis"),
+            "postgres://depsis@localhost/depsis"
+        );
     }
 }

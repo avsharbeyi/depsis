@@ -319,6 +319,20 @@ export class BackupTargetService {
     const row = await this.row(organizationId);
     if (row === null) throw new NoBackupTargetError();
 
+    // KURTARMA DİSKİNDE YEDEKLEME AÇILAMAZ, ve bunu SÖYLEMEK gerekiyor. Bayrak bugün sessizce
+    // kabul ediliyordu: satır `enabled = true` oluyor, ekran "yedekleniyor" diyor, ama
+    // `BackupRunService.runOnce` kurtarma kipini görüp hiçbir şey yapmadan "bitti" dönüyor —
+    // yani sahibinin gördüğü şey, çalışıyormuş gibi duran ve hiç yedek almayan bir anahtar.
+    //
+    // Diski bu cihazın yedek diskine ÇEVİRMENİN bir yolu henüz yok; o adım geldiğinde bu
+    // refüzün yerini o alacak.
+    if (row.recoveryOnly && input.enabled === true) {
+      throw new BackupAgentRefusedError(
+        'bu disk başka bir cihazın yedeği (kurtarma kipi) ve bu cihaz ona yazmıyor;' +
+          ' dosyalarınızı geri getirmek için yedek gezginini kullanın',
+      );
+    }
+
     await this.db.withTenant(organizationId, (q) =>
       q.query(
         `UPDATE public.backup_targets

@@ -220,6 +220,42 @@ describeDb('the idempotency key', () => {
     expect(rows).toHaveLength(0);
   });
 
+  it('sweeps keys past their retention, INCLUDING the ones stuck in flight', async () => {
+    // ADR-0008 24 saatlik saklama diyor ve hiçbir şey bir satırı silmiyordu: `complete` her isteğin
+    // tam yanıt gövdesini jsonb olarak yazıyor, ve her gece yedek alan bir dış istemci bir yılda
+    // on binlerce satır bırakıyor. Arayüzde temizleyecek bir yol yok.
+    const stale = randomUUID();
+    const stuck = randomUUID();
+    const fresh = randomUUID();
+
+    await keys.claim(orgA, ayse, ENDPOINT, stale, print('eski'));
+    await keys.complete(orgA, ayse, ENDPOINT, stale, 201, { id: 'a' }, {});
+    // `status IS NULL`: API süreci `claim` ile `complete` arasında öldü. Bu anahtar sonsuza dek
+    // 409 `operation-in-progress` döndürür ve kullanıcının onu kurtaracak bir düğmesi yok — aynı
+    // pencerenin bunu da toplaması, süpürmenin asıl sebebi.
+    await keys.claim(orgA, ayse, ENDPOINT, stuck, print('takili'));
+    await keys.claim(orgA, ayse, ENDPOINT, fresh, print('yeni'));
+
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `UPDATE idempotency_keys SET created_at = now() - interval '48 hours'
+          WHERE organization_id = $1 AND idempotency_key = ANY($2)`,
+        [orgA, [stale, stuck]],
+      ),
+    );
+
+    expect(await keys.purgeExpired(orgA)).toBe(2);
+
+    // Ve süpürülen anahtar yeniden kullanılabilir — takılı kalmış olanın çıkış yolu bu.
+    expect(await keys.claim(orgA, ayse, ENDPOINT, stuck, print('takili'))).toEqual({
+      outcome: 'claimed',
+    });
+    // Bugünün anahtarı yerinde: pencereyi geçmemiş bir tekrar hâlâ korunuyor.
+    expect(await keys.claim(orgA, ayse, ENDPOINT, fresh, print('yeni'))).toEqual({
+      outcome: 'in-flight',
+    });
+  });
+
   it('gives a different body a different fingerprint', () => {
     expect(print('belgeler').equals(print('belgeler'))).toBe(true);
     expect(print('belgeler').equals(print('arsiv'))).toBe(false);

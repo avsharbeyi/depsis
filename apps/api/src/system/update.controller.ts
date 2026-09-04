@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
+import { statfs } from 'node:fs/promises';
 
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
   ForbiddenException,
   Get,
   HttpCode,
+  Logger,
   Post,
   Req,
   ServiceUnavailableException,
@@ -21,11 +24,42 @@ import { AuditService } from '../audit/audit.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
 import { ReauthService } from '../auth/reauth.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
-import { SystemService } from './system.service.js';
+import { SystemService, type Telemetry } from './system.service.js';
 
 type Schemas = OpenApi.components['schemas'];
 
 const applySchema = z.object({ password: z.string().min(1).max(1024) });
+
+/**
+ * Güncellemenin derlendiği ağaç. `tools/install/update.sh` içindeki `SRC_TREE` ile aynı yol.
+ *
+ * Boş alan ORADAN ölçülüyor, `/`den değil: bir kutuda ikisi ayrı dosya sistemi olabilir, ve
+ * derlemenin dolduracağı disk bu.
+ */
+const UPDATE_TREE = '/opt/depsis';
+
+/**
+ * Kaynaktan derleme için sistem diskinde bulunması gereken en az boş alan.
+ *
+ * `pnpm install` ile `cargo build --release` birlikte gigabaytlarca yer istiyor, ve GERİ ALMA
+ * YOLU DA YER İSTİYOR: `update.sh` eski ağacı saklayıp geri koyuyor. Dolu bir diskte yarıda
+ * düşen bir güncelleme, geri de dönemeyen bir güncellemedir.
+ */
+const MIN_FREE_BYTES = 4 * 1024 * 1024 * 1024;
+
+/**
+ * Havuzun BİLİNEN-KÖTÜ hâlleri.
+ *
+ * `UNKNOWN` burada YOK ve bu bilinçli: sağlığı okunamayan bir havuz yüzünden güncellemeyi
+ * kapatmak, bir telemetri boşluğunu onarılamayan bir kutuya çevirirdi. Engellenen şey, kutunun
+ * gerçekten söylediği arıza.
+ */
+const UNHEALTHY = new Set(['DEGRADED', 'FAULTED', 'OFFLINE', 'REMOVED', 'UNAVAIL', 'SUSPENDED']);
+
+/** Bayt → GB, tek ondalık. Kullanıcıya gösterilen sayı bayt olamaz. */
+function gigabytes(bytes: number): string {
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1);
+}
 
 /** Ajanın `update` yanıtı — alan adları ajanın yazdığı gibi, dönüştürme aşağıda tek yerde. */
 interface AgentUpdate {
@@ -61,6 +95,8 @@ interface AgentUpdate {
 @Controller('system/update')
 @UseGuards(SessionGuard)
 export class UpdateController {
+  private readonly logger = new Logger(UpdateController.name);
+
   constructor(
     private readonly system: SystemService,
     private readonly agent: AgentService,
@@ -110,6 +146,14 @@ export class UpdateController {
     const parsed = applySchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('parola gerekli');
 
+    // ── ÖN KONTROL, PAROLADAN ÖNCE (§12) ────────────────────────────────────────────────────
+    //
+    // Havuz sihirbazındaki kalıbın aynısı: güncellemenin ZATEN başlayamayacağını öğrenecek olan
+    // kişi, bunu öğrenmek için parolasını vermek zorunda kalmasın. Kontrol edilen iki şey de
+    // güncellemeyi YARIDA bırakan türden — ve yarıda kalan bir güncelleme, geri alma yolu da
+    // aynı diski kullandığı için kendini geri de alamıyor.
+    await this.precheck(session.organizationId, session.correlationId);
+
     await this.reauth.require(
       session.organizationId,
       session.userId,
@@ -157,6 +201,70 @@ export class UpdateController {
       userId: session.userId,
       correlationId: randomUUID(),
     };
+  }
+
+  /**
+   * §12'nin ön kontrolü: boş alan ve havuz sağlığı.
+   *
+   * ── NEDEN BURADA ─────────────────────────────────────────────────────────────────────────
+   *
+   * Bu iki şeyi hiç kimse denetlemiyordu. %95 dolu bir sistem diskinde "Güncelle"ye basan
+   * sahibinin gördüğü şey, derleme yarıda düştükten sonra geri alma da yer bulamadığında ortaya
+   * çıkan bir kutuydu — ve terminalsiz bir çıkışı yoktu.
+   *
+   * ── ÖLÇÜLEMEYEN ŞEY ENGELLEMİYOR ─────────────────────────────────────────────────────────
+   *
+   * Boş alan okunamıyorsa ya da ajana ulaşılamıyorsa güncelleme durdurulmuyor: bir ölçüm
+   * boşluğunu "hayır" diye okumak, cihazı bir güvenlik düzeltmesinden mahrum bırakmanın en
+   * kolay yolu. Sebep günlüğe yazılıyor.
+   *
+   * SÜREN İŞ ve GERİ ALMA burada değil, ve olmamalı: ikinci bir güncellemeyi ajanın kendisi
+   * reddediyor, geri alma da `update.sh`in içinde. İkinci bir kopya, ilkinin güncelliğini
+   * kimsenin denetlemediği bir yerde tutmak olurdu.
+   */
+  private async precheck(organizationId: string, correlationId: string): Promise<void> {
+    const free = await this.freeBytes();
+    if (free === null) {
+      this.logger.warn(`${UPDATE_TREE} üzerindeki boş alan okunamadı; ön kontrol atlandı`);
+    } else if (free < MIN_FREE_BYTES) {
+      throw new ConflictException(
+        `Güncelleme başlatılmadı: sistem diskinde ${gigabytes(free)} GB boş yer var,` +
+          ` kaynaktan derleme ve geri alma için en az ${gigabytes(MIN_FREE_BYTES)} GB gerekiyor.` +
+          ` Yer açtıktan sonra yeniden deneyin.`,
+      );
+    }
+
+    let pools: Telemetry['pools'];
+    try {
+      pools = (await this.system.telemetry(correlationId, organizationId)).pools;
+    } catch (error) {
+      if (!(error instanceof AgentUnavailableError)) throw error;
+      // Ajan yoksa `apply_update` zaten 503 diyecek; buradan bir cümle daha eklemek gereksiz.
+      return;
+    }
+    const sick = pools.find((pool) => UNHEALTHY.has(pool.health));
+    if (sick !== undefined) {
+      throw new ConflictException(
+        `Güncelleme başlatılmadı: '${sick.name}' havuzu ${sick.health} durumda.` +
+          ` Önce havuzu onarın — güncelleme sırasında düşen bir kutuda geri alma da aynı` +
+          ` disklere yazıyor.`,
+      );
+    }
+  }
+
+  /**
+   * Güncellemenin derleneceği dosya sisteminde kalan boş alan, bayt. `null` — ölçülemedi.
+   *
+   * `protected`, çünkü bu ölçüm cihazın dosya sistemine bağlı: testin dolu bir diski taklit
+   * edebilmesi için üzerine yazılabilir olması gerekiyor.
+   */
+  protected async freeBytes(): Promise<number | null> {
+    try {
+      const stats = await statfs(UPDATE_TREE);
+      return Number(stats.bavail) * Number(stats.bsize);
+    } catch {
+      return null;
+    }
   }
 
   private async callAgent(

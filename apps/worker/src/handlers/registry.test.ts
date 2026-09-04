@@ -117,6 +117,10 @@ describe('the worker consumes every kind the API enqueues', () => {
       'files.trash.purge',
       'identity.revoke-smb',
       'identity.sync',
+      // `job_history`'nin saklama suresi. `JobsService` acilista her kiraci icin bir satir
+      // tohumluyor; isleyicisi kayitli olmasaydi o satir sonsuza kadar `queued` durur ve budama
+      // hic kosmazdi -- kuyrukta "yapilacak" gorunen, hicbir zaman yapilmayan bir is.
+      'jobs.prune',
       'permissions.apply',
       // Aga katilan cihazlarin kendiliginden yetkilendirilmesi. Yirmi saniyede bir zincirleniyor;
       // bir okumanin yan etkisi olarak yetki vermek, uye listesini acan herkesin agin uyeligini

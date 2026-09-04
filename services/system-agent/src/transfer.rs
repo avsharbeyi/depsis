@@ -82,8 +82,13 @@ pub struct PendingTransfer {
     ///
     /// For `Receive` this is the staging file's own name, one component under `.depsis/staging/`.
     /// For `Send` it is the published file's path relative to the share root, joined with `/` —
-    /// a download has no staging file, and its natural key is the thing being read. The two can
-    /// never collide: a staging name is a single component and therefore contains no separator.
+    /// a download has no staging file, and its natural key is the thing being read.
+    ///
+    /// THE TWO CAN COLLIDE. An earlier version of this note claimed they could not, on the grounds
+    /// that a staging name is a single component and so contains no separator — but a file in the
+    /// share ROOT has a single-component path too, and joining it with `/` changes nothing. Nothing
+    /// depends on the claim any more: only a `Receive` reserves a name and only a `Receive` is
+    /// marked in flight, so a download never touches a bookkeeping entry it did not create.
     pub staging_name: String,
     /// Who opened it. The data connection must present the same uid: without this, a token seen in
     /// a log line or a traced response becomes a transferable bearer write into a tenant's share.

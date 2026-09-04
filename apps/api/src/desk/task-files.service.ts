@@ -69,7 +69,13 @@ export class TaskFilesService {
         linkedAt: row.created_at.toISOString(),
       }));
 
-    return { items, hidden: rows.length - items.length };
+    // ÇÖPTEKİLER "GÖREMEDİĞİNİZ" SAYISINA GİRMİYOR. `visibleIds` çöpe atılmış bir satırı atlıyor ve
+    // bu doğru — çöp bir görünürlük değil bir yaşam döngüsü durumu — ama farkı burada ham satır
+    // sayısından çıkarmak, kullanıcının kendi çöpe attığı dosyayı ona "başkasının gizli dosyası"
+    // gibi gösteriyordu: arayüzdeki cümle "Göremediğiniz 1 bağlı dosya daha var." Sayı yalnız
+    // İZİN yüzünden düşenleri anlatıyor.
+    const live = rows.filter((row) => row.trashed_at === null).length;
+    return { items, hidden: live - items.length };
   }
 
   /**

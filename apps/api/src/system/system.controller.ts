@@ -15,7 +15,7 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 
-import { AgentService, AgentUnavailableError } from '../agent/agent.service.js';
+import { AgentService, AgentUnavailableError, type AgentResponse } from '../agent/agent.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
 import { z } from 'zod';
@@ -64,6 +64,12 @@ export class SystemController {
    * `systemctl reboot` isteği systemd'ye bırakıp çıkıyor, yani 202 gerçekten dönüyor. Ajanın
    * ulaşılamaz olması da bu tek işlemde bir hata değil: kapanma başlamışsa olacak olan şey zaten
    * bu, ve kullanıcıya "yeniden başlatılamadı" demek yanlış olurdu.
+   *
+   * AMA "AJAN SUSTU" İLE "AJAN HAYIR DEDİ" AYRI ŞEYLER. `refused` ve `failed` bu telde olağan
+   * cevaplar, istisna değil (`agent.service.ts`); `systemctl reboot` bir polkit/dbus arızasıyla
+   * sıfırdan farklı çıktığında ajan `failed` diyor. Cevabı hiç okumayan bu uç o hâlde de 202
+   * dönüyordu: ekran "yeniden başlatılıyor" yazıyor, kutu hiç kapanmıyor, ve sahibi neden
+   * olmadığını hiçbir yerde göremiyordu.
    */
   @Post('power/reboot')
   @HttpCode(202)
@@ -80,16 +86,33 @@ export class SystemController {
       actorId: session.userId,
       action: 'system.reboot',
       target: { kind: 'system', id: 'reboot' },
-      summary: 'Cihaz yeniden başlatılıyor.',
+      // KAYIT ÇAĞRIDAN ÖNCE, ve öyle kalıyor: başarılı bir yeniden başlatmada systemd kutuyu
+      // kapatırken bu satır artık yazılamayabilir. Cümlesi bu yüzden bir olgu değil bir İSTEK
+      // bildiriyor — ajanın kendi kalıbı da (dispatch.rs) işten önce yazmak.
+      summary: 'Cihazın yeniden başlatılması istendi.',
       correlationId,
     });
 
+    let response: AgentResponse;
     try {
-      await this.agent.call({ op: 'reboot_system' }, 'rebooting the appliance', correlationId);
+      response = await this.agent.call(
+        { op: 'reboot_system' },
+        'rebooting the appliance',
+        correlationId,
+      );
     } catch (error) {
       // AJANIN SUSMASI BURADA BİR HATA DEĞİL. Kapanma başladıysa soket zaten gidiyor, ve
       // kullanıcıya "yeniden başlatılamadı" demek, olan bitenin tam tersini söylemek olurdu.
       if (!(error instanceof AgentUnavailableError)) throw error;
+      return;
+    }
+    if (response.status === 'refused' || response.status === 'failed') {
+      // AJANIN KENDİ CÜMLESİ GERİ VERİLMİYOR: `failed` bir komut hatasında ayrıcalıklı ikilinin
+      // mutlak yolunu ve ham stderr'i taşıyor (`backups.controller.explain` aynı ayrımı yapıyor).
+      // Kullanıcıya gereken cümle, kutunun kapanmadığı.
+      throw new ServiceUnavailableException(
+        'Cihaz yeniden başlatılamadı: sistem ajanı isteği yerine getiremedi.',
+      );
     }
   }
 

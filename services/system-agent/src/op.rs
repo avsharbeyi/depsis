@@ -1909,7 +1909,25 @@ pub enum Request {
     /// Yedek ağacının kendi düzeni var ve ilk bileşen onu söylüyor: `Dosyalar/` gecikmeli
     /// ayna, `DEPSIS-YEDEK/` defter ve günlükler.
     #[serde(rename = "backup_list_directory")]
-    BackupListDirectory { path: Vec<EntryName> },
+    BackupListDirectory {
+        path: Vec<EntryName>,
+        /// Bu addan SONRAKİLERİ ver — `ListDirectory`dekiyle aynı imleç.
+        ///
+        /// ── NEDEN BURADA DA GEREKLİ ──────────────────────────────────────────────────────
+        ///
+        /// Bu listeleme de `MAX_LISTING` satırda kesiliyor, ve kesilmenin bedeli burada canlı
+        /// taraftakinden ağır. Saklama süresi dolmuş silinenleri budayan tur, kesilmiş bir
+        /// listeleme gördüğünde o dizini ATLIYOR; dizin küçülmediği için bir sonraki tur aynı
+        /// kararı veriyor. İmleçsiz, 5.000'den fazla dosya taşıyan bir `silinenler/<gün>`
+        /// klasörü yedek diskinde KALICI olarak duruyor — ve kurtarma gezgininden bakan sahibi
+        /// de yalnız ilk 5.000 adı görüyor, kalanını hiç geri getiremiyor.
+        ///
+        /// Ad, ofset değil — gerekçesi `ListDirectory::after` ile birebir aynı. Sıra bunun için
+        /// SABİT: girdiler ada göre bayt sırasıyla veriliyor, çünkü `readdir`ın kendi sırası
+        /// dosya sistemine ait ve iki çağrı arasında aynı kalacağının garantisi yok.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<EntryName>,
+    },
 
     /// Yedek ağacında bir dizin açar.
     ///
@@ -2478,11 +2496,6 @@ pub struct DirEntry {
 /// socket's line limit rather than by taste: one response has to fit in one line.
 pub const MAX_LISTING: usize = 5_000;
 
-/// One whole disk, as `ListDisks` found it.
-///
-/// Partitions are not reported as disks. They appear only through `holds`, `mounted` and
-/// `holds_system` — which is what a caller about to overwrite the device needs to know, and a
-/// per-partition inventory is not.
 /// Kurulabilecek bir sürüm — DENETİMİN bulduğu, isteğin seçtiği değil.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -2611,6 +2624,11 @@ pub struct SnapshotEntry {
     pub created_at: i64,
 }
 
+/// One whole disk, as `ListDisks` found it.
+///
+/// Partitions are not reported as disks. They appear only through `holds`, `mounted` and
+/// `holds_system` — which is what a caller about to overwrite the device needs to know, and a
+/// per-partition inventory is not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DiskInfo {
@@ -2728,7 +2746,6 @@ impl PoolTopology {
     }
 }
 
-/// A disk named twice: the stable link to use, and the WWN it must still be.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessSummary {
@@ -2742,6 +2759,7 @@ pub struct ProcessSummary {
     pub protected: bool,
 }
 
+/// A disk named twice: the stable link to use, and the WWN it must still be.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DiskRef {
     /// The `/dev/disk/by-id` name. A `SafeComponent`, so a path or a flag cannot be smuggled in —
@@ -3402,6 +3420,12 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 44, `backup_list_directory`ye `after` ile: yedek ağacındaki 5.000'den büyük bir klasörün de
+/// TAMAMI okunabilsin. `list_directory` bunu 42'de aldı, yedek tarafı almadı — ve orada eksikliğin
+/// bedeli daha ağırdı: saklama süresi dolmuş silinenleri budayan tur, kesilmiş bir listeleme
+/// gördüğünde o dizini atlıyor ve dizin küçülmediği için her tur aynı kararı veriyordu. Yani
+/// budanması gereken dosyalar yedek diskinde kalıcı olarak duruyordu.
+///
 /// 43, `EntryName` ve `restore_file_from_backup`ın sahiplik alanlarıyla. İki değişiklik, ikisi de
 /// sessiz veri kaybını kapatıyor. `EntryName`, yol ve girdi adı konumlarında baştaki tireyi kabul
 /// ediyor: `-notlar.txt` diye bir dosya listeden sessizce düşüyor ve artımlı yedek turunu kalıcı
@@ -3471,7 +3495,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 43;
+pub const SCHEMA_VERSION: u32 = 44;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///

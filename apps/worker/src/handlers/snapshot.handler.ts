@@ -23,6 +23,14 @@ export const SNAPSHOT_KIND = 'storage.snapshot';
  * The payload is validated here rather than trusted. It reached the queue as jsonb and the queue
  * does not interpret payloads — a job row could have been written by a migration, by a fixture, or
  * by an older version of the code that spelled a field differently.
+ *
+ * ŞU ANDA HİÇBİR ÜRÜN YOLU BU TÜRÜ KUYRUĞA ALMIYOR, ve bunu bilmeden okumak yanıltıcı. Anlık
+ * görüntüler SENKRON alınıyor: `backup-schedules.service.ts`, `backup-run.service.ts` ve
+ * `backups.service.ts` doğrudan `create_snapshot` çağırıyor, çünkü işlem saniyeler sürüyor ve
+ * sonucunu isteyen ekran cevabı hemen bekliyor. Kayıtlı kalmasının sebebi, kuyruğa bir
+ * `storage.snapshot` satırı düşürecek bir yol eklendiği gün onu alacak bir işleyicinin var
+ * olması — kaydı olmayan bir tür, kimsenin almadığı ve hiçbir belirti vermeyen bir satırdır
+ * (`permissions.apply` haftalarca öyle durmuştu).
  */
 export function snapshotHandler(agent: AgentService): JobHandler {
   const logger = new Logger('SnapshotHandler');

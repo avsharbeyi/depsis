@@ -91,6 +91,71 @@ function clamp(value: number, low: number, high: number): number {
   return Math.min(high, Math.max(low, value));
 }
 
+/**
+ * Kaydedilmiş hücreleri EKRANDAKİ ızgaraya katlar — ve katlanmış hâli asla kaydetmez.
+ *
+ * Düzen sunucuda hücre indeksi olarak duruyor ve ızgara ekrana göre ölçülüyor: televizyonda on
+ * sütunlu bir masada 25. hücreye konan bir kısayol, telefonda üç sütunla 8. satıra düşüyordu —
+ * alanın yüzlerce piksel altına, kaydırılınca Depolama ve Sistem kartlarının üstüne. Alanı
+ * `overflow: hidden` ile kırpmak daha kötüsü olurdu: `.sc` mutlak konumlu, yani simge tamamen
+ * kaybolur ve geri getirilemezdi.
+ *
+ * Katlama yalnız ÇİZİM: ızgaranın içine düşen hücreler yerinde kalıyor (televizyonda hiçbir şey
+ * değişmiyor), yalnız dışarı taşanlar boş hücrelere sırayla yerleşiyor. Telefonda açmak, kimsenin
+ * dokunmadığı bir masayı yeniden yazmamalı — kaydedilen tek şey kullanıcının kendi sürüklediği
+ * simgedir.
+ *
+ * Aynı hücreye düşmüş iki kayıt da buradan çıkıyor: üst üste binmiş, biri erişilemez iki simge
+ * yerine ikincisi ilk boş hücreye gidiyor.
+ */
+export function visiblePlacement(
+  layout: readonly Placed[],
+  grid: { cols: number; rows: number },
+): Map<string, number> {
+  const capacity = Math.max(1, grid.cols * grid.rows);
+  const shown = new Map<string, number>();
+  const taken = new Set<number>();
+  const spill: Placed[] = [];
+
+  for (const item of layout) {
+    if (item.cell >= 0 && item.cell < capacity && !taken.has(item.cell)) {
+      taken.add(item.cell);
+      shown.set(item.id, item.cell);
+    } else {
+      spill.push(item);
+    }
+  }
+
+  // Kaydedilmiş sıraya göre: katlanan simgeler birbirine göre yerlerini koruyor.
+  spill.sort((a, b) => a.cell - b.cell);
+  let next = 0;
+  for (const item of spill) {
+    while (taken.has(next)) next += 1;
+    taken.add(next);
+    shown.set(item.id, next);
+  }
+  return shown;
+}
+
+/**
+ * Yeni bir kısayolun gideceği hücre.
+ *
+ * İleri doğru yürümek, tıklanan hücre menü açıkken dolduğunda hiçbir şey yapmamaktan iyi; ama
+ * sınırsız yürümek ızgaranın dışına bir hücre YAZIYORDU, ve yazılan şey kalıcı. Arama ızgaranın
+ * kapasitesinde başa dönüyor: kullanıcı hangi ızgaraya bakıyorsa kaydedilen hücre onun içinde.
+ */
+export function nextFreeCell(taken: ReadonlySet<number>, wanted: number, capacity: number): number {
+  for (let step = 0; step < capacity; step += 1) {
+    const cell = (wanted + step) % capacity;
+    if (!taken.has(cell)) return cell;
+  }
+  // Izgara gerçekten dolu. Alan `flex: 1` ile büyüdüğü için bir sonraki satır bir sonraki
+  // ölçümde ızgaranın içine giriyor; simgeyi hiç eklememek ise sessizce hiçbir şey yapmaktı.
+  let cell = capacity;
+  while (taken.has(cell)) cell += 1;
+  return cell;
+}
+
 export function Shortcuts({
   prefs,
   save,
@@ -234,6 +299,15 @@ export function Shortcuts({
     }),
     [grid.cols],
   );
+
+  /**
+   * Hangi simgenin EKRANDA hangi hücrede durduğu.
+   *
+   * Sürükleme ve ekleme de bu haritayı okuyor, kaydedilmiş hücreleri değil: kullanıcı ekranda
+   * gördüğü hücreye bırakıyor, ve takas kararını kaydedilmiş hücrelere göre vermek katlanmış bir
+   * ızgarada yanlış simgeyi yerinden oynatırdı.
+   */
+  const shown = useMemo(() => visiblePlacement(layout, grid), [layout, grid]);
 
   /** Where an icon whose top-left corner sits at (x, y) would land. Nearest cell, so a half-step
    *  nudge still commits to a move rather than snapping back. */
@@ -382,14 +456,18 @@ export function Shortcuts({
       event.clientY - rect.top - grab.dy,
     );
 
-    const moving = layout.find((item) => item.id === grab.id);
-    if (moving === undefined || moving.cell === target) return;
-    const occupant = layout.find((item) => item.cell === target && item.id !== grab.id);
+    // EKRANDAKİ hücreden ekrandaki hücreye. Kaydedilmiş indeks katlanmış bir ızgarada başka bir
+    // yeri gösteriyor, ve ona göre karar vermek kullanıcının hiç dokunmadığı simgeyi taşırdı.
+    const from = shown.get(grab.id);
+    if (from === undefined || from === target) return;
+    const occupantId = [...shown.entries()].find(
+      ([id, cell]) => cell === target && id !== grab.id,
+    )?.[0];
     // Occupied cells swap rather than refuse. Refusing looks like the drag failed; stacking would
     // hide one icon behind another with no way to get it back.
     const next = layout.map((item) => {
       if (item.id === grab.id) return { ...item, cell: target };
-      if (occupant !== undefined && item.id === occupant.id) return { ...item, cell: moving.cell };
+      if (occupantId !== undefined && item.id === occupantId) return { ...item, cell: from };
       return item;
     });
     // One write, on release. Saving per pointermove would spend fifty PUTs on a single drag.
@@ -399,11 +477,10 @@ export function Shortcuts({
   /* ─── adding and removing ─────────────────────────────────────────────────── */
 
   const add = (id: string, cell: number): void => {
-    const taken = new Set(layout.map((item) => item.cell));
-    let free = cell;
     // The click may land on a cell that filled up while the menu was open, or the menu may have
     // been opened over an icon's shadow. Walking forward is less surprising than doing nothing.
-    while (taken.has(free)) free += 1;
+    const taken = new Set(shown.values());
+    const free = nextFreeCell(taken, cell, Math.max(1, grid.cols * grid.rows));
     persist([...layout, { id, cell: free }]);
   };
 
@@ -497,7 +574,9 @@ export function Shortcuts({
         const pane = metaFor(item.id);
         if (pane === undefined) return null;
         const dragging = drag !== null && drag.id === item.id;
-        const place = dragging ? { left: drag.x, top: drag.y } : positionOf(item.cell);
+        const place = dragging
+          ? { left: drag.x, top: drag.y }
+          : positionOf(shown.get(item.id) ?? item.cell);
 
         return (
           <div

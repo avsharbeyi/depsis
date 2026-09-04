@@ -27,6 +27,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import type { UserRole } from '../auth/session.service.js';
 import {
+  EveryoneTeamIsFixedError,
   LastGrantInShareError,
   TeamMemberNotFoundError,
   TeamNameTakenError,
@@ -365,5 +366,8 @@ function translate(error: unknown): Error {
   // is what refuses the delete, and the sentence says which write clears it, so a status the
   // caller can act on is worth more here than one the document already blesses.
   if (error instanceof LastGrantInShareError) return new ConflictException(error.message);
+  // 409 ve aynı gerekçe: istek biçim olarak kusursuz, onu reddeden şey kiracının hâli — ve cümle
+  // reddin sebebini ve ne yapılabileceğini söylüyor.
+  if (error instanceof EveryoneTeamIsFixedError) return new ConflictException(error.message);
   return error instanceof Error ? error : new Error(String(error));
 }

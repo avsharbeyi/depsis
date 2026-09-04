@@ -1,10 +1,4 @@
-import {
-  createCipheriv,
-  createDecipheriv,
-  hkdfSync,
-  randomBytes,
-  timingSafeEqual,
-} from 'node:crypto';
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 /**
@@ -221,11 +215,6 @@ export class SecretBox {
       // attacker: the difference is exactly which guess was closer.
       throw new SecretDecryptionError('authentication failed');
     }
-  }
-
-  /** Whether two keys are the same, without leaking how far a comparison got. */
-  matches(other: Buffer): boolean {
-    return other.length === this.key.length && timingSafeEqual(other, this.key);
   }
 }
 

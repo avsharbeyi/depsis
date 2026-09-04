@@ -6,15 +6,20 @@ import {
   Delete,
   Get,
   HttpCode,
+  NotFoundException,
+  Param,
   Post,
   Req,
+  Res,
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import type { OpenApi } from '@depsis/contracts';
+import type { Response } from 'express';
 import { z } from 'zod';
 
-import { requireSameOrigin } from '../auth/origin.js';
+import { serializeClearedSessionCookie } from '../auth/cookie.js';
+import { isSecure, requireSameOrigin } from '../auth/origin.js';
 import { MfaService } from '../auth/mfa.service.js';
 import { PasswordService } from '../auth/password.service.js';
 import { ReauthService } from '../auth/reauth.service.js';
@@ -63,6 +68,19 @@ interface UserRow {
   slug: string;
   smb_ready: boolean;
 }
+
+/** Bir oturum satırı, sahibine gösterilecek hâliyle. `token_hash` BURADA YOK ve olmamalı. */
+interface SessionRow {
+  id: string;
+  user_agent: string | null;
+  ip_address: string | null;
+  created_at: Date;
+  last_seen_at: Date;
+  expires_at: Date;
+}
+
+/** UUID olmayan bir oturum id'si "böyle bir oturum yok", bir arıza değil. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The account the session belongs to, and its second factor.
@@ -195,6 +213,95 @@ export class MeController {
         session.userId,
       ),
     };
+  }
+
+  /**
+   * "Hangi cihazlarda açığım" — ADR-0009 §60.
+   *
+   * SORGU BURADA, `SessionService`te değil, ve bu bilinçli bir yerleştirme değil bir sınır: o
+   * servis oturumu KURAN ve ÇÖZEN yer, ve `token_hash`e dokunan tek yer olması onun en değerli
+   * özelliği. Listeleme aynı dosyadaki parola değişiminin `sessions` üzerinde zaten yaptığı türden
+   * bir okuma. `token_hash` seçilmiyor: sorulmayan bir sütun yanlışlıkla da dönemez.
+   *
+   * YALNIZ YAŞAYAN OTURUMLAR. İptal edilmiş ve süresi geçmiş satırlar tabloda kalıyor — denetim
+   * "iptal edildi" ile "hiç olmadı"yı ayırabilsin diye (0003) — ama kimseyi içeri almıyorlar, ve
+   * onları listelemek kullanıcının gerçekten kapatması gereken satırı görmesini zorlaştırırdı.
+   *
+   * `user_id` sorgunun İÇİNDE: RLS kiracıyı ayırıyor ama oturumdaki kişiyi bilmiyor.
+   */
+  @Get('sessions')
+  async listSessions(@Req() request: AuthenticatedRequest): Promise<Schemas['DeviceSessionPage']> {
+    const session = requireSession(request);
+    const rows = await this.db.withTenant(session.organizationId, (q) =>
+      q.query<SessionRow>(
+        `SELECT id::text AS id, user_agent, host(ip_address) AS ip_address,
+                created_at, last_seen_at, expires_at
+           FROM public.sessions
+          WHERE organization_id = $1 AND user_id = $2
+            AND revoked_at IS NULL AND expires_at > now()
+          ORDER BY last_seen_at DESC, id DESC`,
+        [session.organizationId, session.userId],
+      ),
+    );
+    return {
+      items: rows.map((row) => ({
+        id: row.id,
+        current: row.id === session.sessionId,
+        userAgent: row.user_agent,
+        ipAddress: row.ip_address,
+        createdAt: row.created_at.toISOString(),
+        lastSeenAt: row.last_seen_at.toISOString(),
+        expiresAt: row.expires_at.toISOString(),
+      })),
+    };
+  }
+
+  /**
+   * Bir cihazın oturumunu sonlandır.
+   *
+   * `user_id = $2` YAZMANIN İÇİNDE, ve bu bir yetki kontrolü: RLS kiracıyı tutuyor, kişiyi
+   * tutmuyor — onsuz aynı kiracının herhangi bir üyesi bir başkasının oturumunu kapatabilirdi.
+   *
+   * KENDİ OTURUMUNU DA KAPATABİLİR. "Bu cihazı çıkar" düğmesinin en çok istendiği an, kişinin
+   * ekranda gördüğü tek cihazın kendi eski tarayıcısı olduğu andır; mevcut oturumu istisna yapmak
+   * düğmeyi tam orada çalışmaz kılardı. Kapatılan oturum bu istekse çerez de temizleniyor, yoksa
+   * tarayıcı sunucunun çoktan unuttuğu bir çerezi taşımaya devam ederdi (`logout` ile aynı sıra).
+   */
+  @Delete('sessions/:id')
+  @HttpCode(204)
+  async revokeSession(
+    @Req() request: AuthenticatedRequest,
+    @Res({ passthrough: true }) response: Response,
+    @Param('id') id: string,
+  ): Promise<void> {
+    requireSameOrigin(request);
+    const session = requireSession(request);
+    if (!UUID.test(id)) throw new NotFoundException();
+
+    const rows = await this.db.withTenant(session.organizationId, (q) =>
+      q.query<{ id: string }>(
+        `UPDATE public.sessions SET revoked_at = now()
+          WHERE organization_id = $1 AND user_id = $2 AND id = $3 AND revoked_at IS NULL
+          RETURNING id::text AS id`,
+        [session.organizationId, session.userId, id],
+      ),
+    );
+    // Başkasına ait ya da zaten kapalı bir oturum için de 404: "bu senin değil" demek, başkasının
+    // cihaz listesi hakkında bilgi vermek olurdu.
+    if (rows.length === 0) throw new NotFoundException();
+
+    if (id === session.sessionId) {
+      response.setHeader('Set-Cookie', serializeClearedSessionCookie(isSecure(request)));
+    }
+
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'auth.session-revoked',
+      summary:
+        id === session.sessionId
+          ? 'Hesap sahibi bu cihazın oturumunu sonlandırdı.'
+          : 'Hesap sahibi başka bir cihazın oturumunu sonlandırdı.',
+    });
   }
 
   @Post('mfa/enrolment')

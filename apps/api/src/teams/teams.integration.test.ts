@@ -5,6 +5,7 @@ import { DbService } from '../db/db.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import {
+  EveryoneTeamIsFixedError,
   LastGrantInShareError,
   TeamMemberNotFoundError,
   TeamNameTakenError,
@@ -433,6 +434,37 @@ describeDb('teams and membership, against a real PostgreSQL', () => {
     await expect(teams.rename(orgA, team.id, 'Muhasebe')).rejects.toBeInstanceOf(
       TeamNameTakenError,
     );
+  });
+
+  it("will not rename or delete the 'Herkes' team out from under everyone_team()", async () => {
+    // `everyone_team()` ekibi ADIYLA arıyor ve bulamazsa YENİSİNİ açıp kiracının bütün
+    // kullanıcılarını ona alıyor. Adını değiştirmek ya da silmek, bir sonraki hesap açılışında
+    // ikinci (ya da boş) bir "Herkes" doğuruyor: bugünkü paylaşımların kök hibeleri eski ekipte
+    // kalıyor ve yeni kullanıcılar "herkes görür" diye açılmış paylaşımları göremiyor. Hiçbir
+    // ekran bunu söylemiyor, o yüzden ret ekranda görünen tek şey.
+    const everyoneId = await db.withTenant(orgA, async (q) => {
+      const rows = await q.query<{ id: string }>(`SELECT public.everyone_team($1)::text AS id`, [
+        orgA,
+      ]);
+      return rows[0]?.id ?? '';
+    });
+    expect(everyoneId).not.toBe('');
+
+    await expect(teams.rename(orgA, everyoneId, 'Tüm Personel')).rejects.toBeInstanceOf(
+      EveryoneTeamIsFixedError,
+    );
+    // Kuru koşuda da: gerçekleşemeyecek bir silmenin önizlemesi, retten kötü bir cevap.
+    await expect(teams.remove(orgA, everyoneId, { dryRun: true })).rejects.toBeInstanceOf(
+      EveryoneTeamIsFixedError,
+    );
+    await expect(teams.remove(orgA, everyoneId, { dryRun: false })).rejects.toBeInstanceOf(
+      EveryoneTeamIsFixedError,
+    );
+
+    // Aynı kimliğe katlanan bir düzeltme serbest: ekibi kaybettiren şey ad değil, KATLANMIŞ ad.
+    const fixed = await teams.rename(orgA, everyoneId, 'herkes');
+    expect(fixed.name).toBe('herkes');
+    expect(await teams.find(orgA, everyoneId)).toBeTruthy();
   });
 
   it('queues the POSIX re-application for every share the cascade reaches', async () => {

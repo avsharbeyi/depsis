@@ -43,12 +43,14 @@ import {
 import { TaskWatchersService } from './task-watchers.service.js';
 import {
   AssigneeNotFoundError,
+  ParentTaskNotFoundError,
   TaskBothStatusFieldsError,
   TaskNotFoundError,
   TaskNotYoursError,
   TaskRejectedError,
   TaskStatusTransitionRefused,
   TasksService,
+  type ActivityRow,
   type TaskRow,
 } from './tasks.service.js';
 
@@ -300,14 +302,7 @@ export class TasksController {
           id: row.id,
           actorUsername: row.actor_username,
           field: row.field,
-          // SİLİNEN YORUMUN GÖVDESİ YÖNETİCİDEN BAŞKASINA DÖNMÜYOR.
-          //
-          // Denetim satırı gövdeyi TUTUYOR — §7 istiyor, ve bir yorumun silinmiş olması en çok
-          // bakılacak an geldiğinde ne yazdığını da bilmeyi gerektirir. Ama onu bu akıştan HER
-          // ÜYEYE geri vermek, silmeyi tamamen görüntüden ibaret yapardı: cümle yorum listesinden
-          // kalkıyor, bir sekme ötede aynen duruyor. Kayıt yönetici için var, akran için değil.
-          oldValue: row.field === 'comment' && !caller.isOrganizationAdmin ? null : row.old_value,
-          newValue: row.new_value,
+          ...redactActivity(row, caller.isOrganizationAdmin),
           at: row.created_at.toISOString(),
         })),
       };
@@ -332,8 +327,7 @@ export class TasksController {
         taskBody: row.task_body,
         actorUsername: row.actor_username,
         field: row.field,
-        oldValue: row.field === 'comment' && !caller.isOrganizationAdmin ? null : row.old_value,
-        newValue: row.new_value,
+        ...redactActivity(row, caller.isOrganizationAdmin),
         at: row.created_at.toISOString(),
       })),
     };
@@ -701,6 +695,36 @@ function requireSession(request: AuthenticatedRequest): {
   };
 }
 
+/**
+ * Denetim satırının değerlerinden akranın görmemesi gerekenleri düş.
+ *
+ * İKİ ALAN, iki ayrı gerekçe, ve ikisi de aynı kapıdan geçiyor — yönetici hepsini görüyor.
+ *
+ * SİLİNEN YORUMUN GÖVDESİ. Denetim satırı gövdeyi TUTUYOR — §7 istiyor, ve bir yorumun silinmiş
+ * olması en çok bakılacak an geldiğinde ne yazdığını da bilmeyi gerektirir. Ama onu bu akıştan HER
+ * ÜYEYE geri vermek, silmeyi tamamen görüntüden ibaret yapardı: cümle yorum listesinden kalkıyor,
+ * bir sekme ötede aynen duruyor. Kayıt yönetici için var, akran için değil.
+ *
+ * DOSYA BAĞININ YOLU. `linkFile` denetime dosyanın TAM YOLUNU yazıyor, ve bu doğru: altı ay sonra
+ * bir uuid hiçbir şeye çözülmüyor. Ama `TaskFilesService.list` aynı bağı, dosyayı göremeyen üyeden
+ * ÖZENLE gizliyor — o gizleme, dosya adının kendisinin bilgi olmasından dolayı yapılıyor. İki uç
+ * çelişiyordu: bağ listesi yolu saklarken, aynı işin etkinlik akışı ve panonun tamamını döken
+ * `/tasks/log` onu herkese basıyordu. Yol denetimde kalıyor, akran görmüyor.
+ *
+ * Yönetici kapısı, dosya izinlerinden bağımsız KABA bir yaklaşım: satır satır süzmek, denetim
+ * satırının hangi dosyaya işaret ettiğini yeniden çözmeyi gerektirirdi ve yolu saklamayı bırakmak
+ * demek olurdu.
+ */
+function redactActivity(
+  row: { field: ActivityRow['field']; old_value: string | null; new_value: string | null },
+  isOrganizationAdmin: boolean,
+): { oldValue: string | null; newValue: string | null } {
+  if (isOrganizationAdmin) return { oldValue: row.old_value, newValue: row.new_value };
+  if (row.field === 'comment') return { oldValue: null, newValue: row.new_value };
+  if (row.field === 'file_link') return { oldValue: null, newValue: null };
+  return { oldValue: row.old_value, newValue: row.new_value };
+}
+
 /** A malformed id is "no such task"; see the note on the same guard in `notes.controller.ts`. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function requireUuid(id: string): void {
@@ -717,6 +741,9 @@ function translate(error: unknown): Error {
   // 404 on both write routes for exactly this: naming somebody outside the organisation must read
   // as "no such person here", never as a confirmation that the id belongs to an account elsewhere.
   if (error instanceof AssigneeNotFoundError) return new NotFoundException(error.message);
+  // Üst iş de 404, ama KENDİ cümlesiyle: eskiden bu da atanan hatasına düşüyordu ve silinmiş bir
+  // üst iş için "bu kuruluşta böyle bir kullanıcı yok" cevabı dönüyordu.
+  if (error instanceof ParentTaskNotFoundError) return new NotFoundException(error.message);
   if (error instanceof TaskRejectedError) return new UnprocessableEntityException(error.message);
   // 422 ve 409 DEĞİL. 409 "kaynağın şu anki hâliyle çatışıyor" der ve yeniden denemeyi çağrıştırır;
   // reddedilen bir geçiş yeniden denemekle geçmez, isteğin kendisi yanlış.

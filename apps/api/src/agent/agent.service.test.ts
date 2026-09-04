@@ -317,6 +317,60 @@ describe('the startup handshake', () => {
     expect(bad.isAvailable()).toBe(false);
   });
 
+  it('opens the latch when a LATE agent finally answers', async () => {
+    // `depsis-api.service` ajan soketine `Requires=` değil `Wants=` ile bağlı: ajan geç kalktığında
+    // API onsuz ayağa kalkıyor. Mandal açılışta kapanıp bir daha hiç tazelenmediği için, ajan otuz
+    // saniye sonra gelse bile her yükleme ve her klasör oluşturma `systemctl restart depsis-api`
+    // yazılana kadar 503 veriyordu — terminalsiz ürün kuralının doğrudan ihlali.
+    let attempt = 0;
+    const late = await fakeAgent((_l, socket, reply) => {
+      attempt += 1;
+      // İlk el sıkışma: soket orada, ajan değil. Cevapsız kapanış.
+      if (attempt === 1) socket.destroy();
+      else reply({ status: 'ok', schema_version: EXPECTED_SCHEMA_VERSION });
+    });
+
+    const agent = new AgentService(late.path, 2_000);
+    await agent.onModuleInit();
+    expect(agent.isAvailable()).toBe(false);
+
+    expect(await agent.ensureAvailable()).toBe(true);
+    expect(agent.isAvailable(), 'the latch must stay open afterwards').toBe(true);
+    // Zaten açıkken yoklama yapılmıyor: `ensureAvailable` sıcak yolda ücretsiz olmalı.
+    const seen = late.received.length;
+    expect(await agent.ensureAvailable()).toBe(true);
+    expect(late.received).toHaveLength(seen);
+  });
+
+  it('does not probe again inside the cooldown', async () => {
+    // Ajan gerçekten yokken her isteğin bir bağlantı denemesine dönüşmesi, düzeltmenin kendisini
+    // bir sorun hâline getirirdi.
+    const dead = await fakeAgent((_l, socket) => socket.destroy());
+    const agent = new AgentService(dead.path, 2_000);
+    await agent.onModuleInit();
+
+    expect(await agent.ensureAvailable()).toBe(false);
+    expect(await agent.ensureAvailable()).toBe(false);
+    // Açılış el sıkışması bir, tek bir yoklama iki; ikinci yoklama soğumaya takıldı.
+    expect(dead.received).toHaveLength(2);
+  });
+
+  it('keeps a mismatched agent closed even when it arrives late', async () => {
+    // Bir alışverişin başarılı olması mandalı açıyor; sürüm uyuşmazlığı onu geri almalı. Aksi
+    // hâlde `isAvailable()` "hazır" derken `call()` reddeder ve o telin üzerindeki işlemlerden
+    // biri disk siliyor.
+    const stale = await fakeAgent((_l, _s, reply) =>
+      reply({ status: 'ok', schema_version: EXPECTED_SCHEMA_VERSION - 1 }),
+    );
+    const agent = new AgentService(stale.path, 2_000);
+    await agent.onModuleInit();
+    expect(agent.isAvailable()).toBe(false);
+
+    expect(await agent.ensureAvailable()).toBe(false);
+    expect(agent.isAvailable()).toBe(false);
+    await expect(agent.call({ op: 'ping' }, 'r', 'c')).rejects.toThrow(/stale/);
+  });
+
   it('does not throw when there is no agent at all', async () => {
     // A development machine has no socket. Refusing to start would mean the API only runs on Linux.
     const absent = new AgentService(null);

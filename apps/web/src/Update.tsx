@@ -1,10 +1,31 @@
 import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { api, problemMessage } from './api.js';
+import { api, isTransportFailure, problemMessage } from './api.js';
 
 type UpdateStatus = OpenApi.components['schemas']['UpdateStatus'];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
+
+/**
+ * Cevapsız kalan bir okumanın ne anlama geldiği.
+ *
+ * "CİHAZ YENİDEN BAŞLIYOR" BİR İDDİA, ve her başarısız okuma onu doğrulamıyor. Kurulum sırasında
+ * API gerçekten kesiliyor — istek hiç ulaşmıyor, tarayıcı bağlantıyı düşürüyor (`isTransportFailure`)
+ * ya da önündeki nginx 502 veriyor. Ama ajan çöktüğünde API AYAKTA ve 503 ile "depolama ajanına
+ * ulaşılamıyor" diyor: cihaz yeniden başlamıyor, cevap veriyor. İkisini aynı kefeye koyan ekran,
+ * ajanı ölmüş bir kutuda saatlerce "birazdan döner" diyerek sahibini bekletiyordu.
+ *
+ * 401 üçüncü bir şey: oturum bitmiş. Onu burada anlatmak yanlış olurdu — App'in kendi oturum yolu
+ * zaten devrede, ve bu panelin söyleyeceği her cümle onun üstüne yanlış bir teşhis koyardı.
+ */
+export type ReadFailure = 'unreachable' | 'signed-out' | 'refused';
+
+export function readFailure(status: number, transport: boolean): ReadFailure {
+  if (status === 401) return 'signed-out';
+  // 502: nginx ayakta, arkasındaki API kapalı — kurulumun tam ortası.
+  if (transport || status === 502) return 'unreachable';
+  return 'refused';
+}
 
 /** Commit kimliği kırk hanedir ve kırk hane hiç kimseye bir şey söylemez. */
 function short(commit: string | null): string {
@@ -38,6 +59,8 @@ export function UpdatePanel({ notify }: { notify: Notify }): React.JSX.Element |
   /** Yönetici değilse bu bölüm hiç çizilmez — 403 bir hata değil, bir cevaptır. */
   const [allowed, setAllowed] = useState(true);
   const [unreachable, setUnreachable] = useState(false);
+  /** Sunucunun AÇIKÇA reddettiği okuma — cümlesiyle birlikte, çünkü teşhis onun içinde. */
+  const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [asking, setAsking] = useState(false);
   const [password, setPassword] = useState('');
@@ -51,13 +74,27 @@ export function UpdatePanel({ notify }: { notify: Notify }): React.JSX.Element |
       return null;
     }
     if (data === undefined) {
-      // Kurulum sırasında sunucu birkaç kez kesilir. Bunu "güncelleme bozuldu" diye göstermek,
-      // olağan bir adımı bir felakete çevirirdi.
-      setUnreachable(true);
-      void problemMessage(error, '');
-      return null;
+      switch (readFailure(response.status, isTransportFailure(response))) {
+        case 'unreachable':
+          // Kurulum sırasında sunucu birkaç kez kesilir. Bunu "güncelleme bozuldu" diye
+          // göstermek, olağan bir adımı bir felakete çevirirdi.
+          setUnreachable(true);
+          setProblem(null);
+          return null;
+        case 'signed-out':
+          // Oturumu App yönetiyor; burada söylenecek bir şey yok, ve yoklamayı sürdürmek
+          // kapanmış bir oturumu üç saniyede bir yeniden sormak olurdu.
+          setUnreachable(false);
+          setProblem(null);
+          return null;
+        case 'refused':
+          setUnreachable(false);
+          setProblem(problemMessage(error, 'Güncelleme durumu okunamadı.'));
+          return null;
+      }
     }
     setUnreachable(false);
+    setProblem(null);
     setStatus(data);
     return data;
   }, []);
@@ -120,7 +157,7 @@ export function UpdatePanel({ notify }: { notify: Notify }): React.JSX.Element |
         <span className="val" style={{ fontFamily: 'var(--mono)' }}>
           {short(installed)}
         </span>
-        <Pill status={status} unreachable={unreachable} />
+        <Pill status={status} unreachable={unreachable} problem={problem} />
         {status !== null &&
           (status.signed ? (
             <span className="pill">imzalı sürüm</span>
@@ -162,6 +199,17 @@ export function UpdatePanel({ notify }: { notify: Notify }): React.JSX.Element |
         <p className="note">
           Cihaz şu an yanıt vermiyor. Kurulum sırasında olağan: API, worker ve web sunucusu yeniden
           başlatılıyor. Bu ekran bağlantı geri gelince kendiliğinden güncellenir.
+        </p>
+      )}
+
+      {/* SUNUCU CEVAP VERDİ, AMA OLUMSUZ. Burada beklemenin bir anlamı yok — yoklama da durdu —
+          bu yüzden ekran hem sebebi hem de tek yapılacak şeyi gösteriyor. */}
+      {problem !== null && (
+        <p className="note warn">
+          {problem} Cihaz yeniden başlamıyor: sunucu yanıt verdi ama güncelleme durumunu okuyamadı.{' '}
+          <button type="button" className="lnk" onClick={() => void load()}>
+            Yeniden dene
+          </button>
         </p>
       )}
 
@@ -272,11 +320,14 @@ function Log({ lines }: { lines: readonly string[] }): React.JSX.Element {
 function Pill({
   status,
   unreachable,
+  problem,
 }: {
   status: UpdateStatus | null;
   unreachable: boolean;
+  problem: string | null;
 }): React.JSX.Element {
   if (unreachable) return <span className="pill warn">Cihaz yeniden başlıyor…</span>;
+  if (problem !== null) return <span className="pill bad">Durum okunamadı</span>;
   if (status === null) return <span className="pill dim">okunuyor…</span>;
   if (status.inProgress) {
     return (

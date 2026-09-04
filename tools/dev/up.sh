@@ -191,12 +191,13 @@ curl -fsS "http://127.0.0.1:$WEB_PORT/" >/dev/null || {
 echo '→ first administrator'
 CLAIMED=$(curl -fsS "http://127.0.0.1:$API_PORT/api/v1/setup/status" | grep -o '"setupRequired":[a-z]*')
 if [ "$CLAIMED" = '"setupRequired":true' ]; then
-  # The one-time token is printed to the log at startup and never stored. Reading it here is
-  # exactly what an operator does with `journalctl -u depsis-api`.
-  TOKEN=$(grep -oE '^ {6}[A-Za-z0-9_-]{20,}$' /tmp/depsis-dev-api.log | tail -1 | tr -d ' ')
+  # No token. The claim is TOKENLESS by decision (SetupService): the only way to read a one-time
+  # token was a terminal, on an appliance whose owner must never need one. The grep here matched
+  # nothing and the empty `token` field was swallowed because claimSchema is not strict, so this
+  # worked — for a reason that would have stopped being true the day somebody added `.strict()`.
   curl -sS -X POST "http://127.0.0.1:$API_PORT/api/v1/setup/claim" \
     -H 'content-type: application/json' \
-    -d "{\"token\":\"$TOKEN\",\"organizationName\":\"DEPSIS\",\"organizationSlug\":\"$ORG_SLUG\",\"adminUsername\":\"$ADMIN_USERNAME\",\"adminPassword\":\"$ADMIN_PASSWORD\"}" \
+    -d "{\"organizationName\":\"DEPSIS\",\"organizationSlug\":\"$ORG_SLUG\",\"adminUsername\":\"$ADMIN_USERNAME\",\"adminPassword\":\"$ADMIN_PASSWORD\"}" \
     | grep -q '"status":"ok"' && echo '  claimed' || echo '  claim failed (already set up?)'
 else
   echo '  already claimed'

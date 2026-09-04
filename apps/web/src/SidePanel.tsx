@@ -21,6 +21,26 @@ type RemoteStatus = OpenApi.components['schemas']['RemoteStatus'];
 
 type Remote = { state: 'loading' } | { state: 'error' } | { state: 'ready'; status: RemoteStatus };
 
+/**
+ * Samba adresi, PAYLAŞIMIN KENDİSİNDEN — `\\depsis` diye SABİT YAZILMIŞ hâlinden değil.
+ *
+ * Ana makine adı yapılandırılabilir (`DEPSIS_SMB_HOST`, ve kurulum onu `--hostname` ile
+ * eşitliyor). `ofis-nas` diye kurulmuş bir kutuda sabit dize, Gezgin'de "ağ yolu bulunamadı"
+ * veren bir adres gösteriyordu — kopyalanmak için konmuş tek satırın çözülmeyen bir ada
+ * çıkması, satırın hiç olmamasından kötü.
+ *
+ * Sözleşme her paylaşımda `uncPath` veriyor (`\\depsis\belgeler`); ana makine adı onun ilk
+ * parçası. Hiç paylaşım yoksa `null` dönüyor ve satır çizilmiyor: uydurulmuş bir ad, yanlış
+ * adresin aynısıdır.
+ */
+export function sambaAddress(uncPaths: readonly string[]): string | null {
+  for (const path of uncPaths) {
+    const host = /^\\\\([^\\]+)/.exec(path)?.[1];
+    if (host !== undefined && host !== '') return `\\\\${host}`;
+  }
+  return null;
+}
+
 export function SidePanel({
   snapshot,
   onOpen,
@@ -34,6 +54,21 @@ export function SidePanel({
   onOpen?: (pane: PaneId) => void;
 }): React.JSX.Element {
   const [remote, setRemote] = useState<Remote>({ state: 'loading' });
+  const [samba, setSamba] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      // Paylaşım listesi burada bir liste için değil, ADRES İÇİN okunuyor: `uncPath` bu kutunun
+      // Samba'da kendini hangi adla duyurduğunu söyleyen tek kaynak.
+      const { data } = await api.GET('/shares', {});
+      if (cancelled || data === undefined) return;
+      setSamba(sambaAddress(data.items.map((item) => item.uncPath)));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,7 +93,7 @@ export function SidePanel({
     <aside className="side" aria-label="Cihaz durumu">
       <StorageCard snapshot={snapshot} {...(onOpen === undefined ? {} : { onOpen })} />
       <SystemCard snapshot={snapshot} {...(onOpen === undefined ? {} : { onOpen })} />
-      <RemoteCard remote={remote} {...(onOpen === undefined ? {} : { onOpen })} />
+      <RemoteCard remote={remote} samba={samba} {...(onOpen === undefined ? {} : { onOpen })} />
     </aside>
   );
 }
@@ -256,9 +291,12 @@ function SystemCard({
 
 function RemoteCard({
   remote,
+  samba,
   onOpen,
 }: {
   remote: Remote;
+  /** Bu kutunun Samba adresi, ya da paylaşım okunamadıysa `null`. */
+  samba: string | null;
   onOpen?: (pane: PaneId) => void;
 }): React.JSX.Element {
   const meta =
@@ -287,14 +325,21 @@ function RemoteCard({
           </div>
         )}
 
+        {/* ── "DEPSIS ONU PAKETLEMİYOR" ARTIK DOĞRU DEĞİL ────────────────────────────────
+            O cümle ADR-0020'nin ilk hâlinden kalmaydı; ADR sahada revize edildi ve ZeroTier
+            cihazla birlikte geliyor — kurulumu ISO'nun ilk açılışı yapıyor
+            (`deploy/iso/firstboot.sh`). Geriye kalan tek durum kurulumun ya da servisin
+            başarısız olması, ve o zaman söylenecek şey "cihaza kurun" değil ne olduğudur.
+            Uzaktan erişim penceresi (Remote.tsx) zaten bunu söylüyordu; iki ekranın aynı durum
+            için birbirinin tersini yazması, hangisinin doğru olduğunu bilinemez kılıyordu. */}
         {remote.state === 'ready' && !remote.status.available && (
           <Empty
             glyph="🌐"
-            text="ZeroTier kurulu değil"
+            text="Uzak erişim şu an kullanılamıyor"
             action={
               <span>
-                DEPSIS onu paketlemiyor. Cihaza kurup servisi başlattığınızda düğüm kimliği ve ağlar
-                burada görünür.
+                ZeroTier bu cihazla birlikte kuruluyor; şu an yanıt vermiyor. Çoğu zaman cihazı
+                yeniden başlatmak yeterlidir.
               </span>
             }
           />
@@ -321,12 +366,18 @@ function RemoteCard({
                 </div>
               </React.Fragment>
             ))}
-            <div className="r">
-              <span className="d" style={{ background: 'var(--iris, #8fa6ff)' }} />
-              <span>Samba</span>
-              <b className="m">{'\\\\depsis'}</b>
-            </div>
           </>
+        )}
+
+        {/* SAMBA SATIRI ZEROTIER'A BAĞLI DEĞİL, ve eskiden onun dalının içindeydi: uzaktan
+            erişimi hiç açmamış birinin — yani kullanıcıların çoğunun — evdeki ağdan bağlanmak
+            için kopyalayacağı adres hiç görünmüyordu. */}
+        {samba !== null && (
+          <div className="r">
+            <span className="d" style={{ background: 'var(--iris, #8fa6ff)' }} />
+            <span>Samba</span>
+            <b className="m">{samba}</b>
+          </div>
         )}
       </div>
     </Card>

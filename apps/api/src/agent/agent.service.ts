@@ -78,6 +78,20 @@ export class AgentService implements OnModuleInit {
   private available = false;
 
   /**
+   * En son ne zaman "ajan geldi mi" diye yoklandığı.
+   *
+   * `ensureAvailable()` yoklamayı bununla seyreltiyor. Sebep: `depsis-api.service` ajan soketine
+   * `Requires=` değil `Wants=` ile bağlı, yani ajan geç kalktığında API onsuz ayağa kalkıyor ve
+   * mandal kapalı kalıyordu — ajan otuz saniye sonra gelse bile her yükleme, klasör oluşturma ve
+   * yeniden adlandırma `systemctl restart depsis-api` yazılana kadar 503 veriyordu. Terminalsiz
+   * ürün kuralı bunu yasaklıyor.
+   */
+  private lastProbeAt = 0;
+
+  /** İki yoklama arasındaki en kısa süre. Ajan yokken her istek bir bağlantı denemesi olmasın. */
+  private static readonly PROBE_COOLDOWN_MS = 10_000;
+
+  /**
    * Why this agent must not be used, when the handshake found a reason.
    *
    * SEPARATE FROM `available`, because the two mean different things and only one of them is
@@ -133,6 +147,9 @@ export class AgentService implements OnModuleInit {
         this.refuseBecause =
           `the agent speaks schema ${response.schema_version}, this build was generated against ` +
           `${EXPECTED_SCHEMA_VERSION}; one of the two is stale`;
+        // Alışveriş başarılıydı, dolayısıyla `enqueue` mandalı açtı. Sürüm uyuşmazlığı bunu geri
+        // alır: soket oradadır ama söyledikleri başka bir şey demektir, ve o hâl kapalı düşmeli.
+        this.available = false;
         throw new AgentUnavailableError(
           `schema version mismatch: the agent speaks ${response.schema_version}, this build was ` +
             `generated against ${EXPECTED_SCHEMA_VERSION}. One of the two is stale, and running ` +
@@ -142,6 +159,10 @@ export class AgentService implements OnModuleInit {
       this.available = true;
       this.logger.log(`agent reachable at ${this.socketPath}, schema v${response.schema_version}`);
     } catch (error) {
+      // Mandal burada kapatılıyor, ve bu bir ihtiyat değil bir zorunluluk: başarılı her alışveriş
+      // `enqueue` içinde mandalı açıyor, dolayısıyla EL SIKIŞMAYI geçemeyen — yanlış `status`,
+      // yanlış şema — bir cevap da onu açmış oluyordu. El sıkışma bitmediyse ajan kullanılmaz.
+      this.available = false;
       this.logger.error(
         `system agent unreachable at ${this.socketPath}: ${describe(error)}. ` +
           'Storage operations will answer 503.',
@@ -151,6 +172,55 @@ export class AgentService implements OnModuleInit {
 
   isAvailable(): boolean {
     return this.available;
+  }
+
+  /**
+   * Aynı soruyu sorar, ama cevabı TAZELER: mandal kapalıysa ajanı bir kez yoklar.
+   *
+   * `isAvailable()` bir açılış mandalıydı ve hiç kendine gelmiyordu. Ajan API'den sonra kalktığında
+   * — soket birimi `Wants=` ile bağlı olduğu için olağan bir durum — mandal kapalı kalıyor, ve
+   * ajana hiç uğramadan senkron kapıda 503 veren uçlar (yükleme, klasör oluşturma, yeniden
+   * adlandırma) kalıcı olarak kapanıyordu. Çıkış yolu terminaldi.
+   *
+   * SOĞUMA SÜRESİ VAR: ajan gerçekten yokken her istek bir bağlantı denemesine dönüşmemeli. On
+   * saniye, kullanıcının "tekrar dene"sinin çalışacağı kadar kısa, gürültü olmayacak kadar uzun.
+   *
+   * SÜRÜM UYUŞMAZLIĞI YİNE KAPALI DÜŞÜYOR: geç gelen ajan yanlış şemayı konuşuyorsa `refuseBecause`
+   * yazılır ve mandal açılmaz — `call()` de o andan sonra reddeder.
+   */
+  async ensureAvailable(): Promise<boolean> {
+    if (this.available) return true;
+    if (this.socketPath === null || this.refuseBecause !== null) return false;
+
+    const now = Date.now();
+    if (now - this.lastProbeAt < AgentService.PROBE_COOLDOWN_MS) return false;
+    this.lastProbeAt = now;
+
+    try {
+      const response = await this.enqueue({ op: 'ping' }, 'availability probe', randomUUID());
+      // Alışveriş başarılıysa `enqueue` mandalı açtı; el sıkışmayı geçemeyen her yol onu geri
+      // almalı, yoksa `isAvailable()` "hazır" derken `call()` reddeder.
+      if (response.status !== 'ok') {
+        this.available = false;
+        return false;
+      }
+      if (response.schema_version !== EXPECTED_SCHEMA_VERSION) {
+        this.refuseBecause =
+          `the agent speaks schema ${response.schema_version}, this build was generated against ` +
+          `${EXPECTED_SCHEMA_VERSION}; one of the two is stale`;
+        this.available = false;
+        this.logger.error(`system agent unusable: ${this.refuseBecause}`);
+        return false;
+      }
+      this.logger.log(
+        `agent became reachable at ${this.socketPath}, schema v${response.schema_version}`,
+      );
+      return true;
+    } catch {
+      // Sessiz: ajan hâlâ yok. Bunu her yoklamada günlüğe yazmak açılıştaki tek `error` satırını
+      // gürültüde boğardı, ve o satır operatörün gerçekten okuması gereken satır.
+      return false;
+    }
   }
 
   /**
@@ -201,14 +271,19 @@ export class AgentService implements OnModuleInit {
     // `catch` before `then`, so one failed call does not poison the chain for every call after it.
     const result = this.chain
       .catch(() => undefined)
-      .then(() => {
+      .then(async () => {
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
           throw new AgentUnavailableError(
             `gave up after ${this.budgetMs}ms waiting behind other calls`,
           );
         }
-        return this.exchange(envelope, remaining);
+        const response = await this.exchange(envelope, remaining);
+        // BAŞARILI HER ALIŞVERİŞ MANDALI AÇAR. Açılışta kapanan mandal başka hiçbir yerde
+        // açılmıyordu; ajan sonradan geldiğinde ona ulaşan çağrılar çalışıyor, ama mandala bakan
+        // uçlar kapalı kalıyordu. Cevap alındıysa ajan oradadır — reddetme de bir cevaptır.
+        this.available = true;
+        return response;
       });
 
     this.chain = result.then(

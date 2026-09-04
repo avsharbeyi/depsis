@@ -157,7 +157,10 @@ pub fn keyscan_argv(host: &SshHostName, port: u16) -> Vec<String> {
 ///
 /// Comment lines are dropped — `ssh-keyscan` writes the server's version banner as `# host:22
 /// SSH-2.0-OpenSSH_9.2`, and storing that would put a line in `known_hosts` that matches nothing.
-/// Anything that is not three whitespace-separated fields is dropped for the same reason.
+/// Anything with FEWER than three whitespace-separated fields is dropped for the same reason. More
+/// than three is kept, and the line is stored exactly as `ssh-keyscan` printed it: `known_hosts`
+/// carries longer forms too — a `@cert-authority` marker, a comma-separated name list — and
+/// rebuilding the line from its first three parts would silently drop them.
 ///
 /// An EMPTY RESULT IS NOT AN ERROR HERE and the caller must not treat it as "no keys": a host that
 /// refused the connection produces the same empty output as one that answered with nothing, and
@@ -171,13 +174,15 @@ pub fn parse_keyscan(output: &str) -> Vec<HostKey> {
             let mut fields = line.split_whitespace();
             let _host = fields.next()?;
             let kind = fields.next()?;
-            let blob = fields.next()?;
-            // Three fields and no more. A `known_hosts` line with a trailing comment is legal and
-            // harmless, but rebuilding the line from the parts is what guarantees that whatever
-            // else `ssh-keyscan` printed does not end up in a file `ssh` reads.
-            if blob.is_empty() {
-                return None;
-            }
+            // ÜÇÜNCÜ ALANIN VARLIĞI, ve süzgeç bundan ibaret: anahtarın kendisi yoksa satır bir
+            // `known_hosts` satırı değil. Bir `?` ile düşmesi yeter.
+            //
+            // SATIR HAM SAKLANIYOR — parçalardan yeniden kurulmuyor. Buradaki eski yorum tersini
+            // iddia ediyordu ve `line: line.to_string()` ile çelişiyordu. Hamı saklamak doğrusu:
+            // `known_hosts` biçimi üç alandan fazlasını da taşıyabiliyor (`@cert-authority`
+            // markörü, virgüllü ad listeleri), ve satırı üç parçadan yeniden kurmak onları
+            // sessizce düşürürdü.
+            let _blob = fields.next()?;
             Some(HostKey {
                 kind: kind.to_string(),
                 line: line.to_string(),
@@ -226,6 +231,19 @@ pub fn host_key_pattern(host: &SshHostName, port: u16) -> String {
 ///     an agent socket or the invoking user's `~/.ssh` holds, which makes "which credential
 ///     authenticated" unanswerable.
 ///   - `ConnectTimeout` — a link that goes away mid-handshake must fail, not wait.
+///   - `ServerAliveInterval` / `ServerAliveCountMax` / `TCPKeepAlive` — a link that goes away
+///     MID-TRANSFER must fail too, and `ConnectTimeout` says nothing about that. Measured cost of
+///     not having them: when the VPN tunnel drops without an RST — the ordinary way a ZeroTier or
+///     WireGuard tunnel dies — `ssh` waits on the kernel's TCP retransmit ceiling (`tcp_retries2`,
+///     roughly fifteen minutes) while `zfs send` blocks on the pipe. The agent serves ONE control
+///     connection at a time, so for those fifteen minutes the owner cannot read pool status, list
+///     shares or add a user: every request fails with "the agent is not answering". Thirty seconds
+///     times three bounds it at about ninety, and an honest transfer is untouched because the
+///     probes travel on the same connection the data does.
+///
+/// NO TOTAL TIME LIMIT, deliberately. An honest terabyte-scale `zfs send | zfs recv` runs for
+/// hours; a ceiling on the whole run would cut exactly the replication that needs it most. The
+/// bound here is on SILENCE, not on duration.
 ///
 /// `zfs recv -F -u` on the far end, and the flags mean what they mean in `replicate.rs`: `-F`
 /// rolls the target back to the common snapshot, which is what makes this destructive AT THE
@@ -251,6 +269,12 @@ pub fn ssh_recv_argv(
         "IdentitiesOnly=yes".to_string(),
         "-o".to_string(),
         "ConnectTimeout=15".to_string(),
+        "-o".to_string(),
+        "ServerAliveInterval=30".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=3".to_string(),
+        "-o".to_string(),
+        "TCPKeepAlive=yes".to_string(),
         "-i".to_string(),
         key.display().to_string(),
         "-p".to_string(),
@@ -324,6 +348,14 @@ mod tests {
             "{joined}"
         );
 
+        // KOPAN BİR TÜNEL BEKLENMİYOR. `ConnectTimeout` yalnız el sıkışmayı bağlıyor; aktarımın
+        // ortasında düşen bir VPN tüneli RST göndermez ve `ssh` çekirdeğin yeniden iletim tavanına
+        // (~15 dakika) kadar bekler. O süre boyunca kontrol soketi tek bağlantı işlediği için
+        // cihazda başka hiçbir şey yapılamaz: havuz durumu, paylaşım listesi, kullanıcı ekleme.
+        assert!(joined.contains("ServerAliveInterval=30"), "{joined}");
+        assert!(joined.contains("ServerAliveCountMax=3"), "{joined}");
+        assert!(joined.contains("TCPKeepAlive=yes"), "{joined}");
+
         // And the three that would each quietly undo one of them.
         assert!(!joined.contains("accept-new"), "{joined}");
         assert!(!joined.contains("StrictHostKeyChecking=no"), "{joined}");
@@ -361,6 +393,19 @@ mod tests {
         // A truncated line is dropped rather than stored: a two-field `known_hosts` entry is a
         // file `ssh` refuses to read at all, which would break every destination at once.
         assert_eq!(parse_keyscan("host ssh-ed25519\n"), Vec::new());
+    }
+
+    #[test]
+    fn a_line_with_more_than_three_fields_is_stored_whole() {
+        // The stored value is the RAW line, not one rebuilt from its first three fields. A comment
+        // after the key is a legal `known_hosts` line, and the doc above used to claim the line was
+        // reassembled from the parts — which it never was, and should not be: the longer forms the
+        // format allows carry meaning in the fields a three-field rebuild would drop.
+        let out = "backup.example.org ssh-ed25519 AAAA depsis\n";
+        let keys = parse_keyscan(out);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].kind, "ssh-ed25519");
+        assert_eq!(keys[0].line, "backup.example.org ssh-ed25519 AAAA depsis");
     }
 
     #[test]

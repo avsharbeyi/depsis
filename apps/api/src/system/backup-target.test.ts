@@ -26,7 +26,10 @@ interface Harness {
   calls: AgentRequest[];
 }
 
-function harness(posixUidFor: () => Promise<number> = () => Promise.resolve(UID)): Harness {
+function harness(
+  posixUidFor: () => Promise<number> = () => Promise.resolve(UID),
+  recoveryOnly = false,
+): Harness {
   const calls: AgentRequest[] = [];
 
   const agent = {
@@ -49,7 +52,7 @@ function harness(posixUidFor: () => Promise<number> = () => Promise.resolve(UID)
           label: 'Kirmizi disk',
           cadence_hours: 6,
           retain_days: 30,
-          recovery_only: false,
+          recovery_only: recoveryOnly,
           device_id: null,
           enabled: true,
           last_verified_at: null,
@@ -108,5 +111,27 @@ describe('yedekten geri getirme', () => {
       ),
     ).rejects.toThrow();
     expect(calls.some((call) => call.op === 'restore_file_from_backup')).toBe(false);
+  });
+});
+
+/**
+ * KURTARMA DİSKİNDE YEDEKLEME AÇMAK.
+ *
+ * Bayrak sessizce kabul ediliyordu: satır `enabled = true` oluyor, ekran "yedekleniyor" diyor, ama
+ * tur kurtarma kipini görüp hiçbir şey yapmadan "bitti" dönüyor — sahibinin gördüğü şey,
+ * çalışıyormuş gibi duran ve hiç yedek almayan bir anahtar. Bir kontrolün çalışıyor GÖRÜNMESİ,
+ * hiç olmamasından kötü.
+ */
+describe('kurtarma diskinin ayarları', () => {
+  it('yedeklemeyi açma isteğini sebebiyle birlikte reddediyor', async () => {
+    const { targets } = harness(undefined, true);
+
+    await expect(targets.update(ORG, { enabled: true })).rejects.toThrow(/kurtarma kipi/u);
+  });
+
+  it('etiket gibi zararsız bir alanı değiştirmeye engel olmuyor', async () => {
+    const { targets } = harness(undefined, true);
+
+    await expect(targets.update(ORG, { label: 'Mavi disk' })).resolves.toBeDefined();
   });
 });

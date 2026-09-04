@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { AgentService } from '../agent/agent.service.js';
-import { DbService } from '../db/db.service.js';
+import { DbService, type TenantQuery } from '../db/db.service.js';
 import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import type { UserRole } from '../auth/session.service.js';
@@ -50,6 +50,30 @@ export class CannotDeleteSelfError extends Error {
   constructor() {
     super('bir yönetici kendi hesabını silemez');
     this.name = 'CannotDeleteSelfError';
+  }
+}
+
+/**
+ * Bu hesabı silmek bir paylaşımın SON izin satırını da götürürdü.
+ *
+ * `folder_grants.user_id` `ON DELETE CASCADE` (0015): hesabı silmek onun adına yazılmış hibeleri de
+ * siliyor — ve tek kuralı o kişiyi adlandıran bir paylaşım hiçbir kural taşımadan kalıyor. "Her
+ * paylaşımın en az bir hibesi vardır" bir DEĞİŞMEZ (0016, ve `SharesService.create` satırı ilk
+ * hibesiyle birlikte yazıyor); `PermissionsService.write` (`LastGrantError`) ve `TeamsService.remove`
+ * (`LastGrantInShareError`) aynı geçişi ön kapıdan reddediyor. Hesap silme, o kapının etrafından
+ * dolaşan üçüncü yoldu.
+ *
+ * Kalan hâl sessiz: klasörler onu kullananlara görünmez oluyor, izin panelinde "kimse" yazıyor, ve
+ * hiçbir ekran bunu silinen hesapla ilişkilendirmiyor. Cümle bu yüzden ne yapılacağını söylüyor.
+ */
+export class LastGrantForUserError extends Error {
+  constructor() {
+    super(
+      'bu hesabı silmek bir paylaşımın son izin satırını da kaldırır ve o paylaşım hiçbir kuralı ' +
+        'kalmadan yöneticiden başka herkese görünmez olur; önce erişimi kimin sürdüreceğini ' +
+        'söyleyen bir kök izin yazın, sonra hesabı silin',
+    );
+    this.name = 'LastGrantForUserError';
   }
 }
 
@@ -119,17 +143,30 @@ export class UsersService {
    * `list`'in daraltılmış hâli DEĞİL, ayrı bir sorgu: `list` yöneticinin gördüğü her sütunu
    * seçiyor ve buradan çağrılsaydı rolü de e-postayı da okuyup sonra atmış olurduk. Bir sütun
    * sorulmuyorsa yanlışlıkla da dönemez.
+   *
+   * DEVRE DIŞI HESAPLAR LİSTEDE KALIYOR, ama artık öyle olduklarını SÖYLEYEREK. Onları büsbütün
+   * süzmek yanlış olurdu: aynı uç izin panelinin ve ekipler ekranının da adları çözdüğü yer, ve
+   * kapatılmış bir hesabın var olan yetkisi o ekranlarda adsız bir satıra dönerdi. Bayrağı
+   * göndermek, "kime atayabilirim" sorusunu soran ekranın kendi süzgecini kurmasına izin veriyor —
+   * kapatılmış bir hesaba iş atamak, kimsenin okumayacağı bir gelen kutusuna iş koymak demek.
    */
-  async directory(organizationId: string): Promise<Array<{ id: string; username: string }>> {
-    return this.db.withTenant(organizationId, (db) =>
-      db.query<{ id: string; username: string }>(
-        `SELECT id::text AS id, username
+  async directory(
+    organizationId: string,
+  ): Promise<Array<{ id: string; username: string; disabled: boolean }>> {
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ id: string; username: string; disabled_at: Date | null }>(
+        `SELECT id::text AS id, username, disabled_at
            FROM public.users
           WHERE organization_id = $1
           ORDER BY username`,
         [organizationId],
       ),
     );
+    return rows.map((row) => ({
+      id: row.id,
+      username: row.username,
+      disabled: row.disabled_at !== null,
+    }));
   }
 
   async find(organizationId: string, id: string): Promise<UserRow> {
@@ -379,6 +416,12 @@ export class UsersService {
     );
     const posixUid = posix[0]?.posix_uid ?? null;
 
+    // KUTUYA DOKUNMADAN ÖNCE. Bu kontrol ajan çağrısından sonra koşsaydı, reddedilen bir silme
+    // arkasında Unix hesabı kaldırılmış ama satırı duran bir kullanıcı bırakırdı.
+    await this.db.withTenant(organizationId, (db) =>
+      assertNoShareWouldOpen(db, organizationId, id),
+    );
+
     await this.discardStagedUploads(organizationId, id, reason);
 
     if (posixUid !== null) {
@@ -466,6 +509,37 @@ export class UsersService {
   }
 
   /**
+   * Bir hesabın ikinci faktörünü ve kurtarma kodlarını siler.
+   *
+   * TERMİNALSİZ KURTARMA. Bu satırları silen tek yer `DELETE /me/mfa` idi, ve orası hesabın kendi
+   * oturumunu ve kendi parolasını istiyor — telefonunu ve kurtarma kodlarını kaybeden biri giriş
+   * akışının ikinci adımında duruyor ve oraya hiç ulaşamıyor. Yöneticinin açtığı parola sıfırlama
+   * bileti de kurtarmıyor: kayıtlı bir hesapta bilet yine kod soruyor. Geriye veritabanına elle
+   * girip iki tablodan satır silmek ya da hesabı silip yeniden açmak kalıyordu, ki ikincisi ekip
+   * üyeliklerini, klasör hibelerini ve POSIX kimliğini de götürür.
+   *
+   * KİRACI SORGULARIN İÇİNDE. `/me` yolundaki eşi yalnız `user_id`ye bakıyor ve kiracı ayrımını
+   * RLS'e bırakıyor — orada hedef her zaman oturumun sahibi olduğu için bu yeterli. Burada hedef
+   * BAŞKA bir kullanıcı, yani kapsam açıkça yazılıyor.
+   *
+   * Kayıt olmayan bir hesap için de sessizce başarılı: istenen durum zaten sağlanmış.
+   */
+  async clearMfa(organizationId: string, id: string): Promise<void> {
+    await this.db.withTenant(organizationId, async (db) => {
+      await db.query(
+        `DELETE FROM public.user_totp_secrets WHERE organization_id = $1 AND user_id = $2`,
+        [organizationId, id],
+      );
+      // Kodlar sırla birlikte gidiyor: kalsalardı, ikinci faktörü sözde kaldırılmış bir hesabı
+      // basılı bir kâğıt açmaya devam ederdi.
+      await db.query(
+        `DELETE FROM public.user_recovery_codes WHERE organization_id = $1 AND user_id = $2`,
+        [organizationId, id],
+      );
+    });
+  }
+
+  /**
    * Replace a user's password hash, and the SMB credential that goes with it.
    *
    * `password` is optional for the reason it is on `create`: only a caller holding the plaintext
@@ -493,6 +567,36 @@ export class UsersService {
       await this.identity.enqueue(organizationId, `resetting the password for ${id}`);
     }
   }
+}
+
+/**
+ * Bu hesabın hibeleri kaskatla gittiğinde kuralsız kalacak bir paylaşım var mı.
+ *
+ * TEK BİR İFADE, döngü değil, ve `TeamsService`teki eşinin aynısı: kişiyi adlandıran hibe taşıyan
+ * her paylaşım için, ONU adlandırmayan bir hibesi de var mı diye sor. Cevabı hayır olan paylaşım,
+ * satır gittiği anda yönetilmeyi bırakan paylaşım.
+ *
+ * `other.user_id IS DISTINCT FROM $2` takım hibelerini de sayıyor: takıma yazılmış bir satırda
+ * `user_id` NULL, ve NULL bir uuid'den ayrı — yani "başka bir kural var" doğru cevabı çıkıyor.
+ */
+async function assertNoShareWouldOpen(
+  db: TenantQuery,
+  organizationId: string,
+  userId: string,
+): Promise<void> {
+  const rows = await db.query<{ share_id: string }>(
+    `SELECT DISTINCT g.share_id::text AS share_id
+       FROM public.folder_grants g
+      WHERE g.organization_id = $1 AND g.user_id = $2
+        AND NOT EXISTS (
+          SELECT 1 FROM public.folder_grants other
+           WHERE other.organization_id = g.organization_id
+             AND other.share_id = g.share_id
+             AND other.user_id IS DISTINCT FROM $2
+        )`,
+    [organizationId, userId],
+  );
+  if (rows.length > 0) throw new LastGrantForUserError();
 }
 
 /**

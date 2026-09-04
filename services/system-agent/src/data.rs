@@ -267,8 +267,19 @@ impl<S: Sink> DataChannel<'_, S> {
 
         // From here the name is marked in flight, and this guard clears it however we return —
         // including by panic. `PublishTransfer` is refused for as long as it lives.
-        let _guard = guard_in_flight(self.transfers, key);
+        //
+        // YALNIZ BİR YÜKLEME İÇİN, ve bu bir düzeltme. İşareti `claim` zaten yalnız `Receive` için
+        // koyuyor (`transfer.rs`), yani bir indirmenin muhafızı KENDİ KOYMADIĞI bir işareti
+        // siliyordu. İki yönün anahtarları da çakışabiliyor: bir indirmenin anahtarı yolun `/` ile
+        // birleşimi, ve paylaşımın KÖKÜNDEKİ bir dosyanın yolu tek bileşen — tıpkı bir ara alan adı
+        // gibi. Aynı adı taşıyan bir yükleme akarken biten bir indirme, o yüklemenin işaretini
+        // kaldırırdı ve ardından gelen `PublishTransfer` yarım yazılmış `.part` dosyasını
+        // kullanıcının ağacına taşırdı — atomik yayımlamanın önlemek için var olduğu şeyin ta
+        // kendisi.
+        let _guard = (transfer.direction == Direction::Receive)
+            .then(|| guard_in_flight(self.transfers, key));
 
+        let mut header_sent = false;
         let attempt = match transfer.direction {
             Direction::Receive => {
                 self.attempt(stream, &mut arm_read, &mut transfer, &preamble, &leftover)
@@ -279,17 +290,20 @@ impl<S: Sink> DataChannel<'_, S> {
             Direction::Send if !leftover.is_empty() => {
                 Attempt::refused("a download preamble must not be followed by data".to_string())
             }
-            Direction::Send => self.send(stream, &mut transfer, &preamble),
+            Direction::Send => self.send(stream, &mut transfer, &preamble, &mut header_sent),
         };
         self.record(peer, &transfer, &attempt);
 
-        // A successful download has already written its header AND its body. Writing the reply
-        // again here would append a second JSON line to the end of the user's file as the client
-        // sees it — the bytes would be right on disk and wrong on the wire, which is the kind of
-        // corruption that survives every test that only checks the file.
-        let already_answered =
-            transfer.direction == Direction::Send && attempt.outcome == Outcome::Allowed;
-        if already_answered {
+        // BAŞLIK GİTTİYSE İKİNCİ SATIR YOK, başarılı olsun olmasın. Bir indirmenin başlığı
+        // gövdeden önce yazılıyor; ondan sonra yazılan her JSON satırı, istemcinin gördüğü dosyanın
+        // baytlarının ARASINA giriyor. Karar yöne göre verilseydi ("Send ve Allowed"), gövdenin
+        // ortasında dosya kısaldığında `{"status":"failed",…}` satırı yarım gövdenin ardına
+        // eklenirdi — API tarafındaki `TakeExactly` onu içerik sayar, ve eksik miktar o satırdan
+        // küçükse indirme TAM görünüp dosyanın sonunda ajanın JSON'ı kalır. Sessiz bozulma.
+        //
+        // Bayrağı `send` kuruyor: başlıktan ÖNCEki retler (aralık dışı, seek) hâlâ tek satırlık
+        // cevabı yazıyor, yoksa indirme sessizce boş biterdi.
+        if header_sent {
             return Ok(());
         }
         reply(stream, &attempt.reply)
@@ -356,11 +370,18 @@ impl<S: Sink> DataChannel<'_, S> {
     /// DEPSIS is exactly the case reconciliation exists for — so a range validated there and not
     /// here would let a caller read past the end of a shorter file into whatever the kernel
     /// returns, or be refused for a file that has since grown.
+    ///
+    /// `header_sent` BU İŞLEVİN KURDUĞU BİR BAYRAK, ve `serve`in ikinci bir satır yazıp yazmama
+    /// kararı ona bakıyor. Yön tek başına yetmiyor: başlık gövdeden ÖNCE yazıldığı için, başlıktan
+    /// sonra düşen bir indirmede `{"status":"failed",…}` satırı yarım gövdenin ARDINA ekleniyor ve
+    /// istemci onu dosya içeriği sayıyor. Başlıktan ÖNCEki retler ise (aralık, seek) tek satırlık
+    /// cevabı yazmak ZORUNDA, yoksa indirme sessizce boş biter.
     fn send<T: Read + Write>(
         &self,
         stream: &mut T,
         transfer: &mut PendingTransfer,
         preamble: &Preamble,
+        header_sent: &mut bool,
     ) -> Attempt {
         let size = match transfer.file.metadata() {
             Ok(meta) => meta.len(),
@@ -397,6 +418,8 @@ impl<S: Sink> DataChannel<'_, S> {
         ) {
             return Attempt::refused(format!("could not announce the transfer: {e}"));
         }
+        // Buradan sonra tel üzerinde bir başlık var: her çıkış artık ikinci satırı YASAKLIYOR.
+        *header_sent = true;
 
         let mut written: u64 = 0;
         let mut buf = [0u8; COPY_BUFFER];
@@ -416,6 +439,10 @@ impl<S: Sink> DataChannel<'_, S> {
                     // bytes already on the wire — the length was announced — so the connection is
                     // failed rather than padded, and the client sees a short read instead of a file
                     // silently filled with something else.
+                    //
+                    // The refusal is RECORDED and not written to the wire: `header_sent` is already
+                    // true, so `serve` closes the connection instead of appending a second JSON
+                    // line to the half-sent body. A short read is the client's signal.
                     return Attempt::refused(format!(
                         "the file ended after {written} of {} bytes",
                         preamble.length
@@ -667,6 +694,12 @@ mod tests {
     struct Wire {
         inbound: Vec<Vec<u8>>,
         outbound: Vec<u8>,
+        /// Başlıktan sonraki İLK yazmayı bir kez düşürür.
+        ///
+        /// Başlıktan sonra kopan bir indirmeyi üretmenin tek yolu bu, ve o an ölçülmesi gereken
+        /// şey `serve`in ikinci bir JSON satırı yazıp yazmadığı: yazarsa satır, istemcinin gördüğü
+        /// dosyanın baytlarının arasına girer.
+        cut_next_body_write: bool,
     }
 
     impl Wire {
@@ -674,6 +707,15 @@ mod tests {
             Self {
                 inbound: chunks.iter().map(|c| c.to_vec()).collect(),
                 outbound: Vec::new(),
+                cut_next_body_write: false,
+            }
+        }
+
+        /// Başlık geçiyor, ilk gövde yazması düşüyor, sonrası yine yazılabiliyor.
+        fn cut_after_header(chunks: &[&[u8]]) -> Self {
+            Self {
+                cut_next_body_write: true,
+                ..Self::new(chunks)
             }
         }
 
@@ -708,6 +750,15 @@ mod tests {
 
     impl Write for Wire {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            // Başlık bir satır sonuyla bitiyor, yani telde bir `\n` görünmüş olması gövdenin
+            // başladığı andır.
+            if self.cut_next_body_write && self.outbound.contains(&b'\n') {
+                self.cut_next_body_write = false;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the test wire was cut after the header",
+                ));
+            }
             self.outbound.extend_from_slice(buf);
             Ok(buf.len())
         }
@@ -1149,6 +1200,39 @@ mod tests {
 
         let (_, body) = split_download(&wire);
         assert_eq!(body, b"abc", "exactly the file, with nothing appended");
+    }
+
+    #[test]
+    fn a_download_that_fails_after_the_header_writes_no_second_line() {
+        // THE SILENT CORRUPTION. The header goes out before the body, so every JSON line written
+        // after it lands INSIDE the file as the client sees it. The old rule exempted only a
+        // SUCCESSFUL download from the trailing reply, so a download that broke mid-body appended
+        // `{"status":"failed",…}` to the half-sent bytes — and the API's `TakeExactly` counts those
+        // bytes as content, so a shortfall smaller than the JSON line makes the download look
+        // COMPLETE with the agent's error sitting at the end of the user's file.
+        let f = readable(b"hello world", API);
+        let mut wire = Wire::cut_after_header(&[&preamble_line(0, 11)]);
+
+        f.channel()
+            .serve(&mut wire, API, never_fails)
+            .expect("serve");
+
+        let replies = wire.replies();
+        assert_eq!(
+            replies.len(),
+            1,
+            "only the header may be on the wire: {replies:?}"
+        );
+        assert_eq!(replies[0]["status"], "sending");
+
+        // And the failure is still explicable afterwards — it is recorded, just not written back.
+        let entries = f.audit.entries();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            !matches!(entries[0].outcome, Outcome::Allowed),
+            "a broken download must not be audited as allowed: {:?}",
+            entries[0].outcome
+        );
     }
 
     #[test]

@@ -178,6 +178,7 @@ export class SnapshotBrowseController {
     }
     const { path, destinationId } = parsed.data;
     if (destinationId !== null) requireUuid(destinationId);
+    assertRestorePath(path);
 
     const wanted = path.at(-1);
     if (wanted === undefined) {
@@ -264,6 +265,40 @@ export class SnapshotBrowseController {
       throw new ProblemException('validation-failed', 'Anlık görüntü adı kullanılabilir değil.');
     }
     return parsed.data;
+  }
+}
+
+/**
+ * Geri yükleme gövdesindeki yolun bileşenleri.
+ *
+ * Gezinme yolu (`splitPath`) bunu zaten yapıyordu, gövde yapmıyordu: `path` yalnız "1 ile 255
+ * karakter arası bir dizge" diye sınanıp doğrudan işin yüküne giriyordu. Ajan aynı bileşenleri
+ * `EntryName` olarak ayrıştırıp reddediyor — ama BU İŞÇİDE, uca 202 döndükten sonra. Sonuç,
+ * kullanıcıya "geri yükleme istendi" demek, sonra işi beş kez sessizce öldürmekti.
+ *
+ * KURALLAR AJANIN `EntryName`İ İLE AYNI, `splitPath`inkiyle değil: baştaki tire artık bir ret
+ * sebebi değil (bkz. `assertValidName` yorumu), ve `-eski.txt` geri getirilebilmesi gereken gerçek
+ * bir dosya adı. Uzunluk da BAYTLA ölçülüyor, çünkü ajan öyle ölçüyor: 200 harflik Türkçe bir ad
+ * 255 baytı aşabiliyor.
+ *
+ * Son bileşen ayrıca `.depsis` olamaz: o ad canlı ağaçta ara yükleme ve karantina dizinine ait ve
+ * geri yükleme onu YENİ bir ad olarak yaratıyor.
+ */
+function assertRestorePath(path: readonly string[]): void {
+  for (const part of path) {
+    if (
+      part === '.' ||
+      part === '..' ||
+      part.includes('/') ||
+      part.includes('\\') ||
+      part.includes('\0') ||
+      Buffer.byteLength(part, 'utf8') > 255
+    ) {
+      throw new ProblemException('validation-failed', 'Yol kullanılabilir değil.');
+    }
+  }
+  if (path.at(-1) === '.depsis') {
+    throw new ProblemException('validation-failed', "'.depsis' adıyla geri yükleme yapılamaz.");
   }
 }
 

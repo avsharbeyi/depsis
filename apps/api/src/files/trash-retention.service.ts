@@ -303,7 +303,14 @@ export class TrashRetentionService implements OnModuleInit {
       }
     }
 
-    return { purged, failed, bytes, more: roots.length >= TrashRetentionService.BATCH };
+    // `more` "hemen bir tur daha" demek: işleyici ardılı `new Date()` ile kuruyor ve işçi bekleyen
+    // bir işi hiç beklemeden alıyor. O yüzden koşul dolu bir sayfa DEĞİL, İLERLEME olmalı. Ajan
+    // kapalıyken her kök `AgentUnavailableError` ile anında düşüyor: dolu bir sayfaya bakan eski
+    // koşul, saniyede birkaç tur, tur başına yüz hata satırı üreten sıkı bir döngüye giriyordu.
+    // Hiçbir kök silinemediğinde tur yine BAŞARILI sayılıyor ve ardıl bir sonraki aralığa kuruluyor
+    // — hata atmak zinciri tamamen kırardı, çünkü işleyici `schedule`ı bu çağrıdan SONRA yapıyor.
+    const more = purged > 0 && roots.length >= TrashRetentionService.BATCH;
+    return { purged, failed, bytes, more };
   }
 
   /**

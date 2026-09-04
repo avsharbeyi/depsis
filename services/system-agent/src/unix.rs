@@ -977,6 +977,31 @@ impl ExecRunner {
     /// Tek bir komutun en fazla ne kadar koşabileceği; gerekçe `run` içinde.
     const RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+    /// Öldürülen bir çocuğu KISA BİR TAVANLA topluyor; toplanabildiyse `true`.
+    ///
+    /// ── SIGKILL'İN TESLİM EDİLDİĞİ GARANTİ DEĞİL ──────────────────────────────────────────
+    ///
+    /// Kesintisiz uykudaki (D durumu) bir süreç sinyali ancak çekirdekten kullanıcı alanına
+    /// döndüğünde görüyor — ve askıya alınmış bir ZFS havuzuna girmiş bir `zfs`/`zpool` çağrısı
+    /// tam olarak budur; havuz askıda kaldığı sürece dönmüyor. `wait()` orada SÜRESİZ bekliyor,
+    /// ve kontrol soketi tek bağlantı işlediği için o bekleme ajanın tamamını susturuyor: zaman
+    /// aşımı koruması, adını verdiği durumda kendisi kilitleniyor.
+    ///
+    /// Bu yüzden toplama denenir ama beklenmez. `false` dönerse çağıran, çocuğun borularını okuyan
+    /// iş parçacıklarını JOIN ETMEDEN bırakmalı: çocuk yaşadığı sürece borular açık kalıyor, yani
+    /// o join de aynı süresiz beklemedir.
+    fn reaped_within(child: &mut std::process::Child, grace: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + grace;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return true,
+                Err(_) => return false,
+                Ok(None) if std::time::Instant::now() >= until => return false,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
+
     /// The writer's output if it finishes within the grace, `None` if it is still running.
     fn reap(
         child: &mut std::process::Child,
@@ -1050,7 +1075,7 @@ impl CommandRunner for ExecRunner {
         args: &[&str],
         timeout: std::time::Duration,
     ) -> Result<String, SeamError> {
-        self.exec(program, args, timeout, true)
+        self.exec(program, args, &[], timeout, true)
     }
 
     /// Çıkış kodunu HATA saymayan koşucu — gerekçesi seam'in belgesinde.
@@ -1060,7 +1085,21 @@ impl CommandRunner for ExecRunner {
     /// kısım — tek bir yerde durmalı. Değişen tek şey son adım, ve onu `exec` bir bayrakla
     /// alıyor.
     fn run_capturing(&self, program: &str, args: &[&str]) -> Result<String, SeamError> {
-        self.exec(program, args, Self::RUN_TIMEOUT, false)
+        self.exec(program, args, &[], Self::RUN_TIMEOUT, false)
+    }
+
+    /// Bir sırrı ORTAMDAN geçirerek koşar — `pg_dump` ve `PGPASSWORD`.
+    ///
+    /// Gövde yine `exec`, ve yine tek gövde: zaman aşımı, boruların ayrı iş parçacıklarında
+    /// okunması ve çıkış kodunun yorumlanması burada da aynen geçerli. Değişen tek şey, çocuğun
+    /// temizlenmiş ortamına birkaç değişkenin eklenmesi.
+    fn run_with_env(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<String, SeamError> {
+        self.exec(program, args, env, Self::RUN_TIMEOUT, true)
     }
 
     /// Bir sırrı stdin'den geçirerek koşar — `zfs load-key` ve `zfs create -o keyformat=passphrase`.
@@ -1191,7 +1230,9 @@ impl CommandRunner for ExecRunner {
             Some(out) => out,
             None => {
                 let _ = sending.kill();
-                let _ = sending.wait();
+                // Toplama DENENİYOR, beklenmiyor: `wait()` kesintisiz uykudaki bir yazıcıda
+                // süresiz bloke olur ve ajan kontrol soketini tek bağlantı işlediği için susar.
+                Self::reaped_within(&mut sending, Self::REAP_GRACE);
                 return Err(SeamError::Command {
                     program: writer.to_string(),
                     status: -1,
@@ -1252,10 +1293,18 @@ impl ExecRunner {
         &self,
         program: &str,
         args: &[&str],
+        env: &[(&str, &str)],
         timeout: std::time::Duration,
         fail_on_status: bool,
     ) -> Result<String, SeamError> {
-        let mut child = Self::hardened(program, args)
+        let mut command = Self::hardened(program, args);
+        // `hardened` ortamı TEMİZLİYOR ve üstüne yalnız izin listesini koyuyor; buradakiler o
+        // listenin üstüne biniyor. Değerler hiçbir yere yazılmıyor — bu yolun var olma sebebi
+        // argv'ye konmayacak bir sırrı taşımak.
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1284,16 +1333,27 @@ impl ExecRunner {
                 Err(e) => return Err(SeamError::Io(format!("wait {program}: {e}"))),
                 Ok(Some(status)) => break status,
                 Ok(None) if std::time::Instant::now() >= until => {
+                    let pid = child.id();
                     let _ = child.kill();
-                    let _ = child.wait();
-                    // Okuyucular BEKLENİYOR: öldürülen çocuğun boruları kapanıyor ve iki
-                    // `read_to_end` dosya sonuyla bitiyor. Beklemeden dönmek, bu fonksiyonun
-                    // ajanın ömrü boyunca binlerce kez koştuğu düşünülürse, iş parçacığı
-                    // biriktirmek olurdu.
-                    let _ = out_reader.join();
-                    let _ = err_reader.join();
+                    // ÖLDÜRMEK, ÖLDÜĞÜ ANLAMINA GELMİYOR. Bu metnin adını verdiği durumda —
+                    // askıya alınmış bir havuz — süreç çekirdekte kesintisiz uykuda bekliyor ve
+                    // SIGKILL'i görmüyor. Eski hâli burada `child.wait()` ve ardından iki `join()`
+                    // çağırıyordu; üçü de sınırsız bekliyor, çünkü çocuk yaşadıkça boruların yazan
+                    // ucu kapanmıyor. Sonuç, zaman aşımı korumasının tam da koruması gereken
+                    // durumda ajanı kalıcı olarak susturmasıydı: kontrol soketi tek bağlantı
+                    // işlediği için `ping` bile cevapsız kalıyordu.
+                    //
+                    // Toplanabiliyorsa okuyucular da toplanıyor; toplanamıyorsa İKİSİ DE JOIN
+                    // EDİLMEDEN bırakılıyor. Sızan iş parçacığı ve tanımlayıcı bir maliyet, ama
+                    // `serve_loop`un EMFILE kolunun zaten karşıladığı bir maliyet — sessizleşmiş
+                    // bir ajan değil.
+                    if Self::reaped_within(&mut child, Self::REAP_GRACE) {
+                        let _ = out_reader.join();
+                        let _ = err_reader.join();
+                    }
                     return Err(SeamError::Io(format!(
-                        "{program} {} saniyede yanıt vermedi ve öldürüldü — askıya alınmış bir                          havuz (zpool status: SUSPENDED) en bilinen sebep",
+                        "{program} (pid {pid}) {} saniyede yanıt vermedi ve öldürüldü — askıya \
+                         alınmış bir havuz (zpool status: SUSPENDED) en bilinen sebep",
                         timeout.as_secs()
                     )));
                 }
@@ -2018,6 +2078,30 @@ mod tests {
                 .run_piped("/nonexistent/depsis-writer", &[], "/bin/cat", &[])
                 .expect_err("a missing program must be reported");
             assert!(matches!(error, SeamError::Io(_)), "got {error:?}");
+        }
+
+        #[test]
+        fn a_timed_out_command_names_the_process_it_killed_and_returns() {
+            // ZAMAN AŞIMININ KENDİSİ KİLİTLENMEMELİ. Eski hâli `kill`in ardından `wait()` ve iki
+            // `join()` çağırıyordu, üçü de sınırsız — ve bu kolun hata metninin adını verdiği
+            // durumda (askıya alınmış havuz, D durumunda bekleyen `zfs`) SIGKILL hiç teslim
+            // edilmiyor, yani koruma tam da koruması gereken yerde ajanı susturuyordu.
+            //
+            // Sıradan bir süreçle o kilit üretilemez; ölçülebilen şey sınırın kendisi: çağrı
+            // süreden hemen sonra dönüyor ve HANGİ süreci öldürdüğünü söylüyor.
+            let brief = std::time::Duration::from_millis(200);
+            let started = std::time::Instant::now();
+            let error = runner()
+                .run_with_timeout("/bin/sleep", &["30"], brief)
+                .expect_err("a command past its timeout must be reported, not waited on");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "zaman aşımı kolu beklemeden dönmeli"
+            );
+            match error {
+                SeamError::Io(message) => assert!(message.contains("pid "), "{message}"),
+                other => panic!("expected an io error, got {other:?}"),
+            }
         }
     }
 

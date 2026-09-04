@@ -172,9 +172,15 @@ console.log('');
 
 // Anahtarın gerçekten okunabildiğini teyit etmenin bedeli sıfır, ve yanlış anahtarla üretilmiş
 // bir jetonu ancak müşteri fark ederdi.
+// İKİ dosyanın da varlığı kontrol ediliyor. Eskiden yalnız depodaki `shipped` bakılıyor, özel
+// anahtarın YANINDAKİ .pub doğrudan readFileSync ile okunuyordu: satıcı anahtarı
+// DEPSIS_LICENSE_KEY ile başka bir dizinden gösterdiğinde ya da yalnız .key dosyasını kopyaladığında
+// burası ENOENT ile çöküyordu — jeton çoktan basılmış ve deftere yazılmış olduğu hâlde. Satıcı
+// işlemin düştüğünü sanıp ikinci kez üretiyor ve defterde aynı cihaz için iki jeton kalıyordu.
 const shipped = join(HERE, '..', '..', 'deploy', 'release', 'license-key.pub');
-if (existsSync(shipped)) {
-  const mine = readFileSync(join(dirname(keyPath), 'license-key.pub'), 'utf8').trim();
+const minePath = join(dirname(keyPath), 'license-key.pub');
+if (existsSync(shipped) && existsSync(minePath)) {
+  const mine = readFileSync(minePath, 'utf8').trim();
   if (mine !== readFileSync(shipped, 'utf8').trim()) {
     console.log('  UYARI: buradaki açık anahtar, cihazlara giden açık anahtarla AYNI DEĞİL.');
     console.log(
@@ -182,4 +188,8 @@ if (existsSync(shipped)) {
     );
     console.log('');
   }
+} else if (existsSync(shipped)) {
+  console.log(`  NOT: anahtarın yanında license-key.pub yok (${minePath}),`);
+  console.log('  cihazlara giden açık anahtarla karşılaştırma yapılamadı.');
+  console.log('');
 }

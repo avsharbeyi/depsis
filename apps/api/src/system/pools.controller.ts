@@ -18,7 +18,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { z } from 'zod';
 
 import { AuditService } from '../audit/audit.service.js';
-import { AgentService } from '../agent/agent.service.js';
+import { AgentService, AgentUnavailableError } from '../agent/agent.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
 import { ReauthService } from '../auth/reauth.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
@@ -125,7 +125,22 @@ export class PoolsController {
     // will talk to.
     let prepareShareRoot = plan.prepareShareRoot;
     if (prepareShareRoot === undefined) {
-      const root = (await this.system.storageSetup(randomUUID())).shareRoot;
+      // AJANA ULAŞILAMIYORSA KARAR VERİLEMEZ, ve karar verilemeyen yerde iş kuyruğa GİRMİYOR.
+      // `AgentUnavailableError` bir `HttpException` değil, yani sarmalanmadığında `ProblemFilter`
+      // onu ayrıntısız bir 500'e çeviriyordu: "Beklenmeyen hata" diyen bir kart, oysa doğru
+      // cümle "sistem ajanına ulaşılamıyor" ve sahibinin yapacağı şey beklemek. `enqueue`den
+      // ÖNCE atılıyor, yani yarım iş bırakmıyor.
+      let root: Awaited<ReturnType<SystemService['storageSetup']>>['shareRoot'];
+      try {
+        root = (await this.system.storageSetup(randomUUID())).shareRoot;
+      } catch (error) {
+        if (error instanceof AgentUnavailableError) {
+          throw new ServiceUnavailableException(
+            'Depolama durumu okunamadı: sistem ajanına ulaşılamıyor.',
+          );
+        }
+        throw error;
+      }
       prepareShareRoot =
         root.path !== undefined && root.dataset === undefined && root.empty === true;
     }
@@ -191,10 +206,9 @@ export class PoolsController {
   ): Promise<Schemas['ScrubStatus']> {
     await this.requireSystemAdmin(request);
     const name = this.requirePoolName(pool);
-    const response = await this.agent.call(
+    const response = await this.reachAgent(
       { op: 'scrub_status', pool: name },
       `reading the scrub status of ${name}`,
-      randomUUID(),
     );
     return toScrub(response, name);
   }
@@ -218,12 +232,34 @@ export class PoolsController {
     requireSameOrigin(request);
     await this.requireSystemAdmin(request);
     const name = this.requirePoolName(pool);
-    const response = await this.agent.call(
+    const response = await this.reachAgent(
       { op: 'start_scrub', pool: name },
       `starting a scrub of ${name}`,
-      randomUUID(),
     );
     return toScrub(response, name);
+  }
+
+  /**
+   * Ajana git, ULAŞILAMIYORSA 503 de.
+   *
+   * `AgentUnavailableError` bir `HttpException` değil: sarmalanmadan geçtiğinde `ProblemFilter`
+   * onu 'internal-error' 500'üne çevirip yığın izini günlüğe yazıyor. Depolama ekranı her havuz
+   * için bir kez tarama durumu sorduğu için, bakım için durmuş bir ajan havuz başına bir hata
+   * yığını üretiyordu — ve operatörün gördüğü cümle "Beklenmeyen hata" oluyordu. Bu dosyanın
+   * dışındaki her `system/` ucu aynı ayrımı zaten yapıyor.
+   */
+  private async reachAgent(
+    operation: Parameters<AgentService['call']>[0],
+    reason: string,
+  ): Promise<Awaited<ReturnType<AgentService['call']>>> {
+    try {
+      return await this.agent.call(operation, reason, randomUUID());
+    } catch (error) {
+      if (error instanceof AgentUnavailableError) {
+        throw new ServiceUnavailableException('sistem ajanına ulaşılamıyor');
+      }
+      throw error;
+    }
   }
 
   /** Havuz adı bir argv elemanı oluyor; havuz yaratmadaki kuralın aynısı. */

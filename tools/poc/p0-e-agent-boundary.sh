@@ -157,9 +157,37 @@ REQ=$(jq -c '.request' <<<"$SCHEMA") || { fail 'request schema is not valid JSON
 
 OPS=$(jq -r '[.. | objects | select(.properties?.op?.const) | .properties.op.const] | unique | join(",")' <<<"$REQ")
 note "operations advertised by the binary: $OPS"
-assert_eq 'the binary advertises exactly the seven Phase 0 operations' \
-  'create_dataset,create_snapshot,diff_snapshots,ping,pool_status,publish_samba_config,read_smart_summary' \
-  "$OPS"
+note "operation count: $(tr ',' '\n' <<<"$OPS" | grep -c .)"
+
+# CONTAINMENT, not an exact list. This used to assert the set was EXACTLY the seven Phase 0
+# operations, which turned every later phase into a red run of this script: the agent carries
+# dozens of operations now and the assertion measured the calendar, not the boundary. What TB4
+# actually needs from §2 is that the seven are still there and that no operation smuggles a
+# command or a path — the loop below — so the check is "still present", plus a diff against the
+# hand-maintained schema that the TypeScript side is generated from.
+for op in create_dataset create_snapshot diff_snapshots ping pool_status \
+          publish_samba_config read_smart_summary; do
+  if grep -qw -- "$op" <<<"${OPS//,/ }"; then
+    pass "the binary still advertises the Phase 0 operation '$op'"
+  else
+    fail "the Phase 0 operation '$op' is gone from the binary's schema" "$OPS"
+  fi
+done
+
+# The generated TypeScript is only true if the shipped schema file and the shipped binary agree.
+# Skipped rather than failed when the repository is not on this box: the PoC's own layout only
+# guarantees $DEPSIS_AGENT_SRC and $DEPSIS_UNIT_SRC.
+SCHEMA_FILE="${DEPSIS_AGENT_SCHEMA:-$HOME/packages/agent-protocol/schema/agent.schema.json}"
+if [ -f "$SCHEMA_FILE" ]; then
+  FILE_OPS=$(jq -r '[.request | .. | objects | select(.properties?.op?.const) | .properties.op.const]
+                    | unique | join(",")' <"$SCHEMA_FILE")
+  assert_eq 'the checked-in agent.schema.json advertises the same operations as the binary' \
+    "$OPS" "$FILE_OPS"
+else
+  warn "no agent.schema.json at $SCHEMA_FILE; binary-vs-schema comparison NOT tested"
+  note 'binary-vs-schema operation comparison skipped' \
+       "set DEPSIS_AGENT_SCHEMA to packages/agent-protocol/schema/agent.schema.json"
+fi
 
 # Claim 1: no operation carries a free-form command, argument vector or path. Checked against
 # the set of property NAMES the request schema actually declares.
@@ -190,21 +218,34 @@ note "api uid = $API_UID"
 
 install -d -m 0755 "$INSTALL_DIR" /etc/depsis
 install -m 0755 "$BIN" "$INSTALL_DIR/depsis-agent"
-printf 'DEPSIS_API_UID=%s\n' "$API_UID" > /etc/depsis/agent.env
+# DEPSIS_SHARES_ROOT too, not just the uid. Without it the agent starts but refuses every
+# transfer at runtime ("transfers will be refused"), which reads as a broken boundary in §4-9
+# rather than as a PoC that under-configured its own agent.
+install -d -m 0755 "$DEPSIS_POC_ROOT/shares"
+{
+  printf 'DEPSIS_API_UID=%s\n' "$API_UID"
+  printf 'DEPSIS_SHARES_ROOT=%s\n' "$DEPSIS_POC_ROOT/shares"
+} > /etc/depsis/agent.env
 chmod 0644 /etc/depsis/agent.env
 
 UNIT_SRC="${DEPSIS_UNIT_SRC:-$HOME/deploy/systemd}"
 if [ ! -f "$UNIT_SRC/depsis-agent.socket" ]; then
   fail "unit files not found at $UNIT_SRC"; poc_summary
 fi
-install -m 0644 "$UNIT_SRC/depsis-agent.socket" "$UNIT_SRC/depsis-agent.service" /etc/systemd/system/
+# BOTH sockets. depsis-agent.service carries `Requires=depsis-agent.socket
+# depsis-agent-data.socket`, so installing only the control socket left the service unstartable:
+# the first client connection failed the dependency, systemd never ran the agent, and every
+# measurement from §4 onwards came back NO_RESPONSE — a red run that said nothing about TB4.
+install -m 0644 "$UNIT_SRC/depsis-agent.socket" "$UNIT_SRC/depsis-agent-data.socket" \
+  "$UNIT_SRC/depsis-agent.service" /etc/systemd/system/
 systemctl daemon-reload
 
 assert_cmd 'systemd-analyze verify accepts both units' ok \
   -- systemd-analyze verify /etc/systemd/system/depsis-agent.socket
 
-systemctl stop depsis-agent.service depsis-agent.socket 2>/dev/null || true
+systemctl stop depsis-agent.service depsis-agent.socket depsis-agent-data.socket 2>/dev/null || true
 assert_cmd 'depsis-agent.socket starts' ok -- systemctl start depsis-agent.socket
+assert_cmd 'depsis-agent-data.socket starts' ok -- systemctl start depsis-agent-data.socket
 
 # The service must NOT be running yet — that is the whole point of socket activation.
 if systemctl is-active --quiet depsis-agent.service; then
@@ -477,7 +518,7 @@ assert_eq 'the agent did not restart (no crash on malformed input)' \
 # ─── cleanup ──────────────────────────────────────────────────────────────────
 section 'Cleanup'
 zfs destroy -r "$TEST_DS" 2>/dev/null || true
-systemctl stop depsis-agent.service depsis-agent.socket 2>/dev/null || true
+systemctl stop depsis-agent.service depsis-agent.socket depsis-agent-data.socket 2>/dev/null || true
 userdel -r "$OTHER_USER" 2>/dev/null || true
 [ "${POOL_IS_OURS:-0}" = 1 ] && cleanup_pool
 info 'units left installed but stopped; binary left in place for re-runs'

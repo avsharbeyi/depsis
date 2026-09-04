@@ -29,6 +29,7 @@ import { copyHandler, COPY_KIND } from './copy.handler.js';
 import { createPoolHandler, CREATE_POOL_KIND } from './create-pool.handler.js';
 import { remoteAuthorizeHandler, REMOTE_AUTHORIZE_KIND } from './remote-authorize.handler.js';
 import { indexDrainHandler, INDEX_DRAIN_KIND } from './index-drain.handler.js';
+import { jobsPruneHandler, JOBS_PRUNE_KIND } from './jobs-prune.handler.js';
 import { reconcileHandler, RECONCILE_KIND } from './reconcile.handler.js';
 import { trashPurgeHandler, TRASH_PURGE_KIND } from './trash-purge.handler.js';
 import { identitySyncHandler, IDENTITY_SYNC_KIND } from './identity-sync.handler.js';
@@ -118,4 +119,10 @@ export function registerHandlers(
   // durdururdu — ve o, saklama suresi dolan dosyalarin sonsuza kadar durmasi demekti.
   worker.register(BACKUP_PURGE_KIND, backupPurgeHandler(services.backupRuns));
   worker.register(BACKUP_VERIFY_KIND, backupVerifyHandler(services.backupRuns));
+  // `job_history`'nin saklama süresi. Kuyruğun KENDİ tablosunu budayan zincir, ve kayıtsız
+  // kalması bu listedeki en sessiz arıza olurdu: `JobsService` açılışta her kiracı için bir
+  // `jobs.prune` satırı tohumluyor, kısmi tekil indeks (0058) ikinci bir kopyayı engelliyor, ve
+  // işleyicisi kayıtlı olmadığı sürece o tek satır sonsuza kadar `queued` duruyor — yani budama
+  // hiç koşmuyor ama kuyrukta "yapılacak" görünüyor.
+  worker.register(JOBS_PRUNE_KIND, jobsPruneHandler(services.jobs));
 }

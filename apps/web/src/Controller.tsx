@@ -50,6 +50,8 @@ export function Controller({
 }): ReactElement {
   const [status, setStatus] = useState<Status | null>(null);
   const [hidden, setHidden] = useState(false);
+  /** Okuma cevapsız kaldığında panelin söyleyeceği cümle — boş bir kutu bir açıklama değildir. */
+  const [problem, setProblem] = useState<string | null>(null);
   const [networks, setNetworks] = useState<Network[] | null>(null);
   const [members, setMembers] = useState<Member[] | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
@@ -81,10 +83,19 @@ export function Controller({
   }
 
   const load = useCallback(async (): Promise<void> => {
+    setProblem(null);
     const found = await api.GET('/remote/controller', {});
     if (found.data === undefined) {
       // 403 bir durum, hata değil: sıradan bir üye bu paneli görmüyor.
-      if (found.response.status === 403) setHidden(true);
+      if (found.response.status === 403) {
+        setHidden(true);
+        return;
+      }
+      // GERİ KALAN HER ŞEY SÖYLENİYOR. ZeroTier durmuşsa uç 503 veriyor, ve bu dal eskiden
+      // sessizce dönüyordu: `status` da `networks` de null kalıyor, aşağıdaki üç dalın hiçbiri
+      // çizilmiyor ve panel yalnız başlığıyla, tek satır açıklama olmadan duruyordu. Bir cihazın
+      // ekranında boş bir kutu, bozuk olduğunu söylemeyen bir arızadır.
+      setProblem(problemMessage(found.error, 'Yönetilen ağ durumu okunamadı.'));
       return;
     }
     setStatus(found.data);
@@ -198,6 +209,16 @@ export function Controller({
           </button>
         )}
       </div>
+
+      {problem !== null && (
+        <p className="note warn">
+          {problem} ZeroTier bu cihazla birlikte kuruluyor; şu an yanıt vermiyor. Çoğu zaman cihazı
+          yeniden başlatmak yeterlidir.{' '}
+          <button type="button" className="lnk" onClick={() => void load()}>
+            Yeniden dene
+          </button>
+        </p>
+      )}
 
       {status !== null && !status.available && (
         <p className="note">

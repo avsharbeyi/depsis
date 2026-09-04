@@ -241,6 +241,57 @@ describeDb('trash retention', () => {
     expect(removed).toEqual(['silinebilir.txt']);
   });
 
+  /** `BATCH` expired roots at the share's root, all `agoDays` old. Returns their names. */
+  async function fullPage(prefix: string): Promise<string[]> {
+    const names = Array.from(
+      { length: TrashRetentionService.BATCH },
+      (_unused, i) => `${prefix}-${i}.txt`,
+    );
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO file_entries
+           (organization_id, share_id, parent_id, kind, name, path, size_bytes,
+            trashed_at, trashed_by)
+         SELECT $1::uuid, $2::uuid, NULL::uuid, 'file', n, '/' || n, 10,
+                now() - make_interval(days => 40), $4::uuid
+           FROM unnest($3::text[]) AS n`,
+        [org, share, names, admin],
+      ),
+    );
+    return names;
+  }
+
+  it('asks for another run immediately while a full page is still making progress', async () => {
+    // The control for the test below. A full page that DID purge something means there is more to
+    // take and the successor is scheduled for `now()`.
+    const names = await fullPage('dolu');
+    const { retention } = service(new Set(names.slice(1)));
+    await retention.setPolicy(org, 30, admin);
+
+    const result = await retention.purgeExpired(org, alwaysHeld);
+
+    expect(result.purged).toBe(1);
+    expect(result.more).toBe(true);
+  });
+
+  it('does not ask for another run when a full page purged nothing', async () => {
+    // `more` schedules the successor for `now()` and the worker takes a waiting job without
+    // pausing. With the agent down every root fails in milliseconds, so a page that looked at the
+    // count alone spun: several runs a second, a hundred error lines each, until the agent came
+    // back. The run still SUCCEEDS — throwing here would skip the handler's `schedule` call and
+    // stop the chain outright, which is the silence this whole service exists to prevent.
+    const names = await fullPage('kilitli');
+    const { retention, removed } = service(new Set(names));
+    await retention.setPolicy(org, 30, admin);
+
+    const result = await retention.purgeExpired(org, alwaysHeld);
+
+    expect(result.purged).toBe(0);
+    expect(result.failed).toBe(TrashRetentionService.BATCH);
+    expect(removed).toEqual([]);
+    expect(result.more).toBe(false);
+  });
+
   it('refuses to be scheduled twice while a run is waiting', async () => {
     // The index this rests on covers `queued`. Two queued runs would double every purge's work and
     // race each other through the same rows.

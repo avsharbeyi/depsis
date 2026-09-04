@@ -2,9 +2,10 @@ name: CI
 
 # Pipeline order per master prompt §19:
 #   format -> lint -> typecheck -> unit -> integration -> e2e -> security -> build -> signed artifacts
-# Stages not yet implemented are declared here as explicit, visibly-skipped jobs rather than
-# omitted, so that a missing stage stays legible instead of silently absent. `e2e` was one of
-# them until the Playwright suite and tools/dev/e2e-stack.sh existed; `integration` still is.
+# Every stage now runs as a real job that measures something. Stages used to be declared here as
+# explicit, visibly-skipped placeholders so a missing one stayed legible; `e2e` was one until the
+# Playwright suite and tools/dev/e2e-stack.sh existed, and `integration` was the last, now folded
+# into `migrations` (PostgreSQL) and `appliance` (real ZFS · Samba · privileged agent).
 
 on:
   push:
@@ -60,6 +61,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm lint
+
+      - name: The design-system page still describes classes that exist
+        # `pnpm check` çağırıyordu, CI hiç çağırmıyordu — yani kapı yalnız yerelde `check` yazan
+        # için vardı. docs/tasarim-sistemi.html arayüzün sınıf sözlüğü; styles.css'ten silinen bir
+        # sınıf orada belgelenmeye devam ederse sayfa sessizce yalan söylemeye başlar.
+        run: pnpm lint:design
 
       # THERE IS DELIBERATELY NO actionlint STEP HERE, and the reason is worth the paragraph.
       #
@@ -192,12 +199,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Where the JSON report goes
-        # A step, because this is the first place a shell exists to expand `$RUNNER_TEMP`. The
-        # `runner` CONTEXT would work in a step-level `env:` too, but writing it once into
-        # $GITHUB_ENV keeps the two steps that read it from having to agree on a path.
-        run: echo "DEPSIS_E2E_JSON_REPORT=$RUNNER_TEMP/playwright-report.json" >> "$GITHUB_ENV"
-
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
@@ -313,9 +314,11 @@ jobs:
           pnpm build
           pnpm --filter @depsis/api test:unit
 
-      - name: Prove the integration tests were not silently skipped
+      - name: The integration suites ran, and passed
         # A gated suite that quietly skips is worse than no suite: the job goes green having
-        # measured nothing. This asserts the gate was actually open.
+        # measured nothing. This asserts the gate was actually open — AND that the suite behind it
+        # passed, which for @depsis/worker's database-gated tests is the only place it is asserted
+        # at all.
         env:
           PGHOST: 127.0.0.1
           PGPORT: '5432'
@@ -358,9 +361,16 @@ jobs:
           echo "── $package"
           report="$reports/vitest-${package#@depsis/}.json"
           rm -f "$report"
+          # ÇIKIŞ KODU SAKLANIYOR, YUTULMUYOR. Burada `|| true` vardı; tek amacı adımın kapıya
+          # ulaşabilmesiydi ama yan etkisi süitin DÜŞMESİNİ de bağışlamaktı, ve aşağıdaki kapı
+          # yalnız "atlandı" sayıyordu. Sonuç: @depsis/worker'ın veritabanı kapılı kuyruk
+          # testlerinden biri gerçekten kırıldığında — bu süiti başka hiçbir iş koşmuyor, `static`
+          # DEPSIS_TEST_* olmadan onu describe.skip'e düşürüyor — iş yeşil bitiyordu. Kod artık
+          # `status`ta bekliyor ve döngünün sonunda okunuyor: rapor önce basılsın, sonra düşsün.
+          status=0
           pnpm --filter "$package" exec vitest run \
             --exclude '**/agent.integration.test.ts' \
-            --reporter=json --outputFile="$report" > /dev/null 2>&1 || true
+            --reporter=json --outputFile="$report" > /dev/null 2>&1 || status=$?
 
           # Every way of failing to measure is now an error, not a zero.
           node -e '
@@ -375,6 +385,16 @@ jobs:
             const tests = (report.testResults || []).flatMap((f) => f.assertionResults || []);
             if (tests.length === 0) {
               console.error("::error::the vitest report contains no tests at all");
+              process.exit(1);
+            }
+
+            // DÜŞEN TESTİN ADI. Çıkış kodu tek başına işi kırmızıya çevirir ama hangi testin
+            // düştüğünü söylemez — vitest'in kendi çıktısı /dev/null'a gidiyor, geriye yalnız bu
+            // rapor kalıyor. Kapı bu yüzden "atlandı"nın yanında "failed"e de bakıyor.
+            const failed = tests.filter((a) => a.status === "failed");
+            if (failed.length > 0) {
+              console.error("::error::" + failed.length + " test düştü");
+              for (const t of failed.slice(0, 10)) console.error("  failed: " + t.fullName);
               process.exit(1);
             }
             // Named exemptions, each with an argument — not a tolerated COUNT.
@@ -426,6 +446,9 @@ jobs:
               }
             }
           ' "$report"
+
+          # Rapor basıldıktan SONRA: süitin kendi çıkış kodu.
+          [ "$status" -eq 0 ] || { echo "::error::$package süiti düştü (vitest $status ile çıktı)"; exit 1; }
           done
 
       - name: Test reports
@@ -761,9 +784,7 @@ jobs:
         if: always()
         run: bash tools/dev/e2e-stack.sh --down
 
-  # ── Declared but not yet implemented ────────────────────────────────────────
-  # These exist so their absence is visible in every CI run. Each is enabled by the
-  # PoC named in its ADR.
+  # ── appliance — gerçek ZFS · Samba · ayrıcalıklı ajan ───────────────────────
 
   appliance:
     name: appliance (ZFS · Samba · privileged agent)
