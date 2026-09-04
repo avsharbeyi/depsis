@@ -571,7 +571,7 @@ export type AgentRequest =
       /**
        * Bu addan SONRAKİLERİ ver — `ListDirectory`dekiyle aynı imleç.
        *
-       * ── NEDEN BURADA DA GEREKLİ ──────────────────────────────────
+       * ── NEDEN BURADA DA GEREKLİ ──────────────────────────────────────────────────────
        *
        * Bu listeleme de `MAX_LISTING` satırda kesiliyor, ve kesilmenin bedeli burada canlı
        * taraftakinden ağır. Saklama süresi dolmuş silinenleri budayan tur, kesilmiş bir
@@ -1019,6 +1019,9 @@ export type NodeAddress = string;
  */
 export type NtHash = string;
 
+/**
+ * A disk named twice: the stable link to use, and the WWN it must still be.
+ */
 export interface DiskRef {
   /**
    * A single path component under a share root — never a path, never absolute.
@@ -1695,11 +1698,6 @@ export interface DatabaseDump {
   size_bytes: number;
 }
 /**
- * One whole disk, as `ListDisks` found it.
- *
- * Partitions are not reported as disks. They appear only through `holds`, `mounted` and
- * `holds_system` — which is what a caller about to overwrite the device needs to know, and a
- * per-partition inventory is not.
  * Kurulabilecek bir sürüm — DENETİMİN bulduğu, isteğin seçtiği değil.
  */
 export interface UpdateCandidate {
@@ -1800,9 +1798,6 @@ export interface ImportablePoolView {
   needs_adopt: boolean;
   state: string;
 }
-/**
- * A disk named twice: the stable link to use, and the WWN it must still be.
- */
 export interface ProcessSummary {
   args: string;
   comm: string;
@@ -1815,6 +1810,13 @@ export interface ProcessSummary {
   uid: number;
   user: string;
 }
+/**
+ * One whole disk, as `ListDisks` found it.
+ *
+ * Partitions are not reported as disks. They appear only through `holds`, `mounted` and
+ * `holds_system` — which is what a caller about to overwrite the device needs to know, and a
+ * per-partition inventory is not.
+ */
 export interface DiskInfo {
   /**
    * The `/dev/disk/by-id` name, when the kernel gave the device a stable link.

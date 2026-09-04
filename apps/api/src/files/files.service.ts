@@ -390,12 +390,20 @@ const ENTRY_COLUMNS = `id, share_id, parent_id, kind, name, path, size_bytes, co
  *
  * ── ALT AĞAÇ ARALIĞI BAYT SIRASIYLA ─────────────────────────────────────────────────────────
  *
- * `~>=~` / `~<~`, düz `>=` / `<` değil. Veritabanının harmanlaması ICU (`und-x-icu`) ve o sırada
- * `&`, `#`, `+`, `~`, `^`, `=` gibi karakterler `/` ile `0` ARASINDA geliyor — hepsi geçerli
+ * `COLLATE "C"`, harmanlamasız `>=` / `<` değil. Veritabanı ICU (`und-x-icu`) ile kurulu ve o
+ * sırada `&`, `#`, `+`, `~`, `^`, `=` gibi karakterler `/` ile `0` ARASINDA geliyor — hepsi geçerli
  * dosya adı karakteri. `Proje` klasörünün aralığına kardeşi `Proje+notlar.zip` giriyordu: 10 MB'lık
- * klasör listede 2 GB görünüyor, arşiv tahmini o kadar yer istiyordu. Bu iki operatör
- * karşılaştırmayı bayt sırasına sabitliyor, ve 0048'in `text_pattern_ops` indeksi de yalnız onlara
- * hizmet ediyor — düz `<` ile aralık hem yanlıştı hem indeksi kullanamıyordu.
+ * klasör listede 2 GB görünüyor, arşiv tahmini o kadar yer istiyordu.
+ *
+ * HARMANLAMA SORGUDA DA YAZILMALI. 0062 indeksi `(share_id, path COLLATE "C")` anahtarıyla
+ * kuruluyor; sorgu karşılaştırmayı aynı harmanlamayla yazmazsa planlayıcı o indeksi seçemez ve
+ * her klasör satırı için paylaşımın tamamı taranır.
+ *
+ * `~>=~` / `~<~` de bayt sırası verirdi ama iki sebeple kullanılmıyor: 0062 `text_pattern_ops`
+ * indeksini düşürüyor, ve o operatörler PostgreSQL'in "diğer operatörler" düzeyinde `||` ile aynı
+ * önceliği paylaşıp soldan birleşiyor — `d.path ~>=~ f.path || '/'` ifadesi
+ * `(d.path ~>=~ f.path) || '/'` diye ayrıştırılıp `AND`e bir metin veriyor ve sorgu 42804 ile
+ * düşüyor. `>=` bir KARŞILAŞTIRMA operatörü, `||`den düşük öncelikli, yani parantez gerekmiyor.
  */
 const ENTRY_COLUMNS_WITH_COUNT = `f.id, f.share_id, f.parent_id, f.kind, f.name, f.path,
                        f.size_bytes, f.content_type, f.trashed_at, f.created_at, f.updated_at,
@@ -412,8 +420,8 @@ const ENTRY_COLUMNS_WITH_COUNT = `f.id, f.share_id, f.parent_id, f.kind, f.name,
                           WHERE d.share_id = f.share_id
                             AND d.kind = 'file'
                             AND d.trashed_at IS NULL
-                            AND d.path ~>=~ f.path || '/'
-                            AND d.path ~<~ f.path || '0'
+                            AND d.path COLLATE "C" >= f.path || '/'
+                            AND d.path COLLATE "C" < f.path || '0'
                        ) ELSE NULL END AS subtree_bytes`;
 
 /**
@@ -2454,12 +2462,13 @@ export class FilesService {
    * geliyor, ve içinde `%` ya da `_` olan bir klasör adı deseni jokere çevirip komşu klasörleri de
    * toplardı.
    *
-   * KARŞILAŞTIRMA `~>=~` / `~<~`, düz `>=` / `<` değil. Veritabanının harmanlaması ICU
-   * (`und-x-icu`), ve o sırada `&`, `#`, `+`, `~`, `^`, `=` gibi karakterler `/` ile `0` ARASINDA
-   * geliyor: `Proje` klasörünün aralığına kardeşi `Proje+notlar.zip` giriyor, yani bir klasörün
-   * boyutu yanındaki dosyanın baytlarını da sayıyordu. Bu iki operatör metni BAYT sırasıyla
-   * karşılaştırıyor — aralığın "tam olarak bu alt ağaç" demesinin tek yolu bu — ve 0048'in
-   * `text_pattern_ops` indeksi de yalnız onlara hizmet ediyor, düz `<` indeksi hiç kullanamıyordu.
+   * KARŞILAŞTIRMA `COLLATE "C"` ile. Veritabanının harmanlaması ICU (`und-x-icu`), ve o sırada
+   * `&`, `#`, `+`, `~`, `^`, `=` gibi karakterler `/` ile `0` ARASINDA geliyor: `Proje`
+   * klasörünün aralığına kardeşi `Proje+notlar.zip` giriyor, yani bir klasörün boyutu yanındaki
+   * dosyanın baytlarını da sayıyordu. `C` harmanlaması metni BAYT sırasıyla karşılaştırıyor —
+   * aralığın "tam olarak bu alt ağaç" demesinin tek yolu bu — ve 0062'nin
+   * `(share_id, path COLLATE "C")` indeksi de yalnız aynı harmanlamayla yazılmış bir
+   * karşılaştırmaya hizmet ediyor.
    */
   async subtreeBytes(organizationId: string, id: string): Promise<number> {
     const rows = await this.db.withTenant(organizationId, (db) =>
@@ -2470,8 +2479,8 @@ export class FilesService {
              ON d.share_id = f.share_id
             AND d.kind = 'file'
             AND d.trashed_at IS NULL
-            AND d.path ~>=~ f.path || '/'
-            AND d.path ~<~  f.path || '0'
+            AND d.path COLLATE "C" >= f.path || '/'
+            AND d.path COLLATE "C" < f.path || '0'
           WHERE f.organization_id = $1 AND f.id = $2`,
         [organizationId, id],
       ),
