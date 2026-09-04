@@ -549,6 +549,14 @@ impl TokenSource for MockTokenSource {
 pub struct MockCommandRunner {
     pub calls: RefCell<Vec<Vec<String>>>,
     responses: RefCell<VecDeque<String>>,
+    /// Bu kadar çağrıdan SONRAKİ her komut hata döner. `None` ise hiçbiri.
+    ///
+    /// Bir komutun ÇALIŞMAMASI ayrı bir dünya ve boş bir yanıtla aynı şey değil: bir işlem
+    /// "okuyamadım"ı "cevap boş" diye okursa, aracın kurulu olmadığı ya da öldüğü her durum
+    /// sessizce bir izne dönüşür. `wipe_disk`in `zpool`u okuyamadığında silmeyi reddetmesi tam
+    /// olarak bu ayrımın üstünde duruyor ve ölçülebilmesi için başarısız olabilen bir koşucu
+    /// gerekiyor.
+    fails_after: Option<usize>,
 }
 
 impl MockCommandRunner {
@@ -556,12 +564,40 @@ impl MockCommandRunner {
         Self {
             calls: RefCell::new(Vec::new()),
             responses: RefCell::new(responses.into_iter().collect()),
+            fails_after: None,
+        }
+    }
+
+    /// İlk `ok` çağrı `response` ile cevaplanır, sonrakiler `SeamError::Command` ile düşer.
+    ///
+    /// Çağrı yine de KAYDEDİLİYOR: bir test "hangi komut denendi" ile "hangi komut başarılı oldu"
+    /// sorularını ayrı ayrı sorabilmeli.
+    pub fn failing_after(ok: usize, response: &str) -> Self {
+        Self {
+            calls: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::from([response.to_string()])),
+            fails_after: Some(ok),
         }
     }
 
     /// The argv of the nth recorded call, for assertions.
     pub fn call(&self, n: usize) -> Option<Vec<String>> {
         self.calls.borrow().get(n).cloned()
+    }
+
+    /// Kaydedilmiş çağrı bu sayıyı aştıysa cevap bir hata.
+    fn answer(&self, program: &str) -> Result<String, SeamError> {
+        if self
+            .fails_after
+            .is_some_and(|ok| self.calls.borrow().len() > ok)
+        {
+            return Err(SeamError::Command {
+                program: program.to_string(),
+                status: 1,
+                stderr: "mock: bu çağrı düşmek üzere kuruldu".to_string(),
+            });
+        }
+        Ok(self.responses.borrow_mut().pop_front().unwrap_or_default())
     }
 }
 
@@ -570,7 +606,7 @@ impl CommandRunner for MockCommandRunner {
         let mut argv = vec![program.to_string()];
         argv.extend(args.iter().map(|a| (*a).to_string()));
         self.calls.borrow_mut().push(argv);
-        Ok(self.responses.borrow_mut().pop_front().unwrap_or_default())
+        self.answer(program)
     }
 
     /// Recorded as ONE call with a literal `|` between the two argvs.
@@ -592,7 +628,7 @@ impl CommandRunner for MockCommandRunner {
         argv.push(reader.to_string());
         argv.extend(reader_args.iter().map(|a| (*a).to_string()));
         self.calls.borrow_mut().push(argv);
-        Ok(self.responses.borrow_mut().pop_front().unwrap_or_default())
+        self.answer(writer)
     }
 
     /// Kaydediliyor, ve SIRRIN KENDİSİ KAYDEDİLMİYOR.
@@ -610,6 +646,6 @@ impl CommandRunner for MockCommandRunner {
         argv.extend(args.iter().map(|a| (*a).to_string()));
         argv.push("<stdin>".to_string());
         self.calls.borrow_mut().push(argv);
-        Ok(self.responses.borrow_mut().pop_front().unwrap_or_default())
+        self.answer(program)
     }
 }

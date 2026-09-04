@@ -17,6 +17,7 @@ import { z } from 'zod';
 import { requireSameOrigin } from '../auth/origin.js';
 import { MfaService } from '../auth/mfa.service.js';
 import { PasswordService } from '../auth/password.service.js';
+import { ReauthService } from '../auth/reauth.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { SessionService } from '../auth/session.service.js';
 import { IdentitySyncService } from '../identity/identity-sync.service.js';
@@ -25,7 +26,22 @@ import { DbService } from '../db/db.service.js';
 
 type Schemas = OpenApi.components['schemas'];
 
-const confirmSchema = z.object({ code: z.string().regex(/^\d{6}$/) });
+/**
+ * Onay kodu VE parola.
+ *
+ * Parola sonradan eklendi, ve eksikliği hesabı kalıcı olarak kilitleyebiliyordu: MFA'sı olmayan
+ * bir hesabın oturumunu ele geçiren biri KENDİ authenticator'ını kaydedebiliyordu. Ondan sonra
+ * gerçek sahip doğru parolayla giriyor, ikinci adımda üretemediği bir kod isteniyor ve
+ * giremiyor — yöneticinin açtığı sıfırlama bileti de ikinci adımı sormaya devam ettiği için işe
+ * yaramıyor. Kurtaran tek şey hesabı silmek oluyordu.
+ *
+ * Kontrol ONAYDA, kaydın başlangıcında değil: sır ancak burada etkinleşiyor, ve onaylanmamış bir
+ * sır kimsenin girişini engellemiyor.
+ */
+const confirmSchema = z.object({
+  code: z.string().regex(/^\d{6}$/),
+  password: z.string().min(1).max(1024),
+});
 const passwordSchema = z.object({ password: z.string().min(1).max(1024) });
 
 /**
@@ -44,7 +60,6 @@ interface UserRow {
   id: string;
   username: string;
   email: string | null;
-  password_hash: string | null;
   slug: string;
   smb_ready: boolean;
 }
@@ -62,7 +77,18 @@ export class MeController {
   constructor(
     private readonly db: DbService,
     private readonly mfa: MfaService,
+    /** Yalnız yeni parolayı ÖZETLEMEK için. Doğrulamanın tamamı `reauth`ta. */
     private readonly passwords: PasswordService,
+    /**
+     * "Klavyenin başındaki hâlâ o kişi mi" sorusunun TEK yeri.
+     *
+     * Bu dosya parolayı kendi eliyle `passwords.verify` ile deniyordu, yani giriş kısıtlamasının
+     * dışındaydı: çalınmış bir oturum çerezi ile parola sınırsız kez, gecikmesiz ve
+     * `login_attempts`'e tek satır iz bırakmadan tahmin edilebiliyordu — üstelik doğru tahminin
+     * ödülü ikinci adımı kaldırmaktı. `ReauthService` aynı kontrolü kısıtlamanın ve kaydın
+     * içinden yapıyor.
+     */
+    private readonly reauth: ReauthService,
     private readonly sessions: SessionService,
     /**
      * For the SMB credential, resealed in the same transaction as the password change.
@@ -102,10 +128,12 @@ export class MeController {
       );
     }
 
-    const user = await this.load(session.organizationId, session.userId);
-    if (!(await this.passwords.verify(user.password_hash, parsed.data.currentPassword))) {
-      throw new UnauthorizedException('the current password is wrong');
-    }
+    await this.reauth.require(
+      session.organizationId,
+      session.userId,
+      parsed.data.currentPassword,
+      request,
+    );
 
     const hash = await this.passwords.hash(parsed.data.newPassword);
     // ONE transaction for both. Writing the Argon2 hash here and sealing the NT hash afterwards
@@ -199,6 +227,15 @@ export class MeController {
     const parsed = confirmSchema.safeParse(body);
     if (!parsed.success) throw new UnauthorizedException();
 
+    // Paroladan ÖNCE hiçbir şey harcanmıyor: kod `confirmEnrolment` içinde tüketiliyor, o yüzden
+    // yeniden kimlik doğrulama ondan önce.
+    await this.reauth.require(
+      session.organizationId,
+      session.userId,
+      parsed.data.password,
+      request,
+    );
+
     const codes = await this.mfa.confirmEnrolment(
       session.organizationId,
       session.userId,
@@ -266,6 +303,9 @@ export class MeController {
    *
    * The session says who this is; the password says they are still at the keyboard. Both of the
    * operations that use this can lock the real owner out, so both ask.
+   *
+   * Gövdeyi okuyup `ReauthService`e devrediyor, ve kontrolün kendisi ORADA: burada durduğu sürece
+   * giriş kısıtlamasını atlıyordu.
    */
   private async reauthenticate(
     request: AuthenticatedRequest,
@@ -275,17 +315,21 @@ export class MeController {
     const parsed = passwordSchema.safeParse(body);
     if (!parsed.success) throw new UnauthorizedException();
 
-    const user = await this.load(session.organizationId, session.userId);
-    if (!(await this.passwords.verify(user.password_hash, parsed.data.password))) {
-      throw new UnauthorizedException();
-    }
+    await this.reauth.require(
+      session.organizationId,
+      session.userId,
+      parsed.data.password,
+      request,
+    );
     return session;
   }
 
   private async load(organizationId: string, userId: string): Promise<UserRow> {
     const rows = await this.db.withTenant(organizationId, (q) =>
       q.query<UserRow>(
-        `SELECT u.id::text AS id, u.username, u.email, u.password_hash, o.slug,
+        // Parola özeti ARTIK SORULMUYOR: doğrulamanın tamamı `ReauthService`e taşındı ve satırı
+        // o kendisi okuyor. Sorulmayan bir sütun yanlışlıkla da dönemez.
+        `SELECT u.id::text AS id, u.username, u.email, o.slug,
                 -- Not the hash itself — only WHETHER there is one. The value is a sealed NT hash
                 -- and has no business leaving the identity path; the boolean is the only part a
                 -- screen needs.

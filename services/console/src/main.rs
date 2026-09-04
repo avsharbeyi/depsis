@@ -67,7 +67,7 @@ mod unix {
     use std::time::{Duration, Instant};
 
     use depsis_console::protocol::{ClientMessage, Open, ServerMessage, MAX_LINE_BYTES};
-    use depsis_console::pty::{find_shell, Pty};
+    use depsis_console::pty::{find_setsid, find_shell, Pty};
     use depsis_console::session::{
         privilege_from, Deadlines, Expiry, Limits, LineExtractor, DEFAULT_IDLE_TIMEOUT,
         DEFAULT_MAX_AGE, MIN_CONFIGURABLE,
@@ -143,6 +143,17 @@ mod unix {
         let Some(shell) = find_shell() else {
             return fail("no /bin/bash and no /bin/sh; there is no console to serve");
         };
+
+        // A missing `setsid` is not fatal — the shell still starts — but it takes the controlling
+        // terminal with it, and a console where Ctrl-C does nothing is a support call. Once here,
+        // where the operator looks when the console misbehaves, rather than per session.
+        if find_setsid().is_none() {
+            eprintln!(
+                "depsis-console: no setsid on this system; sessions will open WITHOUT a \
+                 controlling terminal, so Ctrl-C and window resizes will not reach the programs \
+                 running in the shell"
+            );
+        }
 
         let listener = match listener_from_systemd() {
             Ok(l) => l,

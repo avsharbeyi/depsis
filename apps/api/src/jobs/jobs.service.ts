@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 
 import { DbService } from '../db/db.service.js';
@@ -23,8 +23,16 @@ export interface ClaimedJob {
   maxAttempts: number;
 }
 
-/** What `finish` did with the job, or null if the caller no longer held the lease. */
-export type FinishOutcome = 'succeeded' | 'dead' | 'queued' | null;
+/**
+ * What `finish` did with the job, or null if the caller no longer held the lease.
+ *
+ * `failed` is the narrow fourth case and it is NOT `dead`: the job still had attempts left, but
+ * re-queueing it would have produced a second scheduled job of a kind that allows only one — its
+ * own successor, which the handler queues before doing the work. The turn is lost; the chain is
+ * not. `dead` means the queue gave up after exhausting the attempts, and blurring the two would
+ * blunt the one alarm ADR-0003 §17 asks for.
+ */
+export type FinishOutcome = 'succeeded' | 'dead' | 'queued' | 'failed' | null;
 
 interface JobRow {
   id: string;
@@ -60,13 +68,57 @@ interface ClaimRow {
  * requirement that jobs be idempotent is not advice.
  */
 @Injectable()
-export class JobsService {
+export class JobsService implements OnModuleInit {
   private readonly logger = new Logger(JobsService.name);
 
   /** Identifies this process in `worker_id`, so a lease can be traced to who holds it. */
   readonly workerId = `${process.pid}-${randomUUID().slice(0, 8)}`;
 
+  /** The self-scheduling chain that keeps `job_history` from growing without end. */
+  static readonly PRUNE_KIND = 'jobs.prune';
+  /** A day between rounds. Retention is measured in weeks, so anything finer is churn. */
+  static readonly PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  /** Rows per DELETE. ADR-0003 forbids the long transaction a single unbounded DELETE would be. */
+  static readonly PRUNE_BATCH = 5_000;
+  /** Batches per round, so one turn cannot hold a worker for an hour on a year of backlog. */
+  static readonly PRUNE_BATCHES_PER_ROUND = 20;
+  /** Ordinary rows: a week. Long enough to explain what happened yesterday. */
+  static readonly PRUNE_KEEP_DAYS = 7;
+  /**
+   * `dead` and `failed` rows: three months.
+   *
+   * ADR-0003 §17 keeps a dead job precisely so "an alarm can find it", and a week is not long
+   * enough for that to be true — a failure that lands during a holiday would be swept away before
+   * anybody came back to look.
+   */
+  static readonly PRUNE_KEEP_TERMINAL_DAYS = 90;
+
   constructor(private readonly db: DbService) {}
+
+  /**
+   * Seed the pruning chain for every tenant on this box.
+   *
+   * SEEDED AT BOOT rather than only chained, and 0055 is the reason: `job_queue.run_after` is the
+   * only durable timer this product has, so a chain whose last link never queued its successor is
+   * a chain that stops forever with no symptom at all. The same shape cost the appliance its whole
+   * indexing run in the field.
+   *
+   * `all_organization_ids()` rather than a plain read of `organizations`: there is no tenant
+   * context at boot, and under RLS a context-free read of that table returns zero rows — silently.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      for (const organizationId of await this.db.tenantIds()) {
+        await this.schedulePrune(organizationId, new Date());
+      }
+    } catch (error) {
+      // Not fatal. A box that cannot seed the sweep still works; it just accumulates history, and
+      // saying so is what makes that finite rather than invisible.
+      this.logger.error(
+        `could not seed the job history sweep: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 
   /**
    * Put a job on the queue for one tenant.
@@ -255,6 +307,14 @@ export class JobsService {
         `job ${jobId} is dead after exhausting its attempts: ${error ?? 'no reason given'}`,
       );
     }
+    if (result === 'failed') {
+      // Denemesi kalmıştı ama yeniden kuyruğa alınamadı: ardılı zaten kuyrukta. Ölü değil, ama
+      // sessiz de değil — bu tur kaybedildi, ve neyi kaybettiğini yalnız burası söylüyor.
+      this.logger.warn(
+        `job ${jobId} was not retried because a successor of its kind is already queued: ` +
+          `${error ?? 'no reason given'}`,
+      );
+    }
     return result;
   }
 
@@ -281,5 +341,73 @@ export class JobsService {
       if (rows[0]?.locked !== true) return { acquired: false };
       return { acquired: true, value: await work() };
     });
+  }
+
+  // ─── history retention ──────────────────────────────────────────────────────
+
+  /**
+   * Put the next sweep on the queue, or leave the one that is already there.
+   *
+   * `ON CONFLICT DO NOTHING` against `job_queue_one_scheduled_jobs_prune` (migration 0058), the
+   * same shape the reconciliation and drain chains use: without something to conflict WITH, every
+   * restart would leave one more copy behind.
+   */
+  async schedulePrune(organizationId: string, runAfter: Date): Promise<void> {
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `INSERT INTO public.job_queue (organization_id, kind, payload, run_after, max_attempts)
+         VALUES ($1, $2, '{}'::jsonb, $3, 3)
+         ON CONFLICT DO NOTHING`,
+        [organizationId, JobsService.PRUNE_KIND, runAfter],
+      ),
+    );
+  }
+
+  /** Bring the waiting sweep forward, for when a round hit its ceiling with rows still to go. */
+  async hurryUpPrune(organizationId: string): Promise<void> {
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `UPDATE public.job_queue SET run_after = now()
+          WHERE organization_id = $1 AND kind = $2 AND status = 'queued'`,
+        [organizationId, JobsService.PRUNE_KIND],
+      ),
+    );
+  }
+
+  /**
+   * Delete ONE BATCH of expired history rows, and say how many went.
+   *
+   * `finish_job` writes every completed job here and nothing ever removed one, while the drain
+   * chain re-queues itself every five seconds: roughly seventeen thousand rows per tenant per day,
+   * six million in a year. Nothing on any screen said so and there was no way to prune without a
+   * terminal.
+   *
+   * ONE BATCH PER CALL, on purpose. ADR-0003 rules out the long transaction a single unbounded
+   * DELETE would be on an appliance that has been running for a year — it would hold locks on the
+   * table the jobs screen and the event stream both read, for minutes. The caller loops.
+   *
+   * `withTenant`, not a SECURITY DEFINER function: `depsis_app` already holds DELETE on this table
+   * and its tenant policy already limits it to its own rows, so the sweep runs UNDER row level
+   * security rather than around it.
+   */
+  async pruneHistory(organizationId: string, batch = JobsService.PRUNE_BATCH): Promise<number> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ id: string }>(
+        `DELETE FROM public.job_history
+           WHERE id IN (
+             SELECT id FROM public.job_history
+              WHERE organization_id = $1
+                AND CASE
+                      WHEN status IN ('dead', 'failed')
+                        THEN finished_at < now() - make_interval(days => $2::integer)
+                      ELSE finished_at < now() - make_interval(days => $3::integer)
+                    END
+              LIMIT $4
+           )
+         RETURNING id::text AS id`,
+        [organizationId, JobsService.PRUNE_KEEP_TERMINAL_DAYS, JobsService.PRUNE_KEEP_DAYS, batch],
+      ),
+    );
+    return rows.length;
   }
 }

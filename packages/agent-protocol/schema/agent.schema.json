@@ -394,7 +394,7 @@
           "description": "Where it lands, relative to the share root. Components are validated individually.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "expected_bytes": {
@@ -444,7 +444,7 @@
           "description": "Where the file is, relative to the share root. Components are validated individually,\nso no element can be `..`, a separator or an absolute-looking string.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "share": {
@@ -488,7 +488,7 @@
           "description": "Where it is now, relative to the share root. The last element is the entry's own name.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "op": {
@@ -502,7 +502,7 @@
           "description": "Where it goes, relative to the same share root. The last element is the new name; the\nelements before it must already exist and be directories.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         }
       },
@@ -522,7 +522,7 @@
           "description": "The file to read, relative to the share root. The last element is its name.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "max_bytes": {
@@ -559,7 +559,7 @@
           "description": "Where the copy goes, relative to the same share root. The last element is the new name;\nevery element before it must already exist and be a directory.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         }
       },
@@ -584,7 +584,7 @@
           "description": "Bu addan SONRAKİLERİ ver — sayfalama imleci.\n\n── NEDEN VAR ────────────────────────────────────────────────────────────────────\n\nBir listeleme `MAX_LISTING` satırda kesiliyor, çünkü bir yanıt kontrol soketinde tek\nbir satır. O sınır kalıyor, ama sınıra çarpan çağıranın YAPACAK BİR ŞEYİ olmalıydı ve\nyoktu: sahada 20.246 klasörlük bir paylaşım kökü, dizinde yalnız yarısıyla göründü ve\nhiçbir zaman tamamlanamadı. Sayaç kalıcı olarak yanlıştı ve dosyalar kalıcı olarak\neksikti.\n\n── NEDEN AD, NEDEN OFSET DEĞİL ──────────────────────────────────────────────────\n\nSıra numarası bir dizini iki çağrı arasında değişmediği varsayımına dayanır, ve o\nvarsayım bir NAS'ta yanlış: sayfalar arasında bir dosya eklenirse ofset kayar ve\naradaki her ad ya iki kez ya hiç dönmez. Ad ise kendi başına duruyor — silinmiş bir\naddan sonrası hâlâ iyi tanımlı.\n\nSıra bunun için SABİT: girdiler ada göre bayt sırasıyla veriliyor. `readdir`ın kendi\nsırası dosya sistemine ait ve iki çağrı arasında aynı kalacağının garantisi yok.",
           "anyOf": [
             {
-              "$ref": "#/$defs/SafeComponent"
+              "$ref": "#/$defs/EntryName"
             },
             {
               "type": "null"
@@ -599,7 +599,7 @@
           "description": "Relative to the share root. Empty means the share root itself.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "share": {
@@ -625,7 +625,7 @@
           "description": "Relative to the snapshot's root. Empty means the snapshot of the share root itself.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "share": {
@@ -652,7 +652,7 @@
           "description": "The file to read, relative to the SNAPSHOT's root. The last element is its name.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "max_bytes": {
@@ -692,7 +692,7 @@
           "description": "Where the restored copy goes, relative to the LIVE share root. The last element is the\nnew name and must not already exist; every element before it must.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         }
       },
@@ -1016,14 +1016,14 @@
           "description": "Yedek ağacındaki yol — `Dosyalar/<paylaşım>/…`. Çağıran veriyor, ajan türetmiyor:\nyedek ağacının düzeni API'nin kararı ve ajanın onu ikinci kez bilmesi, iki yerde\nayrı ayrı değişebilen bir kural olurdu.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "live": {
           "description": "Paylaşım içindeki yol.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "op": {
@@ -1125,7 +1125,7 @@
         "from": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "max_bytes": {
@@ -1151,7 +1151,7 @@
         "to": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         }
       },
@@ -1174,7 +1174,7 @@
           "description": "Yedek ağacındaki yol (`Dosyalar/...` ya da `DEPSIS-YEDEK/silinenler/...`).",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "max_bytes": {
@@ -1191,6 +1191,13 @@
           "type": "string",
           "const": "restore_file_from_backup"
         },
+        "owner_gid": {
+          "$ref": "#/$defs/PosixId"
+        },
+        "owner_uid": {
+          "description": "Geri getirilen dosya KİMİN olacak.\n\nAlanın yokluğu bir eksiklik değil bir arızaydı: ara dosya ajanın (kök) elinde 0600 ile\naçılıyor ve hiç `set_owner` görmeden yayımlanıyordu, yani geri getirilen dosya diskte\n`root:root 0600` olarak oturuyordu. Ekran \"geri getirildi\" diyor, dosya listede\ngörünüyor, ve sahibi onu ağ sürücüsünden açmaya kalkınca \"erişim reddedildi\" alıyordu —\ndüzeltmenin terminalsiz bir yolu da yoktu.\n\nYEDEĞİN SAHİBİ DEĞİL, GERİ GETİRENİN kimliği. Dosya, onu geri getiren hesabın\nsilebileceği bir dosya olmalı; yedekteki kopya, o hesap var olmadan önce yazılmış\nolabilir. Aynı gerekçe `restore_from_snapshot`ta da yazılı.\n\n`PosixId` 0'ı ve ayrılmış aralığın dışını AYRIŞTIRMA anında reddediyor, yani kimliği\natlayan bir API sessizce kök sahipli bir dosya üretemiyor; istek hiç `Request` olmuyor.",
+          "$ref": "#/$defs/PosixId"
+        },
         "share": {
           "description": "Canlı ağaçtaki paylaşım ve onun içindeki yol.",
           "$ref": "#/$defs/SafeComponent"
@@ -1201,7 +1208,7 @@
         "to": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         }
       },
@@ -1213,7 +1220,9 @@
         "to",
         "staging_name",
         "offset",
-        "max_bytes"
+        "max_bytes",
+        "owner_uid",
+        "owner_gid"
       ]
     },
     {
@@ -1249,7 +1258,7 @@
         "path": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         }
       },
@@ -1270,7 +1279,7 @@
         "path": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         }
       },
@@ -1287,7 +1296,7 @@
         "from": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "op": {
@@ -1297,7 +1306,7 @@
         "to": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         }
       },
@@ -1322,7 +1331,7 @@
         "path": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         }
       },
@@ -1661,7 +1670,7 @@
         "path": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "share": {
@@ -1695,7 +1704,7 @@
           "description": "Relative to the share root; the LAST element is the name of the directory to create.\nEvery element before it must already exist and be a directory.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "share": {
@@ -1815,7 +1824,7 @@
           "description": "Relative to the share root. EMPTY names the share root itself, which is the ordinary\ncase for a share-wide grant. Unlike `CreateDirectory` — where an empty path would mean\ncreating the share — there is nothing to lose here: the caller already named the share,\nand granting on the root of the tree it named is the point.\n\n`.depsis/` is refused, like everywhere else a caller-supplied path is accepted.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SafeComponent"
+            "$ref": "#/$defs/EntryName"
           }
         },
         "share": {
@@ -1952,6 +1961,10 @@
         "by_id",
         "wwn"
       ]
+    },
+    "EntryName": {
+      "description": "Bir dosyanın ya da klasörün KENDİ ADI — bir yol bileşeni, bir argüman değil.\n\n── NEDEN `SafeComponent`TEN AYRI BİR TİP ────────────────────────────────────────────────────\n\n`SafeComponent`in dört kuralı var ve üçü her iki yerde de doğru: NUL yok, ayraç yok, `.` ve\n`..` yok. Bunlar `openat2(RESOLVE_BENEATH)` confinement'ının dayandığı kurallar ve burada da\naynen duruyorlar.\n\nDördüncü kural — BAŞTA TİRE OLAMAZ — argv'yi koruyor: `zfs`, `zpool`, `tar` ve `smartctl`\nkendi argümanlarını ayrıştırıyor, yani `-` ile başlayan bir operand ayrı bir argüman olarak\ngelse bile bir BAYRAK oluyor. O gerekçe bir havuz adı, bir `by-id` adı, bir anlık görüntü adı\nya da `tar`a verilen klasör adı için geçerli. Bir DOSYA ADI için geçerli değil: çekirdek için\n`-notlar.txt` sıradan bir addır, SMB'den kaydedilebilir, ve `openat2`ye giden bir bileşende\ntirenin hiçbir anlamı yoktur.\n\n── AYRIMIN YOKLUĞUNUN BEDELİ ÖLÇÜLDÜ ────────────────────────────────────────────────────────\n\nTek tip her iki yerde de kullanılırken `-` ile başlayan bir dosya iki kez kayboluyordu.\n`dispatch::list_directory` girdileri `filter_map` içinde ayrıştırıyor, yani ad SESSİZCE\nlisteden düşüyordu: dosya web dizininde ve aramada hiç görünmüyordu. Daha kötüsü, artımlı\nyedek turu `zfs diff`ten gelen ham yolu kopyalamaya çalıştığında ajan bütün isteği\n\"unparseable request\" diye reddediyor, tur düşüyor ve TABAN İLERLEMİYORDU — yani o dosyanın\nyazıldığı günden sonra paylaşımın hiçbir değişikliği yedeğe girmiyordu.\n\n`SafeComponent` argv'ye ulaşan operandlarda olduğu gibi duruyor; bu tip yalnız yol ve girdi\nadı konumlarında.",
+      "type": "string"
     },
     "Ipv4Prefix": {
       "description": "The IPv4 range a controller-hosted network hands out: `a.b.c.0/24`, and nothing else.\n\nONLY /24, and only RFC1918. Both narrowings are deliberate.\n\nA /24 because the alternative is arithmetic: a pool and a route have to be derived from the\nprefix, and deriving them for an arbitrary length means computing broadcast addresses and\nusable ranges in a root daemon for no gain a household will ever notice. 254 addresses is more\ndevices than a house has.\n\nRFC1918 because the value becomes a ROUTE pushed to every member. A public range here would\nsilently blackhole part of the real internet on every device that joins — and the person who\ntyped it would experience that as \"the internet broke after I set up remote access\", with\nnothing connecting the two.\n\nWhat this type CANNOT check is the one collision that actually happens: the household's own\nLAN. `192.168.1.0/24` is a legal RFC1918 /24 and it is also the most common home network in\nthe world, and a member sitting at home would get a route that fights their own router. The\ninterface defaults away from the common ranges and says so; the type cannot know.",
@@ -3664,8 +3677,8 @@
           "format": "int64"
         },
         "name": {
-          "description": "A `SafeComponent`, not a `String`: a name the agent cannot address is a name the API must\nnot be handed, because a row written for it would be permanently unreachable.",
-          "$ref": "#/$defs/SafeComponent"
+          "description": "An `EntryName`, not a `String`: a name the agent cannot address is a name the API must\nnot be handed, because a row written for it would be permanently unreachable.\n\nVe `SafeComponent` DEĞİL. O tip baştaki tireyi reddediyor — argv'ye giden bir operand için\ndoğru — ve burada `-notlar.txt` gibi tamamen olağan bir dosyayı listeden SESSİZCE\ndüşürüyordu: dosya web dizininde hiç görünmüyordu.",
+          "$ref": "#/$defs/EntryName"
         },
         "size": {
           "type": "integer",
@@ -3762,6 +3775,10 @@
         "holds_system"
       ]
     },
+    "EntryName": {
+      "description": "Bir dosyanın ya da klasörün KENDİ ADI — bir yol bileşeni, bir argüman değil.\n\n── NEDEN `SafeComponent`TEN AYRI BİR TİP ────────────────────────────────────────────────────\n\n`SafeComponent`in dört kuralı var ve üçü her iki yerde de doğru: NUL yok, ayraç yok, `.` ve\n`..` yok. Bunlar `openat2(RESOLVE_BENEATH)` confinement'ının dayandığı kurallar ve burada da\naynen duruyorlar.\n\nDördüncü kural — BAŞTA TİRE OLAMAZ — argv'yi koruyor: `zfs`, `zpool`, `tar` ve `smartctl`\nkendi argümanlarını ayrıştırıyor, yani `-` ile başlayan bir operand ayrı bir argüman olarak\ngelse bile bir BAYRAK oluyor. O gerekçe bir havuz adı, bir `by-id` adı, bir anlık görüntü adı\nya da `tar`a verilen klasör adı için geçerli. Bir DOSYA ADI için geçerli değil: çekirdek için\n`-notlar.txt` sıradan bir addır, SMB'den kaydedilebilir, ve `openat2`ye giden bir bileşende\ntirenin hiçbir anlamı yoktur.\n\n── AYRIMIN YOKLUĞUNUN BEDELİ ÖLÇÜLDÜ ────────────────────────────────────────────────────────\n\nTek tip her iki yerde de kullanılırken `-` ile başlayan bir dosya iki kez kayboluyordu.\n`dispatch::list_directory` girdileri `filter_map` içinde ayrıştırıyor, yani ad SESSİZCE\nlisteden düşüyordu: dosya web dizininde ve aramada hiç görünmüyordu. Daha kötüsü, artımlı\nyedek turu `zfs diff`ten gelen ham yolu kopyalamaya çalıştığında ajan bütün isteği\n\"unparseable request\" diye reddediyor, tur düşüyor ve TABAN İLERLEMİYORDU — yani o dosyanın\nyazıldığı günden sonra paylaşımın hiçbir değişikliği yedeğe girmiyordu.\n\n`SafeComponent` argv'ye ulaşan operandlarda olduğu gibi duruyor; bu tip yalnız yol ve girdi\nadı konumlarında.",
+      "type": "string"
+    },
     "ImportablePoolView": {
       "description": "`zpool import` çıktısındaki bir havuz, dışarıya anlatılan hâli.\n\n`state` ZFS'İN KENDİ KELİMESİ, çevrilmeden geçiyor. `DEGRADED` bir havuzdan dosya\nkurtarılabilir ve `FAULTED` bir havuzdan çoğu zaman kurtarılamaz; bu ikisini \"sorunlu\" diye\ntek kelimeye indirmek, kullanıcıya yapabileceği ile yapamayacağını ayırt ettirmemek olurdu.",
       "type": "object",
@@ -3855,10 +3872,6 @@
         "rss_bytes",
         "protected"
       ]
-    },
-    "SafeComponent": {
-      "description": "A single path component under a share root — never a path, never absolute.\n\nADR-0005 forbids treating a path as identity, and ADR-0006 confines every filesystem access\nto `openat2(RESOLVE_BENEATH)` from a long-lived root fd. Both break if a caller can smuggle\n`/` or `..` through, so this type refuses them rather than sanitising.",
-      "type": "string"
     },
     "SnapshotEntry": {
       "description": "One snapshot on the wire.\n\nIts own type rather than `snapshots::SnapshotInfo` for the reason every other wire type here is\nseparate: the protocol is a contract with another process, and a parser's internal shape\nchanging must not silently change what the API receives.",

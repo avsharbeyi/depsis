@@ -277,6 +277,9 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     const user = await users.create(orgA, 'kapanacak', 'member', 'h');
     const off = await users.update(orgA, user.id, { disabled: true });
     expect(off.disabled_at).not.toBeNull();
+    // Adın DÖNMESİ: `UPDATE ... RETURNING`de `username` bir süre yoktu ve satır `UserRow` diye
+    // yazılı olduğu için kimse fark etmedi. Denetleyici SMB'yi tam bu alanla kesiyor.
+    expect(off.username).toBe('kapanacak');
 
     const on = await users.update(orgA, user.id, { disabled: false });
     expect(on.disabled_at).toBeNull();
@@ -342,8 +345,14 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     );
 
     const user = await watched.create(orgA, 'kapatilacak', 'member', 'hash');
-    await watched.update(orgA, user.id, { disabled: true });
-    await watched.revokeSmb(orgA, 'kapatilacak');
+    const off = await watched.update(orgA, user.id, { disabled: true });
+    // DÖNEN SATIRDAN, sabit bir addan değil — ve fark bu testin bir regresyonu kaçırmasıydı.
+    // `update`in `RETURNING`i `username` taşımıyordu, yani denetleyicinin gönderdiği ad
+    // `undefined`dı; burada ad elle yazıldığı için çağrı doğru görünüyordu. Ajana giden istek
+    // ad taşımayınca düşüyor ve kuyruktaki iş "kesilecek ad yok" deyip BAŞARILI bitiyor:
+    // kapatılan hesabın Samba parolası çalışmaya devam ediyordu.
+    expect(off.username).toBe('kapatilacak');
+    await watched.revokeSmb(orgA, off.username);
 
     expect(calls).toContainEqual({ op: 'revoke_smb_credential', login: 'kapatilacak' });
   });

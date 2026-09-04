@@ -145,6 +145,65 @@ if command -v podman >/dev/null 2>&1; then
   id -u depsis-apps >/dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin depsis-apps
 fi
 
+# ── 5d. işletim sistemi güvenlik güncellemeleri ──────────────────────────────
+#
+# Bu kutu 443'ü ve 445'i dinliyor, ve dinleyen yazılım DEPSIS'in değil Debian'ın: nginx, smbd,
+# openssl. DEPSIS'in kendi güncelleyicisi (tools/install/update.sh) yalnız DEPSIS'in kaynağını
+# yeniliyor, Debian paketlerine hiç dokunmuyor. Yani bir Samba CVE'si yayınlandığında sahibinin
+# elinde tek yol terminale girip `apt upgrade` yazmaktı — hem ürünün kabul ölçütünün dışında hem
+# de pratikte hiç yapılmayan bir şey. Yamasız bir NAS, ağdaki en açık kapı.
+#
+# YALNIZ GÜVENLİK KAYNAĞI, ve liste önce TEMİZLENİYOR: apt'ta bir liste seçeneğine atama EKLEME
+# yapar, yani `#clear` olmadan bizim desenimiz Debian'ın varsayılanlarının yanına yazılır ve
+# "yalnız güvenlik" diye bir kısıtlama hiç oluşmaz. Dışarıda bıraktıklarımız kasıtlı: PGDG bir
+# gece postgresql'i major sürüm atlatabilir, NodeSource API'nin altındaki çalışma zamanını
+# değiştirir, ZeroTier ağ katmanıdır. Üçü de sürümü kasten sabit tutulan şeyler.
+#
+# KENDİLİĞİNDEN YENİDEN BAŞLATMA KAPALI. Bir NAS'ın bir dosya aktarımının ortasında yeniden
+# başlaması, yamasız kalmasından kötüdür. Yeniden başlatma gerekiyorsa Debian
+# /var/run/reboot-required dosyasını bırakır; o dosyayı gösterip kararı sahibine bırakmak arayüzün
+# işi (§12), bu betiğin değil.
+say 'güvenlik güncellemeleri'
+apt-get install -y -qq unattended-upgrades >/dev/null || \
+  echo 'UYARI: unattended-upgrades kurulamadı; işletim sistemi güvenlik yamaları uygulanmaz.'
+
+if [ -d /etc/apt/apt.conf.d ]; then
+  # 52: Debian'ın kendi 50unattended-upgrades'inden SONRA okunur, o yüzden onun yazdığını ezer.
+  # Heredoc TIRNAKLI: `${distro_codename}` apt'ın kendi değişkeni, kabuğun değil.
+  cat > /etc/apt/apt.conf.d/52depsis-security-only <<'APTCONF'
+// DEPSIS — deploy/iso/firstboot.sh tarafından yazıldı.
+//
+// Bu dosya 50unattended-upgrades'ten sonra okunur ve onu ezer. Amacı tek cümle: bu cihaz
+// güvenlik yamalarını kendisi alsın, başka hiçbir şeyi kendiliğinden değiştirmesin.
+
+// Atama listeye EKLER; kısıtlamanın gerçekten kısıtlaması için ikisi de önce temizleniyor.
+#clear Unattended-Upgrade::Allowed-Origins;
+#clear Unattended-Upgrade::Origins-Pattern;
+
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+
+// Bir NAS aktarımın ortasında kendini yeniden başlatmaz. Gerekiyorsa Debian
+// /var/run/reboot-required bırakır ve karar cihazın sahibinindir.
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+APTCONF
+
+  # Paketin kurulumu periyodik çalışmayı bir debconf sorusuyla açıyor ve gözetimsiz bir kurulumda
+  # o sorunun cevabı kutuya göre değişebiliyor — "kurulu ama hiç koşmuyor" hâli, hiç kurulmamış
+  # olmakla aynı şey ama yeşil görünüyor. Bu yüzden açıkça yazılıyor.
+  cat > /etc/apt/apt.conf.d/20auto-upgrades <<'APTCONF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+// İndirilen .deb'ler sistem diskinde birikir, ve bu üründe sistem diskini doldurmak
+// PostgreSQL'i yazamaz hâle getirmek demektir.
+APT::Periodic::AutocleanInterval "7";
+APTCONF
+
+  systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+fi
+
 # ── 6. kaynak ────────────────────────────────────────────────────────────────
 say 'DEPSIS kaynağı'
 if [ ! -f "$REPO/tools/install/install.sh" ]; then

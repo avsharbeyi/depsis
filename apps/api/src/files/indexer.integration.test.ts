@@ -467,6 +467,23 @@ describeDb('reconciling a share with the disk', () => {
     expect(await paths()).toEqual([]);
   });
 
+  it('deletes NOTHING when the share ROOT itself is missing from disk', async () => {
+    // ── HAVUZ BAĞLI DEĞİL ─────────────────────────────────────────────────────────────────
+    //
+    // Havuz içe aktarılmamış ya da veri kümesi bağlanmamışken /srv/depsis duruyor ama paylaşımın
+    // dizini yok, yani KÖK dahil her yol `not_found`. Eski hâlde kökün cevabı yalnız atlanıyordu
+    // (kökün satırı yok, silinecek bir şey yok) ve tur bayat klasörlerle devam ediyordu: her biri
+    // 'gone' → alt ağacın bütün satırları, KLASÖR YETKİLERİ ve görev bağları CASCADE ile gidiyordu.
+    // Havuz geri gelince dosyalar yeni kimliklerle geri geliyor, yetkiler gelmiyor.
+    const folder = await row(null, 'folder', 'arsiv', '/arsiv');
+    await row(folder, 'file', 'a.txt', '/arsiv/a.txt', 3);
+
+    await expect(indexer(new Map()).reconcile(org, share, held, 'test')).rejects.toThrow(
+      /kökü diskte yok/,
+    );
+    expect(await paths()).toEqual(['/arsiv', '/arsiv/a.txt']);
+  });
+
   it('removes NOTHING under a folder whose listing had to be clipped', async () => {
     // The one mistake this pass must never make. A truncated listing says nothing about the names
     // it did not report, so reconciling half a directory and deleting the rest of the rows would
@@ -624,10 +641,27 @@ describeDb('reconciling a share with the disk', () => {
   it('removes a folder whose directory is gone', async () => {
     const folder = await row(null, 'folder', 'silinmis', '/silinmis');
     await row(folder, 'file', 'a.txt', '/silinmis/a.txt', 3);
-    // Not in the fake disk at all: the listing answers `not_found`.
-    const result = await indexer(new Map()).reconcileOne(org, share, ['silinmis'], 'test');
+    // The share root reads fine and does not contain it: the folder is genuinely gone. The disk
+    // MUST carry a root — an empty map would mean "the storage is not there", which is the case
+    // below and answers differently.
+    const disk: Disk = new Map([['', { entries: [] }]]);
+    const result = await indexer(disk).reconcileOne(org, share, ['silinmis'], 'test');
     expect(result.removed).toBe(2);
     expect(await paths()).toEqual([]);
+  });
+
+  it('deletes NOTHING through the fast path when the share ROOT is missing too', async () => {
+    // Aynı ayrım, hızlı yolda. Havuz bağlı değilken paylaşımın altındaki her yol `not_found`
+    // dönüyor, ve tek bir Samba denetim satırı bir alt ağacın bütün satırlarını yetkileriyle
+    // birlikte sildirmeye yetiyordu. Kök de okunamıyorsa cevap "klasör silinmiş" değil
+    // "depolama yok": fırlatılıyor, indekse dokunulmuyor.
+    const folder = await row(null, 'folder', 'arsiv', '/arsiv');
+    await row(folder, 'file', 'a.txt', '/arsiv/a.txt', 3);
+
+    await expect(indexer(new Map()).reconcileOne(org, share, ['arsiv'], 'test')).rejects.toThrow(
+      /kökü diskte yok/,
+    );
+    expect(await paths()).toEqual(['/arsiv', '/arsiv/a.txt']);
   });
 
   it('keeps one row per directory however many events arrive', async () => {

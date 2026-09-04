@@ -74,9 +74,29 @@ function shortName(name: string): string {
   return trimmed.length <= 7 ? trimmed : `${trimmed.slice(0, 7)}…`;
 }
 
-/** The maximum the contract allows on one page. This screen has no cursor pagination, so it asks
- *  for as much as it is permitted and says "+" when the server admits there is more, rather than
- *  silently drawing a truncated folder as if it were the whole thing. */
+/**
+ * `POST /files/folders` gövdesi.
+ *
+ * TEK YERDE, çünkü bu kural iki yerde ayrı ayrı yazılmıştı ve biri yanlıştı: yükleme yolundaki
+ * `ensureFolder` seçili paylaşımı gönderiyor, "+ Klasör" düğmesi göndermiyordu. Sunucu `shareId`
+ * gelmeyince kiracının VARSAYILAN paylaşımını seçiyor — yani "Arşiv" seçiliyken kökte açılan bir
+ * klasör başka bir paylaşımda açılıyor, ekran "oluşturuldu" diyor ve klasör listede görünmüyordu.
+ *
+ * `shareId` YALNIZ ÜST DÜZEY bir klasörde: bir üst klasör varsa paylaşımı zaten o belirliyor ve
+ * sözleşme aynı soruyu iki kez cevaplamayı kabul etmiyor.
+ */
+export function folderBody(
+  name: string,
+  parentId: string | undefined,
+  shareId: string | undefined,
+): OpenApi.components['schemas']['CreateFolderRequest'] {
+  if (parentId !== undefined) return { name, parentId };
+  return shareId === undefined ? { name } : { name, shareId };
+}
+
+/** Sözleşmenin bir sayfada izin verdiği en büyük sayı. Sayfanın devamı artık imleçle geliyor
+ *  ("Daha fazla göster"), ama sayfa yine de tavana kadar isteniyor: bir klasörü açan kişinin
+ *  düğmeye hiç basmadan görebildiği satır sayısı ne kadar çoksa o kadar iyi. */
 /** One row of the share picker. Only what the switcher needs — the rest of `Share` is the
  *  Shares screen's business. */
 interface SharePick {
@@ -313,6 +333,18 @@ export function Files({
   /** Told apart from "no rows": an empty list is a fact about the folder, a failed read is not. */
   const [listFailed, setListFailed] = useState(false);
   const [more, setMore] = useState(false);
+  /**
+   * Sunucunun bir sonraki sayfa için verdiği opak imleç; liste bittiyse `undefined`.
+   *
+   * BU EKRAN İMLECİ HİÇ OKUMUYORDU. Tek bir sayfa çekiliyor ve `hasMore` yalnız alt bilgideki bir
+   * `+` işaretine dönüşüyordu — yani iki yüzden kalabalık bir klasörün geri kalanına ne
+   * sıralamayla, ne aramayla, ne seçimle, hiçbir yoldan ulaşılamıyordu. Sözleşme imleci §14'te
+   * baştan beri zorunlu tutuyor (`FileEntryPage.nextCursor`); eksik olan tek şey onu istemekti.
+   */
+  const [cursor, setCursor] = useState<string | undefined>(undefined);
+  /** Devamı gelirken. Düğme iki kez basılmamalı: aynı imleç iki kez harcanırsa aynı satırlar
+   *  listeye iki kez girer ve seçim iki farklı satırı aynı kimlikle işaretler. */
+  const [paging, setPaging] = useState(false);
   const [preview, setPreview] = useState<FileEntry | null>(null);
   const [query, setQuery] = useState('');
   const [term, setTerm] = useState('');
@@ -381,6 +413,9 @@ export function Files({
   const [order, setOrder] = useState<SortKey>('name');
   const [reloadKey, setReloadKey] = useState(0);
 
+  /** Kaçıncı listeleme yürürlükte. Yalnız "daha fazla" için: gecikmiş bir sayfanın kendi
+   *  klasörüne mi döndüğünü ayırt eden tek şey, ve state olsaydı cevabı beklerken eskimiş olurdu. */
+  const listRun = useRef(0);
   const bar = useRef<HTMLDivElement>(null);
   const pickFile = useRef<HTMLInputElement>(null);
   const pickDir = useRef<HTMLInputElement>(null);
@@ -580,25 +615,74 @@ export function Files({
     };
   }, [shares, shareId]);
 
+  /**
+   * Listenin bir sayfası: `from` yoksa ilk sayfa, varsa imleçten devamı.
+   *
+   * SORGU TEK YERDE KURULUYOR, ve bu şart. İlk sayfa ile devamı farklı parametrelerle sorulsaydı
+   * — sıralama ya da paylaşım biri düşseydi — sunucunun imleci başka bir sıranın ortasına
+   * düşerdi: "daha fazla" ya satır atlar ya da aynı satırları yeniden getirirdi.
+   */
+  function fetchPage(from: string | undefined) {
+    const q = trashed ? '' : term.trim();
+    const at = from === undefined ? {} : { cursor: from };
+    return q !== ''
+      ? api.GET('/search', { params: { query: { q, limit: PAGE, ...at, ...shareQuery } } })
+      : api.GET('/files', {
+          params: {
+            query: trashed
+              ? { trashed: true, limit: PAGE, ...at, ...shareQuery }
+              : parentId === undefined
+                ? { limit: PAGE, sort: order, ...at, ...shareQuery }
+                : { parentId, limit: PAGE, sort: order, ...at },
+          },
+        });
+  }
+
+  /**
+   * Listenin devamını getirir.
+   *
+   * SONSUZ KAYDIRMA DEĞİL, BİR DÜĞME. Kendiliğinden yüklenen bir liste alt bilgiyi — depolama
+   * özetini, sayacı, sıralama seçicisini — sürekli bir satır aşağı iterek erişilemez kılıyor, ve
+   * kullanıcı "hepsi bu kadar mı" sorusunun cevabını hiçbir zaman göremiyor.
+   */
+  async function loadMore(): Promise<void> {
+    const from = cursor;
+    if (from === undefined || paging) return;
+    // HANGİ LİSTEYE EKLENDİĞİ ÖNEMLİ. Sayfa yoldayken kullanıcı başka bir klasöre girebilir; o
+    // sayfa döndüğünde eklenecek liste artık başka bir klasörün listesidir, ve satırlar hiç
+    // bulunmadıkları bir klasörün altında görünürdü.
+    const run = listRun.current;
+    setPaging(true);
+    const result = await fetchPage(from);
+    setPaging(false);
+    if (run !== listRun.current) return;
+    if (result.response.status === 401) {
+      onUnauthenticated();
+      return;
+    }
+    if (result.data === undefined) {
+      // Ekrandaki satırlar duruyor: okunamayan şey devamı, ve gelen sayfayı silmek okunabilmiş
+      // olanı da cezalandırmak olurdu.
+      notify('error', 'Sonraki sayfa okunamadı.');
+      return;
+    }
+    const page = result.data;
+    setEntries((current) => merged(current ?? [], page.items, order));
+    setMore(page.hasMore);
+    setCursor(page.nextCursor);
+  }
+
   /* ── the listing ── */
   useEffect(() => {
     let cancelled = false;
+    // Yürürlükteki listelemenin numarası: yolda olan bir "daha fazla" cevabı bununla kendi
+    // listesine mi döndüğünü anlıyor.
+    listRun.current += 1;
     setEntries(null);
     setListFailed(false);
+    setCursor(undefined);
     void (async () => {
-      const q = trashed ? '' : term.trim();
-      const result =
-        q !== ''
-          ? await api.GET('/search', { params: { query: { q, limit: PAGE, ...shareQuery } } })
-          : await api.GET('/files', {
-              params: {
-                query: trashed
-                  ? { trashed: true, limit: PAGE, ...shareQuery }
-                  : parentId === undefined
-                    ? { limit: PAGE, sort: order, ...shareQuery }
-                    : { parentId, limit: PAGE, sort: order },
-              },
-            });
+      const result = await fetchPage(undefined);
       if (cancelled) return;
       if (result.response.status === 401) {
         onUnauthenticated();
@@ -607,7 +691,7 @@ export function Files({
       if (result.data === undefined) {
         // Not `setEntries([])`. A toast is transient chrome; the panel underneath it would be
         // asserting "Bu klasör boş" about a folder nobody managed to read.
-        notify('error', q !== '' ? 'Arama yapılamadı.' : 'Klasör okunamadı.');
+        notify('error', searching ? 'Arama yapılamadı.' : 'Klasör okunamadı.');
         setListFailed(true);
         setMore(false);
         return;
@@ -619,6 +703,7 @@ export function Files({
       // önce" derken alfabetik bir liste gösterirdi.
       setEntries(order === 'name' ? sorted(result.data.items) : result.data.items);
       setMore(result.data.hasMore);
+      setCursor(result.data.nextCursor);
       setTotal(result.data.total);
       // A selection that survives a folder change acts on rows the user can no longer see.
       setSel(new Set());
@@ -767,7 +852,7 @@ export function Files({
   async function createFolder(name: string): Promise<void> {
     setModal({ kind: 'none' });
     const { error, response } = await api.POST('/files/folders', {
-      body: parentId === undefined ? { name } : { name, parentId },
+      body: folderBody(name, parentId, shareId),
     });
     if (response.status === 401) {
       onUnauthenticated();
@@ -945,11 +1030,35 @@ export function Files({
     return { done, signedOut: false };
   }
 
-  /** The bin holds whatever one page of it holds — there is no total in the contract — so what is
-   *  on screen is what gets emptied, and the reader is told if there may be more behind it. */
+  /**
+   * Çöpü boşaltır — ekrandaki sayfayı değil, çöpün tamamını.
+   *
+   * KALAN SAYFALAR ÖNCE İMLEÇLE TOPLANIYOR. Ekranda ne varsa onun silinmesi, iki yüz elli öğelik
+   * bir çöpte düğmeye üç kez basmak ve her seferinde "boşaltmayı yineleyin" uyarısını okumak
+   * demekti; bir temizlik işinin kaç kez tekrarlanacağını kullanıcının kendisinin sayması, bu
+   * cihazda kabul edilebilir bir iş değil.
+   *
+   * Bir sayfa okunamazsa okunabilmiş olanlar YİNE siliniyor ve gerisi için uyarı veriliyor: yarım
+   * kalmış bir boşaltma, hiç başlamamış olandan iyidir ve çöp yinelenebilir bir yer.
+   */
   async function emptyTrash(): Promise<void> {
-    const list = entries ?? [];
-    const hadMore = more;
+    const list = [...(entries ?? [])];
+    let from = cursor;
+    let hadMore = false;
+    while (from !== undefined) {
+      const page = await api.GET('/files', {
+        params: { query: { trashed: true, limit: PAGE, cursor: from, ...shareQuery } },
+      });
+      if (page.data === undefined) {
+        hadMore = true;
+        break;
+      }
+      list.push(...page.data.items);
+      // Boş bir sayfa sonun kendisi: ilerlemeyen bir imleç bu döngüyü sonsuz kılardı ve sonsuz
+      // döngünün faturasını ödeyen, çöpünü boşaltmaya çalışan kullanıcı olurdu.
+      if (page.data.items.length === 0) break;
+      from = page.data.nextCursor;
+    }
     const { done, signedOut } = await permanentDelete(list, 'Çöp boşaltılıyor');
     // Only when something actually went, and never as an 'ok': a run in which every delete was
     // refused ended on a green tick telling the reader to do it again, and 'ok' dismisses itself
@@ -957,7 +1066,10 @@ export function Files({
     // that vanished. Nothing at all once the session went with it; the sign-in note carries the
     // tally there and this stack is no longer on screen.
     if (hadMore && done > 0 && !signedOut) {
-      notify('error', 'Çöpte bu sayfaya sığmayan öğeler kalmış olabilir; boşaltmayı yineleyin.');
+      notify(
+        'error',
+        'Çöpün tamamı okunamadı, bir kısmı silinmemiş olabilir; boşaltmayı yineleyin.',
+      );
     }
   }
 
@@ -1110,9 +1222,7 @@ export function Files({
 
   async function ensureFolder(name: string, parent: string | undefined): Promise<string | null> {
     const { data } = await api.POST('/files/folders', {
-      // `shareId` only for a TOP-LEVEL folder: with a parent, the parent decides the share and the
-      // API refuses to be told twice.
-      body: parent === undefined ? { name, ...shareQuery } : { name, parentId: parent },
+      body: folderBody(name, parent, shareId),
     });
     if (data !== undefined) return data.id;
     // 409 is the ordinary case, not a fault: the user is re-uploading a folder they already have,
@@ -1157,7 +1267,9 @@ export function Files({
       }
 
       try {
-        for await (const percent of uploadFile(file, target)) setProgress({ label, percent });
+        for await (const percent of uploadFile(file, target, shareId)) {
+          setProgress({ label, percent });
+        }
       } catch (problem) {
         failed += 1;
         // ── ÇAKIŞMA BİR HATA DEĞİL, BİR SORU ──────────────────────────────────────────
@@ -1272,11 +1384,16 @@ export function Files({
   // "200+ öğe" yazıyordu ve o "+" bir tahmin değil, bilginin yokluğuydu: ekran iki yüz satır
   // getiriyor ve arkasında ne olduğunu sormuyordu. Sunucu artık klasörün kendi sayısını
   // gönderiyor. Aramada toplam yok — arama bir klasör değil — ve orada eski davranış duruyor.
+  //
+  // EKRANDAKİ SAYI DA YAZIYOR, ama yalnız devamı varken: "350 öğe" derken iki yüz satır çizmek,
+  // sayfalama düğmesi eklendikten sonra bile okuyana neyin eksik olduğunu söylemiyordu.
   const meta =
     entries === null
       ? '—'
       : total !== undefined && !searching
-        ? `${total} öğe`
+        ? more
+          ? `${entries.length} / ${total} öğe`
+          : `${total} öğe`
         : `${entries.length}${more ? '+' : ''} ${searching ? 'sonuç' : 'öğe'}`;
 
   /**
@@ -2083,6 +2200,26 @@ export function Files({
             );
           })
         )}
+        {/* ── LİSTENİN DEVAMI ──────────────────────────────────────────────────────────────
+            Üçlü koşulun DIŞINDA ve listenin altında: gösterilecek satır varsa devamının da bir
+            yolu olmalı, ve o yol sayfanın sonunda durmalı — kullanıcının "hepsi bu mu" diye
+            sorduğu yerde.
+
+            Sonsuz kaydırma DEĞİL. Kendiliğinden yüklenen bir liste alt bilgiyi (depolama özeti,
+            sayaç, sıralama seçicisi) her seferinde bir sayfa daha aşağı iterek ulaşılamaz kılar,
+            ve kullanıcı listenin bittiğini hiçbir zaman göremez.
+
+            İMLEÇSİZ ÇİZİLMİYOR: `hasMore` doğru ama imleç yoksa basılacak bir şey de yok, ve
+            kapalı duran bir düğme hiç olmayandan kötü — bir şey vaat edip vermez. Liste
+            yenilenirken (`entries === null`) de yok: bir önceki klasörden kalan `hasMore`,
+            "Yükleniyor…" yazısının altında bir düğme bırakırdı. */}
+        {more && cursor !== undefined && entries !== null && entries.length > 0 && (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '10px 0 14px' }}>
+            <button type="button" className="mk" disabled={paging} onClick={() => void loadMore()}>
+              {paging ? 'Yükleniyor…' : 'Daha fazla göster'}
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="ffoot">
@@ -2563,6 +2700,24 @@ const SORTS: readonly { key: SortKey; label: string }[] = [
   { key: 'modified', label: 'Tarih' },
 ];
 
+/**
+ * Gelen sayfayı ekrandakinin sonuna ekler.
+ *
+ * ── SIRALAMA BİRİKMİŞ LİSTENİN TAMAMINA ─────────────────────────────────────────────────────
+ * Yalnız yeni sayfayı sıralamak klasörleri listenin ORTASINA serperdi: sunucu `kind`i ARTAN
+ * sıralıyor (`file` < `folder`), yani klasörler en son sayfada geliyor. Aynı karşılaştırma
+ * birikmiş listenin tamamına uygulanınca sonuç, tek sayfaya sığan bir klasörde görülenin aynısı
+ * oluyor — önce klasörler, sonra dosyalar.
+ *
+ * ── ADA GÖRE SIRALAMA DIŞINDA HİÇ DOKUNULMUYOR ──────────────────────────────────────────────
+ * Boyuta ya da tarihe göre dizilmiş bir listeyi yeniden dizmek, sunucunun cevabını silip ekranda
+ * "en büyük önce" derken alfabetik bir liste göstermek olurdu.
+ */
+export function merged(current: FileEntry[], page: FileEntry[], order: SortKey): FileEntry[] {
+  const next = [...current, ...page];
+  return order === 'name' ? sorted(next) : next;
+}
+
 function sorted(items: FileEntry[]): FileEntry[] {
   return [...items].sort((a, b) => {
     // Folders first, then Turkish collation: `İ` sorts with `I` and `ş` after `s`, which a
@@ -2600,8 +2755,20 @@ const CHUNK_BYTES = 5 * 1024 * 1024;
  * because it is the same string the generated client would have used and `contract.test.ts` fails
  * on a route the document does not describe.
  */
-async function* uploadFile(file: File, parentId: string | undefined): AsyncGenerator<number> {
-  const key = fingerprint(file, parentId);
+async function* uploadFile(
+  file: File,
+  parentId: string | undefined,
+  shareId: string | undefined,
+): AsyncGenerator<number> {
+  // ── KÖKE YÜKLEMEDE PAYLAŞIM ────────────────────────────────────────────────────────────────
+  // Bir üst klasör varsa paylaşımı o belirliyor; kökte belirleyen hiçbir şey yoktu ve sunucu
+  // `parentId` gelmeyince kiracının VARSAYILAN paylaşımını seçiyordu. Yani "Arşiv" seçiliyken
+  // köke bırakılan dosyanın bütün baytları başka bir paylaşıma iniyor, ekran "yüklendi" diyor ve
+  // dosya açık olan listede görünmüyordu. `folderBody`deki kuralın aynısı, bir kat aşağıda.
+  const share = parentId === undefined ? shareId : undefined;
+  // Parmak izinin ikinci parçası HEDEF: `undefined` iki farklı paylaşımın kökünü tek anahtara
+  // katlıyordu, ve yarım kalmış bir yükleme yanlış paylaşımdaki oturuma devam edebilirdi.
+  const key = fingerprint(file, parentId ?? (share === undefined ? undefined : `share:${share}`));
 
   // ── kaldığı yerden ──
   //
@@ -2626,10 +2793,7 @@ async function* uploadFile(file: File, parentId: string | undefined): AsyncGener
   }
 
   if (location === null) {
-    const metadata = [
-      `filename ${base64(file.name)}`,
-      ...(parentId === undefined ? [] : [`parentId ${base64(parentId)}`]),
-    ].join(',');
+    const metadata = uploadMetadata(file.name, parentId, share);
 
     const created = await fetch(`${API_BASE_URL}/uploads`, {
       method: 'POST',
@@ -2656,19 +2820,11 @@ async function* uploadFile(file: File, parentId: string | undefined): AsyncGener
     });
 
     if (sent.status === 409) {
-      // The server and this loop disagree about where the file is. The server is right — it seeks
-      // the staging file itself — so resume from what it says rather than retrying blindly.
-      const authoritative = Number(sent.headers.get('upload-offset') ?? '');
-      if (Number.isSafeInteger(authoritative) && authoritative >= 0) {
-        offset = authoritative;
+      const what = conflict(await problemCode(sent), sent.headers.get('upload-offset'));
+      if (what.kind === 'name-taken') throw new UploadNameClash(location, file.name);
+      if (what.kind === 'realign') {
+        offset = what.offset;
         continue;
-      }
-      // ── AYNI DURUM KODU, BAŞKA BİR OLAY ────────────────────────────────────────────────
-      // Ad çakışması da 409 ile geliyor ve hizalanacak bir konum taşımıyor. `code` olmadan bu
-      // dal onu "sunucu başka bir yerde" sanardı ve kullanıcı sonsuza kadar aynı yerden
-      // yüklemeyi denerdi.
-      if ((await problemCode(sent)) === 'name-taken') {
-        throw new UploadNameClash(location, file.name);
       }
       throw await failure(sent, `"${file.name}" yüklenemedi.`);
     }
@@ -2692,6 +2848,35 @@ async function* uploadFile(file: File, parentId: string | undefined): AsyncGener
  * `location` taşınıyor çünkü çözüm baytları yeniden göndermek değil: dosya ara alanda duruyor ve
  * aynı oturum üzerinden yayımlanacak.
  */
+/** Bir 409'un hangi 409 olduğu. */
+export type Conflict =
+  { kind: 'name-taken' } | { kind: 'realign'; offset: number } | { kind: 'other' };
+
+/**
+ * Yükleme sırasında gelen 409'u ayırır.
+ *
+ * ── SIRA ÖNEMLİ, VE BU BİR KUSURUN İZİ ──────────────────────────────────────────────────────
+ * Sunucu son PATCH'te `Upload-Offset`i yanıta YAZDIKTAN sonra yayımı deniyor, yani ad çakışması
+ * 409'unun üzerinde de bir `Upload-Offset` duruyor ve değeri dosyanın tam boyutu. Hizalama dalı
+ * önce baksaydı — ve bakıyordu — imleci dosyanın sonuna alır, döngüyü "bitti" sayar, kaldığı yer
+ * notunu siler ve ekran kullanıcıya hiç sorulmamış bir dosya için "yüklendi" derdi; baytlar ara
+ * alanda öksüz kalırdı. O yüzden ayırt edici işaret olan `code` ÖNCE soruluyor.
+ *
+ * ── BAŞLIK YOKSA HİZALAMA DA YOK ────────────────────────────────────────────────────────────
+ * `Number(null ?? '')` sıfır üretiyor. Başlıksız bir 409'u hizalama sayan bir dal, yüklemeyi
+ * baştan başlatıp aynı 409'a yeniden düşerdi — sonu olmayan bir döngü, ve faturası kullanıcının
+ * bağlantısı.
+ */
+export function conflict(code: string | null, offsetHeader: string | null): Conflict {
+  if (code === 'name-taken') return { kind: 'name-taken' };
+  if (offsetHeader === null) return { kind: 'other' };
+  const offset = Number(offsetHeader);
+  if (!Number.isSafeInteger(offset) || offset < 0) return { kind: 'other' };
+  // Sunucu bu oturumun gerçekten nerede kaldığını kendi ölçüyor (ara dosyayı seek ediyor), yani
+  // anlaşmazlıkta haklı olan taraf o; körlemesine yeniden denemek yerine oradan devam ediliyor.
+  return { kind: 'realign', offset };
+}
+
 /** Sunucunun RFC 9457 gövdesindeki `code`. Gövde okunamazsa `null` — ve o zaman bu bir tahmin
  *  değil, "bilmiyorum" olur. */
 async function problemCode(response: Response): Promise<string | null> {
@@ -2732,6 +2917,26 @@ async function probe(location: string, size: number): Promise<number | null> {
     { status: head.status, offset: number('upload-offset'), length: number('upload-length') },
     size,
   );
+}
+
+/**
+ * tus `Upload-Metadata`: oturumun nereye açılacağını söyleyen tek kanal.
+ *
+ * `parentId` VARSA `shareId` YOK. Paylaşımı üst klasör belirliyor, ve iki cevap bir fazla —
+ * klasör açmadaki (`folderBody`) kuralın aynısı. Kökte ise `shareId` şart: onsuz sunucu kiracının
+ * varsayılan paylaşımını seçiyor, dosyanın bütün baytları oraya iniyor ve kullanıcı yüklediği
+ * dosyayı açık olan listede bulamıyor.
+ */
+export function uploadMetadata(
+  filename: string,
+  parentId: string | undefined,
+  shareId: string | undefined,
+): string {
+  return [
+    `filename ${base64(filename)}`,
+    ...(parentId === undefined ? [] : [`parentId ${base64(parentId)}`]),
+    ...(parentId !== undefined || shareId === undefined ? [] : [`shareId ${base64(shareId)}`]),
+  ].join(',');
 }
 
 /**

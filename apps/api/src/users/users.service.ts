@@ -146,27 +146,11 @@ export class UsersService {
     return row;
   }
 
-  /**
-   * One account, with the hash a confirmation check needs.
-   *
-   * Separate from `find` rather than a column added to it: `UserRow` is what `toUser` turns into an
-   * API response, and a password hash on that type is one careless spread away from being served.
-   * The two callers that need the hash ask for it by name.
-   */
-  async findWithHash(
-    organizationId: string,
-    id: string,
-  ): Promise<(UserRow & { password_hash: string | null }) | null> {
-    const rows = await this.db.withTenant(organizationId, (db) =>
-      db.query<UserRow & { password_hash: string | null }>(
-        `SELECT id::text AS id, username, email, role, disabled_at, created_at, password_hash
-           FROM public.users
-          WHERE organization_id = $1 AND id = $2`,
-        [organizationId, id],
-      ),
-    );
-    return rows[0] ?? null;
-  }
+  // `findWithHash` BURADAN KALDIRILDI, ve yerine bir şey konmadı. Tek işi `UsersController`'ın
+  // iki ucuna (parola sıfırlama bileti ve hesap silme) yöneticinin kendi parola özetini
+  // vermekti; o iki uç artık `ReauthService.require` çağırıyor, ki satırı kendisi okuyor ve
+  // okumayı giriş kısıtlamasının arkasına alıyor. Metot dursaydı, kısıtlamayı atlayan bir
+  // doğrulamanın yeniden yazılması için hazır bir davet olurdu.
 
   /**
    * Create an account.
@@ -267,9 +251,15 @@ export class UsersService {
     try {
       const rows = await this.db.withTenant(organizationId, (db) =>
         db.query<UserRow>(
+          // `username` BURADA OLMAK ZORUNDA, ve bir süre yoktu. Dönen satır `UserRow` diye
+          // yazılıydı ama adı taşımıyordu, yani `row.username` `undefined` oluyordu — ve
+          // denetleyici tam onunla SMB'yi kesiyor (`revokeSmb(org, row.username)`). Ajana adsız
+          // bir istek gidiyor, istek düşüyor, kuyruktaki iş "kesilecek ad yok" deyip BAŞARILI
+          // bitiyor: kapatılan hesabın Samba parolası çalışmaya devam ediyordu. Denetim kaydı da
+          // "'undefined' hesabı kapatıldı" yazıyordu.
           `UPDATE public.users SET ${sets.join(', ')}
             WHERE organization_id = $1 AND id = $2
-            RETURNING id::text AS id, email, role, disabled_at, created_at`,
+            RETURNING id::text AS id, username, email, role, disabled_at, created_at`,
           params,
         ),
       );

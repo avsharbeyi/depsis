@@ -4,6 +4,7 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { AgentService, AgentUnavailableError, expectStatus } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
+import { PosixIdentityService } from '../identity/posix.service.js';
 
 /**
  * Geri getirmede bir çağrının taşıyacağı en fazla bayt.
@@ -130,6 +131,10 @@ export class BackupTargetService {
   constructor(
     private readonly db: DbService,
     private readonly agent: AgentService,
+    // `PosixModule` GLOBAL, o yüzden burada bir modül değişikliği gerekmiyor: geri getirilen
+    // dosyanın diskte kimin olacağını söyleyen tek yer bu eşleme, ve ikinci bir kopyası
+    // olmaması `PosixModule`ün var olma sebebi.
+    private readonly posix: PosixIdentityService,
   ) {}
 
   /** Kurulu hedef, YOKSA null. Ajana sorulmuyor: satır yoksa sorulacak bir havuz da yok. */
@@ -605,14 +610,30 @@ export class BackupTargetService {
    * HEDEFTE BİR DOSYA VARSA ÜSTÜNE YAZILMIYOR: ajan `Conflict` diyor ve o cümle kullanıcıya
    * aynen gidiyor. Kullanıcının hâlâ üzerinde çalıştığı bir dosyayı sessizce eskisiyle
    * değiştirmek, geri getirmenin çözmeye çalıştığı kaybın bir başkasını üretmek olurdu.
+   *
+   * DOSYA GERİ GETİRENİN OLUYOR, ve bu alan eksikken ürün yarım çalışıyordu: ajan ara dosyayı
+   * kök olarak 0600 ile açıyor ve sahipliği yalnız istekten öğreniyor, yani sahipsiz bir geri
+   * getirme diskte `root:root 0600` bir dosya bırakıyordu. Ekran "geri getirildi" diyor, dosya
+   * listede görünüyor, kullanıcı ağ sürücüsünden açmaya kalkınca "erişim reddedildi" alıyordu —
+   * ve düzeltmenin terminalsiz bir yolu yoktu.
+   *
+   * YEDEĞİN SAHİBİ DEĞİL, GERİ GETİRENİN kimliği: yedekteki kopya o hesap var olmadan önce
+   * yazılmış olabilir, ve dosyanın onu geri getiren hesap tarafından silinebilmesi gerekiyor.
+   * `owner_gid` aynı sayı — ADR-0004'te uid ve takım gid'leri tek sayaçtan geliyor, takım erişimi
+   * sahip gruptan değil POSIX ACL'den.
    */
   async restore(
     organizationId: string,
-    input: { from: string[]; share: string; to: string[] },
+    input: { from: string[]; share: string; to: string[]; actorId: string },
     correlationId: string,
   ): Promise<{ restoredBytes: number }> {
     const row = await this.row(organizationId);
     if (row === null) throw new NoBackupTargetError();
+
+    // AJANA GİTMEDEN ÖNCE. Posix kimliği olmayan bir hesapta bu satır anlaşılır bir hata
+    // fırlatıyor; ajan tarafında karşılığı `PosixId`in 0'ı ayrıştırmada reddetmesi, yani sessiz
+    // bir kök sahipliği iki katmanda da ifade edilemiyor.
+    const ownerUid = await this.posix.posixUidFor(organizationId, input.actorId);
 
     const staging = `geri-${randomUUID()}`;
     let offset = 0;
@@ -626,6 +647,8 @@ export class BackupTargetService {
           staging_name: staging,
           offset,
           max_bytes: RESTORE_SLICE,
+          owner_uid: ownerUid,
+          owner_gid: ownerUid,
         },
         `yedekten geri getirme: ${input.from.join('/')}`,
         correlationId,

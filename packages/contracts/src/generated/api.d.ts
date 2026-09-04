@@ -368,6 +368,11 @@ export interface paths {
          * @description Kurtarma kodları **yalnız burada** okunabilir hâlde döner; saklanan yalnız hash'leri.
          *     Onay kodu da harcanır, dolayısıyla aynı 30 saniye içinde girişte kullanılamaz —
          *     arayüz bunu söylemeli.
+         *
+         *     **Parola da isteniyor.** Sır ancak burada etkinleşiyor, ve parolasız hâlinde ele
+         *     geçirilmiş bir oturum hesaba kendi authenticator'ını takabiliyordu: gerçek sahip bundan
+         *     sonra doğru parolayla girse bile üretemediği bir kod isteniyor, ve yöneticinin açtığı
+         *     sıfırlama bileti de aynı kodu sorduğu için kurtarmıyor.
          */
         post: {
             parameters: {
@@ -380,6 +385,7 @@ export interface paths {
                 content: {
                     "application/json": {
                         code: string;
+                        password: string;
                     };
                 };
             };

@@ -40,6 +40,17 @@ ExecStart=/usr/local/lib/depsis/depsis-agent --serve
 # refuses uid 0.
 EnvironmentFile=/etc/depsis/agent.env
 
+# The agent's SECRETS, in a second file because the first one is not one. agent.env is 0644
+# configuration; this one is 0600 root and carries the connection string the nightly database dump
+# uses (DEPSIS_BACKUP_DATABASE_URL — see "the appliance's own database" below), which is a database
+# password. The installer writes both on every run.
+#
+# The leading `-` is deliberate. A box whose secrets file is missing — an interrupted install, an
+# operator who removed it — must still get its agent back: without the dash systemd refuses to
+# start the unit at all, and the appliance would lose storage, shares and identity because a BACKUP
+# setting was absent. The dump refuses on its own and says why; that is the right blast radius.
+EnvironmentFile=-/etc/depsis/agent-secrets.env
+
 # Socket-activated and long-lived. Restart on failure, but rate-limited: a crash loop on a root
 # daemon that shells out to zfs should stop and be noticed, not retry forever.
 Restart=on-failure
@@ -154,10 +165,16 @@ SystemCallFilter=~@module
 # PostgreSQL, and PostgreSQL lives on the system disk. Lose that disk and every byte on the pool
 # survives with nothing left to say who may read it.
 #
-# DEPSIS_BACKUP_DATABASE_URL — what `pg_dump` connects to. UNSET BY DEFAULT and the operation then
-# refuses with a sentence saying so, rather than defaulting to `postgres://localhost/depsis`:
-# dumping the wrong database and reporting "you have a backup" is worse than having none. Use the
-# `depsis_backup` role, which migration 0001 grants SELECT and nothing else.
+# DEPSIS_BACKUP_DATABASE_URL — what `pg_dump` connects to. The installer writes it into
+# /etc/depsis/agent-secrets.env, as `depsis_owner`. If it is absent the operation refuses with a
+# sentence saying so, rather than defaulting to `postgres://localhost/depsis`: dumping the wrong
+# database and reporting "you have a backup" is worse than having none.
+#
+# NOT the `depsis_backup` role, and this line used to say otherwise. Every table carries FORCE ROW
+# LEVEL SECURITY, so a dump taken as that role is filtered by the policies rather than complete —
+# migration 0006 says it outright: an RLS-filtered backup is not a backup, and a real
+# disaster-recovery dump is taken as the owner. `depsis_owner` is the role whose `USING (true)`
+# policy sees every row, and it is still NOSUPERUSER and NOBYPASSRLS.
 #
 # DEPSIS_DB_BACKUP_DIR — where the dumps go; /var/lib/depsis/db-backups by default. NOT a share,
 # and that is a security decision rather than a choice of location: the dump carries password

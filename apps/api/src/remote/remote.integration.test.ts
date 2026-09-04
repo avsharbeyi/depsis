@@ -66,6 +66,23 @@ function network(id: string, status: AgentNetwork['status'], addresses: string[]
   return { network_id: id, name: null, status, addresses };
 }
 
+type AgentMember = Extract<
+  AgentResponse,
+  { status: 'zerotier_controller_members' }
+>['members'][number];
+
+/** Controller'ın gördüğü bir üye: adressiz, çünkü buradaki soru yetki, cihazın adı değil. */
+function controllerMember(memberId: string, authorized: boolean): AgentMember {
+  return {
+    member_id: memberId,
+    authorized,
+    label: '',
+    addresses: [],
+    seen: true,
+    is_this_appliance: false,
+  };
+}
+
 interface RecordedCall {
   request: AgentRequest;
   reason: string;
@@ -144,6 +161,7 @@ describeDb('remote access, against a real PostgreSQL', () => {
   let orgB = '';
   let adminA = '';
   let adminB = '';
+  let seededSetup = false;
 
   beforeAll(async () => {
     db = new DbService(APP_URL as string);
@@ -170,6 +188,17 @@ describeDb('remote access, against a real PostgreSQL', () => {
       );
       adminA = seeded.find((r) => r.organization_id === orgA)?.id ?? '';
       adminB = seeded.find((r) => r.organization_id === orgB)?.id ?? '';
+
+      // Kendiliğinden yetkilendirme denetim kaydına bir AKTÖR yazıyor ve o aktör `system_setup`
+      // içindeki kurucu. Tablo tekil, o yüzden varsa olduğu gibi bırakılıyor; yalnız bu süitin
+      // koyduğu satır sonunda geri alınıyor.
+      const claimed = await q.query<{ id: string }>(
+        `INSERT INTO system_setup (organization_id, admin_user_id) VALUES ($1, $2)
+         ON CONFLICT (id) DO NOTHING
+         RETURNING id::text AS id`,
+        [orgA, adminA],
+      );
+      seededSetup = claimed.length === 1;
     });
   });
 
@@ -179,6 +208,10 @@ describeDb('remote access, against a real PostgreSQL', () => {
         await q.query(`DELETE FROM remote_networks WHERE organization_id = ANY($1)`, [
           [orgA, orgB],
         ]);
+        // Üye kayıtları kuruluşu RESTRICT ile tutuyor — bilerek: "kim içeri aldı" kaydı kuruluş
+        // silinirken sessizce yok olmamalı. Süitin temizliği bu yüzden onları önce kaldırıyor.
+        await q.query(`DELETE FROM remote_members WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+        if (seededSetup) await q.query(`DELETE FROM system_setup`);
         await q.query(`DELETE FROM users WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
         await q.query(`DELETE FROM organizations WHERE id = ANY($1)`, [[orgA, orgB]]);
       });
@@ -189,9 +222,10 @@ describeDb('remote access, against a real PostgreSQL', () => {
 
   /** Every test starts from no networks, so no assertion depends on what an earlier one left. */
   beforeEach(async () => {
-    await owner.withoutTenant('migration-status', (q) =>
-      q.query(`DELETE FROM remote_networks WHERE organization_id = ANY($1)`, [[orgA, orgB]]),
-    );
+    await owner.withoutTenant('migration-status', async (q) => {
+      await q.query(`DELETE FROM remote_networks WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+      await q.query(`DELETE FROM remote_members WHERE organization_id = ANY($1)`, [[orgA, orgB]]);
+    });
   });
 
   /** Read as the OWNER, bypassing RLS: "the row is hidden" and "the row is absent" differ. */
@@ -270,6 +304,83 @@ describeDb('remote access, against a real PostgreSQL', () => {
     await owner.withoutTenant('migration-status', (q) =>
       q.query(`DELETE FROM sessions WHERE organization_id = $1`, [orgA]),
     );
+  });
+
+  // ── çıkarılan cihaz ──
+
+  it('keeps a device the owner removed out, while still letting a new one in', async () => {
+    // Bu testin ölçtüğü şey bir GÜVENLİK davranışı: kendiliğinden yetkilendirme turu her yirmi
+    // saniyede bir yetkisiz üyeleri içeri alıyor, ve ajan "Çıkar"da üyeyi SİLMİYOR — yalnız
+    // `authorized:false` yazıyor. Yani çıkarılmış bir telefon, controller'ın listesinde yeni
+    // katılmış bir telefondan ayırt edilemez halde duruyor; ayıran tek şey DEPSIS'in kendi
+    // kaydındaki çıkarma damgası. O damga okunmazsa kaybolan telefon kendiliğinden geri geliyor.
+    const LOST = '1111111111';
+    const FRESH = '2222222222';
+    const onController = new Map([
+      [LOST, true],
+      [FRESH, false],
+    ]);
+    let setCalls: { member: string; authorized: boolean }[] = [];
+
+    const { agent } = stubAgent((request) => {
+      switch (request.op) {
+        case 'zerotier_controller_networks':
+          return Promise.resolve<AgentResponse>({
+            status: 'zerotier_controller_networks',
+            networks: [
+              {
+                network_id: NET_OK,
+                name: 'Ev',
+                private: true,
+                assigns_addresses: true,
+                subnet: '10.147.17.0/24',
+              },
+            ],
+          });
+        case 'zerotier_controller_members':
+          return Promise.resolve<AgentResponse>({
+            status: 'zerotier_controller_members',
+            members: [...onController].map(([id, authorized]) => controllerMember(id, authorized)),
+          });
+        case 'zerotier_set_member_authorized':
+          setCalls.push({ member: request.member, authorized: request.authorized });
+          onController.set(request.member, request.authorized);
+          return Promise.resolve<AgentResponse>({
+            status: 'zerotier_member_updated',
+            member: controllerMember(request.member, request.authorized),
+          });
+        default:
+          return healthyDaemon()(request);
+      }
+    });
+
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO remote_networks (organization_id, network_id, label, joined_by, controlled)
+              VALUES ($1, $2, 'Ev', $3, true)`,
+        [orgA, NET_OK, adminA],
+      ),
+    );
+    const remote = new RemoteService(agent, db);
+
+    // Sahibi kaybolan telefonu için "Çıkar"a bastı.
+    await remote.setMemberAuthorized(orgA, adminA, NET_OK, LOST, false, null, 'c-cikar');
+    expect(onController.get(LOST)).toBe(false);
+
+    // Yirmi saniye sonraki tur: yeni cihaz içeri alınıyor, çıkarılan alınmıyor.
+    setCalls = [];
+    expect(await remote.authorizeNewMembers(orgA, 'c-tur')).toBe(1);
+    expect(setCalls).toEqual([{ member: FRESH, authorized: true }]);
+    expect(onController.get(LOST)).toBe(false);
+
+    // Ve çıkarmak kalıcı bir yasak DEĞİL: sahibi elle "Yetkilendir" derse son söz onun. Burada
+    // cihaz, controller durumu kaybedildikten sonraki gibi yeniden yetkisiz düşüyor — o tur onu
+    // geri alıyor, çünkü verilen en son karar "içeri al".
+    await remote.setMemberAuthorized(orgA, adminA, NET_OK, LOST, true, null, 'c-geri');
+    onController.set(LOST, false);
+    setCalls = [];
+    expect(await remote.authorizeNewMembers(orgA, 'c-tur-2')).toBe(1);
+    expect(setCalls).toEqual([{ member: LOST, authorized: true }]);
   });
 
   // ── the id itself ──

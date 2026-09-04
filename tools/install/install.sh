@@ -606,6 +606,30 @@ ENV
 
   printf 'DEPSIS_API_UID=%s\nDEPSIS_SHARES_ROOT=%s\n' "$(id -u depsis-api)" "$SHARES_ROOT" > "$ETC/agent.env"
   chmod 0644 "$ETC/agent.env"
+
+  # ── ajanın SIRRI: gecelik veritabanı dökümünün bağlantı dizesi ──
+  #
+  # ZFS anlık görüntüleri kullanıcının DOSYALARINI koruyor; hesapları, paylaşım tanımlarını ve
+  # izinleri koruyan tek şey PostgreSQL dökümü, ve o döküm sistem diskinde. `dbdump.rs`
+  # DEPSIS_BACKUP_DATABASE_URL yoksa işlemi REDDEDİYOR — doğru davranış, çünkü uydurulmuş bir
+  # bağlantı dizesi yanlış veritabanının dökümünü alıp "yedeğiniz var" derdi.
+  #
+  # DEĞİŞKENİ HİÇBİR KURULUM YOLU YAZMIYORDU. Sonucu her kutuda aynıydı: backup-tick zinciri her
+  # gece `dump_database` çağırıyor, ajan reddediyor, Yedekleme ekranı "bağlantı dizesi
+  # yapılandırılmamış" diyor, ve çıkış yolu terminalde bir dosya düzenlemek — yani ürün kuralının
+  # dışı.
+  #
+  # AYRI BİR DOSYA, agent.env'e eklenmiş bir satır DEĞİL: agent.env 0644 ve yapılandırma taşıyor,
+  # bu satır ise veritabanı parolasının kendisi. 0600 root:root — ajan zaten root koşuyor
+  # (ADR-0006), o yüzden ayrı bir grup gerekmiyor.
+  #
+  # ROL depsis_owner: her tablonun `FORCE ROW LEVEL SECURITY`si var ve yalnız owner'ın
+  # `USING (true)` politikası tüm satırları görüyor. `depsis_backup` ile alınan bir döküm RLS
+  # süzgecinden geçer — 0006'nın deyişiyle, RLS ile süzülmüş bir yedek yedek değildir.
+  ( umask 077; printf 'DEPSIS_BACKUP_DATABASE_URL=%s\n' "$(cat "$ETC/db-url-owner")" > "$ETC/agent-secrets.env" )
+  chown root:root "$ETC/agent-secrets.env"
+  chmod 0600 "$ETC/agent-secrets.env"
+
   # console.env — birim dosyası bunu okumadan BAŞLAMIYOR ve ilk saha kurulumunda eksikti: konsol
   # soketi "No such file or directory" ile beş kez düşüp kilitlendi. Ayrıcalıksız kabuk (ADR-0018);
   # 1 yapmak bilinçli bir operatör kararıdır ve buradan değil o dosyadan verilir.
@@ -632,7 +656,7 @@ ENV
     printf '%s\n' "$console_uid" >> "$ETC/console.env"
   fi
   chmod 0644 "$ETC/console.env"
-  ok "$ETC/api.env, $ETC/agent.env ve $ETC/console.env"
+  ok "$ETC/api.env, $ETC/agent.env, $ETC/agent-secrets.env ve $ETC/console.env"
 
   # Bir kurulum kaydı. Atlamak için DEĞİL — her adım zaten kendi başına bakıyor — hangi sürümün
   # ne zaman kurulduğunu söyleyebilmek için. Bir kutuya bakan kişinin ilk sorusu budur.
@@ -654,20 +678,62 @@ ENV
 # Kendinden imzalı sertifika, tarayıcıda bir uyarı üretiyor ve bu uyarı GERÇEK: bir NAS'a ilk kez
 # bağlanan tarayıcının o sertifikayı doğrulamasının yolu yok. Betik bu yüzden PARMAK İZİNİ
 # yazdırıyor — operatörün tarayıcıdaki uyarı ekranında karşılaştırabileceği tek şey o.
+#
+# ── SAHİBİNİN SERTİFİKASINA DOKUNULMAZ ───────────────────────────────────────
+#
+# Bu işlev HER kurulumda koşuyor, ve bir güncelleme de bir kurulumdur (update.sh, install.args ile
+# aynı betiği çağırıyor). Sahibi arayüzden kendi CA imzalı sertifikasını kurduysa dosyalar TAM
+# BURAYA yazılmış olur — `tls.rs`in DEFAULT_CERT_PATH/DEFAULT_KEY_PATH'i bu ikisi. Aşağıdaki
+# "30 günden az kaldı, yenile" dalı verene hiç bakmadığı için, 90 günlük bir Let's Encrypt
+# sertifikasının 65. gününde yapılan bir güncelleme onu sessizce kendinden imzalıyla değiştirirdi:
+# tarayıcı yeniden uyarır, Sertifika ekranı "kendinden imzalı" der ve hiçbir yerde bunu
+# güncellemenin yaptığı yazmaz.
+#
+# Bu yüzden yenilemeden önce sertifikanın KİMİN verdiği soruluyor. Ölçüt `tls.rs`in
+# `parse_facts`iyle birebir aynı — konu ile veren aynıysa kendinden imzalı — ki arayüzün
+# "sahibinin sertifikası" dediği şeye kurulum da aynı adı versin.
+
+# Konu ile veren aynı mı? İki boş dizgeyi "aynı" saymamak önemli: sertifika okunamadığında
+# kendinden imzalı DEMEK, ekranda olgu gibi duran bir tahmin olurdu — ve o tahminin yanlış tarafı
+# sahibinin sertifikasını ezmek. Okunamayan sertifika ayrı bir dal olarak ele alınıyor.
+self_signed_cert() {
+  local subject issuer
+  subject="$(openssl x509 -in "$1" -noout -subject 2>/dev/null | sed 's/^subject=[[:space:]]*//')"
+  issuer="$(openssl x509 -in "$1" -noout -issuer 2>/dev/null | sed 's/^issuer=[[:space:]]*//')"
+  [ -n "$subject" ] && [ "$subject" = "$issuer" ]
+}
 
 tls() {
   step 'TLS sertifikası'
   local crt="$TLS_DIR/depsis.crt" key="$TLS_DIR/depsis.key"
 
-  local need=no
+  local need=no foreign=no
   if [ ! -s "$crt" ] || [ ! -s "$key" ]; then need=yes
+  # Ayrıştırılamayan bir sertifika, olmayan bir sertifikadan farksız: nginx onunla başlamıyor.
+  # Bu dal, "veren okunamadı" hâlini sahibinin sertifikası sanıp kutuyu erişilemez bırakmamak için.
+  elif ! openssl x509 -in "$crt" -noout >/dev/null 2>&1; then
+    need=yes; warn 'mevcut sertifika okunamıyor; yenisi üretiliyor'
+  elif ! self_signed_cert "$crt"; then foreign=yes
   elif [ "$RENEW_CERT" = yes ]; then need=yes; same 'sertifika --renew-cert ile yenileniyor'
   # 30 gün kalmışsa yenile. `-checkend` saniye alıyor.
   elif ! openssl x509 -in "$crt" -noout -checkend 2592000 >/dev/null 2>&1; then
     need=yes; warn 'sertifikanın bitmesine 30 günden az kaldı; yenileniyor'
   fi
 
-  if [ "$need" = no ]; then
+  if [ "$foreign" = yes ]; then
+    # --renew-cert dahil: o bayrak "kendinden imzalıyı tazele" demek, "sahibinin sertifikasını at"
+    # demek değil. update.sh install.args'ı aynen tekrarladığı için bayrağın bir gün oradan
+    # gelmesi de mümkün, ve o gün sessizce eziyor olurdu.
+    local issuer enddate
+    issuer="$(openssl x509 -in "$crt" -noout -issuer | sed 's/^issuer=[[:space:]]*//')"
+    enddate="$(openssl x509 -in "$crt" -noout -enddate | cut -d= -f2)"
+    warn "sahibinin kurduğu sertifika korunuyor (veren: $issuer)"
+    if ! openssl x509 -in "$crt" -noout -checkend 2592000 >/dev/null 2>&1; then
+      warn "bitişine 30 günden az kaldı ($enddate); yenisini Sertifika ekranından yükleyin"
+    else
+      same "sertifika geçerli ($enddate)"
+    fi
+  elif [ "$need" = no ]; then
     same "sertifika geçerli ($(openssl x509 -in "$crt" -noout -enddate | cut -d= -f2))"
   else
     # SAN listesi: hostname, kısa ad, localhost ve makinenin BÜTÜN IPv4 adresleri. Bir NAS'a
@@ -817,6 +883,25 @@ units() {
     # rsyslog yoksa ürün ÇALIŞIYOR, yalnız ağdan yazılanlar on beş dakikalık yürüyüşle
     # indeksleniyor. Söylenmesi gereken bir gecikme, kurulumu durduracak bir eksik değil.
     warn 'rsyslog yok; ağdan yazılan dosyalar düzenli taramayla indekslenecek'
+  fi
+
+  # ── VE O AKIŞIN DÖNDÜRÜLMESİ ────────────────────────────────────────────────
+  #
+  # Kuralın kendisi deponun içinde duruyordu ve hiçbir kurulum yolu onu KURMUYORDU — yukarıdaki
+  # rsyslog kuralının başına gelenin aynısı, bir adım geriden. Sonucu şu: yoğun bir paylaşımda
+  # /var/log/depsis/smb-audit.log hiç döndürülmüyor ve sistem diskini — PostgreSQL'in de durduğu
+  # diski — dolduruyor. O disk dolduğunda veritabanı yazamıyor ve arayüzün tamamı 500 veriyor.
+  #
+  # rsyslog dalından AYRI bir koşul, çünkü ikisi ayrı paketler: rsyslog'suz bir kutuda da logrotate
+  # olabilir, ve dosya `missingok` taşıdığı için günlük hiç doğmamışsa kural sessizce geçiyor.
+  #
+  # accounts()'tan SONRA olması şart: dosyadaki `su root depsis-api` satırı, depsis-api grubu yoksa
+  # logrotate'in tamamını hata verdirir — yalnız bu kuralı değil, o koşudaki her kuralı.
+  if [ -d /etc/logrotate.d ]; then
+    install -m 0644 "$REPO/deploy/logrotate/depsis-smb-audit" /etc/logrotate.d/depsis-smb-audit
+    ok 'SMB denetim günlüğü döndürülüyor (logrotate)'
+  else
+    warn 'logrotate yok; /var/log/depsis/smb-audit.log sınırsız büyür'
   fi
 
   for f in "$REPO"/deploy/systemd/*; do

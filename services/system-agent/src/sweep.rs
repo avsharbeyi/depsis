@@ -172,6 +172,75 @@ pub fn sweep_once<P: SafePath, S: Sink>(
     report
 }
 
+/// One pass over the BACKUP root's staging area.
+///
+/// ── NEDEN AYRI BİR GEÇİŞ, VE NEDEN VAR ───────────────────────────────────────────────────────
+///
+/// `copy_file_to_backup` yedeğe yazarken paylaşımlardakinin aynısı olan bir ara alan kullanıyor,
+/// ama yedek kökünde o alan DÜZ: paylaşım başına değil, ağacın kökünde tek bir
+/// `.depsis/staging/`. Yukarıdaki geçiş `list_share_dirs()` üzerinden yürüdüğü için oraya hiç
+/// uğramıyordu, ve başka hiçbir şey de uğramıyordu: `copy_file_to_backup`ın kendi belgesi bir
+/// süpürücü vaat ediyordu, o süpürücü yoktu.
+///
+/// Bedeli ölçülebilir bir şey: 200 GB'lık bir paylaşımın gecelik turu %80'de kesildiğinde
+/// (ajan yeniden başlatılıyor, elektrik gidiyor, ya da bir dilim `out_of_space` dönüyor) yarım
+/// dosya ara alanda kalıyor ve ertesi gece tur YENİ bir ad seçiyor. Birkaç kesintiden sonra
+/// yedek diski doluyor, ve dolu disk yeni yarım dosyalar üreten durumun ta kendisi. Sahibi
+/// ekranda yalnız "yedek diskinde yer yok" görüyor; yeri neyin yediğini gösteren bir ekran yok.
+///
+/// ── NEDEN AKTARIM KAYDINA BAKILMIYOR ─────────────────────────────────────────────────────────
+///
+/// Yedek kökünde veri düzlemi aktarımı yok: `copy_file_to_backup` baytları kontrol soketindeki
+/// çağrının içinde yazıyor, `open_transfer`ın verdiği gibi bir jeton hiç üretilmiyor. Bakılacak
+/// bir kayıt olmadığı için tek ölçüt yaş — ve `DEFAULT_MAX_AGE` (bir gün) bir turu kesmeyecek
+/// kadar uzak: bir dilim saniyeler içinde yazılıyor ve her dilim aynı dosyaya dokunuyor.
+///
+/// Kök HAZIR DEĞİLSE hiçbir şey yapılmıyor ve bu bir arıza değil: yedek diski kilitliyken her
+/// yeniden başlatmadan sonraki olağan hal bu.
+pub fn sweep_backup_once<P: SafePath, S: Sink>(
+    backup: &P,
+    audit: &S,
+    max_age: Duration,
+) -> SweepReport {
+    let mut report = SweepReport::default();
+    if !backup.root_ready() {
+        return report;
+    }
+
+    let staging = [STAGING_DIR[0], STAGING_DIR[1]];
+    let stale = match backup.list_stale_files(&staging, max_age) {
+        Ok(names) => names,
+        // Hiç yedek turu koşmamış bir diskte `.depsis/staging` yok. Olağan, arıza değil.
+        Err(_) => return report,
+    };
+
+    for name in stale {
+        let outcome = match backup.remove_file(&staging, &name) {
+            Ok(true) => {
+                report.removed = report.removed.saturating_add(1);
+                Outcome::Allowed
+            }
+            // Bir önceki geçiş ya da API'nin kendi temizliği önce davranmış. İş yapılmış.
+            Ok(false) => continue,
+            Err(e) => Outcome::Failed(e.to_string()),
+        };
+
+        audit.record(Entry {
+            correlation_id: "sweep".to_string(),
+            uid: self_identity().uid,
+            pid: self_identity().pid,
+            operation: "sweep_backup_staging",
+            reason: format!(
+                "yedek ara alanındaki {name} {}s'den uzun süredir dokunulmadan duruyordu",
+                max_age.as_secs()
+            ),
+            outcome,
+        });
+    }
+
+    report
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -312,6 +381,68 @@ mod tests {
 
         assert_eq!(report.removed, 1);
         assert_eq!(report.unreadable, 0);
+    }
+
+    /// Yedek kökünün DÜZ ara alanı: `<kök>/.depsis/staging/…`, paylaşım başına değil.
+    fn backup_tree(files: &[(&str, bool)]) -> (tempfile::TempDir, MockSafePath) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging = dir.path().join(".depsis").join("staging");
+        std::fs::create_dir_all(&staging).expect("staging");
+        for (name, old) in files {
+            let path = staging.join(name);
+            std::fs::write(&path, b"x").expect("seed");
+            if *old {
+                let when = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+                let file = std::fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .expect("reopen");
+                file.set_modified(when).expect("set mtime");
+            }
+        }
+        let paths = MockSafePath::new(dir.path());
+        (dir, paths)
+    }
+
+    #[test]
+    fn a_half_finished_backup_copy_is_reclaimed_and_a_live_one_is_not() {
+        // SAHADAKİ ARIZA. Yedek turu her dosya için yeni bir ara ad seçiyor, ve kesilen bir tur o
+        // adı geride bırakıyordu — hiçbir şey onu almıyordu, çünkü süpürücü yalnız paylaşım
+        // ağacını geziyordu. Birkaç kesinti sonra yedek diski doluyor ve turlar `out_of_space` ile
+        // düşüyor; sahibi ekranda yalnız "yer yok" görüyor.
+        let (dir, paths) = backup_tree(&[("yedek-eski", true), ("yedek-suren", false)]);
+        let audit = MemorySink::default();
+
+        let report = sweep_backup_once(&paths, &audit, DEFAULT_MAX_AGE);
+
+        assert_eq!(report.removed, 1);
+        let staging = dir.path().join(".depsis/staging");
+        assert!(!staging.join("yedek-eski").exists());
+        assert!(
+            staging.join("yedek-suren").exists(),
+            "dakikalar önce yazılmış bir dilim koşan bir tura ait"
+        );
+
+        let entries = audit.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].operation, "sweep_backup_staging");
+        assert_eq!(entries[0].outcome, Outcome::Allowed);
+    }
+
+    #[test]
+    fn a_locked_backup_disk_is_swept_over_rather_than_into() {
+        // Kilitli bir yedek diski bir arıza değil, her yeniden başlatmadan sonraki olağan hal:
+        // parola hiçbir yere yazılmıyor. Bağlı olmayan bir kökün ALTINDAKİ bir yola root olarak
+        // silme uygulamak, bağlama noktasının altında kalan gerçek dizini silmek olurdu.
+        let (dir, paths) = backup_tree(&[("yedek-eski", true)]);
+        paths.set_ready(false);
+        let audit = MemorySink::default();
+
+        let report = sweep_backup_once(&paths, &audit, DEFAULT_MAX_AGE);
+
+        assert_eq!(report, SweepReport::default());
+        assert!(dir.path().join(".depsis/staging/yedek-eski").exists());
+        assert!(audit.entries().is_empty());
     }
 
     #[test]

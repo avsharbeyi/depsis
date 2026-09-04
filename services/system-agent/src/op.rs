@@ -158,6 +158,80 @@ impl From<SafeComponent> for String {
     }
 }
 
+/// Bir dosyanın ya da klasörün KENDİ ADI — bir yol bileşeni, bir argüman değil.
+///
+/// ── NEDEN `SafeComponent`TEN AYRI BİR TİP ────────────────────────────────────────────────────
+///
+/// `SafeComponent`in dört kuralı var ve üçü her iki yerde de doğru: NUL yok, ayraç yok, `.` ve
+/// `..` yok. Bunlar `openat2(RESOLVE_BENEATH)` confinement'ının dayandığı kurallar ve burada da
+/// aynen duruyorlar.
+///
+/// Dördüncü kural — BAŞTA TİRE OLAMAZ — argv'yi koruyor: `zfs`, `zpool`, `tar` ve `smartctl`
+/// kendi argümanlarını ayrıştırıyor, yani `-` ile başlayan bir operand ayrı bir argüman olarak
+/// gelse bile bir BAYRAK oluyor. O gerekçe bir havuz adı, bir `by-id` adı, bir anlık görüntü adı
+/// ya da `tar`a verilen klasör adı için geçerli. Bir DOSYA ADI için geçerli değil: çekirdek için
+/// `-notlar.txt` sıradan bir addır, SMB'den kaydedilebilir, ve `openat2`ye giden bir bileşende
+/// tirenin hiçbir anlamı yoktur.
+///
+/// ── AYRIMIN YOKLUĞUNUN BEDELİ ÖLÇÜLDÜ ────────────────────────────────────────────────────────
+///
+/// Tek tip her iki yerde de kullanılırken `-` ile başlayan bir dosya iki kez kayboluyordu.
+/// `dispatch::list_directory` girdileri `filter_map` içinde ayrıştırıyor, yani ad SESSİZCE
+/// listeden düşüyordu: dosya web dizininde ve aramada hiç görünmüyordu. Daha kötüsü, artımlı
+/// yedek turu `zfs diff`ten gelen ham yolu kopyalamaya çalıştığında ajan bütün isteği
+/// "unparseable request" diye reddediyor, tur düşüyor ve TABAN İLERLEMİYORDU — yani o dosyanın
+/// yazıldığı günden sonra paylaşımın hiçbir değişikliği yedeğe girmiyordu.
+///
+/// `SafeComponent` argv'ye ulaşan operandlarda olduğu gibi duruyor; bu tip yalnız yol ve girdi
+/// adı konumlarında.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct EntryName(String);
+
+impl EntryName {
+    const MAX: usize = 255;
+
+    pub fn parse(raw: impl Into<String>) -> Result<Self, ValidationError> {
+        let s: String = raw.into();
+        if s.is_empty() {
+            return Err(ValidationError::Empty);
+        }
+        if s.len() > Self::MAX {
+            return Err(ValidationError::TooLong {
+                len: s.len(),
+                max: Self::MAX,
+            });
+        }
+        if s.contains('\0') {
+            return Err(ValidationError::ContainsNul);
+        }
+        if s.contains('/') || s.contains('\\') {
+            return Err(ValidationError::ContainsSeparator);
+        }
+        if s == "." || s == ".." {
+            return Err(ValidationError::ContainsDotDot);
+        }
+        Ok(Self(s))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for EntryName {
+    type Error = ValidationError;
+    fn try_from(v: String) -> Result<Self, Self::Error> {
+        Self::parse(v)
+    }
+}
+
+impl From<EntryName> for String {
+    fn from(v: EntryName) -> Self {
+        v.0
+    }
+}
+
 /// Yedek diskinin parolası — ZFS'in kendi anahtarı olarak.
 ///
 /// ── NEDEN AYRI BİR TİP ───────────────────────────────────────────────────────────────────────
@@ -1191,7 +1265,7 @@ pub enum Request {
         share: SafeComponent,
         staging_name: SafeComponent,
         /// Where it lands, relative to the share root. Components are validated individually.
-        destination: Vec<SafeComponent>,
+        destination: Vec<EntryName>,
         /// How many bytes the caller believes are staged.
         ///
         /// Checked, not trusted. The agent must not rest on the API's belief that an upload
@@ -1229,7 +1303,7 @@ pub enum Request {
         share: SafeComponent,
         /// Where the file is, relative to the share root. Components are validated individually,
         /// so no element can be `..`, a separator or an absolute-looking string.
-        path: Vec<SafeComponent>,
+        path: Vec<EntryName>,
     },
 
     /// Throw a staging file away.
@@ -1264,10 +1338,10 @@ pub enum Request {
     MoveEntry {
         share: SafeComponent,
         /// Where it is now, relative to the share root. The last element is the entry's own name.
-        from: Vec<SafeComponent>,
+        from: Vec<EntryName>,
         /// Where it goes, relative to the same share root. The last element is the new name; the
         /// elements before it must already exist and be directories.
-        to: Vec<SafeComponent>,
+        to: Vec<EntryName>,
     },
 
     /// Copy ONE file to ONE new name, inside one share.
@@ -1303,10 +1377,10 @@ pub enum Request {
     CopyFile {
         share: SafeComponent,
         /// The file to read, relative to the share root. The last element is its name.
-        from: Vec<SafeComponent>,
+        from: Vec<EntryName>,
         /// Where the copy goes, relative to the same share root. The last element is the new name;
         /// every element before it must already exist and be a directory.
-        to: Vec<SafeComponent>,
+        to: Vec<EntryName>,
         /// The name to stage under, inside `.depsis/staging/`.
         staging_name: SafeComponent,
         /// How many bytes of the source are already staged.
@@ -1355,7 +1429,7 @@ pub enum Request {
     ListDirectory {
         share: SafeComponent,
         /// Relative to the share root. Empty means the share root itself.
-        path: Vec<SafeComponent>,
+        path: Vec<EntryName>,
         /// Bu addan SONRAKİLERİ ver — sayfalama imleci.
         ///
         /// ── NEDEN VAR ────────────────────────────────────────────────────────────────────
@@ -1376,7 +1450,7 @@ pub enum Request {
         /// Sıra bunun için SABİT: girdiler ada göre bayt sırasıyla veriliyor. `readdir`ın kendi
         /// sırası dosya sistemine ait ve iki çağrı arasında aynı kalacağının garantisi yok.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        after: Option<SafeComponent>,
+        after: Option<EntryName>,
     },
 
     /// List ONE directory inside ONE snapshot of a share.
@@ -1401,7 +1475,7 @@ pub enum Request {
         /// dataset could name somebody else's.
         snapshot: SafeComponent,
         /// Relative to the snapshot's root. Empty means the snapshot of the share root itself.
-        path: Vec<SafeComponent>,
+        path: Vec<EntryName>,
     },
 
     /// Copy one file OUT of a snapshot and back into the live share.
@@ -1420,10 +1494,10 @@ pub enum Request {
         share: SafeComponent,
         snapshot: SafeComponent,
         /// The file to read, relative to the SNAPSHOT's root. The last element is its name.
-        from: Vec<SafeComponent>,
+        from: Vec<EntryName>,
         /// Where the restored copy goes, relative to the LIVE share root. The last element is the
         /// new name and must not already exist; every element before it must.
-        to: Vec<SafeComponent>,
+        to: Vec<EntryName>,
         /// The name to stage under, inside `.depsis/staging/`.
         staging_name: SafeComponent,
         /// How many bytes are already staged. The file is the authority; see `CopyFile`.
@@ -1693,11 +1767,11 @@ pub enum Request {
     CompareBackupCopy {
         share: SafeComponent,
         /// Paylaşım içindeki yol.
-        live: Vec<SafeComponent>,
+        live: Vec<EntryName>,
         /// Yedek ağacındaki yol — `Dosyalar/<paylaşım>/…`. Çağıran veriyor, ajan türetmiyor:
         /// yedek ağacının düzeni API'nin kararı ve ajanın onu ikinci kez bilmesi, iki yerde
         /// ayrı ayrı değişebilen bir kural olurdu.
-        backup: Vec<SafeComponent>,
+        backup: Vec<EntryName>,
     },
 
     /// Diskin şifresiz yarısındaki bir dosyayı okur.
@@ -1746,8 +1820,8 @@ pub enum Request {
     #[serde(rename = "copy_file_to_backup")]
     CopyFileToBackup {
         share: SafeComponent,
-        from: Vec<SafeComponent>,
-        to: Vec<SafeComponent>,
+        from: Vec<EntryName>,
+        to: Vec<EntryName>,
         staging_name: SafeComponent,
         offset: u64,
         max_bytes: u64,
@@ -1766,13 +1840,29 @@ pub enum Request {
     #[serde(rename = "restore_file_from_backup")]
     RestoreFileFromBackup {
         /// Yedek ağacındaki yol (`Dosyalar/...` ya da `DEPSIS-YEDEK/silinenler/...`).
-        from: Vec<SafeComponent>,
+        from: Vec<EntryName>,
         /// Canlı ağaçtaki paylaşım ve onun içindeki yol.
         share: SafeComponent,
-        to: Vec<SafeComponent>,
+        to: Vec<EntryName>,
         staging_name: SafeComponent,
         offset: u64,
         max_bytes: u64,
+        /// Geri getirilen dosya KİMİN olacak.
+        ///
+        /// Alanın yokluğu bir eksiklik değil bir arızaydı: ara dosya ajanın (kök) elinde 0600 ile
+        /// açılıyor ve hiç `set_owner` görmeden yayımlanıyordu, yani geri getirilen dosya diskte
+        /// `root:root 0600` olarak oturuyordu. Ekran "geri getirildi" diyor, dosya listede
+        /// görünüyor, ve sahibi onu ağ sürücüsünden açmaya kalkınca "erişim reddedildi" alıyordu —
+        /// düzeltmenin terminalsiz bir yolu da yoktu.
+        ///
+        /// YEDEĞİN SAHİBİ DEĞİL, GERİ GETİRENİN kimliği. Dosya, onu geri getiren hesabın
+        /// silebileceği bir dosya olmalı; yedekteki kopya, o hesap var olmadan önce yazılmış
+        /// olabilir. Aynı gerekçe `restore_from_snapshot`ta da yazılı.
+        ///
+        /// `PosixId` 0'ı ve ayrılmış aralığın dışını AYRIŞTIRMA anında reddediyor, yani kimliği
+        /// atlayan bir API sessizce kök sahipli bir dosya üretemiyor; istek hiç `Request` olmuyor.
+        owner_uid: PosixId,
+        owner_gid: PosixId,
     },
 
     /// Diskin ŞİFRESİZ yarısına küçük bir metin dosyası yazar.
@@ -1819,7 +1909,7 @@ pub enum Request {
     /// Yedek ağacının kendi düzeni var ve ilk bileşen onu söylüyor: `Dosyalar/` gecikmeli
     /// ayna, `DEPSIS-YEDEK/` defter ve günlükler.
     #[serde(rename = "backup_list_directory")]
-    BackupListDirectory { path: Vec<SafeComponent> },
+    BackupListDirectory { path: Vec<EntryName> },
 
     /// Yedek ağacında bir dizin açar.
     ///
@@ -1827,7 +1917,7 @@ pub enum Request {
     /// oluşturulacağını bilen taraf ağacı yürüyen taraftır, ve o taraf API. Eksik bir ara
     /// bileşen `NotFound` ile geri geliyor, yani çağıran hangi adımda olduğunu biliyor.
     #[serde(rename = "backup_create_directory")]
-    BackupCreateDirectory { path: Vec<SafeComponent> },
+    BackupCreateDirectory { path: Vec<EntryName> },
 
     /// Yedek ağacının İÇİNDE bir düğümü taşır.
     ///
@@ -1843,8 +1933,8 @@ pub enum Request {
     /// kopyalamak demekti.
     #[serde(rename = "backup_move_entry")]
     BackupMoveEntry {
-        from: Vec<SafeComponent>,
-        to: Vec<SafeComponent>,
+        from: Vec<EntryName>,
+        to: Vec<EntryName>,
     },
 
     /// Yedek ağacından bir düğümü siler — süresi dolan gün klasörlerinin temizliği.
@@ -1854,7 +1944,7 @@ pub enum Request {
     /// işlem, tek bir yanlış operandla bütün yedeği silerdi.
     #[serde(rename = "backup_remove_entry")]
     BackupRemoveEntry {
-        path: Vec<SafeComponent>,
+        path: Vec<EntryName>,
         directory: bool,
     },
 
@@ -2087,7 +2177,7 @@ pub enum Request {
     /// remove a leaf.
     RemoveEntry {
         share: SafeComponent,
-        path: Vec<SafeComponent>,
+        path: Vec<EntryName>,
         /// Is the entry a directory? The caller knows and has to say.
         directory: bool,
     },
@@ -2112,7 +2202,7 @@ pub enum Request {
         share: SafeComponent,
         /// Relative to the share root; the LAST element is the name of the directory to create.
         /// Every element before it must already exist and be a directory.
-        path: Vec<SafeComponent>,
+        path: Vec<EntryName>,
         /// Who owns the directory. The same pair as `PublishTransfer` and the same type, for the
         /// same reason: a directory owned by root at 0750 is one the user cannot enter, and one
         /// owned by a host service account is one the wrong process can, so an API that skipped or
@@ -2275,7 +2365,7 @@ pub enum Request {
         /// and granting on the root of the tree it named is the point.
         ///
         /// `.depsis/` is refused, like everywhere else a caller-supplied path is accepted.
-        path: Vec<SafeComponent>,
+        path: Vec<EntryName>,
         entries: Vec<AclEntry>,
     },
 
@@ -2368,9 +2458,13 @@ impl SmbPrincipal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DirEntry {
-    /// A `SafeComponent`, not a `String`: a name the agent cannot address is a name the API must
+    /// An `EntryName`, not a `String`: a name the agent cannot address is a name the API must
     /// not be handed, because a row written for it would be permanently unreachable.
-    pub name: SafeComponent,
+    ///
+    /// Ve `SafeComponent` DEĞİL. O tip baştaki tireyi reddediyor — argv'ye giden bir operand için
+    /// doğru — ve burada `-notlar.txt` gibi tamamen olağan bir dosyayı listeden SESSİZCE
+    /// düşürüyordu: dosya web dizininde hiç görünmüyordu.
+    pub name: EntryName,
     pub directory: bool,
     pub size: u64,
     /// Seconds since the epoch, from the kernel. Fills `updated_at` for a row DEPSIS is learning
@@ -3308,6 +3402,13 @@ pub enum ZeroTierNetworkStatus {
 /// `EXPECTED_SCHEMA_VERSION` in `packages/agent-protocol` moves with it; they are one number in two
 /// languages.
 ///
+/// 43, `EntryName` ve `restore_file_from_backup`ın sahiplik alanlarıyla. İki değişiklik, ikisi de
+/// sessiz veri kaybını kapatıyor. `EntryName`, yol ve girdi adı konumlarında baştaki tireyi kabul
+/// ediyor: `-notlar.txt` diye bir dosya listeden sessizce düşüyor ve artımlı yedek turunu kalıcı
+/// olarak kırıyordu. `owner_uid`/`owner_gid` ise geri getirilen dosyanın `root:root 0600` inmesini
+/// bitiriyor. Eski bir ajanla konuşan yeni bir API'nin geri getirmesi "unparseable" ile düşer — ve
+/// düşmesi doğrusu: sessizce sahipsiz bir dosya bırakmaktansa el sıkışmada durmalı.
+///
 /// 42, `list_directory`ye `after` ile: 5.000'den fazla girdisi olan bir dizinin TAMAMI
 /// okunabilsin. Sınır kalıyor — bir yanıt tek bir satır — ama artık sayfalanabiliyor. Sahada
 /// 20.246 klasörlük bir paylaşım kökü dizine yalnız yarısıyla girdi ve hiçbir zaman
@@ -3370,7 +3471,7 @@ pub enum ZeroTierNetworkStatus {
 /// Buradaki uyuşmazlığın bedeli özellikle sinsi olurdu — güncelleme ekranını taşıyan yeni bir API,
 /// eski bir ajanla el sıkışıp "güncelleme desteklenmiyor" yerine "durum okunamadı" derdi, yani
 /// güncellenmesi gereken kutu, güncelleme yolunun bozuk olduğunu söyleyemezdi.
-pub const SCHEMA_VERSION: u32 = 42;
+pub const SCHEMA_VERSION: u32 = 43;
 
 /// The most one `CopyFile` call will move, whatever the caller asks for.
 ///
@@ -3494,6 +3595,60 @@ mod tests {
             SafeComponent::parse(".."),
             Err(ValidationError::ContainsDotDot)
         );
+    }
+
+    #[test]
+    fn an_entry_name_may_begin_with_a_dash_and_a_safe_component_may_not() {
+        // Ayrımın tamamı bu. `-notlar.txt` SMB'den kaydedilebilen sıradan bir dosya adı ve
+        // `openat2`ye giden bir bileşende tirenin hiçbir anlamı yok; oysa aynı ad bir havuz ya da
+        // anlık görüntü adı olarak `zfs`e gitseydi bir bayrak olurdu.
+        assert_eq!(
+            EntryName::parse("-notlar.txt").map(|n| n.as_str().to_string()),
+            Ok("-notlar.txt".to_string())
+        );
+        assert_eq!(
+            EntryName::parse("- Kopya.docx").map(|n| n.as_str().to_string()),
+            Ok("- Kopya.docx".to_string())
+        );
+        assert_eq!(
+            SafeComponent::parse("-notlar.txt"),
+            Err(ValidationError::LeadingDash)
+        );
+    }
+
+    #[test]
+    fn an_entry_name_keeps_every_rule_that_protects_the_confinement() {
+        // Tirenin düşmesi öteki üç kuralı gevşetmiyor: bunlar `openat2(RESOLVE_BENEATH)`in
+        // dayandığı kurallar, argv'nin değil.
+        assert_eq!(
+            EntryName::parse("a/b"),
+            Err(ValidationError::ContainsSeparator)
+        );
+        assert_eq!(
+            EntryName::parse("..\\windows"),
+            Err(ValidationError::ContainsSeparator)
+        );
+        assert_eq!(EntryName::parse(".."), Err(ValidationError::ContainsDotDot));
+        assert_eq!(EntryName::parse("."), Err(ValidationError::ContainsDotDot));
+        assert_eq!(EntryName::parse("a\0b"), Err(ValidationError::ContainsNul));
+        assert_eq!(EntryName::parse(""), Err(ValidationError::Empty));
+        assert!(EntryName::parse("x".repeat(256)).is_err());
+    }
+
+    #[test]
+    fn a_listing_of_a_dash_named_file_parses_as_a_request() {
+        // Arıza tam burada görünüyordu: ad ayrıştırılamayınca bütün istek "unparseable" oluyor ve
+        // artımlı yedek turu o dosyaya geldiği anda düşüyordu.
+        let raw = r#"{"op":"copy_file_to_backup","share":"alice",
+                      "from":["-notlar.txt"],"to":["Dosyalar","alice","-notlar.txt"],
+                      "staging_name":"yedek-1","offset":0,"max_bytes":1024}"#;
+        let parsed: Request = serde_json::from_str(raw).expect("bir dosya adı bir bayrak değildir");
+        match parsed {
+            Request::CopyFileToBackup { from, .. } => {
+                assert_eq!(from.first().map(EntryName::as_str), Some("-notlar.txt"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     // ── NetworkId ──
@@ -3642,9 +3797,14 @@ mod tests {
     #[test]
     fn a_traversing_component_cannot_be_expressed_in_a_move_or_a_remove() {
         // The type test the brief asks for, and it is a PARSE failure rather than a runtime check:
-        // `Vec<SafeComponent>` has no inhabitant spelled `..`, so no dispatch code path can be
+        // `Vec<EntryName>` has no inhabitant spelled `..`, so no dispatch code path can be
         // reached with one. Nothing downstream has to remember to look, which is the whole reason
         // the operand is a type instead of a string.
+        //
+        // `["-rf"]` DEĞİL, ve yokluğu bilinçli: bir yol bileşeni hiçbir programın argv'sine
+        // gitmiyor, ve `-rf` adında bir dosya SMB'den kaydedilebilen sıradan bir dosya. Baştaki
+        // tireyi reddeden kural `share` gibi argv'ye ulaşan operandlarda duruyor — bu döngünün
+        // üçüncü satırı onu ölçüyor.
         assert_eq!(
             SafeComponent::parse(".."),
             Err(ValidationError::ContainsDotDot)
@@ -3654,9 +3814,9 @@ mod tests {
             r#"{"op":"move_entry","share":"alice","from":["a"],"to":["..","..","etc","passwd"]}"#,
             r#"{"op":"move_entry","share":"alice","from":["a/b"],"to":["c"]}"#,
             r#"{"op":"move_entry","share":"..","from":["a"],"to":["b"]}"#,
+            r#"{"op":"move_entry","share":"-x","from":["a"],"to":["b"]}"#,
             r#"{"op":"remove_entry","share":"alice","path":["..","etc"],"directory":false}"#,
             r#"{"op":"remove_entry","share":"alice","path":["a\\b"],"directory":false}"#,
-            r#"{"op":"remove_entry","share":"alice","path":["-rf"],"directory":false}"#,
             r#"{"op":"remove_entry","share":"alice","path":[""],"directory":false}"#,
         ] {
             assert!(
@@ -3723,10 +3883,13 @@ mod tests {
     #[test]
     fn a_traversing_component_cannot_be_expressed_in_a_create_directory() {
         // The type test the brief asks for, and it is a PARSE failure rather than a runtime check.
-        // `Vec<SafeComponent>` has no inhabitant spelled `..`, so no code path in `create_directory`
+        // `Vec<EntryName>` has no inhabitant spelled `..`, so no code path in `create_directory`
         // can be reached with one — the `mkdirat` below it never has to remember to look, which is
         // the whole reason the operand is a type instead of a string. The same holds for the
         // `share` field: a share named `..` would be the parent of the share root.
+        //
+        // `["-p"]` bu listede DEĞİL: `mkdirat`a bir bayrak diye okunacak bir argv yok, ve `-p`
+        // adında bir klasör kullanıcının kurabileceği sıradan bir klasör.
         assert_eq!(
             SafeComponent::parse(".."),
             Err(ValidationError::ContainsDotDot)
@@ -3739,7 +3902,6 @@ mod tests {
             r#"{"op":"create_directory","share":"alice","path":["/etc"],"owner_uid":1,"owner_gid":1}"#,
             r#"{"op":"create_directory","share":"..","path":["docs"],"owner_uid":1,"owner_gid":1}"#,
             r#"{"op":"create_directory","share":"alice","path":[""],"owner_uid":1,"owner_gid":1}"#,
-            r#"{"op":"create_directory","share":"alice","path":["-p"],"owner_uid":1,"owner_gid":1}"#,
         ] {
             assert!(
                 serde_json::from_str::<Request>(json).is_err(),
@@ -3840,7 +4002,7 @@ mod tests {
             parsed,
             Request::ApplyFolderAcl {
                 share: SafeComponent::parse("alice").expect("valid"),
-                path: vec![SafeComponent::parse("docs").expect("valid")],
+                path: vec![EntryName::parse("docs").expect("valid")],
                 entries: vec![AclEntry {
                     gid: PosixId::parse(301_200).expect("reserved range"),
                     read: true,

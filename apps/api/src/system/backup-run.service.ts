@@ -23,6 +23,19 @@ const SLICE = 32 * 1024 * 1024;
  */
 const MAX_FILES_PER_RUN = 2_000;
 
+/**
+ * Bir dizin listelemesinin kaç sayfada bitmesinin beklendiği.
+ *
+ * Ajan tek yanıtta en çok 5.000 girdi veriyor ve gerisini `after` imleciyle sunuyor; kırk sayfa,
+ * iki yüz bin girdilik bir dizin demek. Tavan, adı sürekli değişen bir dizinde sonsuz döngüye
+ * girmemek için var — ve tavana çarpıldığında SUSULMUYOR, hata veriliyor: ilk turda atlanan bir
+ * dosyanın bir daha sorulacağı yer yok.
+ */
+const MAX_LISTING_PAGES = 40;
+
+/** Turun aldığı görüntülerin ön eki. Bu ön eki taşımayan hiçbir görüntüye tur dokunmuyor. */
+const RUN_SNAPSHOT_PREFIX = 'depsis-yedek-';
+
 export interface RunOutcome {
   state: 'bitti' | 'kilitli' | 'yer-yok' | 'dustu' | 'devam';
   copiedFiles: number;
@@ -130,11 +143,16 @@ export class BackupRunService {
     const total: RunOutcome = { state: 'bitti', copiedFiles: 0, copiedBytes: 0, movedFiles: 0 };
     const today = new Date().toISOString().slice(0, 10);
 
+    // BİR PAYLAŞIMIN DÜŞMESİ, TURUN DÜŞMESİ. Bu işaret döngüden sonra hâlâ okunuyor: arızayı
+    // izleyen paylaşımlardan biri "devam edecek" dediğinde turun durumu ona dönüp arızanın üstünü
+    // örtmesin diye.
+    let failure: string | null = null;
+
     for (const share of shares) {
       if (total.copiedFiles >= MAX_FILES_PER_RUN) {
         // BİTMEDİ, DEVAM EDECEK. Ardılı kuyruğa alan taraf işleyici; burada söylenen tek şey
         // turun kapanmadığı.
-        total.state = 'devam';
+        if (failure === null) total.state = 'devam';
         break;
       }
       try {
@@ -146,17 +164,24 @@ export class BackupRunService {
           total,
           correlationId,
         );
-        if (!done) total.state = 'devam';
+        if (!done && failure === null) total.state = 'devam';
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         // YER YOK, kendi durumu: kullanıcının yapacağı şey farklı (disk değiştirmek ya da
         // saklama süresini kısaltmak) ve yeniden denemek dolu diske yarım dosyalar park etmekten
         // başka bir şey yapmaz.
         const outOfSpace = reason.includes('yer yok') || reason.includes('yer kalmadı');
+        failure = reason;
         total.state = outOfSpace ? 'yer-yok' : 'dustu';
         total.error = reason;
         this.logger.warn(`yedek turu '${share.name}' üzerinde düştü: ${reason}`);
-        break;
+        // ARIZALI PAYLAŞIM SIRADAKİLERİ YEDEKSİZ BIRAKMIYOR. Paylaşımlar ada göre sıralı geliyor,
+        // yani buradaki `break` 'Fotograflar' bozulduğunda 'Videolar'ı da her turda sıraya
+        // sokmuyordu — ve düzelene kadar o paylaşımın hiçbir dosyası yedeğe girmiyordu.
+        //
+        // 'yer yok' ayrı ve turu gerçekten bitiriyor: dolu bir diske sıradaki paylaşımı yazmayı
+        // denemek, yarım dosyalar park etmekten başka bir şey yapmaz.
+        if (outOfSpace) break;
       }
     }
 
@@ -198,7 +223,7 @@ export class BackupRunService {
     total: RunOutcome,
     correlationId: string,
   ): Promise<boolean> {
-    const snapshot = `depsis-yedek-${Date.now()}`;
+    const snapshot = `${RUN_SNAPSHOT_PREFIX}${Date.now()}`;
     expectStatus(
       await this.agent.call(
         { op: 'create_snapshot', dataset: share.dataset, name: snapshot },
@@ -209,60 +234,153 @@ export class BackupRunService {
     );
 
     const base = await this.baseOf(organizationId, share.id);
-    if (base === null) {
-      // İLK TUR: karşılaştırılacak bir taban yok, o yüzden ağacın TAMAMI yürünüyor.
-      //
-      // Bu turun kısa sürmesi beklenmiyor ve kısaltılmıyor. Yalnız tabanı yazıp geçmek —
-      // yani ilk turu bir "başlangıç noktası" saymak — mevcut dosyaların HİÇBİRİNİ
-      // yedeklememek demekti, ve ekranda "yedeğiniz var" yazarken diskte hiçbir şey olmayacaktı.
-      // Bir yedeğin en tehlikeli hâli, olduğu sanılan ve olmayan yedektir.
-      //
-      // DOSYA SAYISI SINIRI BU TURDA UYGULANMIYOR. Sınır, ardılı kuyruğa alınabilen artımlı
-      // turlar için var; ilk tur yarıda bırakılıp taban yazılmadan tekrarlansaydı, her seferinde
-      // baştan başlayan ve hiç bitmeyen bir döngü olurdu.
-      await this.walkAndCopy(share.name, [], total, correlationId);
-      await this.setBase(organizationId, share.id, snapshot);
-      return true;
-    }
 
-    const diff = await this.agent.call(
-      { op: 'diff_snapshots', dataset: share.dataset, from: base, to: snapshot },
-      `yedek turu: '${share.name}' neyi değişti`,
+    // TABAN İLERLEMEZSE BU TURUN GÖRÜNTÜSÜ ÇÖP. Aşağıdaki her erken çıkış — kesilmiş değişiklik
+    // listesi, dosya sınırı, kopyalamanın fırlattığı hata — tabanı olduğu yerde bırakıyor; o
+    // görüntüye bir daha kimse bakmayacak, ama havuzda tuttuğu bloklar duruyor.
+    let advanced = false;
+    try {
+      // GEÇMİŞ TURLARIN GÖRÜNTÜLERİ TURUN BAŞINDA SÜPÜRÜLÜYOR, sonunda değil: silinecek olan bir
+      // ÖNCEKİ turun tabanı, ve o taban ancak yerine yenisi yazıldıktan sonra gereksiz. Başta
+      // olması, sahada zaten birikmiş görüntülerin de ilk turda temizlenmesi demek.
+      await this.sweepRunSnapshots(organizationId, share, snapshot, correlationId);
+
+      if (base === null) {
+        // İLK TUR: karşılaştırılacak bir taban yok, o yüzden ağacın TAMAMI yürünüyor.
+        //
+        // Bu turun kısa sürmesi beklenmiyor ve kısaltılmıyor. Yalnız tabanı yazıp geçmek —
+        // yani ilk turu bir "başlangıç noktası" saymak — mevcut dosyaların HİÇBİRİNİ
+        // yedeklememek demekti, ve ekranda "yedeğiniz var" yazarken diskte hiçbir şey olmayacaktı.
+        // Bir yedeğin en tehlikeli hâli, olduğu sanılan ve olmayan yedektir.
+        //
+        // DOSYA SAYISI SINIRI BU TURDA UYGULANMIYOR. Sınır, ardılı kuyruğa alınabilen artımlı
+        // turlar için var; ilk tur yarıda bırakılıp taban yazılmadan tekrarlansaydı, her seferinde
+        // baştan başlayan ve hiç bitmeyen bir döngü olurdu.
+        await this.walkAndCopy(share.name, [], total, correlationId);
+        await this.setBase(organizationId, share.id, snapshot);
+        advanced = true;
+        return true;
+      }
+
+      const diff = await this.agent.call(
+        { op: 'diff_snapshots', dataset: share.dataset, from: base, to: snapshot },
+        `yedek turu: '${share.name}' neyi değişti`,
+        correlationId,
+      );
+      if (diff.status === 'refused' || diff.status === 'failed') {
+        // Taban görüntüsü havuzdan gitmiş olabilir. Tabanı düşürüp bir sonraki turun baştan
+        // başlamasını sağlamak, buradaki tek doğru davranış.
+        await this.setBase(organizationId, share.id, null);
+        throw new Error(diff.reason);
+      }
+      const changes = expectStatus(diff, 'diff');
+      if (changes.truncated) {
+        // KESİLMİŞ BİR LİSTE KULLANILAMAZ: eksik olan her satır yedeklenmeyen bir dosya.
+        await this.setBase(organizationId, share.id, null);
+        this.logger.warn(
+          `'${share.name}' değişiklik listesi kesildi; sonraki tur baştan yürüyecek`,
+        );
+        return false;
+      }
+
+      const prefix = `${mountpoint}/`;
+      for (const entry of changes.entries) {
+        if (total.copiedFiles >= MAX_FILES_PER_RUN) return false;
+        const relative = entry.path.startsWith(prefix) ? entry.path.slice(prefix.length) : null;
+        // Bağlama noktasının DIŞINDA bir yol — olmaması gerekir, ve olduğunda yedeğe yazmak yerine
+        // atlamak doğru: yedek ağacında nereye konacağı bilinmeyen bir dosya.
+        if (relative === null || relative === '') continue;
+        const parts = relative.split('/');
+
+        if (entry.change === 'removed') {
+          await this.moveToDeleted(share.name, parts, today, total, correlationId);
+          continue;
+        }
+        if (entry.kind !== 'file') continue;
+        await this.copyOne(share.name, parts, total, correlationId);
+      }
+
+      await this.setBase(organizationId, share.id, snapshot);
+      advanced = true;
+      return true;
+    } finally {
+      if (!advanced) await this.destroySnapshot(share, snapshot, correlationId);
+    }
+  }
+
+  /**
+   * Bu paylaşımın datasetinde ARTIK KİMSENİN BAKMADIĞI tur görüntülerini yok eder.
+   *
+   * Tur her koştuğunda bir `depsis-yedek-*` görüntüsü alıyor, ama bunlardan yalnız ikisi işe
+   * yarıyor: bir sonraki turun karşılaştıracağı taban, ve az önce alınan. Gerisi ölü ağırlık —
+   * kullanıcının sildiği her blok o görüntülerde asılı kalıyor. Altı saatlik ritimde beş paylaşım
+   * ayda altı yüz görüntü demek, ve havuz dolduğunda duran şey SMB yazmaları oluyor.
+   *
+   * ÖN EKİ OLMAYANA DOKUNULMUYOR. Zamanlanmış yedeklerin (`depsis-daily-…`) ve kullanıcının bir
+   * yükseltmeden önce elle aldığı görüntülerin ne zaman silineceğine bu tur karar veremez;
+   * `prunable()`in tek cümlelik kuralı burada da geçerli.
+   *
+   * KAYITLI HİÇBİR TABAN SİLİNMİYOR — yalnız bu paylaşımınki değil, kiracının tamamınınki. İki
+   * paylaşımın aynı dataseti göstermesini engelleyen bir kısıt yok, ve başka bir paylaşımın
+   * tabanını silmek o paylaşımın turunu baştan yürümeye zorlardı.
+   *
+   * BİR GÖRÜNTÜ SİLİNEMEZSE TUR DÜŞMÜYOR: klonu ya da tutamağı olabilir, ve bu turun işi değil.
+   */
+  private async sweepRunSnapshots(
+    organizationId: string,
+    share: ShareRow,
+    keep: string,
+    correlationId: string,
+  ): Promise<void> {
+    const listed = await this.agent.call(
+      { op: 'list_snapshots', dataset: share.dataset },
+      `yedek turu: '${share.name}' görüntü envanteri`,
       correlationId,
     );
-    if (diff.status === 'refused' || diff.status === 'failed') {
-      // Taban görüntüsü havuzdan gitmiş olabilir. Tabanı düşürüp bir sonraki turun baştan
-      // başlamasını sağlamak, buradaki tek doğru davranış.
-      await this.setBase(organizationId, share.id, null);
-      throw new Error(diff.reason);
-    }
-    const changes = expectStatus(diff, 'diff');
-    if (changes.truncated) {
-      // KESİLMİŞ BİR LİSTE KULLANILAMAZ: eksik olan her satır yedeklenmeyen bir dosya.
-      await this.setBase(organizationId, share.id, null);
-      this.logger.warn(`'${share.name}' değişiklik listesi kesildi; sonraki tur baştan yürüyecek`);
-      return false;
-    }
+    if (listed.status !== 'snapshots') return;
 
-    const prefix = `${mountpoint}/`;
-    for (const entry of changes.entries) {
-      if (total.copiedFiles >= MAX_FILES_PER_RUN) return false;
-      const relative = entry.path.startsWith(prefix) ? entry.path.slice(prefix.length) : null;
-      // Bağlama noktasının DIŞINDA bir yol — olmaması gerekir, ve olduğunda yedeğe yazmak yerine
-      // atlamak doğru: yedek ağacında nereye konacağı bilinmeyen bir dosya.
-      if (relative === null || relative === '') continue;
-      const parts = relative.split('/');
+    const bases = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ base_snapshot: string }>(
+        `SELECT base_snapshot FROM public.backup_bases WHERE base_snapshot IS NOT NULL`,
+      ),
+    );
+    const inUse = new Set(bases.map((row) => row.base_snapshot));
+    inUse.add(keep);
 
-      if (entry.change === 'removed') {
-        await this.moveToDeleted(share.name, parts, today, total, correlationId);
-        continue;
+    for (const snapshot of listed.snapshots) {
+      if (!snapshot.name.startsWith(RUN_SNAPSHOT_PREFIX)) continue;
+      if (inUse.has(snapshot.name)) continue;
+      await this.destroySnapshot(share, snapshot.name, correlationId);
+    }
+  }
+
+  /**
+   * Bir tur görüntüsünü yok eder.
+   *
+   * HİÇBİR KOŞULDA FIRLATMIYOR, ve bu bir kolaylık değil: çağıranlardan biri `finally` içinde ve
+   * orada atılan bir hata, turun asıl hatasının — 'yer yok' gibi, kendi durumu olan bir hatanın —
+   * üstünü örterdi.
+   */
+  private async destroySnapshot(
+    share: ShareRow,
+    snapshot: string,
+    correlationId: string,
+  ): Promise<void> {
+    try {
+      const gone = await this.agent.call(
+        { op: 'destroy_snapshot', dataset: share.dataset, snapshot },
+        `yedek turu: '${share.name}' görüntüsü siliniyor (${snapshot})`,
+        correlationId,
+      );
+      // Silinemeyen bir görüntünün klonu ya da tutamağı olabilir, ve o bir kullanıcı kararı. Ama
+      // sessizce geçilmiyor — havuz doluyorsa sebebi günlükte olsun.
+      if (gone.status !== 'snapshot_destroyed') {
+        this.logger.warn(`${share.dataset}@${snapshot} silinemedi; ajan '${gone.status}' dedi`);
       }
-      if (entry.kind !== 'file') continue;
-      await this.copyOne(share.name, parts, total, correlationId);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`${share.dataset}@${snapshot} silinemedi: ${reason}`);
     }
-
-    await this.setBase(organizationId, share.id, snapshot);
-    return true;
   }
 
   /**
@@ -272,9 +390,15 @@ export class BackupRunService {
    * olmamalı: kök yetkiyle koşan bir süreçte ağacın ne kadarına dokunulacağını çağıran taraf
    * seçemez. Ağacı yürüyen taraf, ağacı zaten bilen taraf.
    *
-   * KESİLMİŞ BİR LİSTELEME ATLANMIYOR, hata veriyor: eksik olan her satır yedeklenmeyen bir
-   * dosya, ve ilk turda o dosyaların bir daha sorulacağı yer yok — taban yazıldıktan sonra
-   * yalnız DEĞİŞENLER geliyor, ve hiç kopyalanmamış bir dosya bir daha değişmeyebilir.
+   * DİZİN SAYFA SAYFA OKUNUYOR. Ajanın tek bir yanıtı 5.000 girdide kesiliyor ve gerisini `after`
+   * imleciyle veriyor — imleç bir AD, ofset değil, yani sayfalar arasında bir dosya eklenirse sıra
+   * kaymıyor. Sayfalama olmadan, içinde 5.000'den fazla girdi bulunan tek bir klasör paylaşımın
+   * İLK turunu her seferinde aynı yerden düşürüyordu: taban hiç yazılmadığı için sonraki tur baştan
+   * başlıyor, aynı klasöre çarpıyor, ve o paylaşımın hiçbir dosyası yedeğe girmiyordu.
+   *
+   * TAVAN AŞILIRSA HÂLÂ HATA VERİLİYOR: eksik olan her satır yedeklenmeyen bir dosya, ve ilk turda
+   * o dosyaların bir daha sorulacağı yer yok — taban yazıldıktan sonra yalnız DEĞİŞENLER geliyor,
+   * ve hiç kopyalanmamış bir dosya bir daha değişmeyebilir.
    */
   private async walkAndCopy(
     shareName: string,
@@ -282,28 +406,48 @@ export class BackupRunService {
     total: RunOutcome,
     correlationId: string,
   ): Promise<void> {
-    const response = await this.agent.call(
-      { op: 'list_directory', share: shareName, path },
-      `ilk yedek turu: ${shareName}/${path.join('/')}`,
-      correlationId,
-    );
-    // Bu arada silinmiş bir dizin: olağan, ve atlanıyor.
-    if (response.status === 'not_found') return;
-    const listing = expectStatus(response, 'listing');
-    if (listing.truncated) {
-      throw new Error(
-        `'${shareName}/${path.join('/')}' dizini tek listelemeye sığmadı; ilk yedek eksik kalırdı`,
+    let after: string | undefined;
+
+    for (let page = 0; page < MAX_LISTING_PAGES; page += 1) {
+      const response = await this.agent.call(
+        {
+          op: 'list_directory',
+          share: shareName,
+          path,
+          ...(after === undefined ? {} : { after }),
+        },
+        `ilk yedek turu: ${shareName}/${path.join('/')}`,
+        correlationId,
       );
+      // Bu arada silinmiş bir dizin: olağan, ve atlanıyor. Sonraki sayfalarda aynı yanıt "dizin
+      // okunurken silindi" demek; o zamana kadar kopyalananlar yerinde kalıyor ve yürüyüş biter.
+      if (response.status === 'not_found') return;
+      const listing = expectStatus(response, 'listing');
+
+      // SAYFA GELDİĞİ ANDA İŞLENİYOR, biriktirilmiyor: iki yüz bin girdilik bir dizinin tamamını
+      // bellekte tutmanın hiçbir karşılığı yok, ve imleç bir ad olduğu için sayfalar arasında
+      // geçen süre güvenli.
+      for (const entry of listing.entries) {
+        const child = [...path, entry.name];
+        if (entry.directory) {
+          await this.walkAndCopy(shareName, child, total, correlationId);
+        } else {
+          await this.copyOne(shareName, child, total, correlationId);
+        }
+      }
+
+      if (!listing.truncated) return;
+      const last = listing.entries[listing.entries.length - 1];
+      // Kesildi ama girdi yok: ilerletecek bir imleç kalmadı, ve aynı sayfayı yeniden istemek
+      // sonsuz döngü olurdu.
+      if (last === undefined) break;
+      after = last.name;
     }
 
-    for (const entry of listing.entries) {
-      const child = [...path, entry.name];
-      if (entry.directory) {
-        await this.walkAndCopy(shareName, child, total, correlationId);
-      } else {
-        await this.copyOne(shareName, child, total, correlationId);
-      }
-    }
+    throw new Error(
+      `'${shareName}/${path.join('/')}' dizini ${MAX_LISTING_PAGES} listeleme sayfasında bitmedi;` +
+        ` ilk yedek eksik kalırdı`,
+    );
   }
 
   /** Bir dosyayı yedeğe kopyalar, gerekirse üst dizinleri açarak. */

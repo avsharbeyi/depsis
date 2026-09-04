@@ -6,7 +6,10 @@
 # reader handles both — it notices a changed inode AND a size that went backwards — but the one
 # that keeps rsyslog working without a signal is this one.
 #
-#     cp deploy/logrotate/depsis-smb-audit /etc/logrotate.d/depsis-smb-audit
+# `tools/install/install.sh` installs this file — it is not a manual step, and for a while it was
+# neither: the rule sat in the repository while no installation path ever copied it, so the log on
+# a real box grew without a bound until the system disk filled.  `su root depsis-api` needs the
+# depsis-api group to exist, which is why the installer copies it after creating the accounts.
 
 /var/log/depsis/smb-audit.log {
     hourly

@@ -208,16 +208,33 @@ fn serve() -> std::process::ExitCode {
         // from "old but streaming right now". An external collector has neither and would
         // eventually delete a live upload (ADR-0017).
         //
-        // Absent share root means nothing to sweep, and no thread. A box before storage is set up
-        // has no staging directories at all.
-        if let Some(paths) = shares.as_ref() {
+        // İKİ AĞAÇ, TEK DÖNGÜ. Paylaşım kökünün yanında YEDEK kökü de süpürülüyor, ve ikincisi
+        // eksikti: `copy_file_to_backup` yedek ağacının kökünde kendi DÜZ `.depsis/staging`ini
+        // kuruyor, `sweep_once` ise `list_share_dirs()` üzerinden yürüdüğü için oraya hiç
+        // uğramıyordu. Yarıda kesilen her yedek turu — ajan yeniden başlatması, elektrik
+        // kesintisi, `out_of_space` — geride yarım bir dosya bırakıyor ve ertesi gece tur yeni bir
+        // ad seçiyordu; hiçbir şey eskisini almıyordu.
+        //
+        // İPLİK KOŞULSUZ. Eskiden yalnız paylaşım kökü varken kuruluyordu; yedek diski
+        // paylaşımlardan bağımsız olarak takılabiliyor, ve "paylaşım kökü yok" cevabı yedek
+        // ağacının hiç süpürülmemesi için bir sebep değil. Kök hazır değilse iki geçiş de hiçbir
+        // şey yapmıyor.
+        {
             // Reborrowed before the `move`, which the thread needs for `paths`. Writing `&transfers`
             // inside a `move` closure captures the registry BY VALUE — the mutex would go with the
             // sweeper and the two socket loops would lose it.
             let registry = &transfers;
             let journal = &audit;
+            let live = shares.as_ref();
+            let vault = &backup;
             scope.spawn(move || loop {
-                let report = sweep::sweep_once(paths, registry, journal, max_age);
+                let mut report = match live {
+                    Some(paths) => sweep::sweep_once(paths, registry, journal, max_age),
+                    None => sweep::SweepReport::default(),
+                };
+                let backup_report = sweep::sweep_backup_once(vault, journal, max_age);
+                report.removed = report.removed.saturating_add(backup_report.removed);
+                report.unreadable = report.unreadable.saturating_add(backup_report.unreadable);
                 if report.removed > 0 || report.unreadable > 0 {
                     eprintln!(
                         "depsis-agent: sweep removed {} abandoned staging file(s), spared {}, \
