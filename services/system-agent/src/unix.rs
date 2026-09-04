@@ -263,7 +263,7 @@ impl Openat2SafePath {
                 continue;
             }
             let Ok(name) = raw.to_str() else {
-                // A name that is not UTF-8 cannot be a `SafeComponent`, so nothing downstream
+                // A name that is not UTF-8 cannot be an `EntryName`, so nothing downstream
                 // could ever address it. Reported as absent rather than as a fault: it is a real
                 // file, and the honest thing is that DEPSIS cannot represent it.
                 continue;
@@ -752,7 +752,7 @@ impl SafePath for Openat2SafePath {
                 continue;
             }
             let Ok(name) = raw.to_str() else {
-                // Not addressable as a `SafeComponent`, so nothing downstream could name it.
+                // Not addressable as an `EntryName`, so nothing downstream could name it.
                 continue;
             };
             names.push(name.to_string());

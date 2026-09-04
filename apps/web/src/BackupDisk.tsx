@@ -12,6 +12,27 @@ type Importable = OpenApi.components['schemas']['ImportableBackupPools']['pools'
 type Notify = (kind: 'ok' | 'error', text: string) => void;
 
 /**
+ * Yedek diskinin kurulabileceği havuzlar — paylaşımların durduğu havuz ÇIKARILMIŞ hâlde.
+ *
+ * Bir yedek, kopyanın ASIL VERİDEN BAŞKA BİR DİSKTE durmasıdır. Paylaşımların bulunduğu havuzu
+ * seçtiren bir liste, aynı disklere ikinci bir kopya yazdırırdı: havuz iki katı hızla dolar, ZFS
+ * yazmayı keser ve bütün paylaşımlar "disk dolu" vermeye başlar; disk arızasında ise "yedek" de
+ * asıl veriyle birlikte gider — yani ekranın verdiği söz ("cihazın dışında bir kopya") baştan boş
+ * çıkar.
+ *
+ * Karşılaştırma METİN ÖNEKİYLE değil BİLEŞENLE yapılıyor: `tank2`, `tank`'ın parçası değildir ve
+ * onu da elemek, sahibinin elindeki tek geçerli yedek havuzunu listeden silerdi.
+ *
+ * `parentDataset` bilinmiyorsa (paylaşım ağacı henüz kurulmamış) eleyecek bir şey yok — liste
+ * olduğu gibi kalıyor. Bu zaten frenin nazik yarısı; reddeden yarısı ajanda.
+ */
+export function backupCandidatePools(pools: string[], parentDataset?: string): string[] {
+  if (parentDataset === undefined || parentDataset === '') return pools;
+  const sharePool = parentDataset.split('/')[0];
+  return pools.filter((name) => name !== sharePool);
+}
+
+/**
  * Yedek diski — cihazın dışında duran kopyanın kendisi.
  *
  * ── BU EKRANIN CEVAPLADIĞI SORU ──────────────────────────────────────────────────────────────
@@ -48,6 +69,8 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
   const [label, setLabel] = useState('Ev');
   /** Kurulum için seçilebilecek havuzlar — kullanıcı ZFS adı YAZMIYOR, listeden seçiyor. */
   const [pools, setPools] = useState<string[]>([]);
+  /** Paylaşımların açıldığı veri kümesi; havuzu aday listesinden düşmek için tutuluyor. */
+  const [parentDataset, setParentDataset] = useState<string | undefined>(undefined);
   const [disks, setDisks] = useState<Disk[]>([]);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
@@ -67,7 +90,10 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
       // ödenen bir bedel bu — yedek almak için ham ZFS adı yazdıran bir form, adı bilmeyen
       // sahibi terminale iter.
       const setup = await api.GET('/system/storage', {});
-      if (alive && setup.data !== undefined) setPools(setup.data.pools);
+      if (alive && setup.data !== undefined) {
+        setPools(setup.data.pools);
+        setParentDataset(setup.data.parentDataset);
+      }
       const inventory = await api.GET('/system/disks', {});
       if (alive && inventory.data !== undefined) setDisks(inventory.data.disks);
     })();
@@ -175,7 +201,7 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
         <p className="note">Yükleniyor…</p>
       ) : !configured ? (
         <Kurulmamis
-          pools={pools}
+          pools={backupCandidatePools(pools, parentDataset)}
           disks={disks}
           open={mode === 'kur'}
           busy={busy}
@@ -236,6 +262,7 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
  * tek bir disk arızasında her şeyi kaybeder. Bu cümlenin sakinleşmesi gereken bir yer yok.
  */
 function Kurulmamis(props: {
+  /** ADAY havuzlar — paylaşımların durduğu havuz `backupCandidatePools` ile çıkarılmış olarak. */
   pools: string[];
   disks: Disk[];
   open: boolean;
@@ -306,7 +333,13 @@ function Kurulmamis(props: {
                 </option>
               ))}
             </select>
-            <span className="note">Yedeğin duracağı havuz. Ana depolamanızdan farklı olmalı.</span>
+            {/* Artık bir uyarı değil bir AÇIKLAMA: ana depolamanın havuzu listeye hiç girmiyor,
+                çünkü aynı diske yazılan bir kopya yedek değildir. Kullanıcıya uyulması gereken
+                bir kural bırakmak yerine, kuralı listenin kendisi uyguluyor. */}
+            <span className="note">
+              Yedeğin duracağı havuz. Ana depolamanızın havuzu listede yok — yedek başka bir diskte
+              durmalı.
+            </span>
           </div>
 
           <div className="netrow">

@@ -140,7 +140,21 @@ export class WorkerService implements OnApplicationShutdown {
         await sleep(this.idleMs);
         continue;
       }
-      await this.execute(claimed);
+
+      // `execute` kendi hatalarını yutuyor — TEK BİR TANESİ hariç: sonucu yazan `finish` çağrısı
+      // catch bloğunun İÇİNDE, yani oradan gelen bir veritabanı hatasının gidecek yeri yok. Sahada
+      // görüleni buydu: ardılını çoktan kuyruğa almış bir zincir işi düşünce `finish_job`ın
+      // yeniden deneme yolu 23505 veriyor, reddetme buraya kadar çıkıyor, ve `this.loop` hiçbir
+      // yerde beklenmediği için süreç yakalanmamış bir reddetmeyle ölüyordu.
+      //
+      // Bu try/catch bir yara bandı değil, döngünün sözleşmesi: TEK BİR SATIR kuyruğun tamamını
+      // durduramamalı. İşin kendisi kaybolmuyor — kirası dolunca yeniden alınabilir hâle geliyor.
+      const job = claimed;
+      try {
+        await this.execute(job);
+      } catch (error) {
+        this.logger.error(`job ${job.id} (${job.kind}) could not be completed: ${describe(error)}`);
+      }
     }
   }
 
@@ -183,10 +197,24 @@ export class WorkerService implements OnApplicationShutdown {
     } catch (error) {
       // The message is the handler's, and §16 applies to it: this string is written to durable
       // storage, so a handler must not put a secret in the error it throws.
-      const outcome = held ? await this.jobs.finish(job.id, 'failed', describe(error)) : null;
+      //
+      // AYRICA KENDİ TRY'INDA. Bu çağrı zaten bir catch bloğunun içinde, yani buradan fırlayan bir
+      // hatanın yakalanacağı yer yok — ve `finish_job` gerçekten fırlatabiliyor: ardılını çoktan
+      // kuyruğa almış bir zincir işinin yeniden denenmesi kısmi tekil indekse çarpıyor. Sonucu
+      // yazamamak işi KAYBETTİRMİYOR (kira dolunca satır yeniden alınabilir), ama buradan
+      // fırlatmak işçinin tamamını düşürürdü.
+      let ending = ' — and the lease was already lost';
+      if (held) {
+        try {
+          const outcome = await this.jobs.finish(job.id, 'failed', describe(error));
+          ending = outcome === null ? ' — and the lease was already lost' : ` → ${outcome}`;
+        } catch (finishError) {
+          ending = ` — and the outcome could not be recorded: ${describe(finishError)}`;
+        }
+      }
       this.logger.warn(
         `job ${job.id} (${job.kind}) failed on attempt ${job.attempt}/${job.maxAttempts}: ` +
-          `${describe(error)}${outcome === null ? ' — and the lease was already lost' : ` → ${outcome}`}`,
+          `${describe(error)}${ending}`,
       );
     } finally {
       clearInterval(beat);

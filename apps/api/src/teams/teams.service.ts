@@ -286,10 +286,34 @@ export class TeamsService {
 
       if (options.dryRun) return { impact, changed: false };
 
-      await db.query(`DELETE FROM public.teams WHERE organization_id = $1 AND id = $2`, [
-        organizationId,
-        id,
-      ]);
+      // ── SİLİNEN EKİBİN gid'İ EMEKLİ EDİLİYOR ────────────────────────────────────────────
+      //
+      // `allocate_posix_id` bir sonraki numarayı `MAX(users.posix_uid ∪ teams.posix_gid ∪
+      // retired) + 1` ile buluyor, yani en yüksek numaralı ekip silinince gid'i serbest kalıyor
+      // ve BİR SONRAKİ HESABA uid olarak veriliyor. Ajanın kimlik eşitlemesi grupları yalnız
+      // yaratıyor, silmiyor — `depsis-t-<gid>` kutuda duruyor. `ensure_group` o numarada bir
+      // grup görünce "var" deyip geçiyor, sonra `useradd -g depsis-p-<uid>` var olmayan bir
+      // grubu istiyor ve patlıyor: o kiracının BÜTÜN eşitlemeleri kalıcı olarak düşüyor, yani
+      // hiçbir yeni hesap SMB'ye giremiyor. Üstelik diskteki `group:<gid>` ACL girdileri de
+      // yeni hesabın özel grubuyla eşleşiyor.
+      //
+      // `RETURNING` ile, ayrı bir SELECT ile değil: değer silinen satırdan aynı işlemde gelmeli.
+      // 0015 öncesi kurulmuş ekiplerin `posix_gid`i NULL olabiliyor, o zaman emekli edilecek bir
+      // numara da yok.
+      const dropped = await db.query<{ posix_gid: number | null }>(
+        `DELETE FROM public.teams WHERE organization_id = $1 AND id = $2
+          RETURNING posix_gid`,
+        [organizationId, id],
+      );
+      const posixGid = dropped[0]?.posix_gid ?? null;
+      if (posixGid !== null) {
+        await db.query(
+          `INSERT INTO public.retired_posix_ids (id_value, note)
+                VALUES ($1, $2)
+           ON CONFLICT (id_value) DO NOTHING`,
+          [posixGid, 'silinen ekip'],
+        );
+      }
       return { impact, changed: true };
     });
 

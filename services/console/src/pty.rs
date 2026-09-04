@@ -5,30 +5,39 @@
 //! directly. So a genuine terminal — line editing, `top`, `vim`, colour — is reachable from a
 //! crate that forbids `unsafe_code` outright.
 //!
-//! # What this pty CANNOT do, and why
+//! # The controlling terminal, and why it arrives through `setsid(1)`
 //!
-//! There is no controlling terminal. Making the child's pty its controlling terminal means
-//! `setsid()` plus `ioctl(TIOCSCTTY)` between fork and exec, and the only hook `std` offers
-//! there is `CommandExt::pre_exec`, which is `unsafe` — it runs in a forked child where only
-//! async-signal-safe calls are legal, and this crate does not take that exception.
+//! A pty nobody claimed is a terminal in appearance only. The kernel's line discipline sends
+//! SIGINT to `tty->ctrl.pgrp`, and a resize sends SIGWINCH to that same field; the field is
+//! filled in by `TIOCSCTTY` and by nothing else. So on an unclaimed pty `Ctrl-C` is echoed as
+//! `^C` and signals no one — a `ping` or a `tail -f` opened in the browser console could not be
+//! stopped at all, only escaped by closing the tab — and a full-screen program never learns the
+//! window changed size. `/dev/tty` does not resolve either.
 //!
-//! The consequence is concrete and the operator will meet it:
+//! Claiming it means `setsid()` plus `ioctl(TIOCSCTTY)` BETWEEN fork and exec, and the only hook
+//! `std` offers there is `CommandExt::pre_exec`, which is `unsafe`. This crate is
+//! `forbid(unsafe_code)`, so the two syscalls are made by a program that exists for exactly this:
+//! `setsid -c`, exec'ed in front of the shell.
 //!
-//!   * Job control does not work. `Ctrl-Z`, `fg`, `bg` and `jobs` will not behave; bash prints
-//!     "no job control in this shell" at startup for exactly this reason.
-//!   * `Ctrl-C` still works, because the tty's line discipline sends SIGINT to the foreground
-//!     process group and [`Pty::open`] puts the shell in its own group — but signals are
-//!     delivered to that whole group rather than to a foreground job within it.
-//!   * `/dev/tty` does not resolve inside the session, so the handful of programs that open it
-//!     directly (some password prompts, `ssh` asking for a passphrase) will fail rather than
-//!     prompt.
+//! One detail makes that safe to rely on. `setsid(1)` forks when it finds itself a process group
+//! leader, and the pid this struct holds would then belong to a process that exits immediately.
+//! It does not fork here, because [`Pty::open`] deliberately does NOT call `process_group(0)`:
+//! the child inherits this service's group, its own fresh pid therefore differs from that group's
+//! id, and `setsid(1)` calls `setsid()` in place and `exec`s. [`Pty::pid`] stays the shell's pid,
+//! and that pid is now also the session id.
 //!
-//! Everything else about the terminal is real: `stty size` reports the true geometry, SIGWINCH
-//! arrives on resize, and readline edits lines.
+//! Where no `setsid` is installed the console still opens, without a controlling terminal — a
+//! shell that cannot be interrupted is worth more than no shell — and the operator is told once
+//! at startup. [`find_setsid`] is what the binary asks.
 //!
-//! Getting job control back is a small, self-contained change — a `pre_exec` closure calling
-//! `setsid` and `TIOCSCTTY`, or a tiny helper binary that does it before exec'ing the shell —
-//! and it should be a deliberate decision, not something that arrives by accident.
+//! # What that costs [`Pty::terminate`]
+//!
+//! Job control is the point of a controlling terminal, and job control puts every job in a
+//! process group of its OWN. `kill_process_group(shell)` then names a group holding the shell
+//! alone, and `sleep 900 &` survives it — still holding the user side of the pty open, which is
+//! what makes a read on the master block forever. The session is the unit that still contains
+//! everything the console started, so [`Pty::terminate`] signals the shell's group AND every
+//! process the kernel reports in the shell's session.
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -49,6 +58,14 @@ use crate::protocol::TermSize;
 /// exec primitive wearing a configuration key's clothes.
 const SHELLS: [&str; 2] = ["/bin/bash", "/bin/sh"];
 
+/// Where `setsid(1)` lives. util-linux installs it under `/usr/bin`, busybox links it from
+/// `/bin`; a fixed list for the same reason as [`SHELLS`], since this is the second and last
+/// program the service execs.
+const SETSIDS: [&str; 2] = ["/usr/bin/setsid", "/bin/setsid"];
+
+/// Where the kernel publishes the session of every process.
+const PROC: &str = "/proc";
+
 /// How long a shell gets between the hangup and the kill.
 ///
 /// Long enough for bash to write its history file, short enough that closing a browser tab does
@@ -63,6 +80,20 @@ const GRACE: std::time::Duration = std::time::Duration::from_millis(300);
 #[must_use]
 pub fn find_shell() -> Option<PathBuf> {
     SHELLS
+        .iter()
+        .map(Path::new)
+        .find(|p| p.is_file())
+        .map(Path::to_path_buf)
+}
+
+/// The `setsid(1)` on this box, or nothing.
+///
+/// Nothing is survivable — the shell still starts, just without a controlling terminal — but it
+/// changes what the console can do, so the binary asks once at startup and says so in the
+/// journal instead of leaving the operator to discover that Ctrl-C does nothing.
+#[must_use]
+pub fn find_setsid() -> Option<PathBuf> {
+    SETSIDS
         .iter()
         .map(Path::new)
         .find(|p| p.is_file())
@@ -103,7 +134,31 @@ impl Pty {
         let stdout = slave.try_clone()?;
         let stderr = slave;
 
-        let mut cmd = Command::new(shell);
+        // `setsid -c <shell>` rather than the shell directly: those two syscalls between fork and
+        // exec are what give the pty a controlling terminal, and without one Ctrl-C and SIGWINCH
+        // reach nobody. See the module comment for why it is an exec and not a `pre_exec`.
+        //
+        // The short flag, not `--ctty`: busybox's setsid understands `-c` and no long options,
+        // and an appliance image may well ship busybox rather than util-linux. The `--` is what
+        // keeps the shell's own `-l` from being read as a flag OF setsid by an option parser that
+        // permutes its arguments.
+        let mut cmd = match find_setsid() {
+            Some(setsid) => {
+                let mut cmd = Command::new(setsid);
+                cmd.arg("-c");
+                cmd.arg("--");
+                cmd.arg(shell);
+                cmd
+            }
+            // No setsid anywhere. The console opens without job control — bash will announce
+            // that itself — and the shell gets its own process group, because that group is then
+            // the only thing `terminate` has to signal.
+            None => {
+                let mut cmd = Command::new(shell);
+                cmd.process_group(0);
+                cmd
+            }
+        };
         cmd.arg("-l");
         cmd.stdin(Stdio::from(stdin));
         cmd.stdout(Stdio::from(stdout));
@@ -125,11 +180,10 @@ impl Pty {
             cmd.env("HOME", home);
         }
 
-        // Its own process group, so the tty's line discipline has a foreground group to signal
-        // and so terminating the session can take background jobs with it. This is NOT a
-        // controlling terminal — see the module comment for what that costs.
-        cmd.process_group(0);
-
+        // NOTHING sets the process group here, and that omission is load-bearing on the setsid
+        // path: `setsid(1)` forks when it is already a group leader, and the pid returned by
+        // `spawn` would then name a process that exits at once — leaving `wait` with setsid's
+        // status instead of the shell's and `terminate` signalling an empty session.
         let child = cmd.spawn()?;
 
         Ok(Self {
@@ -153,28 +207,31 @@ impl Pty {
     }
 
     pub fn resize(&self, size: TermSize) -> io::Result<()> {
-        // On the master. The kernel propagates it to the user side and raises SIGWINCH there,
-        // which is what makes `stty size` and full-screen programs agree with the browser.
+        // On the master. The kernel propagates it to the user side and raises SIGWINCH on the
+        // terminal's foreground process group, which is what makes `stty size` and full-screen
+        // programs agree with the browser. The signal half only happens because the shell claimed
+        // this pty as its controlling terminal; the ioctl alone updates a number nobody is told
+        // about.
         rustix::termios::tcsetwinsize(&self.master, winsize(size))?;
         Ok(())
     }
 
-    /// End the session: signal the whole process group, not just the shell.
+    /// End the session: signal everything it started, not just the shell.
     ///
     /// `sleep 900 &` holds the user side of the pty open after bash is gone, and a master read
-    /// blocked on a descriptor a background job still owns never returns. Signalling the group
-    /// is what makes "the session is over" true for everything the session started.
+    /// blocked on a descriptor a background job still owns never returns. Reaching that job takes
+    /// both halves of [`signal_session`], because the shell can be in either shape: with a
+    /// controlling terminal job control has moved the job into a group of its own and only the
+    /// SESSION still contains it, and without one there is no session to enumerate and the
+    /// shell's own group is the whole of it.
     pub fn terminate(&self) {
-        let Some(pid) = rustix::process::Pid::from_raw(self.pid()) else {
-            return;
-        };
         // SIGHUP, not SIGTERM: "the terminal went away" is exactly what happened, it is the
         // signal a shell has a handler for, and bash runs its EXIT trap and writes its history
         // on it. A grace period, then SIGKILL — because the point of a timeout is that it
         // completes, and a process that ignores a hangup is the case the timeout exists for.
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::HUP);
+        signal_session(self.pid(), rustix::process::Signal::HUP);
         std::thread::sleep(GRACE);
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        signal_session(self.pid(), rustix::process::Signal::KILL);
     }
 
     /// Reap the shell and report its exit status the way a shell would.
@@ -215,6 +272,68 @@ impl Drop for Pty {
         self.terminate();
         let _ = self.child.wait();
     }
+}
+
+/// Signal the shell's process group and everything else in the shell's session.
+///
+/// Both, deliberately. The group covers the no-controlling-terminal fallback, where the session
+/// belongs to this service and enumerating it would sweep the console itself. The session covers
+/// the normal path, where job control has scattered the shell's jobs across process groups the
+/// shell's pid does not name.
+fn signal_session(shell: i32, signal: rustix::process::Signal) {
+    let Some(pid) = rustix::process::Pid::from_raw(shell) else {
+        return;
+    };
+    let _ = rustix::process::kill_process_group(pid, signal);
+    for member in session_members(Path::new(PROC), shell) {
+        // The leader is already covered by its own group above.
+        if member == shell {
+            continue;
+        }
+        if let Some(member) = rustix::process::Pid::from_raw(member) {
+            let _ = rustix::process::kill_process(member, signal);
+        }
+    }
+}
+
+/// Every pid the kernel reports as belonging to session `sid`.
+///
+/// A directory walk, not a shell out to `ps`: this crate execs a shell for the user and nothing
+/// else, and /proc is the kernel's own word. A process that ends mid-walk gives ENOENT on its
+/// `stat`, which is not an error but the normal life of the file — the list is a snapshot either
+/// way, which is why [`Pty::terminate`] takes a fresh one before the SIGKILL pass.
+fn session_members(proc_root: &Path, sid: i32) -> Vec<i32> {
+    let mut members = Vec::new();
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
+        return members;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue; // /proc/self, /proc/meminfo and the rest
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        if stat_session(&stat) == Some(sid) {
+            members.push(pid);
+        }
+    }
+    members
+}
+
+/// The session id out of a `/proc/<pid>/stat` line.
+///
+/// Split on the LAST `)`, never on spaces from the front: field 2 is the executable's name
+/// unescaped, so a process called `sh (old)` shifts every field after it and a naive split would
+/// read somebody else's number as a session id and then signal it.
+fn stat_session(stat: &str) -> Option<i32> {
+    // After the comm the fields are: state, ppid, pgrp, session.
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm.split_whitespace().nth(3)?.parse().ok()
 }
 
 fn winsize(size: TermSize) -> Winsize {
@@ -358,6 +477,132 @@ mod tests {
         let _ = pty.wait();
     }
 
+    /// True when this box can have a controlling terminal at all.
+    ///
+    /// Not a quiet pass: without `setsid` the kernel genuinely cannot deliver these signals, and
+    /// saying so beats a green tick that means nothing. Every ordinary Linux has it, so the two
+    /// tests below do assert for real everywhere it matters.
+    fn ctty_or_skip() -> bool {
+        if find_setsid().is_some() {
+            return true;
+        }
+        eprintln!("skipped: no setsid on this box, so the pty has no controlling terminal");
+        false
+    }
+
+    #[test]
+    fn ctrl_c_interrupts_a_running_command() {
+        // The defect this guards. With no controlling terminal the line discipline has no
+        // foreground process group to signal: `\x03` is echoed as ^C, `sleep` runs to the end,
+        // and the `echo` typed after it is not read for another 30 s — far past the budget here.
+        // The administrator's only escape was closing the browser tab, which killed the shell.
+        if !ctty_or_skip() {
+            return;
+        }
+        let mut pty = open_test_pty(80, 24);
+        let mut master = pty.master();
+
+        master.write_all(b"sleep 30\n").unwrap();
+        master.flush().unwrap();
+        // The shell must have reached `sleep` first: an interrupt that arrives while bash is
+        // still reading the line only cancels the line, which would pass for the wrong reason.
+        std::thread::sleep(Duration::from_millis(700));
+
+        master.write_all(b"\x03").unwrap();
+        master.flush().unwrap();
+        // SIGINT flushes the terminal's input queue, so the next command goes in after the shell
+        // has taken the interrupt rather than in the same write.
+        std::thread::sleep(Duration::from_millis(300));
+
+        // The needle is split across two literals so the terminal's echo of the command does not
+        // contain it — `read_until` stops at the first match, and the echo arrives first.
+        master.write_all(b"echo \"KES\"\"ILDI\"\n").unwrap();
+        master.flush().unwrap();
+
+        let seen = read_until(&pty, "KESILDI", Duration::from_secs(10));
+        assert!(
+            seen.contains("KESILDI"),
+            "Ctrl-C did not interrupt `sleep 30`; the pty produced: {seen:?}"
+        );
+
+        pty.terminate();
+        let _ = pty.wait();
+    }
+
+    #[test]
+    fn a_resize_raises_sigwinch_in_the_shell() {
+        // `a_resize_reaches_the_shell` proves the ioctl lands, which it does even on a pty nobody
+        // claimed. This proves the other half: that a SIGNAL was delivered. `htop` and `vim`
+        // redraw on the signal and never re-query the ioctl, so without this they keep drawing at
+        // the old size for as long as the session lives.
+        if !ctty_or_skip() {
+            return;
+        }
+        let mut pty = open_test_pty(80, 24);
+        let mut master = pty.master();
+
+        master
+            .write_all(b"trap 'echo \"YENI\"\"BOY\"' WINCH\necho \"HAZ\"\"IR\"\n")
+            .unwrap();
+        master.flush().unwrap();
+        let seen = read_until(&pty, "HAZIR", Duration::from_secs(10));
+        assert!(
+            seen.contains("HAZIR"),
+            "the shell never got as far as installing the trap: {seen:?}"
+        );
+
+        pty.resize(TermSize::new(120, 40).unwrap()).unwrap();
+
+        let seen = read_until(&pty, "YENIBOY", Duration::from_secs(10));
+        assert!(
+            seen.contains("YENIBOY"),
+            "the resize raised no SIGWINCH; the pty produced: {seen:?}"
+        );
+
+        pty.terminate();
+        let _ = pty.wait();
+    }
+
+    #[test]
+    fn the_session_id_is_read_past_a_command_name_that_contains_spaces() {
+        // Field 2 of /proc/<pid>/stat is unescaped. Counting spaces from the front reads field 6
+        // correctly for `bash` and reads some other process's number for `sh (old) x` — and
+        // `signal_session` would then SIGKILL whatever pid that number happened to be.
+        assert_eq!(
+            stat_session("4242 (bash) S 1 4200 4242 34816 4200 4194304"),
+            Some(4242)
+        );
+        assert_eq!(
+            stat_session("77 (sh (old) x) S 1 55 4242 34816 55 4194304"),
+            Some(4242)
+        );
+        assert_eq!(stat_session("not a stat line"), None);
+    }
+
+    #[test]
+    fn session_members_lists_only_the_pids_in_that_session() {
+        let root = std::env::temp_dir().join(format!("depsis-console-proc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |pid: &str, stat: &str| {
+            let dir = root.join(pid);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("stat"), stat).unwrap();
+        };
+        // The shell, a job that job control has moved into a group of its own, and a stranger.
+        write("100", "100 (bash) S 1 100 100 34816 100 4194304");
+        write("101", "101 (sleep) S 100 101 100 34816 100 4194304");
+        write("102", "102 (stranger) S 1 102 999 34816 999 4194304");
+        // A /proc entry that is not a pid, and a process whose `stat` disappeared mid-walk.
+        std::fs::create_dir_all(root.join("meminfo")).unwrap();
+        std::fs::create_dir_all(root.join("103")).unwrap();
+
+        let mut found = session_members(&root, 100);
+        found.sort_unstable();
+        assert_eq!(found, vec![100, 101]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn dropping_a_pty_nobody_waited_on_takes_the_session_with_it() {
         // The regression this guards. `run_session` sends `ready` immediately after opening the
@@ -399,8 +644,9 @@ mod tests {
             pid
         };
 
-        // Gone, not merely orphaned. SIGKILL to the group is what ends it, and its new parent
-        // (pid 1) reaps it — so the /proc entry disappears rather than turning into a zombie.
+        // Gone, not merely orphaned. Job control has given this job a process group of its own,
+        // so what ends it is the SESSION half of `signal_session`, and its new parent (pid 1)
+        // reaps it — the /proc entry disappears rather than turning into a zombie.
         let deadline = Instant::now() + Duration::from_secs(10);
         while Path::new(&format!("/proc/{background}")).exists() {
             assert!(
@@ -413,8 +659,10 @@ mod tests {
 
     #[test]
     fn terminate_takes_background_jobs_with_it() {
-        // The reason `terminate` signals the group. With a plain `kill(pid)` the sleep below
-        // keeps the user side of the pty open and the read never ends.
+        // The reason `terminate` reaches past the shell. With a plain `kill(pid)` — or, once job
+        // control has moved the job into a group of its own, with a plain
+        // `kill_process_group(pid)` — the sleep below keeps the user side of the pty open and the
+        // read never ends.
         let mut pty = open_test_pty(80, 24);
         {
             let mut master = pty.master();

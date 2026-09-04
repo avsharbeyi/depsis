@@ -285,6 +285,110 @@ pub enum PoolPlanError {
     Mounted { by_id: String },
     #[error("{by_id} is removable; a disk that can be unplugged takes its vdev with it")]
     Removable { by_id: String },
+    #[error(
+        "{by_id} şu anda '{pool}' havuzunun bir üyesi; silmeden önce o havuzu dışa aktarın ya da \
+         yok edin"
+    )]
+    PoolMember { by_id: String, pool: String },
+}
+
+/// `zpool list -vHP`. İşlenen YOK — havuzun adını da, diski de çağıran seçmiyor.
+///
+/// `-v` vdev satırlarını da yazdırıyor, `-P` aygıtları TAM YOLLA veriyor (`/dev/disk/by-id/…`),
+/// `-H` başlıkları atıp alanları tek sekmeyle ayırıyor. Üçü birlikte, "bu diski hangi havuz
+/// kullanıyor" sorusunun tek komutla ve ayrıştırılabilir biçimde cevabı.
+pub fn pool_members_argv() -> [&'static str; 2] {
+    ["list", "-vHP"]
+}
+
+/// Bir havuzun kullandığı bir aygıt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolMember {
+    pub pool: String,
+    /// `-P` sayesinde tam yol: `/dev/disk/by-id/ata-X-part1` ya da eski kurulumlarda `/dev/sdb1`.
+    pub device: String,
+}
+
+/// `zpool list -vHP` çıktısını üyelere ayırır.
+///
+/// Girintisi OLMAYAN satır bir HAVUZ adı, girintili satırlar onun vdev'leri ve aygıtları.
+/// Aygıt olmayan vdev satırları (`mirror-0`, `raidz1-0`, `logs`) düşüyor: eğik çizgiyle
+/// başlamayan bir ad bir aygıt yolu değil.
+///
+/// AYRIŞTIRILAMAYAN SATIR SESSİZCE ATLANMIYOR DEĞİL — atlanıyor, ve bunun bedeli çağıran tarafta
+/// karşılanıyor: `wipe_disk` komutun kendisi çalışmazsa silmeyi REDDEDİYOR, yani "okuyamadım"
+/// hiçbir zaman "üye değil"e dönüşmüyor.
+pub fn parse_pool_members(out: &str) -> Vec<PoolMember> {
+    let mut members = Vec::new();
+    let mut pool: Option<String> = None;
+    for line in out.lines() {
+        let Some(first) = line.split('\t').map(str::trim).find(|f| !f.is_empty()) else {
+            continue;
+        };
+        // EĞİK ÇİZGİ, GİRİNTİ DEĞİL. Girinti de bir ipucu ama `-H` kipinde onu okumak, bir
+        // sürümün girintiyi atmasına bel bağlamak olurdu — ve o bahis kaybedilirse aygıt satırı
+        // bir HAVUZ ADI sanılır, yani hiçbir üye bulunmaz ve silme sessizce geçer. Bir havuz adı
+        // `/` taşıyamaz, bir aygıt yolu `-P` sayesinde hep onunla başlar.
+        if first.starts_with('/') {
+            members.push(PoolMember {
+                pool: pool.clone().unwrap_or_else(|| "?".to_string()),
+                device: first.to_string(),
+            });
+            continue;
+        }
+        if line.starts_with('\t') || line.starts_with(' ') {
+            // `mirror-0`, `raidz1-0`, `logs` — vdev'in kendisi, bir aygıt değil.
+            continue;
+        }
+        // `zpool list` boş bir makinede "no pools available" yazabiliyor, ve bir havuz adı boşluk
+        // taşıyamaz.
+        pool = (!first.contains(char::is_whitespace)).then(|| first.to_string());
+    }
+    members
+}
+
+/// Bu diski KULLANAN havuzun adı, varsa.
+///
+/// İki ad üzerinden eşleştiriyor, çünkü bir havuz iki biçimde de kurulmuş olabilir: DEPSIS'in
+/// kendi sihirbazı `/dev/disk/by-id/…` yazıyor, elle kurulmuş eski bir havuz `/dev/sdX` taşıyor.
+/// Bölüm eki de sayılıyor: ZFS diski bütün olarak alsa bile vdev yolu `-part1` ile biter, ve
+/// `wipefs --all` AYGITIN TAMAMINI siler — bölüm tablosuyla birlikte.
+pub fn pool_using(disk: &DiskInfo, members: &[PoolMember]) -> Option<String> {
+    let by_id = disk
+        .by_id
+        .as_ref()
+        .map(|id| format!("{BY_ID_DIR}/{id}"))
+        .unwrap_or_default();
+    let kname = format!("/dev/{}", disk.kname);
+    members
+        .iter()
+        .find(|member| {
+            (!by_id.is_empty() && same_device(&member.device, &by_id))
+                || same_device(&member.device, &kname)
+        })
+        .map(|member| member.pool.clone())
+}
+
+/// `path`, `device`in kendisi ya da onun bir bölümü mü.
+fn same_device(path: &str, device: &str) -> bool {
+    if path == device {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix(device) else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    // `/dev/disk/by-id/ata-X-part1`, `/dev/sdb1`, `/dev/nvme0n1p1` — üç yazım, tek soru.
+    let digits = if let Some(tail) = rest.strip_prefix("-part") {
+        tail
+    } else if let Some(tail) = rest.strip_prefix('p') {
+        tail
+    } else {
+        rest
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Check a proposed WIPE against what the box reports RIGHT NOW.
@@ -295,7 +399,25 @@ pub enum PoolPlanError {
 /// by any confirmation is the same two absolutes as pool creation: the system disk, and anything
 /// mounted. The WWN re-check is verbatim the pool wizard's TOCTOU defence: the caller confirms a
 /// disk, the agent re-reads the inventory, and a device swapped in between is refused, not erased.
-pub fn wipe_plan(disk: &DiskRef, inventory: &[DiskInfo]) -> Result<(), PoolPlanError> {
+///
+/// ── ÜÇÜNCÜ MUTLAK: İÇE AKTARILMIŞ BİR HAVUZUN ÜYESİ ──────────────────────────────────────────
+///
+/// `mounted` bunu YAKALAMIYOR ve yakalayamaz: ZFS veri kümelerini bağlıyor, blok aygıtını değil,
+/// yani çalışan bir havuzun diski `lsblk`ye göre `fstype=zfs_member, mountpoint=null` — yani
+/// bağlı değil. `holds` da reddetmiyor, çünkü içerik silmenin var olma sebebi. Sonuç, sihirbazda
+/// `tank`ın diskinin "üstünde zfs_member var — Sıfırla" diye görünmesiydi: onaylanan silme, canlı
+/// bir vdev'in ZFS etiketlerini ve bölüm tablosunu siliyor, tek diskli havuz bir sonraki
+/// açılışta UNAVAIL, aynadaki DEGRADED oluyordu. Ajanın bütün doğrulamalarından geçen bir işlem
+/// kullanıcının kendi paylaşımlarını yok ediyordu.
+///
+/// YALNIZ İÇE AKTARILMIŞ havuzlar reddediliyor: `members` `zpool list`ten geliyor ve o, yalnız bu
+/// makinenin ŞU AN kullandığı havuzları sayıyor. Dışa aktarılmış eski bir havuzun diskini geri
+/// kazanmak silmenin var olma sebeplerinden biri, ve onu da reddetmek özelliği öldürürdü.
+pub fn wipe_plan(
+    disk: &DiskRef,
+    inventory: &[DiskInfo],
+    members: &[PoolMember],
+) -> Result<(), PoolPlanError> {
     let by_id = disk.by_id.as_str();
     let Some(found) = inventory.iter().find(|d| d.by_id.as_deref() == Some(by_id)) else {
         return Err(PoolPlanError::Unknown {
@@ -317,6 +439,12 @@ pub fn wipe_plan(disk: &DiskRef, inventory: &[DiskInfo]) -> Result<(), PoolPlanE
     if found.mounted {
         return Err(PoolPlanError::Mounted {
             by_id: by_id.to_string(),
+        });
+    }
+    if let Some(pool) = pool_using(found, members) {
+        return Err(PoolPlanError::PoolMember {
+            by_id: by_id.to_string(),
+            pool,
         });
     }
     Ok(())
@@ -996,5 +1124,93 @@ mod tests {
         // A disk formatted with no partition table: the filesystem is on the device itself, and
         // reporting `holds: []` here would offer the disk as empty.
         assert_eq!(disks[0].holds, ["ext4"]);
+    }
+
+    /// `zpool list -vHP` çıktısı, gerçek bir aynanın hâli.
+    ///
+    /// Girintili satırlar sekmeyle geliyor; `mirror-0` bir vdev, altındaki iki satır aygıt.
+    const POOLS: &str = "tank\t3.6T\t1.2T\t2.4T\t-\t-\t2%\t33%\t1.00x\tONLINE\t-\n\
+                         \tmirror-0\t3.6T\t1.2T\t2.4T\t-\t-\t2%\t33%\t-\tONLINE\n\
+                         \t  /dev/disk/by-id/ata-A-part1\t-\t-\t-\t-\t-\t-\t-\t-\tONLINE\n\
+                         \t  /dev/sdb1\t-\t-\t-\t-\t-\t-\t-\t-\tONLINE\n\
+                         yedek\t1.8T\t900G\t900G\t-\t-\t1%\t50%\t1.00x\tONLINE\t-\n\
+                         \t/dev/disk/by-id/ata-C\t-\t-\t-\t-\t-\t-\t-\t-\tONLINE\n";
+
+    #[test]
+    fn a_vdev_line_is_told_from_a_pool_name_by_the_slash() {
+        // Girintiye değil eğik çizgiye bakılıyor, ve fark güvenlik: bir sürüm girintiyi atarsa
+        // aygıt satırı bir HAVUZ ADI sanılır, hiçbir üye bulunmaz, ve canlı bir vdev'in silinmesi
+        // sessizce geçer. Bir havuz adı `/` taşıyamaz; `-P` sayesinde bir aygıt yolu hep taşır.
+        let members = parse_pool_members(POOLS);
+        assert_eq!(
+            members,
+            vec![
+                PoolMember {
+                    pool: "tank".into(),
+                    device: "/dev/disk/by-id/ata-A-part1".into()
+                },
+                PoolMember {
+                    pool: "tank".into(),
+                    device: "/dev/sdb1".into()
+                },
+                PoolMember {
+                    pool: "yedek".into(),
+                    device: "/dev/disk/by-id/ata-C".into()
+                },
+            ],
+            "`mirror-0` bir aygıt değil ve listeye girmemeli"
+        );
+        assert!(parse_pool_members("no pools available\n").is_empty());
+        assert!(parse_pool_members("").is_empty());
+    }
+
+    #[test]
+    fn a_disk_is_matched_through_its_partition_and_through_either_name() {
+        // SAHADAKİ ARIZANIN ÖLÇÜSÜ. `wipefs --all` AYGITIN TAMAMINI siliyor, oysa vdev yolu
+        // `-part1` ile bitiyor: ham dize karşılaştırması canlı bir havuz üyesini kaçırırdı.
+        // İkinci yazım da sayılıyor — DEPSIS'in sihirbazı `by-id` yazıyor, elle kurulmuş eski bir
+        // havuz `/dev/sdX` taşıyor.
+        let members = parse_pool_members(POOLS);
+
+        let mut by_id = present("ata-A", "0xA", false);
+        by_id.kname = "sda".into();
+        assert_eq!(pool_using(&by_id, &members).as_deref(), Some("tank"));
+
+        let mut kname_only = present("ata-Z", "0xZ", false);
+        kname_only.kname = "sdb".into();
+        assert_eq!(pool_using(&kname_only, &members).as_deref(), Some("tank"));
+
+        let mut whole = present("ata-C", "0xC", false);
+        whole.kname = "sdc".into();
+        assert_eq!(pool_using(&whole, &members).as_deref(), Some("yedek"));
+
+        // Ve YANLIŞ EŞLEŞME YOK: `ata-A2` `ata-A`nın bir bölümü değil, başka bir disk.
+        let mut other = present("ata-A2", "0xA2", false);
+        other.kname = "sdd".into();
+        assert_eq!(pool_using(&other, &members), None);
+    }
+
+    #[test]
+    fn a_live_pool_member_is_refused_and_an_exported_disk_is_not() {
+        // `mounted` bunu yakalayamaz: ZFS veri kümelerini bağlıyor, blok aygıtını değil, yani
+        // çalışan bir havuzun diski `mountpoint: null` diye görünüyor. `holds` da reddetmiyor —
+        // içerik silmenin var olma sebebi.
+        let mut member = present("ata-A", "0xA", false);
+        member.kname = "sda".into();
+        member.holds = vec!["zfs_member".into()];
+        let inventory = [member];
+        let members = parse_pool_members(POOLS);
+
+        let error = wipe_plan(&named("ata-A", "0xA"), &inventory, &members)
+            .expect_err("canlı bir havuz üyesi silinmeye gitmemeli");
+        assert!(
+            error.to_string().contains("tank"),
+            "ret havuzun adını taşımalı: {error}"
+        );
+
+        // DIŞA AKTARILMIŞ bir havuzun diski silinebiliyor, ve bu bir gevşeklik değil: `zpool
+        // list` yalnız bu makinenin ŞU AN kullandığı havuzları sayıyor, ve eski bir diski
+        // terminalsiz geri kazanmak silmenin var olma sebeplerinden biri.
+        assert!(wipe_plan(&named("ata-A", "0xA"), &inventory, &[]).is_ok());
     }
 }

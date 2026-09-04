@@ -156,7 +156,7 @@ export type AgentRequest =
       /**
        * Where it lands, relative to the share root. Components are validated individually.
        */
-      destination: SafeComponent[];
+      destination: EntryName[];
       /**
        * How many bytes the caller believes are staged.
        *
@@ -199,7 +199,7 @@ export type AgentRequest =
        * Where the file is, relative to the share root. Components are validated individually,
        * so no element can be `..`, a separator or an absolute-looking string.
        */
-      path: SafeComponent[];
+      path: EntryName[];
       share: SafeComponent;
     }
   | {
@@ -211,20 +211,20 @@ export type AgentRequest =
       /**
        * Where it is now, relative to the share root. The last element is the entry's own name.
        */
-      from: SafeComponent[];
+      from: EntryName[];
       op: 'move_entry';
       share: SafeComponent;
       /**
        * Where it goes, relative to the same share root. The last element is the new name; the
        * elements before it must already exist and be directories.
        */
-      to: SafeComponent[];
+      to: EntryName[];
     }
   | {
       /**
        * The file to read, relative to the share root. The last element is its name.
        */
-      from: SafeComponent[];
+      from: EntryName[];
       /**
        * The most this call will copy before returning.
        *
@@ -284,7 +284,7 @@ export type AgentRequest =
        * Where the copy goes, relative to the same share root. The last element is the new name;
        * every element before it must already exist and be a directory.
        */
-      to: SafeComponent[];
+      to: EntryName[];
     }
   | {
       /**
@@ -308,12 +308,12 @@ export type AgentRequest =
        * Sıra bunun için SABİT: girdiler ada göre bayt sırasıyla veriliyor. `readdir`ın kendi
        * sırası dosya sistemine ait ve iki çağrı arasında aynı kalacağının garantisi yok.
        */
-      after?: SafeComponent | null;
+      after?: EntryName | null;
       op: 'list_directory';
       /**
        * Relative to the share root. Empty means the share root itself.
        */
-      path: SafeComponent[];
+      path: EntryName[];
       share: SafeComponent;
     }
   | {
@@ -321,7 +321,7 @@ export type AgentRequest =
       /**
        * Relative to the snapshot's root. Empty means the snapshot of the share root itself.
        */
-      path: SafeComponent[];
+      path: EntryName[];
       share: SafeComponent;
       /**
        * A single path component under a share root — never a path, never absolute.
@@ -336,7 +336,7 @@ export type AgentRequest =
       /**
        * The file to read, relative to the SNAPSHOT's root. The last element is its name.
        */
-      from: SafeComponent[];
+      from: EntryName[];
       /**
        * The most this call will copy before returning. Bounded by `MAX_COPY_SLICE`.
        */
@@ -383,7 +383,7 @@ export type AgentRequest =
        * Where the restored copy goes, relative to the LIVE share root. The last element is the
        * new name and must not already exist; every element before it must.
        */
-      to: SafeComponent[];
+      to: EntryName[];
     }
   | {
       op: 'offsite_status';
@@ -486,11 +486,11 @@ export type AgentRequest =
        * yedek ağacının düzeni API'nin kararı ve ajanın onu ikinci kez bilmesi, iki yerde
        * ayrı ayrı değişebilen bir kural olurdu.
        */
-      backup: SafeComponent[];
+      backup: EntryName[];
       /**
        * Paylaşım içindeki yol.
        */
-      live: SafeComponent[];
+      live: EntryName[];
       op: 'compare_backup_copy';
       share: SafeComponent;
     }
@@ -512,22 +512,45 @@ export type AgentRequest =
       pool: SafeComponent;
     }
   | {
-      from: SafeComponent[];
+      from: EntryName[];
       max_bytes: number;
       offset: number;
       op: 'copy_file_to_backup';
       share: SafeComponent;
       staging_name: SafeComponent;
-      to: SafeComponent[];
+      to: EntryName[];
     }
   | {
       /**
        * Yedek ağacındaki yol (`Dosyalar/...` ya da `DEPSIS-YEDEK/silinenler/...`).
        */
-      from: SafeComponent[];
+      from: EntryName[];
       max_bytes: number;
       offset: number;
       op: 'restore_file_from_backup';
+      owner_gid: PosixId;
+      /**
+       * A numeric POSIX uid or gid, inside the range migration 0015 reserved for DEPSIS.
+       *
+       * A type rather than a comparison, for the reason `AclType` is a type: the agent exists not to
+       * trust the API, and a rule the API is asked to follow is not a rule the agent enforces. Before
+       * this, the privileged side refused the value 0 and nothing else — so uid 33 (`www-data`), gid 27
+       * (`sudo`), gid 42 (`shadow`) and the appliance's own service accounts were all accepted operands
+       * of `PublishTransfer`, `CreateDirectory` and `AclEntry`. The 300000-399999 range that 0015
+       * introduced *precisely* so that "sistem gruplarıyla çakışan bir gid, cihazdaki bir servis
+       * hesabına kullanıcının dosyalarını açmaktır" was enforced in exactly two places, both
+       * unprivileged: the `CHECK` constraints and `assertUsable` in `posix.service.ts`.
+       *
+       * The agent's own stated reason for refusing 0 — an API that skipped the uid mapping must fail
+       * loudly here — applies with the same force to an API that mapped it to the WRONG number, and
+       * that was the case being waved through. Now a system id cannot be expressed in a request at all,
+       * the same way `nfsv4` cannot be expressed at dataset creation.
+       *
+       * The bounds are duplicated from `0015_teams_and_grants.sql` rather than read from anywhere. That
+       * is deliberate and it is the point: the agent must not depend on the database to know what it
+       * will accept, because the database is on the unprivileged side of the boundary.
+       */
+      owner_uid: number;
       /**
        * A single path component under a share root — never a path, never absolute.
        *
@@ -537,7 +560,7 @@ export type AgentRequest =
        */
       share: string;
       staging_name: SafeComponent;
-      to: SafeComponent[];
+      to: EntryName[];
     }
   | {
       content: string;
@@ -546,21 +569,21 @@ export type AgentRequest =
     }
   | {
       op: 'backup_list_directory';
-      path: SafeComponent[];
+      path: EntryName[];
     }
   | {
       op: 'backup_create_directory';
-      path: SafeComponent[];
+      path: EntryName[];
     }
   | {
-      from: SafeComponent[];
+      from: EntryName[];
       op: 'backup_move_entry';
-      to: SafeComponent[];
+      to: EntryName[];
     }
   | {
       directory: boolean;
       op: 'backup_remove_entry';
-      path: SafeComponent[];
+      path: EntryName[];
     }
   | {
       disk: DiskRef;
@@ -675,7 +698,7 @@ export type AgentRequest =
        */
       directory: boolean;
       op: 'remove_entry';
-      path: SafeComponent[];
+      path: EntryName[];
       share: SafeComponent;
     }
   | {
@@ -707,7 +730,7 @@ export type AgentRequest =
        * Relative to the share root; the LAST element is the name of the directory to create.
        * Every element before it must already exist and be a directory.
        */
-      path: SafeComponent[];
+      path: EntryName[];
       share: SafeComponent;
     }
   | {
@@ -739,7 +762,7 @@ export type AgentRequest =
        *
        * `.depsis/` is refused, like everywhere else a caller-supplied path is accepted.
        */
-      path: SafeComponent[];
+      path: EntryName[];
       share: SafeComponent;
     }
   | {
@@ -827,6 +850,35 @@ export type SmbPrincipal =
  * against `getent` before creating anything.
  */
 export type PosixName = string;
+/**
+ * Bir dosyanın ya da klasörün KENDİ ADI — bir yol bileşeni, bir argüman değil.
+ *
+ * ── NEDEN `SafeComponent`TEN AYRI BİR TİP ────────────────────────────────────────────────────
+ *
+ * `SafeComponent`in dört kuralı var ve üçü her iki yerde de doğru: NUL yok, ayraç yok, `.` ve
+ * `..` yok. Bunlar `openat2(RESOLVE_BENEATH)` confinement'ının dayandığı kurallar ve burada da
+ * aynen duruyorlar.
+ *
+ * Dördüncü kural — BAŞTA TİRE OLAMAZ — argv'yi koruyor: `zfs`, `zpool`, `tar` ve `smartctl`
+ * kendi argümanlarını ayrıştırıyor, yani `-` ile başlayan bir operand ayrı bir argüman olarak
+ * gelse bile bir BAYRAK oluyor. O gerekçe bir havuz adı, bir `by-id` adı, bir anlık görüntü adı
+ * ya da `tar`a verilen klasör adı için geçerli. Bir DOSYA ADI için geçerli değil: çekirdek için
+ * `-notlar.txt` sıradan bir addır, SMB'den kaydedilebilir, ve `openat2`ye giden bir bileşende
+ * tirenin hiçbir anlamı yoktur.
+ *
+ * ── AYRIMIN YOKLUĞUNUN BEDELİ ÖLÇÜLDÜ ────────────────────────────────────────────────────────
+ *
+ * Tek tip her iki yerde de kullanılırken `-` ile başlayan bir dosya iki kez kayboluyordu.
+ * `dispatch::list_directory` girdileri `filter_map` içinde ayrıştırıyor, yani ad SESSİZCE
+ * listeden düşüyordu: dosya web dizininde ve aramada hiç görünmüyordu. Daha kötüsü, artımlı
+ * yedek turu `zfs diff`ten gelen ham yolu kopyalamaya çalıştığında ajan bütün isteği
+ * "unparseable request" diye reddediyor, tur düşüyor ve TABAN İLERLEMİYORDU — yani o dosyanın
+ * yazıldığı günden sonra paylaşımın hiçbir değişikliği yedeğe girmiyordu.
+ *
+ * `SafeComponent` argv'ye ulaşan operandlarda olduğu gibi duruyor; bu tip yalnız yol ve girdi
+ * adı konumlarında.
+ */
+export type EntryName = string;
 /**
  * A numeric POSIX uid or gid, inside the range migration 0015 reserved for DEPSIS.
  *
@@ -1829,8 +1881,12 @@ export interface DirEntry {
    */
   modified_unix: number;
   /**
-   * A `SafeComponent`, not a `String`: a name the agent cannot address is a name the API must
+   * An `EntryName`, not a `String`: a name the agent cannot address is a name the API must
    * not be handed, because a row written for it would be permanently unreachable.
+   *
+   * Ve `SafeComponent` DEĞİL. O tip baştaki tireyi reddediyor — argv'ye giden bir operand için
+   * doğru — ve burada `-notlar.txt` gibi tamamen olağan bir dosyayı listeden SESSİZCE
+   * düşürüyordu: dosya web dizininde hiç görünmüyordu.
    */
   name: string;
   size: number;

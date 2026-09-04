@@ -205,6 +205,37 @@ export class IndexerService implements OnModuleInit {
     //
     // KÖK HER TURDA OKUNUYOR ve bu bilerek: tek bir listeleme, ve paylaşımın en üst seviyesi
     // kullanıcının en sık baktığı yer. Kökün satırı olmadığı için damgası da yok.
+
+    // ── KÖK OKUNAMIYORSA HİÇBİR ŞEY SİLİNMİYOR ────────────────────────────────────────
+    //
+    // Havuz içe aktarılmamış ya da veri kümesi bağlı değilken /srv/depsis duruyor ama paylaşımın
+    // dizini yok: ajan ENOENT'i `not_found` yapıyor, yani KÖK dahil her klasör 'gone' dönüyor.
+    // Eski hâlde kökün 'gone'u yalnız atlanıyordu (kökün satırı yok, silinecek bir şey yok) ve tur
+    // bayat 500 klasörle devam ediyordu: her biri 'gone' → `forget` → alt ağacın bütün satırları,
+    // onlara bağlı KLASÖR YETKİLERİ ve görev bağları CASCADE ile siliniyordu. `more` da true
+    // döndüğü için turlar arka arkaya koşup dakikalar içinde bütün dizini boşaltıyordu. Havuz geri
+    // geldiğinde yürüyüş dosyaları yeni kimliklerle yeniden keşfediyor — ama yetkiler geri
+    // gelmiyor.
+    //
+    // Kökün YOK OLMASI bir klasör olayı değil bir KESİNTİ: iş başarısız sayılıyor, indekse hiç
+    // dokunulmuyor, kuyruk yeniden deniyor. Okunabiliyorsa aynı cevap kuyruğun ilk elemanı için
+    // yeniden kullanılıyor, ajana ikinci kez gidilmiyor.
+    //
+    // Yalnız 'gone' burada ele alınıyor: ajan reddettiğinde ya da ulaşılamadığında `listing`
+    // fırlatıyor, ve o hâl aşağıdaki `unreadable` sayacının zaten doğru cevabı verdiği hâl —
+    // burada yutulup döngüye bırakılıyor ki "hiçbir klasör listelenemedi" tanısı bozulmasın.
+    let preloaded: Awaited<ReturnType<typeof this.listing>> | undefined;
+    try {
+      preloaded = await this.listing(share.name, [], reason);
+    } catch {
+      preloaded = undefined;
+    }
+    if (preloaded === 'gone') {
+      throw new Error(
+        `'${share.name}' paylaşımının kökü diskte yok; havuz bağlı değil — indekse dokunulmadı`,
+      );
+    }
+
     const started = new Date();
     const queue: Array<{ id: string | null; components: string[] }> = [
       { id: null, components: [] },
@@ -237,18 +268,24 @@ export class IndexerService implements OnModuleInit {
       // sorunu değil bir KESİNTİ, ve o zaman fırlatmak doğru — sessizce "tarandı" demek,
       // ajanı kapalı bir cihazda indeksi boş göstermek olurdu.
       let listing: Awaited<ReturnType<typeof this.listing>>;
-      try {
-        listing = await this.listing(share.name, folder.components, reason);
-      } catch (error) {
-        unreadable += 1;
-        this.logger.warn(
-          `could not list '${folder.components.join('/')}': ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        // Damgası VURULMUYOR: bir sonraki turda yeniden denensin. Vurulsaydı, geçici bir
-        // sebeple okunamayan bir klasör sıranın en sonuna düşerdi.
-        continue;
+      if (folder.id === null && preloaded !== undefined) {
+        // Kök turun başında zaten okundu; ajana ikinci kez sorulmuyor.
+        listing = preloaded;
+        preloaded = undefined;
+      } else {
+        try {
+          listing = await this.listing(share.name, folder.components, reason);
+        } catch (error) {
+          unreadable += 1;
+          this.logger.warn(
+            `could not list '${folder.components.join('/')}': ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          // Damgası VURULMUYOR: bir sonraki turda yeniden denensin. Vurulsaydı, geçici bir
+          // sebeple okunamayan bir klasör sıranın en sonuna düşerdi.
+          continue;
+        }
       }
       result.scanned += 1;
       if (listing !== 'gone' && listing.truncated) result.truncated += 1;
@@ -482,7 +519,19 @@ export class IndexerService implements OnModuleInit {
 
     const listing = await this.listing(share.name, components, reason);
     if (listing === 'gone') {
-      if (folderId !== null) result.removed += await this.forget(organizationId, folderId);
+      if (folderId !== null) {
+        // Silmeden önce kök sorulur, `reconcile`daki gerekçenin aynısı: havuz bağlı değilken
+        // paylaşımın altındaki HER yol 'gone' dönüyor, ve tek bir Samba denetim satırı da bir alt
+        // ağacın bütün satırlarını yetkileriyle birlikte sildirmeye yetiyor. Kök de yoksa bu
+        // "klasör gerçekten silinmiş" değil "depolama yok" demek: fırlatılıyor, kuyruk satırı
+        // `dequeue` edilmediği için olay kaybolmuyor.
+        if ((await this.listing(share.name, [], reason)) === 'gone') {
+          throw new Error(
+            `'${share.name}' paylaşımının kökü diskte yok; havuz bağlı değil — indekse dokunulmadı`,
+          );
+        }
+        result.removed += await this.forget(organizationId, folderId);
+      }
       return result;
     }
     if (listing.truncated) result.truncated += 1;

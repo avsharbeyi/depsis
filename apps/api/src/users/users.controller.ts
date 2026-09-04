@@ -24,6 +24,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { requireSameOrigin } from '../auth/origin.js';
 import { PasswordResetService } from '../auth/password-reset.service.js';
 import { PasswordService } from '../auth/password.service.js';
+import { ReauthService } from '../auth/reauth.service.js';
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { SessionService } from '../auth/session.service.js';
 import {
@@ -83,7 +84,17 @@ export class UsersController {
 
   constructor(
     private readonly users: UsersService,
+    /** Yalnız `create` için: yeni hesabın parolasını özetlemek. Doğrulama `reauth`ın işi. */
     private readonly passwords: PasswordService,
+    /**
+     * "Klavyenin başındaki hâlâ o kişi mi" sorusunun TEK yeri.
+     *
+     * Buradaki iki uç parolayı kendi elleriyle `passwords.verify` ile deniyordu, yani giriş
+     * kısıtlamasının dışındaydı: çalınmış bir yönetici çerezi ile parola sınırsız kez, gecikmesiz
+     * ve `login_attempts`'e tek satır iz bırakmadan tahmin edilebiliyordu. `ReauthService` aynı
+     * kontrolü kısıtlamanın ve kaydın içinden yapıyor.
+     */
+    private readonly reauth: ReauthService,
     private readonly sessions: SessionService,
     private readonly resets: PasswordResetService,
     private readonly audit: AuditService,
@@ -161,10 +172,12 @@ export class UsersController {
     const parsed = confirmSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('your own password is required');
 
-    const me = await this.users.findWithHash(session.organizationId, session.userId);
-    if (me === null || !(await this.passwords.verify(me.password_hash, parsed.data.password))) {
-      throw new UnauthorizedException('your password is wrong');
-    }
+    await this.reauth.require(
+      session.organizationId,
+      session.userId,
+      parsed.data.password,
+      request,
+    );
 
     // Refused for oneself, and not as a safety rail: `/me/password` already does this properly,
     // asking for the current password and LEAVING the current session alive. Redeeming a ticket
@@ -235,10 +248,12 @@ export class UsersController {
     const parsed = confirmSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('your own password is required');
 
-    const me = await this.users.findWithHash(session.organizationId, session.userId);
-    if (me === null || !(await this.passwords.verify(me.password_hash, parsed.data.password))) {
-      throw new UnauthorizedException('your password is wrong');
-    }
+    await this.reauth.require(
+      session.organizationId,
+      session.userId,
+      parsed.data.password,
+      request,
+    );
     if (id === session.userId) throw translate(new CannotDeleteSelfError());
 
     const removed = await this.users

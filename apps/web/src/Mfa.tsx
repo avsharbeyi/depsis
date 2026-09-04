@@ -54,15 +54,23 @@ export function Mfa({
     }
     setEnrolment(data);
     setCode('');
+    setPassword('');
     setStep('enrolling');
   }
 
   async function confirm(): Promise<void> {
     setBusy(true);
-    const { data, error } = await api.POST('/me/mfa/enrolment/confirm', { body: { code } });
+    // Parola, kodun yanında. Onaylama anına kadar sır etkisiz, ama onaylandığı anda hesabın
+    // ikinci faktörü oluyor: çalınmış bir oturum bunu parolasız yapabilseydi, hesabın gerçek
+    // sahibi doğru parolasıyla gelip üretemeyeceği bir kod istenerek dışarıda kalırdı ve
+    // yöneticinin de onu geri açacak bir yolu yok.
+    const { data, error } = await api.POST('/me/mfa/enrolment/confirm', {
+      body: { code, password },
+    });
     setBusy(false);
+    setPassword('');
     if (data === undefined) {
-      notify('error', problemMessage(error, 'Kod doğrulanamadı. Saat farkı olabilir.'));
+      notify('error', problemMessage(error, 'Kod ya da parola kabul edilmedi.'));
       return;
     }
     // Straight to the codes rather than closing: these are hashed on the server, so this is the
@@ -174,14 +182,29 @@ export function Mfa({
             value={code}
             onChange={(event) => setCode(event.target.value)}
           />
+          <label htmlFor="mfa-enrol-password">Hesap parolanız</label>
+          <input
+            id="mfa-enrol-password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
           <div className="row">
-            <button type="button" className="no" onClick={() => setStep('idle')}>
+            <button
+              type="button"
+              className="no"
+              onClick={() => {
+                setPassword('');
+                setStep('idle');
+              }}
+            >
               Vazgeç
             </button>
             <button
               type="submit"
               className="yes"
-              disabled={busy || code.trim() === ''}
+              disabled={busy || code.trim() === '' || password === ''}
               onClick={() => void confirm()}
             >
               {busy ? 'Doğrulanıyor…' : 'Doğrula ve aç'}

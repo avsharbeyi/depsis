@@ -380,6 +380,35 @@ describeDb('teams and membership, against a real PostgreSQL', () => {
     expect(leftovers).toHaveLength(0);
   });
 
+  it('retires the gid of a deleted team, and never hands it to an account', async () => {
+    // BU SÜİTİN EN PAHALI HATASIYDI. `allocate_posix_id` bir sonraki numarayı
+    // `MAX(users.posix_uid ∪ teams.posix_gid ∪ retired) + 1` ile buluyor, yani silinen ekip en
+    // yüksek numaralıysa gid'i serbest kalıp BİR SONRAKİ HESABA uid olarak veriliyordu. Ajanın
+    // eşitlemesi grupları yalnız yaratıyor, silmiyor: `depsis-t-<gid>` kutuda duruyor,
+    // `ensure_group` o numarada bir grup görüp "var" diyor, ve ardından gelen
+    // `useradd -g depsis-p-<uid>` var olmayan bir grubu isteyip patlıyor — o kiracının BÜTÜN
+    // eşitlemeleri kalıcı olarak ölüyor, yani yeni hiçbir hesap SMB'ye giremiyor.
+    const team = await teams.create(orgA, 'Emekli');
+    const gid = team.posix_gid as number;
+    expect(gid).not.toBeNull();
+
+    await teams.remove(orgA, team.id, { dryRun: false });
+
+    const retired = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM retired_posix_ids WHERE id_value = $1`,
+        [gid],
+      ),
+    );
+    expect(retired[0]?.n).toBe('1');
+
+    // Ve asıl ölçüm: sıradaki numara o gid DEĞİL. Mezar taşı olmadan burası tam olarak `gid`
+    // dönerdi.
+    const next = await teams.create(orgA, 'Sonraki');
+    expect(next.posix_gid).not.toBe(gid);
+    expect(next.posix_gid).toBeGreaterThan(gid);
+  });
+
   it('removes a member for real, and refuses to remove one twice', async () => {
     const team = await teams.create(orgA, 'Cikacak');
     await teams.putMember(orgA, team.id, memberA, false);

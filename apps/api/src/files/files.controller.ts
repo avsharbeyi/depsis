@@ -140,9 +140,17 @@ export class FilesController {
    * this that means anything.
    *
    * The named `parentId` itself is refused with 404 when the caller cannot `list` it, which is the
-   * same answer the two checks below it already give for a parent in another share or in the bin.
-   * A caller whose only grant is on a deep subfolder therefore reaches it by its id and not by
-   * walking down from a root they cannot read, and the intermediate folders never appear.
+   * same answer the checks below it already give for a parent in the bin or in a share the request
+   * explicitly named something else. A caller whose only grant is on a deep subfolder therefore
+   * reaches it by its id and not by walking down from a root they cannot read, and the
+   * intermediate folders never appear.
+   *
+   * PAYLAŞIMI PARENT SATIRI BELİRLER, istek değil. `shareId` gelmediğinde istekten çözülen şey
+   * kiracının VARSAYILAN paylaşımıdır (`shareFor(org, undefined)`), yani ikinci bir paylaşımdaki
+   * her klasör "başka paylaşımda" görünüp 404 alıyordu — web klasöre inerken `shareId`
+   * göndermediği için o paylaşımın hiçbir klasörü açılamıyordu. Diğer bütün per-entry rotalar gibi
+   * burası da satırın kendi `share_id`sini kullanıyor (`shareOfEntry`); istek AÇIKÇA başka bir
+   * paylaşım adlandırdıysa çelişki 404'tür — `createFolder`daki "ikisi uyuşmalı" ilkesiyle aynı.
    *
    * The ROOT listing takes no such check: there is no id in the request to conceal, and filtering
    * its rows already reduces it to what the caller may see — for somebody with one deep grant,
@@ -160,7 +168,9 @@ export class FilesController {
   ): Promise<Schemas['FileEntryPage']> {
     const caller = requireSession(request);
     const after = cleanCursor(cursor);
-    const share = await this.share(request, shareId);
+    // İstek paylaşımı: `shareId` biçim ve kiracı doğrulamasını burada geçiyor. Çöp dalı ve kök
+    // listelemesi bunu kullanıyor; `parentId` verildiğinde aşağıda satırın paylaşımıyla değişiyor.
+    let share = await this.share(request, shareId);
     const order = cleanSort(sort);
 
     if (isTrue(trashed)) {
@@ -176,12 +186,15 @@ export class FilesController {
       );
     }
 
-    // A parent from another share, or a trashed one, must read as absent rather than empty: an
-    // empty page would tell the caller the folder exists.
+    // A trashed parent, or one in a share the request explicitly named something else, must read
+    // as absent rather than empty: an empty page would tell the caller the folder exists.
     if (parentId !== undefined) {
       requireUuid(parentId);
       const parent = await this.load(caller.organizationId, parentId);
-      if (parent.share_id !== share.id || parent.trashed_at !== null) throw new NotFoundException();
+      if (parent.trashed_at !== null) throw new NotFoundException();
+      const parentShare = await this.shareOfEntry(caller.organizationId, parent);
+      if (shareId !== undefined && parentShare.id !== share.id) throw new NotFoundException();
+      share = parentShare;
       await this.permit(caller, share.id, parentId, 'list');
     }
 
@@ -830,7 +843,15 @@ export class FilesController {
       });
 
     const found = await this.thumbs
-      .of(id, share.name, components, randomUUID(), `GET /files/${id}/thumbnail`)
+      .of(
+        id,
+        Number(entry.size_bytes),
+        entry.updated_at,
+        share.name,
+        components,
+        randomUUID(),
+        `GET /files/${id}/thumbnail`,
+      )
       .catch((error: unknown) => {
         // Ajanın reddi indirmedekiyle aynı kapalı küme, ve aynı cevaplara çevriliyor: dosya
         // gitmiş, ya da başkası okuyor.
@@ -860,8 +881,9 @@ export class FilesController {
       'Content-Disposition',
       `attachment; filename*=UTF-8''${encodeURIComponent(entry.name)}.jpg`,
     );
-    // Değişmez: anahtar girdi kimliği ARTI ajanın bildirdiği boyut, yani dosya değişirse anahtar
-    // da değişiyor. Bir saat, bir ızgarayı defalarca çizen bir oturum için yeterli.
+    // Değişmez: anahtar girdi kimliği ARTI satırın boyutu ve son değişme anı, yani dosya değişip
+    // satır güncellenince anahtar da değişiyor. Bir saat, bir ızgarayı defalarca çizen bir oturum
+    // için yeterli.
     response.setHeader('Cache-Control', 'private, max-age=3600');
     response.end(found.bytes);
   }

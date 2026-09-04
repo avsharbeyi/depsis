@@ -279,7 +279,14 @@ export class BackupTargetController {
 
     let result;
     try {
-      result = await this.targets.restore(session.organizationId, parsed.data, randomUUID());
+      // Geri getiren hesap, dosyanın sahibi oluyor. Ajanın `restore_file_from_backup` işlemi artık
+      // sahip istiyor: eskiden dosya `root:root` iniyordu ve sahibi onu ağ sürücüsünden hiç
+      // açamıyordu — yani "geri getirildi" diyen bir düğme, ulaşılamayan bir dosya bırakıyordu.
+      result = await this.targets.restore(
+        session.organizationId,
+        { ...parsed.data, actorId: session.userId },
+        randomUUID(),
+      );
     } catch (error) {
       throw this.translate(error);
     }

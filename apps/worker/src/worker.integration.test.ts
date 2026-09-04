@@ -1,4 +1,4 @@
-import { DbService, JobsService } from '@depsis/api/worker-surface';
+import { DbService, JobsService, type FinishOutcome } from '@depsis/api/worker-surface';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { WorkerService } from './worker.service.js';
@@ -147,6 +147,53 @@ describeDb('the worker loop, against a real queue', () => {
     expect(finished?.lastError).toContain('the handler said no');
     // Retries carry exponential backoff, so this waits on real time between attempts.
   }, 30_000);
+
+  it('survives a finish that throws, and goes on to the next job', async () => {
+    // THE LOOP'S CONTRACT: one bad row must not stop the queue.
+    //
+    // A self-scheduling handler queues its successor BEFORE doing the work, so when a turn fails
+    // `finish_job`'s retry branch tries to set the running row back to `queued` while a `queued`
+    // row of that kind already exists — and every such kind carries a partial unique index on
+    // exactly that. The 23505 came back out of `JobsService.finish`, which `execute` calls from
+    // INSIDE its own catch block, so nothing caught it; the rejection travelled out of `run()`,
+    // and `this.loop` is awaited by nobody until shutdown. The process died, systemd restarted it
+    // five seconds later, and a permanently failing job did that every sixty-five seconds while
+    // copies, ACL applications and identity syncs waited.
+    class RefusingJobs extends JobsService {
+      refused = 0;
+      override finish(
+        jobId: string,
+        outcome: 'succeeded' | 'failed',
+        error?: string,
+      ): Promise<FinishOutcome> {
+        if (outcome === 'failed' && this.refused === 0) {
+          this.refused += 1;
+          return Promise.reject(new Error('duplicate key value violates unique constraint'));
+        }
+        return super.finish(jobId, outcome, error);
+      }
+    }
+    const flaky = new RefusingJobs(db);
+
+    const worker = new WorkerService(flaky, { leaseSeconds: 5, idleMs: 50 });
+    worker.register('w.badfinish', () => Promise.reject(new Error('the handler said no')));
+    worker.register('w.next', () => Promise.resolve());
+
+    await flaky.enqueue(orgId, 'w.badfinish', {}, { maxAttempts: 1 });
+    // Enqueued second, so `claim`'s ordering hands over the poisoned one first.
+    const next = await flaky.enqueue(orgId, 'w.next');
+
+    worker.start();
+    try {
+      await until(
+        'the loop to reach the job behind the one whose finish threw',
+        async () => (await jobs.find(orgId, next))?.status === 'succeeded',
+      );
+    } finally {
+      await worker.stop();
+    }
+    expect(flaky.refused, 'the throwing finish must actually have been reached').toBe(1);
+  });
 
   it('claims only the kinds it has a handler for', async () => {
     const worker = new WorkerService(jobs, { leaseSeconds: 5, idleMs: 50 });

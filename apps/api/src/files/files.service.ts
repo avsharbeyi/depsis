@@ -612,6 +612,13 @@ export function assertValidName(name: string): void {
   // NUL terminates a C string, so a name containing one is stored whole in PostgreSQL and
   // truncated by every syscall that later receives it — two different names for one file.
   if (name.includes('\0')) throw new InvalidNameError('a name may not contain a NUL');
+  // Baştaki tire ARTIK bir güvenlik kuralı değil. Ajanın yol ve girdi adı konumları `EntryName`e
+  // geçti (şema 43): `-notlar.txt` bir bayrak gibi okunabileceği hiçbir argüman listesine
+  // girmiyor, ve ağ sürücüsünden böyle bir dosya yazıldığında artık dizine giriyor, listeleniyor,
+  // yedekleniyor — eskiden sessizce düşüyor ve artımlı yedek turunu kalıcı olarak kırıyordu.
+  // Burada duruyor olmasının sebebi başka: DEPSIS'in KENDİ açtığı bir adın, kullanıcının bir gün
+  // bir kabuğa yapıştıracağı yerde bayrak gibi görünmesini istemiyoruz. Yani bu bir görgü kuralı,
+  // ve yalnız yeni adlara uygulanıyor — diskte zaten var olan bir ada değil.
   if (name.startsWith('-')) {
     throw new InvalidNameError('a name may not begin with a dash, which reads as a flag');
   }

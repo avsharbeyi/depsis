@@ -12,8 +12,8 @@ use crate::acl::{self, AclError};
 use crate::audit::{self, Outcome, Sink};
 use crate::authz::{Decision, Policy};
 use crate::op::{
-    AclEntry, AclType, DatabaseDump, DirEntry, NodeAddress, OffsiteHostKey, PosixId, Request,
-    Response, SafeComponent, SnapshotEntry, ZeroTierControlledNetwork, ZeroTierMember,
+    AclEntry, AclType, DatabaseDump, DirEntry, EntryName, NodeAddress, OffsiteHostKey, PosixId,
+    Request, Response, SafeComponent, SnapshotEntry, ZeroTierControlledNetwork, ZeroTierMember,
     SCHEMA_VERSION, SHARE_ROOT_MODE,
 };
 use crate::seams::{CommandRunner, OpenIntent, PeerIdentity, SafePath, SeamError, TokenSource};
@@ -62,6 +62,61 @@ pub const STAGING_DIR: [&str; 2] = [".depsis", "staging"];
 
 fn depsis_agent_max_pending() -> usize {
     MAX_PENDING_TRANSFERS
+}
+
+/// `--no-block` yarışını kapatan pencere: durum dosyasına bu kadar yakın zamanda dokunulmuşsa,
+/// systemd henüz "koşuyor" demese bile güncelleyici koşuyor sayılıyor.
+///
+/// Bir dakika, çünkü kapatılan boşluk saniyeler sürüyor: `systemctl start --no-block` işi kuyruğa
+/// koyup dönüyor, ve birim `activating` olana kadar geçen aralıkta `ActiveState` "inactive" diyor.
+const UPDATE_START_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Bir güncelleme GERÇEKTEN sürüyor mu — dört olgudan tek cevap.
+///
+/// ── NEDEN AYRI BİR İŞLEV, VE NEDEN BU BİÇİM ──────────────────────────────────────────────────
+///
+/// Eskiden tek satırdı: `units_running || !phase_is_terminal(faz)`. O VEYA, systemd'nin "bu birim
+/// bitti" cevabını etkisiz kılıyordu. Güncelleyici öldürüldüğünde — güç kesintisi,
+/// `TimeoutStartSec=10800` dolunca gelen SIGTERM, OOM — durum dosyasında `installing` kalıyor ve
+/// onu temizleyen HİÇBİR ŞEY yok: dosya `/var/lib/depsis/update` altında, yeniden başlatma da
+/// silmiyor. Sonuç, cihazın bir daha hiç güncellenememesiydi: ekran sonsuza kadar "Güncelleniyor…"
+/// gösteriyor, iki düğme de gri kalıyor, ve `start_update_unit` aynı bayrağa bakıp "bir güncelleme
+/// işlemi zaten sürüyor" diyor. Tek çıkış durum dosyasını kabuktan silmekti — terminalsiz bir
+/// üründe bu bir çıkış değil.
+///
+/// ── DURUM DOSYASINA YAZILMIYOR ──────────────────────────────────────────────────────────────
+///
+/// Bayat fazı `failed`a çevirmek de bir seçenekti ve yanlış olurdu: burası bir OKUMA yolu ve
+/// arayüz onu üç saniyede bir yokluyor. Salt-okunur bir sorgunun güncelleyicinin durum dosyasını
+/// yeniden yazması, iki yazarı olan bir sözleşme demek. Cevap yalnız yanıtın içinde türetiliyor.
+///
+/// ── DÖRT OLGU ───────────────────────────────────────────────────────────────────────────────
+///
+/// `units_running`: systemd bir birimin koştuğunu söylüyor — tek başına yeter.
+/// `phase_terminal`: durum dosyasındaki faz bitmiş fazlardan biri.
+/// `systemd_answered`: systemd'ye SORULABİLDİ mi. Boş cevap "koşmuyor" değil "soramadım" demek,
+/// ve ikisini karıştırmak systemd'siz bir kutuda her bitmemiş fazı anında bayat sayardı.
+/// `state_fresh`: durum dosyasına son bir dakika içinde dokunuldu mu — başlatma yarışının kapağı.
+fn update_in_progress(
+    units_running: bool,
+    phase_terminal: bool,
+    systemd_answered: bool,
+    state_fresh: bool,
+) -> bool {
+    units_running || (!phase_terminal && (!systemd_answered || state_fresh))
+}
+
+/// Durum dosyasına son `window` içinde dokunuldu mu.
+///
+/// Dosyanın kendi mtime'ı, içindeki `started_at` metni DEĞİL: güncelleyici her faz geçişinde
+/// dosyayı yeniden yazıyor, ve çekirdeğin verdiği zaman ayrıştırılacak bir dize değil.
+/// Okunamayan bir dosya "dokunulmadı" demek — dosya yoksa okunacak bir faz da yok.
+fn state_file_touched_within(window: std::time::Duration) -> bool {
+    std::fs::metadata(crate::update::state_file())
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|when| when.elapsed().ok())
+        .is_some_and(|age| age < window)
 }
 
 /// En fazla kaç üye okunuyor.
@@ -922,7 +977,23 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     .to_string(),
             });
         }
-        if let Err(error) = crate::disks::wipe_plan(disk, &inventory) {
+        // HANGİ HAVUZ BU DİSKİ KULLANIYOR — envanterin cevaplayamadığı soru. `lsblk` çalışan bir
+        // havuzun diskini `mountpoint: null` diye bildiriyor (ZFS veri kümesini bağlıyor, blok
+        // aygıtını değil), yani `mounted` kontrolü canlı bir vdev'i geçiriyordu.
+        //
+        // OKUNAMAZSA REDDEDİLİYOR, geçilmiyor: "havuzları soramadım" ile "bu disk bir havuzun
+        // üyesi değil" aynı cevaba indiğinde, sorunun sorulmadığı her durum bir silme izni olurdu.
+        let members = match self.runner.run(bin::ZPOOL, &crate::disks::pool_members_argv()) {
+            Ok(out) => crate::disks::parse_pool_members(&out),
+            Err(e) => {
+                return Ok(Response::Refused {
+                    reason: format!(
+                        "bu diski bir havuzun kullanıp kullanmadığı okunamadı, silme yapılmadı: {e}"
+                    ),
+                })
+            }
+        };
+        if let Err(error) = crate::disks::wipe_plan(disk, &inventory, &members) {
             return Ok(Response::Refused {
                 reason: error.to_string(),
             });
@@ -1174,16 +1245,23 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
 
         let phase = state.phase.unwrap_or_else(|| "idle".to_string());
         // İKİ KAYNAĞIN BİRLEŞİMİ, ve tek başına hiçbiri yetmiyor. Durum dosyası, güncelleyici onu
-        // yazmaya fırsat bulamadan öldüyse (güç kesintisi, OOM) sonsuza kadar "installing" der —
-        // systemd o birimin bittiğini bilir. Tersi de doğru: birim `--no-block` ile daha yeni
-        // kuyruğa girmişken ActiveState bir an "inactive" olabilir, ve o an dosyadaki faz zaten
-        // koşuyor der.
-        let units_running =
-            crate::update::state_is_running(&self.unit_active_state(crate::update::APPLY_UNIT))
-                || crate::update::state_is_running(
-                    &self.unit_active_state(crate::update::CHECK_UNIT),
-                );
-        let in_progress = units_running || !crate::update::phase_is_terminal(&phase);
+        // yazmaya fırsat bulamadan öldüyse (güç kesintisi, OOM, `TimeoutStartSec` dolunca gelen
+        // SIGTERM) sonsuza kadar "installing" der — systemd o birimin bittiğini bilir. Tersi de
+        // doğru: birim `--no-block` ile daha yeni kuyruğa girmişken ActiveState bir an "inactive"
+        // olabilir, ve o an dosyadaki faz zaten koşuyor der.
+        let apply_state = self.unit_active_state(crate::update::APPLY_UNIT);
+        let check_state = self.unit_active_state(crate::update::CHECK_UNIT);
+        let units_running = crate::update::state_is_running(&apply_state)
+            || crate::update::state_is_running(&check_state);
+        let in_progress = update_in_progress(
+            units_running,
+            crate::update::phase_is_terminal(&phase),
+            // "Koşmuyor" ile "soramadım" ayrı: `unit_active_state` systemd yokken BOŞ DİZE
+            // dönüyor, ve boş dizeyi "koşmuyor" diye okumak systemd'siz her kutuda her bitmemiş
+            // fazı anında bayat sayardı.
+            !apply_state.trim().is_empty() || !check_state.trim().is_empty(),
+            state_file_touched_within(UPDATE_START_GRACE),
+        );
 
         let available = state.available.map(|found| crate::op::UpdateCandidate {
             commit: found.commit,
@@ -1683,8 +1761,13 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     ///
     /// Names and metadata only — see `op::Request::ListDirectory` for why that is the whole point.
     /// The seam drops symlinks and everything that is neither a regular file nor a directory, and
-    /// this drops anything whose name is not a `SafeComponent`: a name DEPSIS could never address
+    /// this drops anything whose name is not an `EntryName`: a name DEPSIS could never address
     /// must not become a row, because the row would be permanently unreachable.
+    ///
+    /// `EntryName`, `SafeComponent` DEĞİL, ve fark sahada ödendi: `SafeComponent` baştaki tireyi
+    /// reddediyor (argv'yi korumak için doğru), ve o kural burada `-notlar.txt` gibi tamamen
+    /// geçerli bir dosyayı listeden SESSİZCE düşürüyordu — dosya web dizininde hiç görünmüyor,
+    /// artımlı yedek turu ona geldiğinde ise bütün istek reddedilip tur düşüyordu.
     fn list_directory(
         &self,
         share: &str,
@@ -1761,7 +1844,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     return None;
                 }
                 Some(DirEntry {
-                    name: SafeComponent::parse(entry.name).ok()?,
+                    name: EntryName::parse(entry.name).ok()?,
                     directory: entry.directory,
                     size: entry.size,
                     modified_unix: entry.modified_unix,
@@ -1959,6 +2042,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// HEDEFİN ÜSTÜNE YAZILMIYOR. Geri getirme, kullanıcının hâlâ üzerinde çalıştığı bir dosyayı
     /// sessizce eski hâliyle değiştirmemeli: o, geri getirmenin çözmeye çalıştığı kaybın bir
     /// başkasını üretmek olurdu. Çakışma `Conflict` ile geri geliyor ve kararı kullanıcı veriyor.
+    ///
+    /// SAHİPLİK YAYIMLAMADAN ÖNCE VERİLİYOR, kardeşleri `copy_file` ve `publish_transfer` gibi.
+    /// Burada yoktu: ara dosya kökün elinde 0600 ile açılıyor ve hiç `set_owner` görmeden yerine
+    /// oturuyordu, yani geri getirilen dosya `root:root 0600` iniyordu. Ekran "geri getirildi"
+    /// diyordu, dosya listede görünüyordu, ve sahibi onu ağ sürücüsünden açamıyordu.
     #[allow(
         clippy::too_many_arguments,
         reason = "her operand ayrı bir karar; gruplamak hangisinin hangi köke ait olduğunu gizlerdi"
@@ -1971,6 +2059,8 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         staging_name: &str,
         offset: u64,
         max_bytes: u64,
+        owner_uid: PosixId,
+        owner_gid: PosixId,
     ) -> Result<Response, SeamError> {
         let Some(live) = self.paths else {
             return Ok(Response::Refused {
@@ -2068,6 +2158,15 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 done: false,
             });
         }
+
+        // SAHİPLİK FSYNC'TEN ÖNCE, ve sıra `publish_transfer`daki gerekçenin aynısı: `fchown`
+        // inode metadata'sını değiştiriyor, `fsync` onu kalıcı kılıyor. Sahiplik fsync'ten sonra
+        // verilseydi, bir güç kesintisi dosyayı gerçek adıyla ESKİ sahibiyle yayımlayabilirdi —
+        // kullanıcının görüp açamadığı bir dosya, ve onu düzeltecek bir ara dosya artık yok.
+        //
+        // Kip 0600 kalıyor ve bu bilinçli (bkz. `unix.rs`, `OpenIntent::CreateNew`): dosya
+        // sahiplikle sahipleniliyor, kipi genişletmek onu kutudaki her kiracıya okutmak olurdu.
+        live.set_owner(&staging_file, owner_uid.get(), owner_gid.get())?;
 
         if let Err(e) = staging_file.sync_all() {
             if matches!(
@@ -2571,7 +2670,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             .take(crate::op::MAX_LISTING)
             .filter_map(|entry| {
                 Some(DirEntry {
-                    name: SafeComponent::parse(entry.name).ok()?,
+                    name: EntryName::parse(entry.name).ok()?,
                     directory: entry.directory,
                     size: entry.size,
                     modified_unix: entry.modified_unix,
@@ -3607,8 +3706,8 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 offset,
                 max_bytes,
             } => {
-                let f: Vec<&str> = from.iter().map(SafeComponent::as_str).collect();
-                let t: Vec<&str> = to.iter().map(SafeComponent::as_str).collect();
+                let f: Vec<&str> = from.iter().map(EntryName::as_str).collect();
+                let t: Vec<&str> = to.iter().map(EntryName::as_str).collect();
                 self.copy_file_to_backup(
                     share.as_str(),
                     &f,
@@ -3625,9 +3724,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 staging_name,
                 offset,
                 max_bytes,
+                owner_uid,
+                owner_gid,
             } => {
-                let f: Vec<&str> = from.iter().map(SafeComponent::as_str).collect();
-                let t: Vec<&str> = to.iter().map(SafeComponent::as_str).collect();
+                let f: Vec<&str> = from.iter().map(EntryName::as_str).collect();
+                let t: Vec<&str> = to.iter().map(EntryName::as_str).collect();
                 self.restore_file_from_backup(
                     &f,
                     share.as_str(),
@@ -3635,6 +3736,8 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     staging_name.as_str(),
                     *offset,
                     *max_bytes,
+                    *owner_uid,
+                    *owner_gid,
                 )
             }
             Request::ArchiveFolder {
@@ -3665,27 +3768,27 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 backup,
             } => self.compare_backup_copy(
                 share.as_str(),
-                &live.iter().map(SafeComponent::as_str).collect::<Vec<_>>(),
-                &backup.iter().map(SafeComponent::as_str).collect::<Vec<_>>(),
+                &live.iter().map(EntryName::as_str).collect::<Vec<_>>(),
+                &backup.iter().map(EntryName::as_str).collect::<Vec<_>>(),
             ),
             Request::BackupWriteMeta { name, content } => {
                 self.backup_write_meta(name.as_str(), content)
             }
             Request::BackupListDirectory { path } => {
-                let parts: Vec<&str> = path.iter().map(SafeComponent::as_str).collect();
+                let parts: Vec<&str> = path.iter().map(EntryName::as_str).collect();
                 self.backup_list_directory(&parts)
             }
             Request::BackupCreateDirectory { path } => {
-                let parts: Vec<&str> = path.iter().map(SafeComponent::as_str).collect();
+                let parts: Vec<&str> = path.iter().map(EntryName::as_str).collect();
                 self.backup_create_directory(&parts)
             }
             Request::BackupMoveEntry { from, to } => {
-                let a: Vec<&str> = from.iter().map(SafeComponent::as_str).collect();
-                let b: Vec<&str> = to.iter().map(SafeComponent::as_str).collect();
+                let a: Vec<&str> = from.iter().map(EntryName::as_str).collect();
+                let b: Vec<&str> = to.iter().map(EntryName::as_str).collect();
                 self.backup_move_entry(&a, &b)
             }
             Request::BackupRemoveEntry { path, directory } => {
-                let parts: Vec<&str> = path.iter().map(SafeComponent::as_str).collect();
+                let parts: Vec<&str> = path.iter().map(EntryName::as_str).collect();
                 self.backup_remove_entry(&parts, *directory)
             }
 
@@ -3913,7 +4016,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     share.as_str(),
                     &parts,
                     None,
-                    after.as_ref().map(SafeComponent::as_str),
+                    after.as_ref().map(EntryName::as_str),
                 )
             }
 
@@ -4831,6 +4934,46 @@ mod tests {
     }
 
     #[test]
+    fn a_phase_left_behind_by_a_killed_updater_does_not_pin_the_screen() {
+        // SAHADAKİ ARIZA: derleme sırasında elektrik gidiyor (ya da `TimeoutStartSec` dolunca
+        // systemd betiği öldürüyor). Durum dosyasında `installing` kalıyor ve onu temizleyen
+        // hiçbir şey yok. Eski birleşim — `units_running || !phase_terminal` — systemd'nin
+        // "birim bitti" cevabını etkisiz kılıyordu, ve cihaz bir daha hiç güncellenemiyordu:
+        // ekran "Güncelleniyor…", iki düğme gri, ajan "zaten sürüyor" diyor.
+        assert!(
+            !update_in_progress(false, false, true, false),
+            "systemd birimin bittiğini söylüyorsa bayat bir faz ekranı kilitlememeli"
+        );
+
+        // Ve ölçüyü kaybetmeyen üç durum:
+        assert!(
+            update_in_progress(true, true, true, false),
+            "koşan bir birim tek başına yeter — dosya ne derse desin"
+        );
+        assert!(
+            update_in_progress(false, false, true, true),
+            "`--no-block` ile yeni başlatılmış bir güncelleme koşuyor sayılmalı"
+        );
+        assert!(
+            update_in_progress(false, false, false, false),
+            "systemd'ye sorulamadıysa tek kaynak dosyadaki faz"
+        );
+        assert!(
+            !update_in_progress(false, true, true, true),
+            "bitmiş bir faz, dosya az önce yazılmış olsa da sürmüyor demek"
+        );
+    }
+
+    #[test]
+    fn a_state_file_that_is_not_there_is_not_fresh() {
+        // `no_update_files` durum dosyasını olmayan bir yola alıyor; okunamayan bir dosya
+        // "dokunulmadı" demek, "az önce dokunuldu" değil — tersi, bayat fazı sonsuza kadar taze
+        // sayardı ve düzeltmenin tamamını geri alırdı.
+        no_update_files();
+        assert!(!state_file_touched_within(UPDATE_START_GRACE));
+    }
+
+    #[test]
     fn the_status_reads_both_units_and_reports_an_unknown_box_honestly() {
         // Sürümü bilinmeyen bir kutu GÜNCEL DEĞİLDİR. "Bilmiyorum"u "güncel" diye raporlamak,
         // güncellemeyi hiç yapmamanın en sessiz yolu olurdu.
@@ -4889,12 +5032,24 @@ mod tests {
        "children":[{"kname":"sdc1","type":"part","size":100,"fstype":"ext4","mountpoint":"/"}]}
     ]}"#;
 
+    /// Hiçbir `wipefs` çalışmadı mı — reddedilen bir silmenin tek ölçüsü.
+    ///
+    /// "İkinci bir komut yok" diye ölçmek yeterli değil artık: silme, kararını vermeden önce
+    /// `zpool`a da soruyor. Aranan şey argv'nin kendisi.
+    fn no_wipe_ran(r: &MockCommandRunner) -> bool {
+        (0..16).all(|i| r.call(i).is_none_or(|call| call[0] != bin::WIPEFS))
+    }
+
     #[test]
     fn wiping_reads_the_box_first_and_then_runs_one_wipefs_all() {
-        // Havuz oluşturmadaki sıra özelliğinin aynısı: envanter TAZE, sonra tek bir wipefs.
-        // İçinde vfat olan bir disk (havuzun reddettiği durum) burada MEŞRU hedef — silmenin
-        // var olma sebebi içerik.
-        let r = MockCommandRunner::with_responses([WIPE_DISKS.into(), String::new()]);
+        // Havuz oluşturmadaki sıra özelliğinin aynısı: envanter TAZE, havuz üyeliği TAZE, sonra
+        // tek bir wipefs. İçinde vfat olan bir disk (havuzun reddettiği durum) burada MEŞRU
+        // hedef — silmenin var olma sebebi içerik.
+        let r = MockCommandRunner::with_responses([
+            WIPE_DISKS.into(),
+            "tank\n\t/dev/disk/by-id/ata-BASKA-part1\n".into(),
+            String::new(),
+        ]);
         let s = MemorySink::default();
         let h = Harness::bare();
         let resp = agent(&r, &s, &h).handle(
@@ -4907,18 +5062,70 @@ mod tests {
 
         let inventory = r.call(0).expect("lsblk ran first");
         assert_eq!(inventory[0], crate::disks::LSBLK);
-        let wipe = r.call(1).expect("wipefs ran second");
+        let pools = r.call(1).expect("havuz üyeliği ikinci soruldu");
+        assert_eq!(pools[0], bin::ZPOOL);
+        assert_eq!(pools[1], "list");
+        let wipe = r.call(2).expect("wipefs ran third");
         assert_eq!(wipe[0], bin::WIPEFS);
         assert_eq!(wipe[1], "--all");
         assert_eq!(wipe[2], "--");
         assert_eq!(wipe[3], "/dev/disk/by-id/ata-DOLU");
-        assert!(r.call(2).is_none(), "wipefs'ten sonra başka komut yok");
+        assert!(r.call(3).is_none(), "wipefs'ten sonra başka komut yok");
+    }
+
+    #[test]
+    fn wiping_a_disk_that_is_a_live_pool_member_is_refused() {
+        // SAHADAKİ ARIZA. Çalışan bir havuzun diski `lsblk`ye göre `fstype=zfs_member,
+        // mountpoint=null` — ZFS veri kümesini bağlıyor, blok aygıtını değil — yani `mounted`
+        // kontrolü onu geçiriyordu ve `holds` zaten hiçbir şeyi reddetmiyor. Sihirbaz o diski
+        // "üstünde zfs_member var — Sıfırla" diye çiziyordu; onaylanan silme canlı bir vdev'in
+        // etiketlerini ve bölüm tablosunu siliyor, havuz bir daha içe aktarılamıyordu.
+        let r = MockCommandRunner::with_responses([
+            WIPE_DISKS.into(),
+            "tank\n\tmirror-0\n\t  /dev/disk/by-id/ata-DOLU-part1\n".into(),
+        ]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"wipe_disk","disk":{"by_id":"ata-DOLU","wwn":"0xD"}}"#,
+            peer(API_UID),
+            "wd5",
+            "operator wiped a pool member",
+        );
+        match resp {
+            Response::Refused { ref reason } => {
+                assert!(reason.contains("tank"), "ret havuzun adını taşımalı: {reason}");
+            }
+            other => panic!("canlı bir havuz üyesi silinmeye gitti: {other:?}"),
+        }
+        assert!(no_wipe_ran(&r), "reddedilen silmede wipefs çalışmamalı");
+    }
+
+    #[test]
+    fn wiping_is_refused_when_the_pool_list_cannot_be_read() {
+        // "Soramadım" ile "üye değil" aynı cevaba inseydi, `zpool`un çalışmadığı her durum bir
+        // silme izni olurdu — ve bir havuzun okunamaması, tam da bir şeylerin ters gittiği an.
+        let r = MockCommandRunner::failing_after(1, WIPE_DISKS);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"wipe_disk","disk":{"by_id":"ata-DOLU","wwn":"0xD"}}"#,
+            peer(API_UID),
+            "wd6",
+            "operator wiped a disk",
+        );
+        assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        assert!(no_wipe_ran(&r), "okunamayan bir havuz listesi silme izni değil");
     }
 
     #[test]
     fn wiping_a_removable_stick_is_allowed_but_the_system_disk_never_is() {
         // Çıkarılabilirlik havuz İÇİN ret sebebi, silme için değil: USB bellek silinebilir.
-        let r = MockCommandRunner::with_responses([WIPE_DISKS.into(), String::new()]);
+        let r = MockCommandRunner::with_responses([
+            WIPE_DISKS.into(),
+            String::new(),
+            String::new(),
+        ]);
         let s = MemorySink::default();
         let h = Harness::bare();
         let resp = agent(&r, &s, &h).handle(
@@ -4938,7 +5145,7 @@ mod tests {
             "operator wiped the system disk",
         );
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
-        assert!(r.call(1).is_none(), "reddedilen silmede wipefs çalışmadı");
+        assert!(no_wipe_ran(&r), "reddedilen silmede wipefs çalışmadı");
     }
 
     #[test]
@@ -4955,7 +5162,7 @@ mod tests {
             "operator wiped a disk",
         );
         assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
-        assert!(r.call(1).is_none());
+        assert!(no_wipe_ran(&r));
     }
 
     #[test]
@@ -5502,7 +5709,7 @@ mod tests {
             r#"{"op":"restore_file_from_backup",
                 "from":["DEPSIS-YEDEK","silinenler","2026-08-30","vergi.pdf"],
                 "share":"belgeler","to":["vergi.pdf"],"staging_name":"g1","offset":0,
-                "max_bytes":1048576}"#,
+                "max_bytes":1048576,"owner_uid":300100,"owner_gid":300100}"#,
             peer(API_UID),
             "gg1",
             "yedekten geri getirme",
@@ -5515,10 +5722,46 @@ mod tests {
             std::fs::read(h.root_path().join("belgeler/vergi.pdf")).expect("geri gelmeli"),
             b"kayip-dosya"
         );
+        // VE DOSYA SAHİPLENİLİYOR. Bu iddia olmadan test yeşildi ve geri getirilen dosya diskte
+        // `root:root 0600` iniyordu: ekran "geri getirildi" diyor, dosya listede görünüyor, ve
+        // sahibi onu ağ sürücüsünden açamıyordu.
+        assert_eq!(
+            h.paths.as_ref().expect("paths").owners(),
+            vec![(300_100, 300_100)],
+            "geri getirilen dosya, onu geri getiren hesabın olmalı"
+        );
         // Yedekteki kopya YERİNDE KALIYOR: geri getirme taşımak değil kopyalamak.
         assert!(backup
             .join("DEPSIS-YEDEK/silinenler/2026-08-30/vergi.pdf")
             .exists());
+    }
+
+    /// Sahipsiz bir geri getirme, isteğin AYRIŞTIRILMASINDA duruyor.
+    ///
+    /// `PosixId` 0'ı ve ayrılmış aralığın dışını reddediyor, yani kimliği atlayan bir API sessizce
+    /// kök sahipli bir dosya bırakamıyor — bu, ekranda "geri getirildi" yazarken açılamayan bir
+    /// dosyanın tam olarak nasıl oluştuğuydu.
+    #[test]
+    fn sahipsiz_bir_geri_getirme_kabul_edilmiyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        for raw in [
+            r#"{"op":"restore_file_from_backup","from":["Dosyalar","a.txt"],
+                "share":"belgeler","to":["a.txt"],"staging_name":"g4","offset":0,
+                "max_bytes":1024}"#,
+            r#"{"op":"restore_file_from_backup","from":["Dosyalar","a.txt"],
+                "share":"belgeler","to":["a.txt"],"staging_name":"g4","offset":0,
+                "max_bytes":1024,"owner_uid":0,"owner_gid":0}"#,
+        ] {
+            let resp = agent(&r, &s, &h).handle(raw, peer(API_UID), "gg4", "sahipsiz");
+            assert!(matches!(resp, Response::Refused { .. }), "{resp:?}");
+        }
+        assert!(
+            h.paths.as_ref().expect("paths").owners().is_empty(),
+            "reddedilen bir geri getirme hiçbir dosyaya dokunmamalı"
+        );
     }
 
     /// Geri getirme, ÜZERİNDE ÇALIŞILAN bir dosyayı sessizce eskisiyle değiştirmiyor.
@@ -5540,7 +5783,7 @@ mod tests {
         let resp = agent(&r, &s, &h).handle(
             r#"{"op":"restore_file_from_backup","from":["Dosyalar","a.txt"],
                 "share":"belgeler","to":["a.txt"],"staging_name":"g2","offset":0,
-                "max_bytes":1048576}"#,
+                "max_bytes":1048576,"owner_uid":300100,"owner_gid":300100}"#,
             peer(API_UID),
             "gg2",
             "cakisan geri getirme",
@@ -5562,7 +5805,7 @@ mod tests {
         let resp = agent(&r, &s, &h).handle(
             r#"{"op":"restore_file_from_backup","from":["Dosyalar","a.txt"],
                 "share":"belgeler","to":["a.txt"],"staging_name":"g3","offset":0,
-                "max_bytes":1024}"#,
+                "max_bytes":1024,"owner_uid":300100,"owner_gid":300100}"#,
             peer(API_UID),
             "gg3",
             "yedek yok",
@@ -7262,7 +7505,7 @@ mod tests {
 
     #[test]
     fn a_listing_drops_what_depsis_cannot_represent() {
-        // A symlink is dropped by the seam and a name that is not a `SafeComponent` by the
+        // A symlink is dropped by the seam and a name that is not an `EntryName` by the
         // dispatcher. Both would otherwise become a row naming something the agent itself refuses
         // to open — a file the interface offers and cannot deliver.
         let h = Harness::with_share("alice");
@@ -7279,6 +7522,28 @@ mod tests {
                     "a symlink must not be reported: {entries:?}"
                 );
                 assert!(entries.iter().any(|e| e.name.as_str() == "real.txt"));
+            }
+            other => panic!("expected a listing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_file_whose_name_begins_with_a_dash_is_listed() {
+        // SMB'den `-notlar.txt` diye bir dosya kaydetmek tamamen olağan, ve o dosya listeden
+        // SESSİZCE düşüyordu: ad `SafeComponent` olarak ayrıştırılıyor, tire reddediliyor ve
+        // `filter_map` girdiyi atıyordu. Sonuç iki katmanlı bir kayıptı — dosya web dizininde hiç
+        // görünmüyor, ve artımlı yedek turu ona geldiğinde bütün istek "unparseable" ile
+        // reddedilip taban ilerlemiyordu.
+        let h = Harness::with_share("alice");
+        std::fs::write(h.share_path(&["alice", "-notlar.txt"]), b"x").expect("write");
+
+        let raw = r#"{"op":"list_directory","share":"alice","path":[]}"#;
+        match call(&h, raw) {
+            Response::Listing { entries, .. } => {
+                assert!(
+                    entries.iter().any(|e| e.name.as_str() == "-notlar.txt"),
+                    "tireyle başlayan bir dosya adı bir bayrak değil: {entries:?}"
+                );
             }
             other => panic!("expected a listing, got {other:?}"),
         }

@@ -72,19 +72,29 @@ export class ThumbnailsService {
   /**
    * Bir dosyanın gömülü küçük resmi, ya da yoksa `null`.
    *
-   * `size` çağıranın ajandan aldığı BOYUT ve önbellek anahtarının parçası: SMB üzerinden değişen
-   * bir dosya `size_bytes` sütununu güncellemiyor, ve o sütuna göre anahtarlanmış bir önbellek
-   * değişmiş bir fotoğrafın eski küçük resmini sonsuza kadar servis ederdi.
+   * ÖNBELLEĞE AJANDAN ÖNCE BAKILIYOR, ve sebebi bir sızıntı: anahtar eskiden ajanın bildirdiği
+   * boyutu içerdiği için önbelleğe bakmadan önce `open_download` çağrılıyordu, isabet hâlinde ise
+   * dönen jeton hiç `receive` edilmiyordu. Ajan her açık jetonu 300 saniye `pending`'de tutuyor ve
+   * okuma yönündeki bir jetonu geri verecek yol yok; 64 jeton dolunca her yükleme ve her indirme
+   * "too many transfers are open" ile reddediliyordu. Yani 64'ten fazla fotoğraflı bir klasörün
+   * İKİNCİ açılışı — bütün cevaplar önbellekten geldiği hâlde — cihazın aktarımlarını beş dakika
+   * boyunca kilitliyordu.
+   *
+   * Anahtar bunun yerine SATIRIN kendi alanlarından kuruluyor: `sizeBytes` ve `updatedAt`. SMB
+   * üzerinden değişen bir dosyayı uzlaştırma turu satıra yazıyor, yani satır değişince anahtar da
+   * değişiyor. İki tur arasındaki aralık ise aşağıda kapatılıyor: diskteki boyut satırdakinden
+   * farklıysa cevap üretiliyor ama önbelleğe YAZILMIYOR.
    */
   async of(
     entryId: string,
+    sizeBytes: number,
+    updatedAt: Date,
     shareName: string,
     components: string[],
     correlationId: string,
     reason: string,
   ): Promise<EmbeddedThumbnail | null> {
-    const opened = await this.files.openDownload(shareName, components, correlationId, reason);
-    const key = `${entryId}:${opened.size}`;
+    const key = `${entryId}:${sizeBytes}:${updatedAt.getTime()}`;
 
     const known = this.cache.get(key);
     if (known !== undefined) {
@@ -95,12 +105,24 @@ export class ThumbnailsService {
       return known.hit;
     }
 
-    const want = Math.min(opened.size, HEAD_BYTES);
-    // Boş dosya: ajandan sıfır bayt istemek bir uç durum, ve cevabı zaten belli.
-    if (want === 0) {
+    // Boş dosya: cevabı satırdan verilebiliyor, ve ajanı HİÇ AÇMIYORUZ — açılmış bir okuma jetonu
+    // tüketilmeden bırakılamıyor, o yüzden gereksiz açılan her jeton beş dakikalık bir sızıntı.
+    if (sizeBytes === 0) {
       this.remember(key, { hit: null });
       return null;
     }
+
+    const opened = await this.files.openDownload(shareName, components, correlationId, reason);
+    // Diskteki boyut satırdakiyle uyuşmuyorsa dosya SMB'den değişmiş ve uzlaştırma turu satırı
+    // henüz güncellememiş. Cevap yine üretiliyor — kullanıcı bir görüntü görüyor — ama ESKİ satır
+    // anahtarının altına yazılmıyor; yoksa yeni dosyanın küçük resmi, satır güncellenene kadar eski
+    // durumun cevabı olarak kalırdı.
+    const fresh = opened.size === sizeBytes;
+
+    const want = Math.min(opened.size, HEAD_BYTES);
+    // Ajan sıfır bayt bildirdi ama satır bunu demiyordu (sıfır boyutlu satır yukarıda ayrıldı):
+    // dosya değişmiş, yani cevap veriliyor ama saklanmıyor.
+    if (want === 0) return null;
 
     // OKUNAMAMAK İLE "KÜÇÜK RESMİ YOK" AYRI ŞEYLER, ve ilk hâlde ikisi de `null` dönüyordu.
     // Sonuç iki kat kötüydü: uç 204 diyerek "bu fotoğrafta küçük resim yok" diye YANLIŞ bir şey
@@ -111,7 +133,7 @@ export class ThumbnailsService {
     if (head === null) throw new ThumbnailUnreadableError();
 
     const found = embeddedThumbnail(head);
-    this.remember(key, found === null ? { hit: null } : { hit: found });
+    if (fresh) this.remember(key, found === null ? { hit: null } : { hit: found });
     return found;
   }
 

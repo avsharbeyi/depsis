@@ -23,6 +23,12 @@ interface UserRow {
  * The login route has had that defence since ADR-0009. Two side doors past it is exactly the shape
  * of thing that gets written twice and reviewed once, so there is now one door.
  *
+ * VE İKİ TANE DEĞİLLERMİŞ. Bu yorum "artık tek kapı var" derken dört tanesi daha duruyordu:
+ * `POST /me/password`, `DELETE /me/mfa`, `POST /me/mfa/recovery-codes` ve `/users` altındaki
+ * parola sıfırlama bileti ile hesap silme. Hepsi kendi `passwords.verify` çağrısını yapıyordu.
+ * Dersin kendisi de burada: bu yorum, hiçbiri okunmadan doğru sayıldığı için dört tanesini
+ * saymamıştı. Yeni bir parola kontrolü yazmak yerine bu servis çağrılır.
+ *
  * WHY THE THROTTLE IS KEYED ON THE SAME PAIR as a login. A session already names the account, so
  * keying on the session would be the account lockout ADR-0009 rules out — an attacker with a
  * stolen cookie could lock the owner out of their own console at will. Keyed on (account, source

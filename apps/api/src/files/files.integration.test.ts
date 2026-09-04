@@ -1744,6 +1744,15 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     );
     const folderId = inSecond[0]?.id ?? '';
 
+    const child = await pdb.withTenant(org, (q) =>
+      q.query<{ id: string }>(
+        `INSERT INTO public.file_entries (organization_id, share_id, parent_id, kind, name, path)
+         VALUES ($1,$2,$3,'file','icerdeki.txt','/ikincideki/icerdeki.txt') RETURNING id::text AS id`,
+        [org, secondId, folderId],
+      ),
+    );
+    const childId = child[0]?.id ?? '';
+
     // The default share does not contain it, and naming no share still means the default — which
     // is what keeps every client written before this parameter existed working unchanged.
     expect(await names(as(alice))).not.toContain('ikincideki');
@@ -1758,7 +1767,24 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     // first share unreachable, however wide its grants.
     expect((await controller.detail(as(alice), stubResponse(), folderId)).name).toBe('ikincideki');
 
+    // AND SO DOES THE LISTING. `list` was the one per-entry route still resolving its share from
+    // the REQUEST: with no `shareId` that is the tenant's default, so a parent living in the
+    // second share read as "another share" and answered 404. The web app does not send `shareId`
+    // when it walks into a folder, so every folder in a second share was un-openable — the screen
+    // said "Klasör okunamadı." Now the parent row decides, like every other per-entry route.
+    const inside = await controller.list(as(alice), folderId, undefined, '100', undefined);
+    expect(inside.items.map((item) => item.name)).toEqual(['icerdeki.txt']);
+
+    // Naming the share explicitly still works, and naming the WRONG one is a 404: the request may
+    // not point at share A while its parent lives in share B.
+    const named = await controller.list(as(alice), folderId, undefined, '100', undefined, secondId);
+    expect(named.items.map((item) => item.name)).toEqual(['icerdeki.txt']);
+    await expect(
+      controller.list(as(alice), folderId, undefined, '100', undefined, shareRef().id),
+    ).rejects.toBeInstanceOf(NotFoundException);
+
     await pdb.withTenant(org, async (q) => {
+      await q.query(`DELETE FROM public.file_entries WHERE id = $1`, [childId]);
       await q.query(`DELETE FROM public.file_entries WHERE id = $1`, [folderId]);
       await q.query(`DELETE FROM public.folder_grants WHERE share_id = $1`, [secondId]);
       await q.query(`DELETE FROM public.shares WHERE id = $1`, [secondId]);

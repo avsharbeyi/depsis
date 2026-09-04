@@ -88,7 +88,30 @@ interface MemberRow {
   label: string | null;
   device: string | null;
   authorized_at: Date | null;
+  deauthorized_at: Date | null;
   authorized_by_username: string | null;
+}
+
+/**
+ * Sahibi bu cihazı ÇIKARDI mı — yani kendiliğinden yetkilendirme onu atlamalı mı?
+ *
+ * Ajan tarafında "Çıkar" üyeyi silmiyor, yalnız `authorized:false` yazıyor; controller'ın
+ * listesinde çıkarılmış bir cihazla hiç yetkilendirilmemiş yeni bir cihaz birbirinin AYNISI
+ * görünüyor. Aradaki farkı bilen tek yer bu tablo.
+ *
+ * Karar damganın varlığına değil SIRASINA bakıyor: "Yetkilendir" düğmesi `authorized_at`i
+ * `now()` yapıyor, yani çıkarmadan sonra gelen elle bir yetkilendirme cihazı yeniden uygun hale
+ * getiriyor. Damgalar bu yüzden silinmiyor — "kim çıkardı, ne zaman" bu tablonun var olma sebebi.
+ *
+ * Kaydı hiç olmayan üye (DEPSIS dışından, `zerotier-cli` ile eklenmiş) çıkarılmış sayılmıyor:
+ * hakkında verilmiş bir karar yok.
+ */
+function removedByOwner(record: MemberRow | undefined): boolean {
+  if (record === undefined || record.deauthorized_at === null) return false;
+  return (
+    record.authorized_at === null ||
+    record.authorized_at.getTime() <= record.deauthorized_at.getTime()
+  );
 }
 
 export class RemoteUnavailableError extends Error {
@@ -552,6 +575,16 @@ export class RemoteService {
    * ÖZEL kalıyor, yani sahibi bir cihazı istediği an çıkarabiliyor — herkese açık bir ağda
    * çıkarmak diye bir şey yok, çünkü kimse "üye" değil.
    *
+   * ── ÇIKARMAK KALICIDIR ───────────────────────────────────────────────────────────────────
+   *
+   * "Çıkar", bu turun geri alacağı bir şey olsaydı hiçbir şey olurdu: ajan üyeyi silmediği,
+   * yalnız `authorized:false` yazdığı için cihaz listede yeni bir cihazdan ayırt edilemez halde
+   * kalıyor ve tur en geç yirmi saniye sonra onu yeniden içeri alırdı. Kaybolan telefonun
+   * erişimini kesmek bu yüzden `remote_members`teki çıkarma damgasına bakmayı gerektiriyor
+   * (`removedByOwner`). Sahibi fikrini değiştirirse yolu elle "Yetkilendir": o da damgadan
+   * sonraya düşen bir `authorized_at` yazıyor ve cihaz kendiliğinden yetkilendirmeye geri
+   * uygun hale geliyor.
+   *
    * ── SESSİZCE BAŞARISIZ ───────────────────────────────────────────────────────────────────
    *
    * Bir üyenin yetkilendirilememesi turu düşürmüyor: sıradaki üyeye geçiliyor ve bir sonraki tur
@@ -577,7 +610,12 @@ export class RemoteService {
         continue;
       }
 
-      for (const member of members.filter((m) => !m.authorized)) {
+      // Ağ başına tek okuma: hangi üyelerin çıkarıldığı ancak DEPSIS'in kendi kaydında yazılı.
+      const records = await this.memberRecords(organizationId, network.networkId);
+
+      for (const member of members.filter(
+        (m) => !m.authorized && !removedByOwner(records.get(m.memberId)),
+      )) {
         try {
           await this.setMemberAuthorized(
             organizationId,
@@ -824,7 +862,8 @@ export class RemoteService {
   ): Promise<Map<string, MemberRow>> {
     const rows = await this.db.withTenant(organizationId, (q) =>
       q.query<MemberRow>(
-        `SELECT m.member_id, m.label, m.device, m.authorized_at, u.username AS authorized_by_username
+        `SELECT m.member_id, m.label, m.device, m.authorized_at, m.deauthorized_at,
+                u.username AS authorized_by_username
            FROM public.remote_members m
            -- LEFT: authorized_by is ON DELETE SET NULL, and the record outlives the account that
            -- made it. An INNER JOIN would drop exactly the rows whose provenance is most awkward.

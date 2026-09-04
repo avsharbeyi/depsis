@@ -346,7 +346,12 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 26 since
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 43 since `EntryName` and
+    // the two ownership operands on `restore_file_from_backup`. No operation was added or
+    // removed — the list above is unchanged — but two operand TYPES were widened and two
+    // operands are now required, so a new API against a stale agent must fail at the handshake:
+    // the stale agent would refuse every restore as unparseable, and would go on dropping a file
+    // named `-notlar.txt` out of every listing. 26 since
     // `prepare_app_data_dir` — the folder a catalogue application keeps inside a share, owned by
     // the app engine's mapped identity. A stale agent that did not know it would answer every
     // install of a data-holding application (Nextcloud, Immich) with a parse failure instead of
@@ -387,7 +392,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(42);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(43);
   });
 
   it('agrees with the number the agent actually reports', () => {

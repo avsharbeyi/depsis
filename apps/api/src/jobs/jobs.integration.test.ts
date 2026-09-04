@@ -340,6 +340,124 @@ describeDb('the job queue, against a real PostgreSQL', () => {
     expect(found?.lastError).toContain('second go');
   });
 
+  it('drops a chain turn instead of crashing when its successor is queued', async () => {
+    // A self-scheduling handler queues its successor BEFORE doing the work — 0054 paid for that
+    // ordering in the field, because a chain that only continues after a SUCCESSFUL turn stops
+    // forever the first time three attempts burn out in a few seconds. Every such kind therefore
+    // carries a partial unique index on `status = 'queued'`.
+    //
+    // `finish_job`'s retry branch set the RUNNING row back to `queued` as well, which is a second
+    // row under that index: 23505, thrown out of `JobsService.finish` where nothing caught it, and
+    // the worker process died. So a momentary agent restart cost two worker crashes and two
+    // minutes of an idle queue.
+    //
+    // The index is created here rather than borrowed from `files.reconcile`, so this test cannot
+    // race whatever another suite has on the queue.
+    await owner.withoutTenant('migration-status', async (q) => {
+      // Dropped first, so a run that was killed part-way through does not poison the next one.
+      await q.query('DROP INDEX IF EXISTS public.test_one_scheduled_chain');
+      await q.query(
+        `CREATE UNIQUE INDEX test_one_scheduled_chain ON public.job_queue (organization_id, kind)
+          WHERE kind = 'test.chain' AND status = 'queued'`,
+      );
+    });
+    try {
+      const id = await jobs.enqueue(orgA, 'test.chain', {}, { maxAttempts: 3 });
+      expect((await jobs.claim(['test.chain']))?.id).toBe(id);
+
+      // What the handler does on its first line.
+      const successor = await jobs.enqueue(orgA, 'test.chain');
+
+      // `failed`, not `dead`: the attempts were not exhausted, the turn simply could not be
+      // re-queued. Blurring the two would blunt the one alarm ADR-0003 §17 asks for.
+      expect(await jobs.finish(id, 'failed', 'the agent was restarting')).toBe('failed');
+
+      const found = await jobs.find(orgA, id);
+      expect(found?.status).toBe('failed');
+      // Both halves of the story survive: what threw, and why it was not tried again.
+      expect(found?.lastError).toContain('the agent was restarting');
+      expect(found?.lastError).toContain('successor');
+
+      // THE CHAIN IS INTACT. Losing the turn is the cost; losing the schedule would be the bug.
+      expect((await jobs.find(orgA, successor))?.status).toBe('queued');
+
+      // And it left the queue rather than sitting there as a `running` ghost nobody can reclaim.
+      const left = await owner.withoutTenant('migration-status', (q) =>
+        q.query<{ n: string }>(`SELECT count(*)::text AS n FROM job_queue WHERE id = $1`, [id]),
+      );
+      expect(left[0]?.n).toBe('0');
+    } finally {
+      await owner.withoutTenant('migration-status', (q) =>
+        q.query('DROP INDEX IF EXISTS public.test_one_scheduled_chain'),
+      );
+    }
+  });
+
+  it('prunes expired history in batches, and keeps dead jobs far longer', async () => {
+    // `finish_job` writes every completed job to `job_history` and nothing ever removed one, while
+    // `files.index-drain` re-queues itself every five seconds: ~17,300 rows per tenant per day. A
+    // box left on for a year carried six million of them, and the jobs screen and the event stream
+    // both scan that table.
+    //
+    // The two retentions are deliberately different. ADR-0003 §17 keeps a dead job precisely so
+    // "an alarm can find it", and a week is not long enough for that to be true.
+    const seed = async (org: string, status: string, ageDays: number): Promise<string> => {
+      const rows = await owner.withoutTenant('migration-status', (q) =>
+        q.query<{ id: string }>(
+          `INSERT INTO public.job_history
+             (organization_id, kind, status, created_at, updated_at, finished_at)
+           VALUES ($1, 'test.pruned', $2,
+                   now() - make_interval(days => $3::integer),
+                   now() - make_interval(days => $3::integer),
+                   now() - make_interval(days => $3::integer))
+           RETURNING id::text AS id`,
+          [org, status, ageDays],
+        ),
+      );
+      return rows[0]?.id ?? '';
+    };
+
+    const fresh = await seed(orgA, 'succeeded', 1);
+    const stale = await seed(orgA, 'succeeded', 30);
+    const recentlyDead = await seed(orgA, 'dead', 30);
+    const longDead = await seed(orgA, 'dead', 200);
+    const neighbour = await seed(orgB, 'succeeded', 30);
+
+    // One batch at a time: a single unbounded DELETE over a year of backlog is the long
+    // transaction ADR-0003 rules out, on the table two screens read.
+    expect(await jobs.pruneHistory(orgA, 1), 'the batch size is a real ceiling').toBe(1);
+    expect(await jobs.pruneHistory(orgA), 'the rest on the next pass').toBe(1);
+    expect(await jobs.pruneHistory(orgA), 'and then there is nothing left to take').toBe(0);
+
+    expect(await jobs.find(orgA, fresh), 'a week has not passed').not.toBeNull();
+    expect(await jobs.find(orgA, stale), 'a month has').toBeNull();
+    expect(await jobs.find(orgA, recentlyDead), 'a dead job outlives the rest').not.toBeNull();
+    expect(await jobs.find(orgA, longDead), 'but not forever').toBeNull();
+    // `withTenant`, so RLS is what confines the sweep — the other tenant's expired rows are not
+    // this tenant's to delete.
+    expect(await jobs.find(orgB, neighbour), 'one tenant must not prune another').not.toBeNull();
+  });
+
+  it('keeps exactly one scheduled prune per tenant, however often it is seeded', async () => {
+    // The chain's own uniqueness (migration 0058), and the thing `ON CONFLICT DO NOTHING` needs to
+    // conflict WITH: without it every restart would leave one more copy of the sweep behind.
+    await jobs.schedulePrune(orgA, new Date());
+    await jobs.schedulePrune(orgA, new Date());
+    await jobs.schedulePrune(orgB, new Date());
+
+    const rows = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM job_queue
+          WHERE organization_id = $1 AND kind = 'jobs.prune' AND status = 'queued'`,
+        [orgA],
+      ),
+    );
+    expect(rows[0]?.n).toBe('1');
+    // Per TENANT, not per box: the other organisation gets its own.
+    const neighbour = await jobs.list(orgB, ['queued'], 50);
+    expect(neighbour.some((job) => job.kind === 'jobs.prune')).toBe(true);
+  });
+
   it('reports progress through the heartbeat', async () => {
     const id = await jobs.enqueue(orgA, 'test.progress');
     await jobs.claim(['test.progress']);

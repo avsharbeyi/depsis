@@ -48,6 +48,11 @@ export function reconcileHandler(indexer: IndexerService): JobHandler {
     //
     // `remote.authorize` ve `tasks.overdue-sweep` aynı kalıbı zaten kullanıyordu; eksik olan
     // buydu.
+    //
+    // ÇAKIŞAN ŞEY BU EKLEME DEĞİL, YENİDEN DENEME. Tur düşerse `finish_job` koşan satırı da
+    // 'queued' yapıyor, ve o zaman aynı indekste iki satır oluyor. 0056 o UPDATE'i bir
+    // alt-işleme aldı: çakışmada yalnız bu tur 'failed' olarak tarihe geçiyor, zincir kuyrukta
+    // duruyor, ve işçi ayakta kalıyor.
     await indexer.schedule(
       organizationId,
       shareId,

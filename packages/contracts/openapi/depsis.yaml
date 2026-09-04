@@ -203,15 +203,21 @@ paths:
         Kurtarma kodları **yalnız burada** okunabilir hâlde döner; saklanan yalnız hash'leri.
         Onay kodu da harcanır, dolayısıyla aynı 30 saniye içinde girişte kullanılamaz —
         arayüz bunu söylemeli.
+
+        **Parola da isteniyor.** Sır ancak burada etkinleşiyor, ve parolasız hâlinde ele
+        geçirilmiş bir oturum hesaba kendi authenticator'ını takabiliyordu: gerçek sahip bundan
+        sonra doğru parolayla girse bile üretemediği bir kod isteniyor, ve yöneticinin açtığı
+        sıfırlama bileti de aynı kodu sorduğu için kurtarmıyor.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [code]
+              required: [code, password]
               properties:
                 code: { type: string, pattern: '^[0-9]{6}$' }
+                password: { type: string, maxLength: 1024 }
       responses:
         '200':
           description: Kayıt tamam; kodlar bir kez gösterilir
