@@ -5,6 +5,7 @@ import { NotificationsService } from './notifications.service.js';
 import { TaskWatchersService } from './task-watchers.service.js';
 import {
   AssigneeNotFoundError,
+  ParentTaskNotFoundError,
   TaskNotFoundError,
   TaskNotYoursError,
   TaskRejectedError,
@@ -329,6 +330,88 @@ describeDb('the job board, against a real PostgreSQL', () => {
     await expect(tasks.update(orgA, task.id, { body: '' })).rejects.toBeInstanceOf(
       TaskRejectedError,
     );
+  });
+
+  it('does not call a job "assigned" when the same request takes its assignee away', async () => {
+    const task = await tasks.create(orgA, deniz, 'atamayı kaldır', emre);
+    await tasks.update(orgA, task.id, { status: 'done' }, deniz);
+
+    // `??` açık `null`'ı "belirtilmedi" sayıyordu: aynı istekte `assignee_id = NULL` yazılırken
+    // durum eski atanana bakılarak `assigned` seçiliyordu, ve pano kimseye ait olmayan bir işi
+    // "Atandı" rozetiyle gösteriyordu.
+    const reopened = await tasks.update(orgA, task.id, { done: false, assigneeId: null }, deniz);
+    expect(reopened.assignee_id).toBeNull();
+    expect(reopened.status).toBe('draft');
+  });
+
+  it('refuses a disabled account as an assignee', async () => {
+    const task = await tasks.create(orgA, deniz, 'kapatılan kişiye', null);
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE users SET disabled_at = now() WHERE id = $1`, [cem]),
+    );
+    try {
+      // Kapatılmış hesap oturum açamıyor: ona atanan bir iş kimseye ulaşmıyor, ve sahibi işin
+      // "atandı" olduğunu sanıp kimsenin yapmadığını sonra fark ediyor.
+      await expect(tasks.update(orgA, task.id, { assigneeId: cem })).rejects.toBeInstanceOf(
+        AssigneeNotFoundError,
+      );
+    } finally {
+      await owner.withoutTenant('migration-status', (q) =>
+        q.query(`UPDATE users SET disabled_at = NULL WHERE id = $1`, [cem]),
+      );
+    }
+    // Kural yalnız `assigneeId` GÖNDERİLEN isteklerde koşuyor: var olan atamaların düzenlenmesi
+    // bozulmuyor.
+    expect((await tasks.update(orgA, task.id, { body: 'başka bir düzenleme' })).body).toBe(
+      'başka bir düzenleme',
+    );
+  });
+
+  it('says "no such parent task" for a parent that is gone, not "no such user"', async () => {
+    const orphan = await tasks.create(orgA, deniz, 'gidecek üst iş', null);
+    const child = await tasks.create(orgA, deniz, 'parça', null);
+    await tasks.remove(orgA, orphan.id, AS_ADMIN);
+
+    // `parent_id` hiç doğrulanmıyordu: yabancı anahtar ihlali 23503 olarak geliyor ve tek bir
+    // cümleye — "bu kuruluşta böyle bir kullanıcı yok" — çevriliyordu, yani okuyan atanan kişinin
+    // gittiğini sanıyordu.
+    await expect(tasks.update(orgA, child.id, { parentId: orphan.id })).rejects.toBeInstanceOf(
+      ParentTaskNotFoundError,
+    );
+  });
+
+  it('refuses a parent that belongs to another tenant instead of silently linking it', async () => {
+    const theirs = await tasks.create(orgB, figen, 'B kiracısının işi', null);
+    const ours = await tasks.create(orgA, deniz, 'A kiracısının işi', null);
+
+    // Yabancı anahtar kontrolleri satır güvenliğini HER ZAMAN atlıyor, ve `tasks_one_level_deep`
+    // tetikleyicisinin `EXISTS`'i RLS altında o satırı göremediği için sessizce geçiyordu: iş
+    // görünmeyen bir ebeveyne bağlanıyor, ve o kiracı kendi işini sildiğinde kaskat bunu da
+    // götürüyordu.
+    await expect(tasks.update(orgA, ours.id, { parentId: theirs.id })).rejects.toBeInstanceOf(
+      ParentTaskNotFoundError,
+    );
+    expect((await tasks.find(orgA, ours.id)).parent_id).toBeNull();
+  });
+
+  it('lets only one of two simultaneous status writes through', async () => {
+    const task = await tasks.create(orgA, deniz, 'aynı anda iki kişi', emre);
+    await tasks.update(orgA, task.id, { status: 'in_progress' }, deniz);
+
+    // Okuma ile yazma ayrı işlemlerde: ikisi de `in_progress` görüp biri "Tamamlandı" öteki
+    // "İptal" yazsaydı, net etki makinenin yasakladığı tek geçiş olan `done → cancelled` olurdu
+    // ve denetim izi bunu hiç göstermezdi. Beklenen eski durum artık WHERE'de.
+    const settled = await Promise.allSettled([
+      tasks.update(orgA, task.id, { status: 'done' }, deniz),
+      tasks.update(orgA, task.id, { status: 'cancelled' }, emre),
+    ]);
+    expect(settled.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+
+    const after = await tasks.find(orgA, task.id);
+    expect(['done', 'cancelled']).toContain(after.status);
+    // Ve `done_at` durumla tutarlı: iptal edilmiş ama tamamlanma zamanı olan bir satır, "ne zaman
+    // bitirdik" sorusuna cevabı olan ama anlamı olmayan bir kayıt olurdu.
+    expect(after.done_at === null).toBe(after.status === 'cancelled');
   });
 });
 

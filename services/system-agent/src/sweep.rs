@@ -122,7 +122,17 @@ pub fn sweep_once<P: SafePath, S: Sink>(
         let stale = match paths.list_stale_files(&staging, max_age) {
             Ok(names) => names,
             // A share with no `.depsis/staging` has never had an upload. Ordinary, not a problem.
-            Err(_) => continue,
+            Err(SeamError::NotFound(_)) => continue,
+            // HER HATA "hiç yüklenmemiş" DEĞİL. Ara alan bir dosyaya dönüşmüşse (SMB'den yazan
+            // biri `.depsis` adında bir dosya bıraktığında olur), veri kümesi bağlı değilse ya da
+            // izinler bozulmuşsa bu çağrı her turda düşer: o paylaşım aylarca hiç süpürülmez,
+            // terk edilmiş `.part` dosyaları kullanıcının refquota'sını yer, ve günlükteki tek
+            // satır "could not read 0" diyerek her şeyin yolunda olduğunu söyler.
+            Err(e) => {
+                eprintln!("depsis-agent: sweep could not read {share}/.depsis/staging: {e}");
+                report.unreadable = report.unreadable.saturating_add(1);
+                continue;
+            }
         };
 
         for name in stale {
@@ -443,6 +453,39 @@ mod tests {
         assert_eq!(report, SweepReport::default());
         assert!(dir.path().join(".depsis/staging/yedek-eski").exists());
         assert!(audit.entries().is_empty());
+    }
+
+    #[test]
+    fn a_staging_area_that_cannot_be_read_is_counted_rather_than_skipped_in_silence() {
+        // SESSİZ ATLAMA. Her hata "hiç yüklenmemiş" sayılıyordu, oysa ara alan bir dosyaya
+        // dönüşmüşse (SMB'den yazan biri o adı kullanabilir), veri kümesi bağlı değilse ya da
+        // izinler bozulmuşsa bu çağrı HER turda düşer: o paylaşım aylarca hiç süpürülmez, terk
+        // edilmiş `.part` dosyaları kullanıcının refquota'sını yer, ve günlükteki tek satır
+        // "could not read 0" diyerek her şeyin yolunda olduğunu söyler.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent_tree = dir.path().join("bozuk").join(".depsis");
+        std::fs::create_dir_all(&agent_tree).expect("share");
+        std::fs::write(agent_tree.join("staging"), b"x").expect("ara alan bir dosya");
+        let paths = MockSafePath::new(dir.path());
+        let transfers = Mutex::new(TransferRegistry::new());
+        let audit = MemorySink::default();
+
+        let report = sweep_once(&paths, &transfers, &audit, DEFAULT_MAX_AGE);
+        assert_eq!(report.unreadable, 1, "{report:?}");
+    }
+
+    #[test]
+    fn a_share_that_never_had_an_upload_is_not_unreadable() {
+        // Ayrımın öteki yarısı, ve olağan olan bu: hiç yükleme almamış bir paylaşımda
+        // `.depsis/staging` HİÇ YOKTUR. Onu da saymak, her taze kutuda bir arıza uydurmak olurdu.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("taze")).expect("share");
+        let paths = MockSafePath::new(dir.path());
+        let transfers = Mutex::new(TransferRegistry::new());
+        let audit = MemorySink::default();
+
+        let report = sweep_once(&paths, &transfers, &audit, DEFAULT_MAX_AGE);
+        assert_eq!(report, SweepReport::default(), "{report:?}");
     }
 
     #[test]

@@ -25,6 +25,29 @@ export interface AuthenticatedRequest extends Request {
  */
 @Injectable()
 export class SessionGuard implements CanActivate {
+  /**
+   * How often one session's `last_seen_at` is written.
+   *
+   * The column existed and nothing ever moved it: `SessionService.touch` had no caller anywhere in
+   * the repository, so every row said it was last seen at the moment it was created and the device
+   * list ADR-0009 asks for would have shown that as fact. Writing it on every authenticated
+   * request would put an UPDATE on the path of every request in the product — five minutes is
+   * accurate enough for "you were last seen from this device" and costs one write per session per
+   * five minutes.
+   */
+  private static readonly TOUCH_INTERVAL_MS = 5 * 60 * 1000;
+
+  /**
+   * How many sessions this process remembers having touched.
+   *
+   * The map is only an optimisation — losing it costs one extra UPDATE — so it is emptied wholesale
+   * when it grows rather than being aged entry by entry. Without the bound, a box that has been up
+   * for a year holds a row per session it ever saw.
+   */
+  private static readonly TOUCH_MEMORY = 4_096;
+
+  private readonly touched = new Map<string, number>();
+
   constructor(private readonly sessions: SessionService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -44,7 +67,25 @@ export class SessionGuard implements CanActivate {
     }
 
     request.depsis = session;
+    this.remember(session.organizationId, session.sessionId);
     return true;
+  }
+
+  /**
+   * Move `last_seen_at` forward, at most once every `TOUCH_INTERVAL_MS`.
+   *
+   * NOT AWAITED, and that is the whole contract: recording "you were seen" must never be able to
+   * fail the request that was being served, and it must never add its latency to one either. A
+   * rejected write is swallowed — the next request rewrites it.
+   */
+  private remember(organizationId: string, sessionId: string): void {
+    const now = Date.now();
+    const last = this.touched.get(sessionId);
+    if (last !== undefined && now - last < SessionGuard.TOUCH_INTERVAL_MS) return;
+
+    if (this.touched.size >= SessionGuard.TOUCH_MEMORY) this.touched.clear();
+    this.touched.set(sessionId, now);
+    void this.sessions.touch(organizationId, sessionId).catch(() => undefined);
   }
 }
 

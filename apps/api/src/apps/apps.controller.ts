@@ -209,6 +209,19 @@ export class AppsController {
         name.data,
         parsed.data.mounts,
       );
+      // KAYDEDİLİYOR, ve komşularıyla aynı ağırlıkta olduğu için: kurmak internetten kod indirip
+      // bir paylaşımı ona bağlamak demek — `share.created` ve `remote.member-authorized` kaydedilip
+      // bunun kaydedilmemesi bir tercih değil, bir boşluktu. Commit'ten SONRA, `audit.service.ts`
+      // 56-62'deki kararla aynı hizada.
+      const bound = parsed.data.mounts.length;
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: 'apps.installed',
+        target: { kind: 'app', id: name.data, label: view.catalogue.name },
+        summary:
+          `'${view.catalogue.name}' uygulaması kuruldu` +
+          `${bound === 0 ? '' : `, ${bound} paylaşım bağlandı`}.`,
+      });
       return toApp(view);
     } catch (error) {
       throw translate(error);
@@ -223,7 +236,7 @@ export class AppsController {
     @Body() body: unknown,
   ): Promise<Schemas['App']> {
     requireSameOrigin(request);
-    const organizationId = requireOrganization(request);
+    const session = requireSession(request);
     const name = slugSchema.safeParse(slug);
     if (!name.success) throw new NotFoundException();
 
@@ -231,7 +244,17 @@ export class AppsController {
     if (!parsed.success) throw new BadRequestException("state must be 'running' or 'stopped'");
 
     try {
-      const view = await this.apps.setState(organizationId, name.data, parsed.data.state);
+      const view = await this.apps.setState(session.organizationId, name.data, parsed.data.state);
+      // İKİ AYRI EYLEM, tek bir `apps.state-changed` değil. "Dün bu kutuda ne oldu" listesinde
+      // aranan şey "kim Jellyfin'i durdurdu", ve tek bir eylem adı bunu satırın özetini okumaya
+      // bırakırdı — filtre de ikisini ayıramazdı.
+      const started = parsed.data.state === 'running';
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: started ? 'apps.started' : 'apps.stopped',
+        target: { kind: 'app', id: name.data, label: view.catalogue.name },
+        summary: `'${view.catalogue.name}' uygulaması ${started ? 'başlatıldı' : 'durduruldu'}.`,
+      });
       return toApp(view);
     } catch (error) {
       throw translate(error);
@@ -267,12 +290,21 @@ export class AppsController {
   @UseGuards(AdminGuard)
   async remove(@Req() request: AuthenticatedRequest, @Param('slug') slug: string): Promise<void> {
     requireSameOrigin(request);
-    const organizationId = requireOrganization(request);
+    const session = requireSession(request);
     const name = slugSchema.safeParse(slug);
     if (!name.success) throw new NotFoundException();
 
     try {
-      await this.apps.remove(organizationId, name.data);
+      const label = await this.apps.remove(session.organizationId, name.data);
+      // `app_instances` satırı DELETE ile gidiyor: kaldırma kaydedilmezse iki yöneticili bir evde
+      // "Jellyfin'i kim sildi" sorusunun hiçbir cevabı kalmıyordu. Özet, verilerin durduğunu da
+      // söylüyor — kaldırma konteynerleri siler, bağlı paylaşımları ve birimleri değil.
+      await this.audit.record(session.organizationId, {
+        actorId: session.userId,
+        action: 'apps.removed',
+        target: { kind: 'app', id: name.data, label },
+        summary: `'${label}' uygulaması kaldırıldı; bağlı paylaşımlar ve verileri yerinde kaldı.`,
+      });
     } catch (error) {
       throw translate(error);
     }

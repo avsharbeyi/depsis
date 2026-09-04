@@ -166,9 +166,52 @@ pub fn revoke_smb<R: CommandRunner>(runner: &R, login: &PosixName) -> Result<(),
     if !Path::new(PDBEDIT).exists() {
         return Err(IdentityError::SambaMissing(PDBEDIT.to_string()));
     }
-    // Çıkış kodu YOK SAYILIYOR, ve `remove`daki ile aynı sebeple: kaydı olmayan bir kullanıcıda
-    // `pdbedit -x` sıfırdan farklı dönüyor, ve o "başarısızlık" istenen durumun ta kendisi.
+    // Çıkış kodu tek başına bir cevap değil: kaydı olmayan bir kullanıcıda da sıfırdan farklı
+    // dönüyor, yani "zaten yoktu" ile "silemedim" aynı kodu paylaşıyor. Karar bir alt satırda,
+    // DURUMU okuyarak veriliyor.
     let _ = runner.run(PDBEDIT, &["-x", "-u", login.as_str()]);
+    assert_smb_credential_gone(runner, login)
+}
+
+/// `pdbedit -x`in gerçekten kestiğini DURUMDAN doğrular.
+///
+/// ── NEDEN ÇIKIŞ KODUNA BAKILMIYOR ───────────────────────────────────────────────────────────
+///
+/// İki ayrı dünya aynı çıkış kodunu üretiyor: kaydı hiç olmayan bir kullanıcı ("istenen şey zaten
+/// olmuş") ve silinemeyen bir kayıt ("`passdb.tdb` smbd tarafından kilitli ya da bozuk"). Kodu
+/// tümüyle yok saymanın bedeli tek yönlü ve ağır: ajan "kesildi" diyor, API bunu denetim kaydına
+/// "SMB erişimi anında kesildi" diye yazıyor ve yeniden deneme işini kuyruğa HİÇ koymuyor — yani
+/// kapatılmış hesap Windows'tan paylaşıma girmeye devam ederken ekranda "kapalı" görünüyor.
+///
+/// ── NEDEN `run_capturing` ───────────────────────────────────────────────────────────────────
+///
+/// `pdbedit -L -u <ad>` kaydı olmayan kullanıcıda sıfırdan farklı dönüyor ve `run` o durumda
+/// stdout'u ATIYOR — yani çıkış kodunun bir hata değil bir cevap olduğu yer tam olarak burası.
+///
+/// OKUYAMAZSA BAŞARISIZ SAYIYOR. Kesip kesmediğimizi bilmiyorsak, "kesildi" demek için yeterli
+/// değil; bir erişimi kesme isteğinin sessizce başarılı görünmesi, bu düzeltmenin kapattığı
+/// kusurun ta kendisi.
+fn assert_smb_credential_gone<R: CommandRunner>(
+    runner: &R,
+    login: &PosixName,
+) -> Result<(), IdentityError> {
+    let name = login.as_str();
+    let listing = match runner.run_capturing(PDBEDIT, &["-L", "-u", name]) {
+        Ok(text) => text,
+        Err(e) => {
+            return Err(IdentityError::Io(format!(
+                "pdbedit -L {name} okunamadı; kesilme doğrulanamadı: {e}"
+            )))
+        }
+    };
+    // `pdbedit -L` satırları `ad:uid:tam ad` biçiminde. Ada göre eşleşmek, başka bir kullanıcının
+    // satırının bu kararı vermesini engelliyor.
+    let prefix = format!("{name}:");
+    if listing.lines().any(|line| line.starts_with(&prefix)) {
+        return Err(IdentityError::Io(format!(
+            "pdbedit {name} kaydını silemedi; SMB parolası hâlâ geçerli"
+        )));
+    }
     Ok(())
 }
 
@@ -226,8 +269,14 @@ pub fn remove<R: CommandRunner>(
     // Samba yoksa silinecek bir kimlik bilgisi de yok. `sync` ile aynı ayrım: eksik araç bir hata
     // değil, kutunun bir hâli.
     if Path::new(PDBEDIT).exists() {
-        // Hesabı olmayan bir kullanıcıda `pdbedit -x` sıfırdan farklı dönüyor, ve bu bir başarısızlık
-        // değil: istenen şey zaten olmuş.
+        // Hesabı olmayan bir kullanıcıda `pdbedit -x` sıfırdan farklı dönüyor, ve bu bir
+        // başarısızlık değil: istenen şey zaten olmuş.
+        //
+        // VE BURADA `revoke_smb`DEKİ DOĞRULAMA YOK, bilerek. Orada kesme tek adım, yani `pdbedit`
+        // düşerse SMB parolası ayakta kalıyor. Burada arkasından `userdel` geliyor: Samba bir
+        // passdb kaydını ancak karşılığı olan bir Unix hesabıyla kullanabildiği için, hesap
+        // gidince kayıt da işe yaramaz oluyor. Doğrulamayı buraya koyup `Err` dönmek, `userdel`e
+        // hiç sıra gelmemesi — yani hesabın TAMAMEN ayakta kalması — demekti.
         let _ = runner.run(PDBEDIT, &["-x", "-u", name]);
     }
 
@@ -797,5 +846,28 @@ mod tests {
         let outcome = sync(&runner, portable_write, &[user(300001, "ali")], &[]).expect("sync");
         assert_eq!(outcome.passwords_set, 0);
         assert!(runner.ran(PDBEDIT).is_empty());
+    }
+
+    #[test]
+    fn a_surviving_passdb_entry_makes_the_revocation_fail() {
+        // The exit code of `pdbedit -x` cannot tell "there was no record" apart from "`passdb.tdb`
+        // is locked by smbd or corrupt", so the state is what decides. Reporting success here is
+        // the expensive half: the API writes "SMB access was cut" into the audit trail and queues
+        // no retry, and the closed account keeps working from Windows.
+        let runner = Scripted::new(&[("/usr/bin/pdbedit -L -u ali", "ali:300001:Ali\n")]);
+        let login = PosixName::parse("ali").expect("valid login");
+        let outcome = assert_smb_credential_gone(&runner, &login);
+        let err = outcome.expect_err("must not report success");
+        assert!(matches!(err, IdentityError::Io(_)), "{err:?}");
+    }
+
+    #[test]
+    fn no_passdb_entry_of_ones_own_is_a_successful_revocation() {
+        // The ordinary case, and the one the old "ignore the exit code" line was written for: a
+        // user who never set an SMB password has no record at all. Somebody ELSE's line must not
+        // decide it either, which is why the match is on the name and not on emptiness.
+        let runner = Scripted::new(&[("/usr/bin/pdbedit -L -u ali", "ayse:300002:Ayse\n")]);
+        let login = PosixName::parse("ali").expect("valid login");
+        assert!(assert_smb_credential_gone(&runner, &login).is_ok());
     }
 }

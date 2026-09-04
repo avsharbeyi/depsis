@@ -8,6 +8,7 @@ import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import {
   UsernameTakenError,
   LastAdminError,
+  LastGrantForUserError,
   UserNotFoundError,
   UsersService,
 } from './users.service.js';
@@ -138,21 +139,33 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     expect(all.map((u) => u.username)).toContain('ikinci');
   });
 
-  it('hands every session a name and an id, and NOTHING else', async () => {
+  it('hands every session a name, an id and whether the account is open — and NOTHING else', async () => {
     // `directory` var, çünkü `/users` yalnız yöneticilere açık ve §6.2'nin `manage` izni bir
     // klasörün yönetimini sıradan bir üyeye devredebiliyor: o üye izin verebiliyor ama kime
     // vereceğini seçemiyordu. Arayüz de 403'ü boş listeye çevirdiği için sonuç, hata mesajı
     // olmayan bir çıkmazdı.
     //
     // BU TESTİN ASIL ÖLÇTÜĞÜ SÜTUN LİSTESİ. Uç, yöneticilere ayrılmış bir listenin daraltılmış
-    // hâli; genişleyen bir SELECT rolü, e-postayı ya da hesabın kapalı olup olmadığını her üyeye
-    // açardı ve tip sistemi bunu görmezdi — `db.query<T>` dönen satırı doğrulamıyor, adlandırıyor.
+    // hâli; genişleyen bir SELECT rolü ya da e-postayı her üyeye açardı ve tip sistemi bunu
+    // görmezdi — `db.query<T>` dönen satırı doğrulamıyor, adlandırıyor.
+    //
+    // `disabled` BİLEREK EKLENDİ ve gerekçesi listede kalmakla ilgili: kapatılmış hesaplar
+    // süzülemiyor, çünkü izin paneli ile ekipler ekranı var olan yetkilerin adını buradan
+    // çözüyor. Bayrak, atama seçicisinin kendi süzgecini kurabilmesi için — kapatılmış bir
+    // hesaba iş atamak, kimsenin okumayacağı bir gelen kutusuna iş koymak demek.
     await users.create(orgA, 'rehber-uye', 'member', 'hash');
 
     const rows = await users.directory(orgA);
     const row = rows.find((r) => r.username === 'rehber-uye');
     expect(row).toBeDefined();
-    expect(Object.keys(row as object).sort()).toEqual(['id', 'username']);
+    expect(Object.keys(row as object).sort()).toEqual(['disabled', 'id', 'username']);
+    expect(row?.disabled).toBe(false);
+
+    const closed = await users.create(orgA, 'rehber-kapali', 'member', 'hash');
+    await users.update(orgA, closed.id, { disabled: true });
+    const after = await users.directory(orgA);
+    expect(after.map((r) => r.username)).toContain('rehber-kapali');
+    expect(after.find((r) => r.username === 'rehber-kapali')?.disabled).toBe(true);
 
     // Ve kiracı sınırı: rehber komşunun hesaplarını saymıyor.
     await users.create(orgB, 'oteki-rehber', 'member', 'hash');
@@ -420,6 +433,54 @@ describeDb('accounts and roles, against a real PostgreSQL', () => {
     );
     expect(after[0]?.posix_uid).not.toBe(uid);
     expect(after[0]?.posix_uid).toBeGreaterThan(uid as number);
+  });
+
+  it('refuses to delete the only person a share is granted to', async () => {
+    // `folder_grants.user_id` `ON DELETE CASCADE`: hesabı silmek onun adına yazılmış hibeleri de
+    // götürüyordu, ve tek kuralı o kişiyi adlandıran paylaşım hiçbir kural taşımadan kalıyordu.
+    // "Her paylaşımın en az bir hibesi vardır" bir DEĞİŞMEZ, ve `PermissionsService.write` ile
+    // `TeamsService.remove` aynı geçişi ön kapıdan reddediyor — hesap silme, o kapının etrafından
+    // dolaşan üçüncü yoldu. Kalan hâl sessiz: klasörler onu kullananlara görünmez oluyor ve
+    // hiçbir ekran bunu silinen hesapla ilişkilendirmiyor.
+    const sole = await users.create(orgA, 'tek-yetkili', 'member', 'hash');
+    const shareId = await owner.withoutTenant('migration-status', async (q) => {
+      const rows = await q.query<{ id: string }>(
+        `INSERT INTO shares (organization_id, name, dataset)
+         VALUES ($1,'yalnizona','tank/shares/yalnizona') RETURNING id::text AS id`,
+        [orgA],
+      );
+      const id = rows[0]?.id ?? '';
+      await q.query(
+        `INSERT INTO folder_grants (organization_id, share_id, entry_id, user_id, permissions)
+         VALUES ($1,$2,NULL,$3,'{list,read}')`,
+        [orgA, id, sole.id],
+      );
+      return id;
+    });
+
+    try {
+      await expect(users.remove(orgA, sole.id, 'test')).rejects.toBeInstanceOf(
+        LastGrantForUserError,
+      );
+      // Ve hesap yerinde: ret ajana gitmeden ÖNCE veriliyor, yoksa reddedilen bir silme arkasında
+      // Unix hesabı kaldırılmış ama satırı duran bir kullanıcı bırakırdı.
+      expect((await users.find(orgA, sole.id)).username).toBe('tek-yetkili');
+
+      // İkinci bir kural yazıldığında silme serbest: cümlenin söylediği çözüm gerçekten çalışıyor.
+      await owner.withoutTenant('migration-status', (q) =>
+        q.query(
+          `INSERT INTO folder_grants (organization_id, share_id, entry_id, user_id, permissions)
+           VALUES ($1,$2,NULL,$3,'{list,read}')`,
+          [orgA, shareId, adminA],
+        ),
+      );
+      await expect(users.remove(orgA, sole.id, 'test')).resolves.toBeTruthy();
+    } finally {
+      await owner.withoutTenant('migration-status', async (q) => {
+        await q.query(`DELETE FROM folder_grants WHERE share_id = $1`, [shareId]);
+        await q.query(`DELETE FROM shares WHERE id = $1`, [shareId]);
+      });
+    }
   });
 
   it('refuses to delete the last enabled administrator', async () => {

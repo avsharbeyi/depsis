@@ -88,6 +88,12 @@ function toFrame(event: DepsisEvent): SseFrame {
  * A header a client controls, so it is parsed defensively: anything that is not a plausible epoch
  * is ignored rather than refused. A malformed resume point is a client bug whose worst outcome
  * should be a fresh stream, not a sign-in screen.
+ *
+ * TABANLI. Bir gün uyuyan dizüstü uyanınca dünkü kimlikle bağlanıyor, ve filigran kiracının
+ * ortağı olduğu için o geri sarma o an bağlı HER yöneticiye dünkü geçmişi yeniden akıtırdı —
+ * `Last-Event-ID: 1` yazan sıradan bir üye de aynısını isteyerek yaptırabilirdi. Kayıp yok: akışa
+ * bağlanan istemci zaten REST anlık görüntüsünü çekiyor. Servis aynı tabanı kendi içinde de
+ * uyguluyor; bu buradaki denetimin yerine geçmez, iki katman aynı kararı veriyor.
  */
 function resumeFrom(request: AuthenticatedRequest): Date | null {
   const raw = request.headers['last-event-id'];
@@ -95,7 +101,7 @@ function resumeFrom(request: AuthenticatedRequest): Date | null {
   const millis = Number.parseInt(text, 10);
   if (!Number.isSafeInteger(millis) || millis <= 0) return null;
 
-  const at = new Date(millis - 1);
+  const at = new Date(Math.max(millis - 1, Date.now() - EventsService.MAX_REWIND_MS));
   // A resume point in the future would seed a watermark nothing can ever pass, and the stream
   // would go permanently silent for everybody in the organisation.
   if (at.getTime() > Date.now()) return null;

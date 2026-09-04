@@ -1,7 +1,17 @@
 import type { OpenApi } from '@depsis/contracts';
 import { describe, expect, it } from 'vitest';
 
-import { conflict, folderBody, merged, uploadMetadata } from './Files.js';
+import {
+  conflict,
+  foldName,
+  folderBody,
+  merged,
+  nextSelection,
+  pathSegments,
+  previewAs,
+  uploadMetadata,
+  uploadsOf,
+} from './Files.js';
 
 type FileEntry = OpenApi.components['schemas']['FileEntry'];
 
@@ -122,5 +132,89 @@ describe('sayfanın devamı listeye eklenirken', () => {
     const before = [...page1];
     merged(page1, page2, 'name');
     expect(page1).toEqual(before);
+  });
+});
+
+describe('var olan klasörü ararken ad karşılaştırması', () => {
+  it('sunucunun katladığı adları aynı sayar', () => {
+    // BU TESTİN VAR OLMA NEDENİ. Sunucu ad tekliğini `fold_identity` ile soruyor: 'FOTOĞRAFLAR'
+    // varken 'fotoğraflar' 409 alıyor. İstemci birebir karşılaştırdığı sürece 409'dan sonra o
+    // klasörü bulamıyor ve klasördeki ÜÇ YÜZ fotoğrafın her biri "klasör kurulamadı" ile düşüyordu.
+    expect(foldName('FOTOĞRAFLAR')).toBe(foldName('fotoğraflar'));
+    expect(foldName('İSTANBUL')).toBe(foldName('istanbul'));
+    expect(foldName('ISPARTA')).toBe(foldName('ısparta'));
+  });
+
+  it('aksanı OLAN ve OLMAYAN adı ayrı tutar', () => {
+    // `fold_identity` arama normalleştirmesi değil: 'Çağrı' ile 'Cagri' sunucuda iki ayrı ad, ve
+    // burada da öyle olmalı — yoksa istemci var olmayan bir klasörü benimsemeye çalışırdı.
+    expect(foldName('Çağrı')).not.toBe(foldName('Cagri'));
+  });
+});
+
+describe('yükleme işlerinin yolu', () => {
+  it('klasör seçicisinden gelen dosyanın üstündeki klasörleri çıkarır', () => {
+    expect(pathSegments('Tatil 2025/Deniz/kum.jpg')).toEqual(['Tatil 2025', 'Deniz']);
+    expect(pathSegments('kum.jpg')).toEqual([]);
+  });
+
+  it('düz dosya seçiminde hiçbir klasör açtırmaz', () => {
+    const file = { name: 'kum.jpg', webkitRelativePath: 'Tatil 2025/kum.jpg' } as unknown as File;
+    expect(uploadsOf([file], false)).toEqual([{ file, segments: [] }]);
+    expect(uploadsOf([file], true)).toEqual([{ file, segments: ['Tatil 2025'] }]);
+  });
+});
+
+describe('hangi dosya önizlenebiliyor', () => {
+  it('§5.1in istediği türleri tanır', () => {
+    expect(previewAs(entry('file', 'tatil.jpg'))).toBe('image');
+    expect(previewAs(entry('file', 'tatil.mp4'))).toBe('video');
+    // BU ÜÇÜ EKSİKTİ: bir sözleşmeye bakmak için onu diske indirmek gerekiyordu.
+    expect(previewAs(entry('file', 'savunma_v3.pdf'))).toBe('pdf');
+    expect(previewAs(entry('file', 'notlar.txt'))).toBe('text');
+    expect(previewAs(entry('file', 'kayit.mp3'))).toBe('audio');
+  });
+
+  it('klasörü, bilinmeyeni ve SVGyi önizlemez', () => {
+    // SVG betik taşıyabilen bir belge; onu oturumun kökeninde çizmek bu ekranın işi değil.
+    expect(previewAs(entry('folder', 'Belgeler'))).toBeNull();
+    expect(previewAs(entry('file', 'kurulum.bin'))).toBeNull();
+    expect(previewAs(entry('file', 'logo.svg'))).toBeNull();
+  });
+});
+
+describe('çoklu seçim', () => {
+  const ids = ['a', 'b', 'c', 'd', 'e'];
+
+  it('düz tıklama tek satırı ekler ve çıkarır', () => {
+    const once = nextSelection(ids, new Set(), 'b', null, { range: false, add: false });
+    expect([...once]).toEqual(['b']);
+    expect([...nextSelection(ids, once, 'b', 'b', { range: false, add: false })]).toEqual([]);
+  });
+
+  it('Shift ile çapadan tıklanana kadarki aralığı seçer', () => {
+    // BU TESTİN VAR OLMA NEDENİ. Üç yüz fotoğraflı bir klasörü taşımak, aralık seçimi olmadan
+    // üç yüz ayrı tıklama demekti.
+    const span = nextSelection(ids, new Set(['b']), 'd', 'b', { range: true, add: false });
+    expect([...span]).toEqual(['b', 'c', 'd']);
+  });
+
+  it('aralığı yukarı doğru da kurar', () => {
+    const span = nextSelection(ids, new Set(['d']), 'b', 'd', { range: true, add: false });
+    expect([...span].sort()).toEqual(['b', 'c', 'd']);
+  });
+
+  it('yalnız Shift eski seçimin yerine geçer, Ctrl+Shift onu korur', () => {
+    const replaced = nextSelection(ids, new Set(['a']), 'c', 'b', { range: true, add: false });
+    expect([...replaced].sort()).toEqual(['b', 'c']);
+    const added = nextSelection(ids, new Set(['a']), 'c', 'b', { range: true, add: true });
+    expect([...added].sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('çapa listede yoksa aralık isteğini tekile düşürür', () => {
+    // Klasör değişmiş ya da satır silinmiş olabilir; olmayan bir çapadan başlayan aralık,
+    // kullanıcının hiç görmediği satırları seçmek olurdu.
+    const only = nextSelection(ids, new Set(), 'c', 'silinmiş', { range: true, add: false });
+    expect([...only]).toEqual(['c']);
   });
 });

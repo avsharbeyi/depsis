@@ -551,7 +551,7 @@ listesi CI'a eşitlendi; ders listenin kendisinde yazıyor.
 Sayfa `apps/web/src/styles.css`i **kopyalamıyor, içe aktarıyor**: bir kopya ilk gün doğru, ikinci
 ay yanlıştır ve yanlış olduğunu kimseye söylemez. Kopyalanamayan tek şey sınıf adları — bir sınıf
 stil dosyasından silindiğinde sayfa hiçbir şey söylemeden çizmeye devam ederdi. `pnpm lint:design`
-tam onu ölçüyor ve `pnpm check`in içinde koşuyor.
+tam onu ölçüyor; `pnpm check`in içinde ve CI'ın `static` işinde koşuyor.
 
 Storybook bilerek kurulmadı; gerekçesi `docs/bilinen-sinirlamalar.md` §21 madde 12’de.
 

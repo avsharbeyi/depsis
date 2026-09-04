@@ -3,7 +3,7 @@ import type { Writable } from 'node:stream';
 
 import type { AgentDataService } from '../agent/agent-data.service.js';
 import type { FilesService } from './files.service.js';
-import { ThumbnailsService } from './thumbnails.service.js';
+import { CACHE_BYTES, NEGATIVE_ENTRY_BYTES, ThumbnailsService } from './thumbnails.service.js';
 
 /**
  * Küçük resim önbelleğinin AJANLA olan ilişkisi.
@@ -91,6 +91,30 @@ describe('the thumbnail cache and the agent', () => {
     await service.of('e1', 4096, at, 'depo', ['a.jpg'], 'c1', 'test');
     await service.of('e1', 4096, at, 'depo', ['a.jpg'], 'c2', 'test');
 
+    expect(opens()).toBe(2);
+  });
+
+  it('evicts "no thumbnail" rows too, so a negative workload cannot grow without a bound', async () => {
+    // Olumsuz cevaplar bayt taşımıyor, ve tahliyeyi çalıştıran tek koşul toplam bayt. Onları
+    // bedava saymak, bir ekran görüntüsü arşivinde — yani HİÇBİR dosyanın gömülü küçük resmi
+    // olmayan, önbelleğin asıl kazanç sağladığı yerde — önbelleği sınırsız büyütüyordu.
+    const { files, data, opens } = stubs(1);
+    const service = new ThumbnailsService(files, data);
+
+    // Bütçeye giren ilk satır bu, yani sınıra çarpıldığında ilk atılacak olan da bu.
+    expect(await service.of('ilk', 1, at, 'depo', ['ilk.jpg'], 'c1', 'test')).toBeNull();
+    expect(opens()).toBe(1);
+
+    // Boş satırların cevabı satırdan veriliyor (ajan hiç açılmıyor) ama önbelleğe yine olumsuz
+    // cevap olarak giriyor: bütçeyi doldurmanın en ucuz yolu.
+    const fill = Math.floor(CACHE_BYTES / NEGATIVE_ENTRY_BYTES);
+    for (let i = 0; i < fill; i += 1) {
+      await service.of(`bos${i}`, 0, at, 'depo', [`bos${i}.jpg`], 'c2', 'test');
+    }
+    expect(opens()).toBe(1);
+
+    // İlk satır tahliye edilmiş olmalı: aynı soru yeniden sorulduğunda cevap ajandan geliyor.
+    expect(await service.of('ilk', 1, at, 'depo', ['ilk.jpg'], 'c3', 'test')).toBeNull();
     expect(opens()).toBe(2);
   });
 });

@@ -5,6 +5,7 @@ import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 
 import { AppModule } from './app.module.js';
+import { RateLimitInterceptor } from './common/rate-limit.interceptor.js';
 import { API_PREFIX, loadConfig } from './config.js';
 
 async function bootstrap(): Promise<void> {
@@ -28,6 +29,16 @@ async function bootstrap(): Promise<void> {
   // only when the connection came from 127.0.0.1: nginx can say it, the network cannot.
   const trustProxy = config.trustProxy ?? 'loopback';
   app.set('trust proxy', trustProxy === 'false' ? false : trustProxy);
+
+  // §14'ün hız sınırı, her uçta. Girişin kendi sayacı ve olay akışının tavanı dışında hiçbir yerde
+  // bir sınır yoktu: kimliği doğrulanmış sıradan bir kullanıcı `GET /search`i saniyede yüzlerce kez
+  // çağırarak kutuyu evdeki herkes için cevapsız bırakabiliyordu.
+  //
+  // BURADA, `AppModule`de değil: sınırın bağımlılığı yok (sayaç bellekte) ve `useGlobalInterceptors`
+  // onu istisnasız her rotaya takıyor — bir modülün sağlayıcı listesine yazılan araç, listeye
+  // eklenmeyi unutan bir sonraki modülü açıkta bırakırdı. Bu, sınırı test edilebilir bir sınıf
+  // olarak da bırakıyor; `rate-limit.interceptor.test.ts` onu doğrudan sürüyor.
+  app.useGlobalInterceptors(new RateLimitInterceptor());
 
   // Nest installs SIGTERM/SIGINT handlers only when asked, and without them a container stop kills
   // the process before the pool drains — leaving transactions to be rolled back by the server's

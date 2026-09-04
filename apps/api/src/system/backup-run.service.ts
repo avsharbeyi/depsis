@@ -36,6 +36,42 @@ const MAX_LISTING_PAGES = 40;
 /** Turun aldığı görüntülerin ön eki. Bu ön eki taşımayan hiçbir görüntüye tur dokunmuyor. */
 const RUN_SNAPSHOT_PREFIX = 'depsis-yedek-';
 
+/**
+ * Silinenler ağacının kaç sil-ve-yeniden-listele turunda bitmesinin beklendiği.
+ *
+ * `backup_list_directory`nin sayfalama imleci YOK: tek yanıtta en çok 5.000 girdi veriyor ve
+ * gerisini söylemiyor. Bir dizini boşaltmak için sıraya da ihtiyaç yok — silinen girdiler bir
+ * daha listelenmiyor — yani listelemeyi yineleyerek ilerlemek yeterli. Tavan, adı sürekli
+ * yeniden dolan bir dizinde sonsuz döngüye girmemek için: iki yüz tur, bir milyon girdi.
+ */
+const MAX_PURGE_PASSES = 200;
+
+/**
+ * Yeni kopyanın YAYIMLANDIĞI geçici adın ön eki.
+ *
+ * Ajanın `copy_file_to_backup`u son diliminde ara dosyayı hedefe TAŞIYARAK bitiriyor, yani
+ * "yaz" ile "yayımla" API tarafından ayrılamıyor; hedefte bir dosya varsa da üstüne yazmıyor,
+ * `conflict` diyor. Yeni sürüm bu yüzden önce yanındaki bu ada yayımlanıyor, eski kopya ancak
+ * ondan SONRA kaldırılıyor ve son adım bir yeniden adlandırma oluyor.
+ */
+const TEMP_PREFIX = '.depsis-yeni-';
+
+/**
+ * Diskin neden okunamadığı — "takılı değil" ile "kilitli" AYRI iki cümle.
+ *
+ * Havuz içe alınmamışsa (USB'si çekilmiş bir disk, ya da açılışta takılmamış bir havuz) ajan
+ * `prepared:false` diyor. Bunu "kilitli" diye kaydeden bir tur, sahibini parola girmeye
+ * gönderiyordu: doğru parola da `dataset does not exist` ile düşüyor ve arızanın adı hiçbir
+ * yerde "disk takılı değil" diye geçmiyordu.
+ */
+function whyUnavailable(status: { prepared: boolean; key_loaded: boolean }): string {
+  if (!status.prepared) {
+    return 'yedek havuzu bulunamadı: disk takılı değil ya da havuzu içe alınmamış';
+  }
+  if (!status.key_loaded) return 'yedek diski kilitli; açmak için parolanız gerekiyor';
+  return 'yedek diski bağlı değil';
+}
+
 export interface RunOutcome {
   state: 'bitti' | 'kilitli' | 'yer-yok' | 'dustu' | 'devam';
   copiedFiles: number;
@@ -55,9 +91,16 @@ interface ShareRow {
  *
  * ── TUR CANLI AĞACI DEĞİL, BİR ANI OKUYOR ────────────────────────────────────────────────────
  *
- * Her paylaşım için önce bir anlık görüntü alınıyor ve tur onun üstünde çalışıyor. Tur saatler
- * sürebilir; canlı ağacı okuyan bir tur, kendi çalışırken değişen dosyaları yarım kopyalar ve
- * hangi anı yedeklediğini söyleyemez.
+ * Her paylaşım için önce bir anlık görüntü alınıyor ve NEYİN değiştiği ondan okunuyor. Tur
+ * saatler sürebilir; canlı ağacı okuyan bir tur, kendi çalışırken değişen dosyaları yarım
+ * kopyalar ve hangi anı yedeklediğini söyleyemez.
+ *
+ * BAYTLAR HÂLÂ CANLI AĞAÇTAN OKUNUYOR, ve bu bilinen bir eksik: `copy_file_to_backup` ajanın
+ * paylaşım kökünden okuyor, `.zfs/snapshot/<ad>` altından değil. Kopyalanırken değişen bir dosya
+ * bu yüzden görüntüdeki hâliyle yedeklenmiyor — ve günlük doğrulama da yedeği CANLI dosyayla
+ * karşılaştırdığı için, turdan sonra düzenlenen bir dosya "yedek bozuk" diye görünebiliyor.
+ * İkisini birden kapatmak ajanın işlem kümesinde bir değişiklik istiyor (görüntüden okuyan bir
+ * kopyalama ve karşılaştırma), yani burada tek başına düzeltilemiyor.
  *
  * ── DEĞİŞİKLİK LİSTESİ, DİZİN YÜRÜYÜŞÜ DEĞİL ─────────────────────────────────────────────────
  *
@@ -106,13 +149,18 @@ export class BackupRunService {
       'backup_root',
     );
     if (!status.prepared || !status.key_loaded || !status.mounted) {
-      await this.record(organizationId, target.id, trigger, {
+      // DURUM 'kilitli' KALIYOR ama SEBEP YAZILIYOR. Yeni bir durum eklemek kaydı okuyan hiçbir
+      // şeyi değiştirmezdi; eksik olan, sahibinin okuyacağı cümlenin "parolanızı girin" yerine
+      // "disk takılı değil" diyebilmesiydi.
+      const outcome: RunOutcome = {
         state: 'kilitli',
         copiedFiles: 0,
         copiedBytes: 0,
         movedFiles: 0,
-      });
-      return { state: 'kilitli', copiedFiles: 0, copiedBytes: 0, movedFiles: 0 };
+        error: whyUnavailable(status),
+      };
+      await this.record(organizationId, target.id, trigger, outcome);
+      return outcome;
     }
     // KURTARMA KİPİ: disk başka bir cihazın yedeği. Yazmak, o cihazın yedeğini bu cihaza göre
     // "düzeltmek" olurdu — yani yeni cihazda henüz olmayan her şeyi silinmiş saymak.
@@ -296,6 +344,34 @@ export class BackupRunService {
           await this.moveToDeleted(share.name, parts, today, total, correlationId);
           continue;
         }
+
+        // ── YENİDEN ADLANDIRMA, `kind` KONTROLÜNDEN ÖNCE ────────────────────────────────────
+        //
+        // `zfs diff` bir klasörün yeniden adlandırılmasını TEK bir `R` satırı olarak veriyor;
+        // çocukları listelemiyor. Bu dal aşağıdaki `kind !== 'file'` kontrolünün ardında
+        // olsaydı klasör yeniden adlandırmaları yine düşerdi — ve düşüyordu: yedekte klasör
+        // eski adıyla kalıyor, yeni ad hiç oluşmuyor, ve eski kopya silinme defterine hiç
+        // girmediği için saklama süresi ona hiç bakmıyordu. Yedek diski her adlandırmada
+        // büyüyor ve canlı ağaçtan sessizce ayrışıyordu.
+        if (entry.change === 'renamed') {
+          const done = await this.renameInBackup(share.name, entry.old_path ?? null, prefix, {
+            parts,
+            kind: entry.kind,
+            total,
+            correlationId,
+          });
+          if (done) continue;
+          // Taşıma uygulanamadı. Eski ağaç OLDUĞU YERDE bırakılıyor — hedefi silip üstüne
+          // taşımak, kullanıcının yedekte aradığı dosyaları yok etmek olurdu — ve taban
+          // düşürülüyor: bir sonraki tur ağacın tamamını yürüyüp yeni adı yazacak.
+          await this.setBase(organizationId, share.id, null);
+          this.logger.warn(
+            `'${share.name}' içindeki bir yeniden adlandırma yedeğe uygulanamadı;` +
+              ` sonraki tur baştan yürüyecek`,
+          );
+          return false;
+        }
+
         if (entry.kind !== 'file') continue;
         await this.copyOne(share.name, parts, total, correlationId);
       }
@@ -306,6 +382,69 @@ export class BackupRunService {
     } finally {
       if (!advanced) await this.destroySnapshot(share, snapshot, correlationId);
     }
+  }
+
+  /**
+   * Yeniden adlandırılan bir düğümü yedekte de yeniden adlandırır. `false` ise uygulanamadı.
+   *
+   * ── NEDEN TAŞIMA, KOPYALAMA DEĞİL ────────────────────────────────────────────────────────
+   *
+   * `zfs diff` kırk bin fotoğraflık bir klasörün yeniden adlandırılmasını TEK bir satır olarak
+   * veriyor ve çocuklarını hiç listelemiyor. Bu satırı görmezden gelen tur ne yeni adı
+   * oluşturuyor ne eskisini kaldırıyordu: yedek, canlı ağaçla uyuşmayan adlar taşıyor ve eski
+   * kopya silinme defterine hiç girmediği için sonsuza kadar duruyordu. Ajanın `publish`i
+   * dizinleri de taşıyor (`renameat2`), yani kırk bin dosyanın yeniden kopyalanması gerekmiyor.
+   *
+   * ── UYGULANAMADIĞINDA YEDEK BOZULMUYOR ───────────────────────────────────────────────────
+   *
+   * Hedefte bir düğüm varsa (`conflict`) o düğüm silinmiyor: `zfs diff` satırlarının sırası
+   * garanti değil, yani orada duran şey bu turda yeni ada yazılmış gerçek bir dosya olabilir.
+   * Çağıran tarafın yapacağı şey tabanı düşürmek — bir sonraki tur ağacın tamamını yürür.
+   */
+  private async renameInBackup(
+    shareName: string,
+    oldPath: string | null,
+    prefix: string,
+    entry: {
+      parts: string[];
+      kind: 'file' | 'directory' | 'other';
+      total: RunOutcome;
+      correlationId: string;
+    },
+  ): Promise<boolean> {
+    const relative =
+      oldPath !== null && oldPath.startsWith(prefix) ? oldPath.slice(prefix.length) : null;
+    // Eski yolu olmayan ya da bağlama noktasının dışını gösteren bir `R` satırı: neyin taşınacağı
+    // bilinmiyor, ve yanlış bir düğümü taşımaktansa tam yürüyüşe düşmek doğru.
+    if (relative === null || relative === '') return false;
+
+    const from = [FILES, shareName, ...relative.split('/')];
+    const to = [FILES, shareName, ...entry.parts];
+    const moved = await this.agent.call(
+      { op: 'backup_move_entry', from, to },
+      `yedek turu: '${relative}' artık '${entry.parts.join('/')}'`,
+      entry.correlationId,
+    );
+
+    if (moved.status === 'moved') {
+      // TAŞIMA BAYT KOPYALAMIYOR, o yüzden `copiedFiles`e sayılmıyor: turun dosya sınırını
+      // taşımalarla doldurmak, gerçek kopyaları sebepsiz yere sonraki tura ertelerdi.
+      entry.total.movedFiles += 1;
+      return true;
+    }
+    if (moved.status === 'not_found') {
+      // Eski ad yedekte yoktu. Bir DOSYA ise yeni adıyla kopyalamak doğru cevap. Bir DİZİN ise
+      // altında ne olduğunu bu satır söylemiyor — çocukları `zfs diff` hiç listelemedi — yani
+      // tam yürüyüşten başka bir yol yok.
+      if (entry.kind !== 'file') return false;
+      await this.copyOne(shareName, entry.parts, entry.total, entry.correlationId);
+      return true;
+    }
+    this.logger.warn(
+      `'${shareName}': '${relative}' → '${entry.parts.join('/')}' taşınamadı;` +
+        ` ajan '${moved.status}' dedi`,
+    );
+    return false;
   }
 
   /**
@@ -467,16 +606,23 @@ export class BackupRunService {
     correlationId: string,
   ): Promise<void> {
     const to = [FILES, shareName, ...parts];
-    await this.ensureDirs(to.slice(0, -1), correlationId);
+    const directory = to.slice(0, -1);
+    await this.ensureDirs(directory, correlationId);
 
-    // Aynı ada sahip DEĞİŞMİŞ bir dosya: hedefte eskisi duruyor ve ajan üstüne yazmıyor. Eski
-    // sürümü silinenlere taşımak yerine kaldırmak, "değişen dosyanın eski hâli" ile "silinen
-    // dosya" arasındaki farkı korumuyor — ama saklama sayacını da yanlış başlatmıyor.
-    await this.agent.call(
-      { op: 'backup_remove_entry', path: to, directory: false },
-      `yedek turu: eski sürüm kaldırılıyor`,
-      correlationId,
-    );
+    // ── ÖNCE YAZ, SONRA KALDIR ───────────────────────────────────────────────────────────────
+    //
+    // Eski sürüm burada, tek bayt yazılmadan ÖNCE kaldırılıyordu. Kırk gigabaytlık bir dosya
+    // değiştiğinde ve yedek diskinde on gigabayt kaldığında olan şuydu: yedekteki SAĞLAM kopya
+    // siliniyor, kopyalama `out_of_space` ile düşüyor, ve o dosyanın yedekte ne eski ne yeni
+    // sürümü kalıyordu. Taban da ilerlemediği için sonraki turlar aynı yerde düşüyor, yani
+    // boşluk kendiliğinden kapanmıyordu — sistem diski o gün yansa dosya tamamen kaybolurdu.
+    //
+    // Ajanın `copy_file_to_backup`u son diliminde ara dosyayı hedefe TAŞIYARAK bitiriyor, yani
+    // "hepsini yaz" ile "yayımla" API tarafından ayrılamıyor. Bu yüzden yeni sürüm önce aynı
+    // dizindeki geçici bir ada yayımlanıyor; eski kopya ancak ondan sonra kaldırılıyor ve son
+    // adım bir yeniden adlandırma. Geçici adın UUID taşıması, yarıda kalmış bir turun bıraktığı
+    // dosyayla çakışmamak için — çakışsaydı kopyalama `conflict` ile düşerdi.
+    const temp = [...directory, `${TEMP_PREFIX}${randomUUID()}`];
 
     const staging = `yedek-${randomUUID()}`;
     let offset = 0;
@@ -486,7 +632,7 @@ export class BackupRunService {
           op: 'copy_file_to_backup',
           share: shareName,
           from: parts,
-          to,
+          to: temp,
           staging_name: staging,
           offset,
           max_bytes: SLICE,
@@ -500,6 +646,32 @@ export class BackupRunService {
       total.copiedBytes += Number(copied.offset) - offset;
       offset = Number(copied.offset);
       if (copied.done) break;
+    }
+
+    // Yeni sürüm artık diskte ve tam. Eski kopyayı kaldırmak buradan sonrası: aradaki pencere
+    // iki çağrı, ve o pencerede kesilen bir tur yedekte geçici adı bırakır — kaybolmuş bir dosya
+    // değil, adı garip bir dosya.
+    //
+    // Eski sürümü silinenlere TAŞIMAK yerine kaldırmak, "değişen dosyanın eski hâli" ile
+    // "silinen dosya" arasındaki farkı korumuyor — ama her değişen dosyanın bir kopyasını
+    // saklama süresi boyunca tutup diski doldurmuyor da.
+    await this.agent.call(
+      { op: 'backup_remove_entry', path: to, directory: false },
+      `yedek turu: eski sürüm kaldırılıyor`,
+      correlationId,
+    );
+    const published = await this.agent.call(
+      { op: 'backup_move_entry', from: temp, to },
+      `yedek turu: yeni sürüm yerine konuyor (${parts.join('/')})`,
+      correlationId,
+    );
+    if (published.status !== 'moved') {
+      // Yeni sürüm yazıldı ama yerine oturmadı. Susmak, yedekte geçici adlı bir dosya ve eski
+      // adında hiçbir şey bırakırdı; turun düşmesi doğru cevap — taban ilerlemiyor, yani bir
+      // sonraki tur aynı dosyayı yeniden deniyor.
+      throw new Error(
+        `${parts.join('/')} yedekte yerine konamadı; ajan '${published.status}' dedi`,
+      );
     }
     total.copiedFiles += 1;
 
@@ -603,7 +775,7 @@ export class BackupRunService {
       // karşılaştırma metin üzerinde yapılabiliyor.
       if (!/^\d{4}-\d{2}-\d{2}$/u.test(day.name)) continue;
       if (day.name >= cutoff) continue;
-      purged += await this.removeTree([LEDGER, DELETED, day.name], correlationId);
+      purged += (await this.removeTree([LEDGER, DELETED, day.name], correlationId)).removed;
     }
     if (purged > 0) {
       this.logger.log(`temizlik: ${purged} dosya kalıcı olarak silindi`);
@@ -611,42 +783,85 @@ export class BackupRunService {
     return purged;
   }
 
-  /** Bir ağacı yaprakları önce silerek kaldırır. Silinen DOSYA sayısını döndürür. */
-  private async removeTree(path: string[], correlationId: string): Promise<number> {
-    const listed = await this.agent.call(
-      { op: 'backup_list_directory', path },
-      'temizlik: dizin',
-      correlationId,
-    );
-    if (listed.status === 'not_found') return 0;
-    const listing = expectStatus(listed, 'listing');
-    if (listing.truncated) {
-      // Kesilmiş bir listeleme: dizinin tamamı silinemez, ve YARIM SİLMEK yerine hiç dokunmamak
-      // doğru. Bir sonraki temizlik turu aynı dizini yeniden deniyor.
-      this.logger.warn(`temizlik: '${path.join('/')}' tek listelemeye sığmadı, atlandı`);
-      return 0;
-    }
-
+  /**
+   * Bir ağacı yaprakları önce silerek kaldırır.
+   *
+   * ── KESİLMİŞ LİSTELEME ARTIK ATLANMIYOR ──────────────────────────────────────────────────
+   *
+   * `backup_list_directory` tek yanıtta en çok 5.000 girdi veriyor ve — kardeşi `list_directory`
+   * gibi bir `after` imleci taşımadığı için — gerisini sunacak bir yolu yok. Kesilmiş bir
+   * listelemede hiç dokunmamak, 8.000 fotoğrafın silindiği bir gün klasörünün ASLA
+   * temizlenmemesi demekti: her saat aynı uyarı, üst dizin dolu kaldığı için o da silinemiyor,
+   * ve o bloklar saklama süresi ne olursa olsun diskte kalıyordu — sonunda "yer yok" ile duran
+   * turlar.
+   *
+   * SİL-VE-YENİDEN-LİSTELE sıraya ihtiyaç duymuyor, ve bu şans değil kuralın kendisi: silinen
+   * bir girdi bir daha listelenmiyor, yani her tur listelemeyi ilerletiyor. `after` imleci
+   * gerekmiyor — ajanın girdileri sıralamadığı bu yolda zaten yoktu.
+   *
+   * İLERLEME ÖLÇÜLÜYOR. Bir turda hiçbir girdi kaldırılamadıysa (hepsi `conflict` ya da
+   * `refused` dönüyorsa) döngü aynı listeyi sonsuza kadar isterdi; o hâlde dizin bırakılıyor ve
+   * gerekçe günlüğe yazılıyor.
+   */
+  private async removeTree(
+    path: string[],
+    correlationId: string,
+  ): Promise<{ removed: number; cleared: boolean }> {
     let removed = 0;
-    for (const entry of listing.entries) {
-      const child = [...path, entry.name];
-      if (entry.directory) {
-        removed += await this.removeTree(child, correlationId);
-      } else {
-        await this.agent.call(
-          { op: 'backup_remove_entry', path: child, directory: false },
-          'temizlik: dosya',
-          correlationId,
+
+    for (let pass = 0; pass < MAX_PURGE_PASSES; pass += 1) {
+      const listed = await this.agent.call(
+        { op: 'backup_list_directory', path },
+        'temizlik: dizin',
+        correlationId,
+      );
+      // Dizin bu arada gitmiş: istenen sonuç zaten bu.
+      if (listed.status === 'not_found') return { removed, cleared: true };
+      const listing = expectStatus(listed, 'listing');
+
+      let progressed = false;
+      for (const entry of listing.entries) {
+        const child = [...path, entry.name];
+        if (entry.directory) {
+          const inner = await this.removeTree(child, correlationId);
+          removed += inner.removed;
+          if (inner.cleared) progressed = true;
+        } else {
+          const gone = await this.agent.call(
+            { op: 'backup_remove_entry', path: child, directory: false },
+            'temizlik: dosya',
+            correlationId,
+          );
+          if (gone.status === 'removed') {
+            removed += 1;
+            progressed = true;
+          }
+        }
+      }
+
+      // Liste kesilmediyse dizinin tamamı görüldü; bir sayfa daha istemenin anlamı yok.
+      if (!listing.truncated || listing.entries.length === 0) break;
+      if (!progressed) {
+        this.logger.warn(
+          `temizlik: '${path.join('/')}' içinde hiçbir girdi kaldırılamadı; dizin bırakıldı`,
         );
-        removed += 1;
+        return { removed, cleared: false };
       }
     }
-    await this.agent.call(
+
+    const gone = await this.agent.call(
       { op: 'backup_remove_entry', path, directory: true },
       'temizlik: dizin',
       correlationId,
     );
-    return removed;
+    // DOLU BİR DİZİN `conflict` DÖNÜYOR ve bu sessizce geçiliyordu: üst klasör diskte kalırken
+    // temizlik "bitti" diyordu. Bir sonraki tur yeniden deniyor, ama sebebin günlükte durması
+    // gerekiyor.
+    if (gone.status !== 'removed') {
+      this.logger.warn(`temizlik: '${path.join('/')}' kaldırılamadı; ajan '${gone.status}' dedi`);
+      return { removed, cleared: false };
+    }
+    return { removed, cleared: true };
   }
 
   /** Temizlik turunu kuyruğa alır — saatte bir. */
@@ -762,7 +977,7 @@ export class BackupRunService {
       'backup_root',
     );
     if (!status.prepared || !status.key_loaded || !status.mounted) {
-      return { ok: false, note: 'disk kilitli; doğrulama yapılamadı' };
+      return { ok: false, note: `${whyUnavailable(status)}; doğrulama yapılamadı` };
     }
 
     await this.scrubIfDue(organizationId, target.pool, correlationId);

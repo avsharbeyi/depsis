@@ -112,11 +112,11 @@ psql -X -v ON_ERROR_STOP=1 -v db_name=depsis -f packages/db/bootstrap.sql
 
 Üç rol ve neden üç tane:
 
-| Rol             | Ne için                                                                                                 |
-| --------------- | ------------------------------------------------------------------------------------------------------- |
-| `depsis_owner`  | Yalnız göçler. Şemayı bu yaratır.                                                                       |
-| `depsis_app`    | API ve worker. RLS **buna** uygulanır.                                                                  |
-| `depsis_backup` | Yalnız okuma, ve her şeyi değil — parola özeti, TOTP sırrı, NT hash ve oturum satırları bu role kapalı. |
+| Rol             | Ne için                                                                                                                                                                                             |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `depsis_owner`  | Yalnız göçler. Şemayı bu yaratır.                                                                                                                                                                   |
+| `depsis_app`    | API ve worker. RLS **buna** uygulanır.                                                                                                                                                              |
+| `depsis_backup` | Yalnız okuma, ve her şeyi değil — parola özeti, TOTP sırrı, NT hash, kurtarma kodları, oturum satırları ve lisans belgesi bu role kapalı (0061; öncesinde parola özeti ile NT hash kapalı DEĞİLDİ). |
 
 Göçler **owner** olarak koşar, superuser olarak değil. Superuser satır seviyesi güvenliği sessizce
 atlar; yalnız superuser tarafından yaratıldığı için çalışan bir şema burada geçer ve üretimde

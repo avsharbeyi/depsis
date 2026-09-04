@@ -485,10 +485,16 @@ MAINPID=$(systemctl show -p MainPID --value depsis-api.service)
 [ -n "$MAINPID" ] && [ "$MAINPID" != 0 ] && ok "running as pid $MAINPID" || bad 'no MainPID'
 
 head1 'the credentials arrived, and are not in the environment'
-if journalctl -u depsis-api.service --no-pager | grep -q 'TOTP secrets are sealed with the key'; then
-  ok 'the API loaded the key through LoadCredential='
+# The line the API actually writes (secret-box.ts): "secrets at rest are sealed with the key at
+# <path>". The pattern here used to read "TOTP secrets are sealed with the key", which no version
+# of the API has ever logged — a permanent FAIL on the one assertion that proves LoadCredential=
+# worked. The PATH is matched too, and deliberately: a key loaded from anywhere but
+# /run/credentials would mean the file arrived by some other route and the delivery is unproven.
+if journalctl -u depsis-api.service --no-pager \
+     | grep -qE 'secrets at rest are sealed with the key at /run/credentials/'; then
+  ok 'the API loaded the key through LoadCredential=, from /run/credentials'
 else
-  bad 'the API did not report loading a key'
+  bad 'the API did not report loading a key from /run/credentials'
   journalctl -u depsis-api.service -n 20 --no-pager | grep -i 'secret\|key' | head -5
 fi
 if journalctl -u depsis-api.service --no-pager | grep -q "connected as 'depsis_app'"; then
@@ -574,13 +580,17 @@ head1 'socket activation, and the pair working'
 # The first request that needs the agent is what should start it.
 JAR="$WORK/admin.jar"
 PW='correct-horse-battery-staple-42'
-# -o cat, because the default renderer prefixes every line with a timestamp and hostname, so the
-# banner's leading spaces are no longer at the start of the line and the pattern never matches.
-TOKEN=$(journalctl -u depsis-api.service -o cat --no-pager | grep -oE '^ {6}[A-Za-z0-9_-]{20,}$' | tail -1 | tr -d ' ')
-[ -n "$TOKEN" ] && ok 'the setup token reached the journal' || bad 'no setup token in the journal'
+# NO SETUP TOKEN. This block used to grep the journal for a one-time token and fail when it found
+# none; SetupService is TOKENLESS by decision — the only way to read a token was a terminal, and
+# this appliance's owner must never need one. What the journal must carry instead is the pending
+# banner, and it must carry no secret.
+# -o cat, because the default renderer prefixes every line with a timestamp and hostname.
+journalctl -u depsis-api.service -o cat --no-pager | grep -q 'DEPSIS is not set up yet' \
+  && ok 'the journal says setup is pending, without printing a secret' \
+  || bad 'no "not set up yet" banner in the journal'
 
 curl -sS -X POST "$BASE/setup/claim" -H 'content-type: application/json' \
-  -d "{\"token\":\"$TOKEN\",\"organizationName\":\"P1D\",\"organizationSlug\":\"p1d\",\"adminUsername\":\"admin\",\"adminDisplayName\":\"Admin\",\"adminPassword\":\"$PW\"}" \
+  -d "{\"organizationName\":\"P1D\",\"organizationSlug\":\"p1d\",\"adminUsername\":\"admin\",\"adminPassword\":\"$PW\"}" \
   | grep -q '"status":"ok"' && ok 'the box was claimed' || bad 'claim failed'
 
 curl -sS -c "$JAR" -X POST "$BASE/auth/login" -H 'content-type: application/json' \

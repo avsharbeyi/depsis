@@ -18,10 +18,26 @@ const HEAD_BYTES = 128 * 1024;
  * demek — bir ızgaranın birkaç sayfası. Sayı değil BAYT sınırı, çünkü sınırlanması gereken şey
  * bellek, ve satır başına boyut on kat değişebiliyor.
  */
-const CACHE_BYTES = 32 * 1024 * 1024;
+export const CACHE_BYTES = 32 * 1024 * 1024;
+
+/**
+ * "Küçük resmi yok" satırının bellekteki bedeli.
+ *
+ * Böyle bir satır hiç bayt TAŞIMIYOR, ama yer kaplıyor: anahtar dizgesi, `Map` girdisi ve küçük
+ * nesne birlikte iki yüz bayt civarı. Bunu sıfır saymak, tahliyeyi çalıştıran tek koşul toplam
+ * bayt olduğu için, olumsuz cevapların önbelleği SONSUZA KADAR büyütmesi demekti: yüz binlerce
+ * EXIF'siz JPEG'i olan bir ızgara gezildikçe `bytes` hiç artmıyor, hiçbir satır atılmıyor ve
+ * "BAYT sınırı" iddiası tutmuyordu.
+ */
+export const NEGATIVE_ENTRY_BYTES = 256;
 
 /** Bir cevap: küçük resim, ya da "bu dosyanın gömülü küçük resmi yok". Hata SAKLANMIYOR. */
 type Cached = { hit: EmbeddedThumbnail } | { hit: null };
+
+/** Bir satırın önbellek bütçesindeki bedeli. Tahliye ile ekleme aynı sayıyı kullanmalı. */
+function costOf(value: Cached): number {
+  return value.hit === null ? NEGATIVE_ENTRY_BYTES : value.hit.bytes.length;
+}
 
 /**
  * Baytlar okunamadı — dosyada küçük resim OLMADIĞI anlamına gelmiyor.
@@ -169,15 +185,14 @@ export class ThumbnailsService {
   }
 
   private remember(key: string, value: Cached): void {
-    const size = value.hit === null ? 0 : value.hit.bytes.length;
     this.cache.set(key, value);
-    this.bytes += size;
+    this.bytes += costOf(value);
     while (this.bytes > CACHE_BYTES) {
       const oldest = this.cache.keys().next();
       if (oldest.done === true) break;
       const dropped = this.cache.get(oldest.value);
       this.cache.delete(oldest.value);
-      this.bytes -= dropped?.hit === null || dropped === undefined ? 0 : dropped.hit.bytes.length;
+      this.bytes -= dropped === undefined ? 0 : costOf(dropped);
     }
   }
 }

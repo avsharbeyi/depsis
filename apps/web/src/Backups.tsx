@@ -66,6 +66,29 @@ function Durum({ state }: { state: Backup['state'] }): React.JSX.Element {
   return <span className={shown?.tone}>{shown?.text}</span>;
 }
 
+/**
+ * "Yedek al" formunun veri kümesi önerileri.
+ *
+ * ÖNERİNİN KAYNAĞI PAYLAŞIMLAR, ve bu bir düzeltme: liste eskiden yalnız zaten yedeği olan veri
+ * kümelerinden besleniyordu, yani hiç yedek almamış bir kutuda — tam da yardıma en çok ihtiyaç
+ * duyulan kutuda — bomboştu. Sahibi `tank/depsis/ev` gibi bir ZFS adını bilemediği için ilk
+ * yedeği hiç alamıyor, ya da 404 alıyordu.
+ *
+ * İKİSİ BİRDEN, çünkü paylaşımı silinmiş ama yedekleri duran bir veri kümesi de meşru bir cevap;
+ * ve bu bir `datalist` olduğu için liste hiçbir zaman tek yol değil — paylaşım dışı bir veri
+ * kümesini elle yazmak açık kalıyor. Sıra ada göre: iki kaynağın hangisinden geldiği, yazacak
+ * adı arayan kişi için bir ayrım değil.
+ */
+export function suggestedDatasets(
+  shareDatasets: readonly string[],
+  backups: ReadonlyArray<{ dataset: string }>,
+): string[] {
+  const all = [...shareDatasets, ...backups.map((item) => item.dataset)].filter(
+    (value) => value !== '',
+  );
+  return [...new Set(all)].sort((a, b) => a.localeCompare(b, 'tr'));
+}
+
 export function Backups({ notify, snapshot }: Props): React.JSX.Element {
   const [page, setPage] = useState<BackupPage | null>(null);
   const [forbidden, setForbidden] = useState(false);
@@ -74,6 +97,8 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
   const [dataset, setDataset] = useState('');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
+  /** Paylaşımların veri kümeleri — öneri listesinin asıl kaynağı. */
+  const [shareDatasets, setShareDatasets] = useState<string[]>([]);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
 
@@ -102,6 +127,29 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
     };
   }, [reloadKey, notify]);
 
+  // ÖNERİ, HİÇ YEDEĞİ OLMAYAN KUTUDA DA DOLU OLMALI. `GET /shares` yöneticiye her paylaşımın
+  // `dataset` alanını veriyor; sözleşmede isteğe bağlı olduğu için (ve yönetici olmayana hiç
+  // dönmediği için) süzülüyor, ve liste boş kalırsa alan serbest metin olarak duruyor —
+  // seçeneği tek yol yapmak, paylaşım dışı veri kümelerini erişilemez kılardı.
+  //
+  // Yalnız açılışta: bu uç ajanı da yokluyor (`smbAvailable`), ve her yedek alışında onu yeniden
+  // çağırmak bu ekranın işi olmayan bir tur daha demek.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const { data } = await api.GET('/shares', {});
+      if (!alive || data === undefined) return;
+      setShareDatasets(
+        data.items
+          .map((item) => item.dataset)
+          .filter((value): value is string => value !== undefined && value !== ''),
+      );
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   async function create(event: React.FormEvent): Promise<void> {
     event.preventDefault();
     const trimmed = dataset.trim();
@@ -127,9 +175,11 @@ export function Backups({ notify, snapshot }: Props): React.JSX.Element {
   }
 
   const items: Backup[] = page?.items ?? [];
-  // Datasets that already carry a backup. The API publishes no share listing, so this is the only
-  // honest source of a suggestion — and it is a suggestion, not the set of valid answers.
-  const known = [...new Set(items.map((item) => item.dataset))].sort();
+  // Paylaşımlar ve zaten yedeği olan veri kümeleri bir arada: ikisi de bir öneridir, geçerli
+  // cevapların kümesi değil. Bir zamanlar burada "API paylaşım listesi vermiyor" yazıyordu ve bu
+  // doğru değildi — hiç yedeği olmayan bir kutuda liste bomboş kalıyor, sahibi `tank/depsis/ev`
+  // gibi bir adı bilemediği için ilk yedeği hiç alamıyordu.
+  const known = suggestedDatasets(shareDatasets, items);
   const pools = snapshot.telemetry?.pools ?? [];
 
   return (

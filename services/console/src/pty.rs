@@ -397,8 +397,36 @@ mod tests {
     ///
     /// A fixed number of reads would be a flaky test: a shell's startup output arrives in
     /// however many chunks the scheduler feels like.
+    /// Bir dizge görünene kadar oku, ama SÜRENİN İÇİNDE.
+    ///
+    /// SÜRE GERÇEKTEN UYGULANIYOR. Bu döngü bitiş anını yalnız okumaların ARASINDA sınıyordu ve
+    /// bir pty ustası bloke okur: kabuk hiç bayt yollamazsa `read` geri dönmez, bitiş anı bir daha
+    /// hiç sınanmaz ve testin bütçesi kâğıt üstünde kalır. CI'da bir kez oldu — 45 testin hepsi
+    /// `ok` yazdı, süit özetini hiç basmadı, ikili çıkmadı ve `cargo` kırk dakika bekledikten
+    /// sonra iş elle iptal edildi. Kabuğun beklenen çıktıyı vermemesi bir test BAŞARISIZLIĞI
+    /// olmalı; bütün koşuyu durduran bir asılma değil.
+    ///
+    /// Bekçi, süre dolduğunda oturumu öldürüyor: usta o an EOF döndüğü için bloke okuma çözülüyor
+    /// ve döngü elindeki çıktıyla bitiyor — çağıran da onu iddiasında gösteriyor. `poll` yerine bu
+    /// seçildi çünkü tek gereken şey `std` ve modülün kendi `signal_session`ı; testin okuduğu tek
+    /// bir bayt da kaybolmuyor.
     fn read_until(pty: &Pty, needle: &str, budget: Duration) -> String {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watch = std::sync::Arc::clone(&done);
+        let pid = pty.pid();
         let deadline = Instant::now() + budget;
+        let watchdog = std::thread::spawn(move || {
+            while Instant::now() < deadline {
+                if watch.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            if !watch.load(std::sync::atomic::Ordering::Relaxed) {
+                signal_session(pid, rustix::process::Signal::KILL);
+            }
+        });
+
         let mut seen = String::new();
         let mut buf = [0u8; 4096];
         let mut master = pty.master();
@@ -408,13 +436,15 @@ mod tests {
                 Ok(n) => {
                     seen.push_str(&String::from_utf8_lossy(&buf[..n]));
                     if seen.contains(needle) {
-                        return seen;
+                        break;
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             }
         }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = watchdog.join();
         seen
     }
 

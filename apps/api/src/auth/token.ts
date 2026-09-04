@@ -28,9 +28,13 @@ export function hashToken(token: string): Buffer {
 /**
  * Constant-time comparison, for the places that compare a secret to a secret.
  *
- * Session lookup goes through the database by hash and does not use this; CSRF token comparison
- * does. Length is checked first because `timingSafeEqual` throws on a length mismatch, and a throw
- * is itself a timing signal.
+ * BUGÜN ÇAĞIRANI YOK, ve yorumun kendisi bir zamanlar tersini söylüyordu: "CSRF token comparison
+ * does". Öyle bir karşılaştırma bu üründe hiç olmadı — CSRF savunması çerezin `SameSite`'ı
+ * (`cookie.ts`) ile origin denetimi (`origin.ts`, `same-origin.guard.ts`), double-submit token
+ * değil. Bir sonraki okuyanın "demek ki CSRF token'ımız var" diye düşünmesini engellemek için
+ * düzeltildi; fonksiyon, sır karşılaştıran bir yer eklendiğinde doğru yazılmış hâliyle burada
+ * duruyor. Uzunluk önce denetleniyor çünkü `timingSafeEqual` uzunluk uyuşmazlığında fırlatır ve
+ * fırlatmanın kendisi bir zamanlama işareti olur.
  */
 export function secretsEqual(a: string, b: string): boolean {
   const left = Buffer.from(a, 'utf8');

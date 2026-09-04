@@ -1,12 +1,12 @@
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 
+import { ProblemException } from '../common/problem.filter.js';
 import { DbService } from '../db/db.service.js';
 import {
   KEY_VERSION_AES_GCM,
   KEY_VERSION_PLAINTEXT,
   SecretDecryptionError,
-  SecretKeyUnavailableError,
   type SecretBox,
 } from './secret-box.js';
 import { base32Encode, generateSecret, otpauthUri, PERIOD_SECONDS, verifyTotp } from './totp.js';
@@ -111,8 +111,18 @@ export class MfaService implements OnModuleInit {
   ): Promise<Enrolment> {
     if (this.secrets === null) {
       // Refused rather than degraded. See the note on the constructor.
-      throw new SecretKeyUnavailableError(
-        'no secret key is configured, so a TOTP secret cannot be stored safely',
+      //
+      // VE EKRANDA OKUNABİLİR OLARAK. Buradan düz bir `Error` fırlatmak `ProblemFilter`'ın 500
+      // dalına düşüyordu, ve bir 500 asla `detail` taşımaz (taşımamalı da): sahibi "İki adımlı
+      // doğrulamayı aç"a basıp yalnız "Kayıt başlatılamadı." görüyor, gerçek sebebi ancak
+      // `journalctl` söylüyordu — terminalsiz ürün kuralının ihlali. 503 `dependency-unavailable`,
+      // durumu olduğu gibi anlatıyor: kutunun bir parçası eksik, istek yanlış değil.
+      throw new ProblemException(
+        'dependency-unavailable',
+        'Bu cihazın gizli anahtarı okunamıyor, bu yüzden iki adımlı doğrulama şu anda ' +
+          'kurulamıyor. Kurtarma sonrasında /etc/depsis/secret.key eksik ya da okunamaz durumda ' +
+          'olabilir; cihazı yeniden başlatmak sorunu çözmezse yedekteki anahtar dosyası geri ' +
+          'yüklenmelidir.',
       );
     }
     const secret = generateSecret();
@@ -458,9 +468,4 @@ function generateRecoveryCode(): string {
 function hashRecoveryCode(code: string): Buffer {
   const canonical = code.trim().replace(/[\s-]/g, '').toUpperCase();
   return createHash('sha256').update(canonical, 'utf8').digest();
-}
-
-/** Formatted for printing: four groups of five. */
-export function formatRecoveryCode(code: string): string {
-  return (code.match(/.{1,5}/g) ?? [code]).join('-');
 }

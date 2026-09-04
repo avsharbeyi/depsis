@@ -11,9 +11,17 @@ import { TrashRetentionService } from './trash-retention.service.js';
 
 type Schemas = OpenApi.components['schemas'];
 
+/**
+ * On yıl. Tavan, kaydedilen politikayı olduğu kadar FİYATLANDIRILAN değeri de bağlıyor: `impact`
+ * sorgusu `now() - make_interval(days => $2::int)` çalıştırıyor, yani sınırsız bir `days` önce
+ * `int` taşmasına, sonra "timestamp out of range" hatasına düşüyor — ikisi de kullanıcıya 500
+ * olarak dönüyordu, oysa söylenmesi gereken şey sayının çok büyük olduğu.
+ */
+const MAX_RETENTION_DAYS = 3650;
+
 const policySchema = z.object({
   /** `null` switches the policy off. Below one day the database refuses; so does this, sooner. */
-  retentionDays: z.number().int().min(1).max(3650).nullable(),
+  retentionDays: z.number().int().min(1).max(MAX_RETENTION_DAYS).nullable(),
 });
 
 /**
@@ -52,8 +60,16 @@ export class TrashPolicyController {
     const policy = await this.retention.policy(caller.organizationId);
 
     const considering = days === undefined ? policy.retentionDays : Number.parseInt(days, 10);
-    if (days !== undefined && (!Number.isSafeInteger(considering) || (considering ?? 0) < 1)) {
-      throw new ProblemException('bad-request', 'days bir tam sayı olmalı ve en az 1.');
+    if (
+      days !== undefined &&
+      (!Number.isSafeInteger(considering) ||
+        (considering ?? 0) < 1 ||
+        (considering ?? 0) > MAX_RETENTION_DAYS)
+    ) {
+      throw new ProblemException(
+        'bad-request',
+        `days 1 ile ${MAX_RETENTION_DAYS} arasında bir tam sayı olmalı.`,
+      );
     }
 
     const impact = await this.retention.impact(caller.organizationId, considering ?? null);

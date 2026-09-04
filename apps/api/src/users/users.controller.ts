@@ -15,6 +15,7 @@ import {
   Req,
   ServiceUnavailableException,
   UnauthorizedException,
+  UnprocessableEntityException,
   UseGuards,
 } from '@nestjs/common';
 import type { OpenApi } from '@depsis/contracts';
@@ -32,6 +33,7 @@ import {
   IdentityStillOnBoxError,
   UsernameTakenError,
   LastAdminError,
+  LastGrantForUserError,
   UserNotFoundError,
   UsersService,
   type UserRow,
@@ -49,13 +51,64 @@ type Schemas = OpenApi.components['schemas'];
 const MIN_PASSWORD = 12;
 const MAX_PASSWORD = 1024;
 
+/**
+ * Kutunun kendi hesaplarının adları — bir DEPSIS kullanıcısına verilemez.
+ *
+ * BİR NEZAKET KURALI DEĞİL, bütün cihazı durduran bir arıza. Ajanın kimlik eşitlemesi her koşuda
+ * her kullanıcıyı `getent passwd <login>` ile arıyor ve bulduğu hesabın uid'i DEPSIS'in ayırdığı
+ * aralıkta değilse "bu login makineye ait" deyip EŞİTLEMENİN TAMAMINI reddediyor. Yani 'backup'
+ * adlı tek bir hesap açmak, o kiracıda o günden sonra açılan hiçbir hesabın SMB'ye girememesi ve
+ * hiçbir ekip üyeliğinin `/etc/group`'a yansımaması demek. Hesabı silmek de çalışmıyor: aynı
+ * kontrol silme yolunda `UidTaken` verip 503 dönüyor, yani çıkış yolu kapatmakla sınırlı kalıyor.
+ *
+ * Liste Debian/Ubuntu'nun taban kurulumundaki hesaplar. Ajanın `PosixName`i de aynı şekli kabul
+ * ediyor ve kendi yorumunda "sistem hesabı adlandırmayı ENGELLEMEZ" diyor — engelleyen tek yer
+ * burası, yani hesabın doğduğu an.
+ */
+const RESERVED_USERNAMES: ReadonlySet<string> = new Set([
+  'adm',
+  'audio',
+  'backup',
+  'bin',
+  'daemon',
+  'dialout',
+  'games',
+  'gnats',
+  'irc',
+  'list',
+  'lp',
+  'mail',
+  'man',
+  'messagebus',
+  'news',
+  'nobody',
+  'nogroup',
+  'operator',
+  'proxy',
+  'root',
+  'sudo',
+  'sshd',
+  'sync',
+  'sys',
+  'syslog',
+  'systemd-network',
+  'systemd-resolve',
+  'uucp',
+  'www-data',
+]);
+
 const createSchema = z.object({
   username: z
     .string()
     .trim()
     .min(1)
     .max(64)
-    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
+    // Küçük harfe indirgenerek karşılaştırılıyor: kutudaki hesaplar küçük harfli, ve 'Backup' ile
+    // 'backup' `getent` için aynı şey değilse de aynı arızaya götürecek kadar yakın.
+    .refine((value) => !RESERVED_USERNAMES.has(value.toLowerCase()), {
+      message: 'that username belongs to the system',
+    }),
   role: z.enum(['admin', 'member']).default('member'),
   password: z.string().min(MIN_PASSWORD).max(MAX_PASSWORD),
 });
@@ -116,6 +169,17 @@ export class UsersController {
     const session = requireSession(request);
     const parsed = createSchema.safeParse(body);
     if (!parsed.success) {
+      // Ayrılmış ad KENDİ cümlesini alıyor. Genel mesaj ("bir kullanıcı adı ve en az 12 karakterlik
+      // parola gerekiyor") burada yanlış yere bakmaya gönderirdi: parola sorun değil, ad sorun — ve
+      // sebebi tahmin edilebilecek bir şey de değil.
+      const reserved = parsed.error.issues.some(
+        (issue) => issue.message === 'that username belongs to the system',
+      );
+      if (reserved) {
+        throw new UnprocessableEntityException(
+          'Bu ad cihazın kendi sistem hesaplarından birine ait; başka bir kullanıcı adı seçin.',
+        );
+      }
       throw new BadRequestException(
         `username and a password of at least ${MIN_PASSWORD} characters are required`,
       );
@@ -169,6 +233,7 @@ export class UsersController {
   ): Promise<Schemas['PasswordResetTicket']> {
     requireSameOrigin(request);
     const session = requireSession(request);
+    requireUuid(id);
     const parsed = confirmSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('your own password is required');
 
@@ -245,6 +310,7 @@ export class UsersController {
   ): Promise<void> {
     requireSameOrigin(request);
     const session = requireSession(request);
+    requireUuid(id);
     const parsed = confirmSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('your own password is required');
 
@@ -276,6 +342,75 @@ export class UsersController {
     this.logger.warn(`user '${removed.username}' deleted by '${session.userId}'`);
   }
 
+  /**
+   * Bir hesabın ikinci faktörünü sıfırlar.
+   *
+   * ── NEDEN VAR ───────────────────────────────────────────────────────────────────────────────
+   *
+   * Telefonunu VE kurtarma kodlarını kaybeden birinin üründen kurtarılmasının tek yolu. `/me/mfa`
+   * hesabın kendi oturumunu ve kendi parolasını istiyor, ama girişi ikinci adımda duran biri
+   * oraya hiç ulaşamıyor; parola sıfırlama bileti de kayıtlı bir hesapta yine kod soruyor. Bu uç
+   * olmadan geriye veritabanına elle girmek ya da hesabı silip yeniden açmak kalıyordu — ikincisi
+   * ekip üyeliklerini, klasör hibelerini ve POSIX kimliğini de götürüyor.
+   *
+   * ── PAROLA YENİDEN İSTENİYOR ────────────────────────────────────────────────────────────────
+   *
+   * `DELETE /users/{id}` ve `DELETE /me/mfa` ile aynı §0.5 gerekçesi, ve burada özellikle ağır:
+   * bir hesabın ikinci adımını kaldırmak, ele geçirilmiş bir yönetici oturumunun yapmak isteyeceği
+   * ilk şeydir.
+   *
+   * ── KENDİ HESABI OLMAZ ──────────────────────────────────────────────────────────────────────
+   *
+   * Yöneticinin kendi ikinci faktörünün yolu `/me/mfa`. Buradan yapması, aşağıdaki oturum iptali
+   * yüzünden kendi kendini isteğin ortasında dışarı atması demek olurdu.
+   */
+  @Delete(':id/mfa')
+  @HttpCode(204)
+  async resetMfa(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ): Promise<void> {
+    requireSameOrigin(request);
+    const session = requireSession(request);
+    requireUuid(id);
+    const parsed = confirmSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('your own password is required');
+
+    await this.reauth.require(
+      session.organizationId,
+      session.userId,
+      parsed.data.password,
+      request,
+    );
+    if (id === session.userId) {
+      throw new ConflictException('use /me/mfa to remove your own second factor');
+    }
+
+    // Hedefin var olduğunu ve BU kiracıya ait olduğunu satır yazılmadan önce kanıtlıyor; ayrıca
+    // denetim kaydının taşıyacağı adı buradan alıyor.
+    const target = await this.users.find(session.organizationId, id).catch((error: unknown) => {
+      throw translate(error);
+    });
+
+    await this.users.clearMfa(session.organizationId, id);
+    // Hedefin oturumları da kapanıyor. İkinci faktörün kaldırılmasını gerektiren şey çoğu zaman
+    // "o hesaba başkası ulaşmış olabilir" şüphesi, ve açık kalan bir oturum tam o şüpheyi taşıyor.
+    await this.sessions.revokeAllForUser(session.organizationId, id);
+
+    // Kayıt İŞTEN SONRA, ve hem aktörü hem hedefi taşıyor: bu satır, kullanıcının "ben yapmadım"
+    // diyebileceği ve yöneticinin "ben yaptım" diyebileceği tek yer.
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'user.mfa-reset',
+      target: { kind: 'user', id, label: target.username },
+      summary:
+        `'${target.username}' hesabının iki adımlı doğrulaması ve kurtarma kodları yönetici ` +
+        `tarafından sıfırlandı; hesabın oturumları sonlandırıldı.`,
+    });
+    this.logger.warn(`second factor reset for '${target.username}' by '${session.userId}'`);
+  }
+
   @Patch(':id')
   async update(
     @Req() request: AuthenticatedRequest,
@@ -284,6 +419,7 @@ export class UsersController {
   ): Promise<Schemas['User']> {
     requireSameOrigin(request);
     const session = requireSession(request);
+    requireUuid(id);
     const parsed = updateSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('nothing to change');
 
@@ -369,12 +505,30 @@ function requireSession(request: AuthenticatedRequest): {
   return { organizationId: session.organizationId, userId: session.userId };
 }
 
+/**
+ * UUID olmayan bir id "böyle bir hesap yok", bir arıza değil.
+ *
+ * `teams.controller.ts`'teki kuralın aynısı ve aynı gerekçeyle: buradaki her id PostgreSQL'e `uuid`
+ * olarak gidiyor, yani yanlış yazılmış bir tanesi SQLSTATE 22P02 ile geri geliyor ve onu eşleyen
+ * hiçbir şey olmadığı için 500 oluyordu — bozuk bir bağlantı için hata sayfası. Ayrıca bozuk bir
+ * id'yi, başka bir kiracının satırını adlandıran geçerli bir id'den AYIRIYORDU; RLS'in silmek
+ * istediği ayrım tam olarak bu.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function requireUuid(id: string): void {
+  if (!UUID.test(id)) throw new NotFoundException();
+}
+
 function translate(error: unknown): Error {
   if (error instanceof UserNotFoundError) return new NotFoundException();
   if (error instanceof UsernameTakenError) return new ConflictException(error.message);
   // 409, not 400: the request is well formed and would be legal at almost any other moment. What
   // refuses it is the state of the organisation.
   if (error instanceof LastAdminError) return new ConflictException(error.message);
+  // 409, ve aynı gerekçe: istek biçim olarak kusursuz, onu reddeden şey kiracının hâli — ve cümle
+  // hangi yazmanın onu temizlediğini söylüyor.
+  if (error instanceof LastGrantForUserError) return new ConflictException(error.message);
   if (error instanceof CannotDeleteSelfError) return new ForbiddenException(error.message);
   // 503 ve 500 DEĞİL: silme başarısız oldu çünkü kutuya ulaşılamadı, ve bu geçici bir durum —
   // çağıranın yapması gereken şey yeniden denemek. Hesap olduğu gibi duruyor.

@@ -77,6 +77,42 @@ const LAST_SEEN_INTERVAL_MS = 10_000;
 /** `console_commands.line`'s CHECK constraint in migration 0013. */
 const MAX_AUDIT_LINE = 8192;
 
+/**
+ * Bir parola isteminden sonra yazılanın yerine kaydedilen sabit.
+ *
+ * Satır SİLİNMİYOR, DEĞİŞTİRİLİYOR: ADR-0018 "yazılan her satır kaydedilir" diyor, ve kaç satır
+ * girildiğinin kaydı denetimin işe yarayan yarısı. Kaybolan tek şey içerik.
+ */
+const MASKED_LINE = '<gizlenmiş girdi>';
+
+/**
+ * Son çıktının bir parola istemi olup olmadığı.
+ *
+ * KELİME DEĞİL, KONUM. Ayırt edici işaret, istemin ekranda en SON duran şey olması: kullanıcı
+ * olağan bir komut yazarken pty ekoyu geri gönderiyor, dolayısıyla `line` geldiğinde kuyrukta
+ * komutun kendisi durur ve bu kalıp tutmaz. Parola isteminde ise eko kapalıdır — sudo, getpass,
+ * `zfs load-key` — ve kuyrukta hâlâ istemin kendisi durur. `[ \t]*$`, `\s*$` değil: enter'ın
+ * ekosundan sonra gelen satır başı kalıbı bozmalı, yoksa iptalden sonraki İLK komut da gizlenirdi.
+ *
+ * Yanlış tarafa hata veriyor: `echo parola:` yazan biri kendi komutunu gizlenmiş görür. Bu, bir
+ * parolanın düz metin olarak `console_commands`'a — ve oradan `dump_database` yedeğine — düşmesine
+ * yeğdir.
+ */
+const PASSWORD_PROMPT = /(password|passphrase|parola|şifre)[^\r\n]*[:：][ \t]*$/i;
+
+/** Kuyrukta ne kadar çıktı tutulduğu. Bir istem satırından uzun, bir ekrandan kısa. */
+const PROMPT_TAIL_CHARS = 256;
+
+/**
+ * Terminal kaçış dizileri: renk ve imleç hareketi istemin sonunu görünmez yapmasın.
+ *
+ * Kontrol karakterleri kalıbın KONUSU: ESC ve BEL olmadan bir kaçış dizisi tanınamaz. Aynı
+ * gerekçeyle arayüz tarafında da bir kez susturuluyor (apps/web/src/scan.ts).
+ */
+const ANSI =
+  // eslint-disable-next-line no-control-regex
+  /\u001b\][^\u0007]*(?:\u0007|$)|\u001b\[[0-9;?]*[\x20-\x2f]*[\x40-\x7e]|\u001b[\x40-\x5f]/g;
+
 /** The vocabulary `console_sessions.close_reason` accepts, as the service words it. */
 const EXPIRY_REASONS = new Set(['idle', 'max_age']);
 
@@ -91,6 +127,13 @@ interface LiveSession {
   readonly events: ReplaySubject<ConsoleEvent>;
   /** Set when the service says why it is about to end, so `exit` can record the real reason. */
   pendingReason: string | null;
+  /**
+   * Ekranda en son duran çıktının kuyruğu, kaçış dizilerinden arındırılmış.
+   *
+   * Denetim satırının gizlenip gizlenmeyeceğine bakılan tek yer. Çıktının KENDİSİ hiçbir yere
+   * yazılmıyor — ADR-0018 bunu yasaklıyor — burada bellekte, oturum kapanınca gidiyor.
+   */
+  outputTail: string;
   lastSeenWrittenAt: number;
   /** Audit writes go through here in order: a shell history out of order is a shell history. */
   writes: Promise<unknown>;
@@ -197,6 +240,7 @@ export class ConsoleService implements OnModuleDestroy {
       connection,
       events: new ReplaySubject<ConsoleEvent>(REPLAY_MESSAGES),
       pendingReason: null,
+      outputTail: '',
       lastSeenWrittenAt: Date.now(),
       writes: Promise.resolve(),
       closed: false,
@@ -207,7 +251,12 @@ export class ConsoleService implements OnModuleDestroy {
     this.opening.delete(id);
 
     connection.listen({
-      output: (data) => session.events.next({ kind: 'out', data }),
+      output: (data) => {
+        // Kuyruk çıktının kendisiyle DEĞİL, yalnız son 256 karakteriyle tutuluyor, ve hiçbir yere
+        // yazılmıyor: burada tek amacı bir sonraki satırın parola istemine mi yazıldığını bilmek.
+        session.outputTail = tailOf(session.outputTail, data);
+        session.events.next({ kind: 'out', data });
+      },
       line: (line) => this.record(session, line),
       error: (message) => {
         // On expiry the service sends the close_reason vocabulary verbatim just ahead of `exit`,
@@ -414,15 +463,28 @@ export class ConsoleService implements OnModuleDestroy {
     throw new ConsoleSessionClosedError('shutdown');
   }
 
-  /** Record one typed line. Never output — ADR-0018 and migration 0013 both say so. */
+  /**
+   * Record one typed line. Never output — ADR-0018 and migration 0013 both say so.
+   *
+   * PAROLA İSTEMİNE YAZILAN GİZLENİR. Satırları üreten taraf yalnız `\r`/`\n` sayıyor; pty'nin eko
+   * kipini bilmiyor, dolayısıyla `sudo`, `smbpasswd` ya da `zfs load-key` istemine yazılan parola
+   * tamamlanmış bir satır sayılıp `console_commands.line`'a DÜZ METİN olarak giriyordu — ve o tablo
+   * `dump_database` yedeğinin içinde, yani parola yedek diskine de gidiyordu. §16 ve
+   * `services/system-agent/src/audit.rs`'in başlığı denetim izinde sır bulunmasını yasaklıyor.
+   *
+   * İstemi tanıyan şey eko: olağan bir komut yazılırken karakterler pty'den geri geliyor ve
+   * kuyrukta komutun kendisi duruyor; parola isteminde eko kapalı olduğu için kuyrukta hâlâ istemin
+   * kendisi duruyor. Satırın VARLIĞI yine kaydediliyor, yalnız içeriği gizleniyor.
+   */
   private record(session: LiveSession, line: string): void {
+    const stored = PASSWORD_PROMPT.test(session.outputTail) ? MASKED_LINE : line;
     session.writes = session.writes
       .then(() =>
         this.db.withTenant(session.organizationId, (q) =>
           q.query(
             `INSERT INTO console_commands (organization_id, session_id, line)
                   VALUES ($1, $2, left($3, ${MAX_AUDIT_LINE}))`,
-            [session.organizationId, session.id, line],
+            [session.organizationId, session.id, stored],
           ),
         ),
       )
@@ -507,6 +569,18 @@ function toView(session: LiveSession): ConsoleSessionView {
     idleTimeoutSeconds: DEFAULT_IDLE_TIMEOUT_SECONDS,
     maxAgeSeconds: DEFAULT_MAX_AGE_SECONDS,
   };
+}
+
+/**
+ * Ekranda en son duran metnin kuyruğu.
+ *
+ * Çıktı base64 olarak geliyor ve öyle kalıyor — tarayıcıya giden yol bu — ama istemi tanımak için
+ * bir kez çözülmesi gerekiyor. Sonuç 256 karakterle sınırlı ve sadece bellekte; hiçbir sorgunun
+ * parametresi olmuyor.
+ */
+function tailOf(previous: string, base64: string): string {
+  const decoded = Buffer.from(base64, 'base64').toString('utf8');
+  return (previous + decoded).replace(ANSI, '').slice(-PROMPT_TAIL_CHARS);
 }
 
 function describe(error: unknown): string {

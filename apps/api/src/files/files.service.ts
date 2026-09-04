@@ -387,6 +387,23 @@ const ENTRY_COLUMNS = `id, share_id, parent_id, kind, name, path, size_bytes, co
  * Sayım, listelenen klasörün İÇİNDEKİLER'i sayıyor ve o klasörü listeleme izni zaten sorulmuş
  * oluyor. Sözleşmedeki "toplam yok" kuralı SÜZÜLMEMİŞ bir toplamla ilgili: görülemeyen satırların
  * varlığını sızdıran bir sayı. Burada sayılan şey, kullanıcının zaten görebildiği liste.
+ *
+ * ── ALT AĞAÇ ARALIĞI BAYT SIRASIYLA ─────────────────────────────────────────────────────────
+ *
+ * `COLLATE "C"`, harmanlamasız `>=` / `<` değil. Veritabanı ICU (`und-x-icu`) ile kurulu ve o
+ * sırada `&`, `#`, `+`, `~`, `^`, `=` gibi karakterler `/` ile `0` ARASINDA geliyor — hepsi geçerli
+ * dosya adı karakteri. `Proje` klasörünün aralığına kardeşi `Proje+notlar.zip` giriyordu: 10 MB'lık
+ * klasör listede 2 GB görünüyor, arşiv tahmini o kadar yer istiyordu.
+ *
+ * HARMANLAMA SORGUDA DA YAZILMALI. 0062 indeksi `(share_id, path COLLATE "C")` anahtarıyla
+ * kuruluyor; sorgu karşılaştırmayı aynı harmanlamayla yazmazsa planlayıcı o indeksi seçemez ve
+ * her klasör satırı için paylaşımın tamamı taranır.
+ *
+ * `~>=~` / `~<~` de bayt sırası verirdi ama iki sebeple kullanılmıyor: 0062 `text_pattern_ops`
+ * indeksini düşürüyor, ve o operatörler PostgreSQL'in "diğer operatörler" düzeyinde `||` ile aynı
+ * önceliği paylaşıp soldan birleşiyor — `d.path ~>=~ f.path || '/'` ifadesi
+ * `(d.path ~>=~ f.path) || '/'` diye ayrıştırılıp `AND`e bir metin veriyor ve sorgu 42804 ile
+ * düşüyor. `>=` bir KARŞILAŞTIRMA operatörü, `||`den düşük öncelikli, yani parantez gerekmiyor.
  */
 const ENTRY_COLUMNS_WITH_COUNT = `f.id, f.share_id, f.parent_id, f.kind, f.name, f.path,
                        f.size_bytes, f.content_type, f.trashed_at, f.created_at, f.updated_at,
@@ -403,8 +420,8 @@ const ENTRY_COLUMNS_WITH_COUNT = `f.id, f.share_id, f.parent_id, f.kind, f.name,
                           WHERE d.share_id = f.share_id
                             AND d.kind = 'file'
                             AND d.trashed_at IS NULL
-                            AND d.path >= f.path || '/'
-                            AND d.path < f.path || '0'
+                            AND d.path COLLATE "C" >= f.path || '/'
+                            AND d.path COLLATE "C" < f.path || '0'
                        ) ELSE NULL END AS subtree_bytes`;
 
 /**
@@ -2014,19 +2031,26 @@ export class FilesService {
       // the rows back while leaving every unlink done — the database would then describe files
       // that no longer exist, which is the divergence this endpoint is most able to cause.
       await this.db.withTenant(organizationId, async (db) => {
-        // BEFORE the entry, in the same transaction, because `upload_sessions` references
-        // `file_entries` twice and both references block this delete rather than following it:
-        // `parent_id` is ON DELETE RESTRICT, and `file_id` is ON DELETE SET NULL guarded by
-        // `upload_sessions_completion_pair`, which refuses a null `file_id` beside a non-null
-        // `completed_at`. So every file that arrived through tus, and every folder that was ever
-        // named as an upload target, was unpurgeable — the agent unlinked the bytes and then the
-        // DELETE failed on the constraint, leaving a row in the trash that no retry could ever
-        // clear and whose data was already gone.
+        // BEFORE the entry, in the same transaction. `upload_sessions` is bound to `file_entries`
+        // twice, and the two halves no longer stand in the same place:
         //
-        // Deleted rather than detached because there is no third option without a migration, and
-        // because a session is a record of a transfer INTO a file: once the file is permanently
-        // gone the session describes nothing. It disappears from the transfer list, which is the
-        // same thing the user asked for when they emptied the trash.
+        //   `file_id`   ON DELETE SET NULL. Bu yarı eskiden engelliyordu, çünkü
+        //               `upload_sessions_completion_pair` NULL bir `file_id`i dolu bir
+        //               `completed_at` yanında reddediyordu; göç 0054 kuralı gerçeğe uydurdu ve
+        //               artık kendi kendine çözülüyor.
+        //   `parent_id` ON DELETE RESTRICT, ve BU hâlâ engelliyor — bilerek: bir klasörü silmek,
+        //               ona yapılmakta olan yüklemeleri sessizce koparmamalı. Silen taraf
+        //               temizlemek zorunda, ve burası silen taraf.
+        //
+        // Bedeli ölçülmüştü: web'den yüklenmiş bir dosya ya da hiç yükleme hedefi olmuş bir klasör
+        // kalıcı olarak silinemiyordu — ajan baytları kaldırıyor, sonra DELETE kısıta çarpıyor ve
+        // çöpte hiçbir yeniden denemenin temizleyemeyeceği, verisi çoktan gitmiş bir satır
+        // kalıyordu.
+        //
+        // Oturum SİLİNİYOR, koparılmıyor: bir oturum bir dosyaya YAPILAN transferin kaydı, ve
+        // dosya kalıcı olarak gittiyse oturum hiçbir şeyi tarif etmiyor. Aktarım listesinden
+        // kayboluyor — çöpü boşaltan kullanıcının istediği şeyin ta kendisi.
+        // `IndexerService.forget` aynı kararı aynı gerekçeyle veriyor.
         await db.query(
           `DELETE FROM public.upload_sessions
             WHERE organization_id = $1 AND (parent_id = $2 OR file_id = $2)`,
@@ -2437,6 +2461,14 @@ export class FilesService {
    * `LIKE` değil ARALIK, ve sebebi 0048 numaralı göçte yazılı: önek satırın kendi yolundan
    * geliyor, ve içinde `%` ya da `_` olan bir klasör adı deseni jokere çevirip komşu klasörleri de
    * toplardı.
+   *
+   * KARŞILAŞTIRMA `COLLATE "C"` ile. Veritabanının harmanlaması ICU (`und-x-icu`), ve o sırada
+   * `&`, `#`, `+`, `~`, `^`, `=` gibi karakterler `/` ile `0` ARASINDA geliyor: `Proje`
+   * klasörünün aralığına kardeşi `Proje+notlar.zip` giriyor, yani bir klasörün boyutu yanındaki
+   * dosyanın baytlarını da sayıyordu. `C` harmanlaması metni BAYT sırasıyla karşılaştırıyor —
+   * aralığın "tam olarak bu alt ağaç" demesinin tek yolu bu — ve 0062'nin
+   * `(share_id, path COLLATE "C")` indeksi de yalnız aynı harmanlamayla yazılmış bir
+   * karşılaştırmaya hizmet ediyor.
    */
   async subtreeBytes(organizationId: string, id: string): Promise<number> {
     const rows = await this.db.withTenant(organizationId, (db) =>
@@ -2447,8 +2479,8 @@ export class FilesService {
              ON d.share_id = f.share_id
             AND d.kind = 'file'
             AND d.trashed_at IS NULL
-            AND d.path >= f.path || '/'
-            AND d.path <  f.path || '0'
+            AND d.path COLLATE "C" >= f.path || '/'
+            AND d.path COLLATE "C" < f.path || '0'
           WHERE f.organization_id = $1 AND f.id = $2`,
         [organizationId, id],
       ),

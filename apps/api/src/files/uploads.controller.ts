@@ -6,6 +6,7 @@ import {
   Head,
   Headers,
   HttpCode,
+  Logger,
   NotFoundException,
   Param,
   Patch,
@@ -19,6 +20,7 @@ import {
 import type { Response } from 'express';
 import { z } from 'zod';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { Readable } from 'node:stream';
 
 import { AgentService, expectStatus } from '../agent/agent.service.js';
 import { AgentDataService, AgentOutOfSpaceError } from '../agent/agent-data.service.js';
@@ -73,6 +75,8 @@ interface SessionRow {
 @Controller('uploads')
 @UseGuards(SessionGuard)
 export class UploadsController {
+  private readonly logger = new Logger(UploadsController.name);
+
   constructor(
     private readonly db: DbService,
     private readonly files: FilesService,
@@ -104,6 +108,15 @@ export class UploadsController {
    * şey yeni dosyanın o adı alması, eskisinin yok olması değil. Eski satır önce boş bir ada
    * taşınıyor — çöp diskte bir şey taşımıyor, yani ad ancak böyle serbest kalıyor — sonra çöpe
    * atılıyor. Kullanıcı yanlış karar verdiyse çöp kutusundan geri alabiliyor.
+   *
+   * ── PARK GERİ ALINIYOR ───────────────────────────────────────────────────────────────────
+   *
+   * Park etmek ile yayımlamak iki ayrı adım, ve ikincisi düşebiliyor: ara dosyayı süpürücü yirmi
+   * dört saat sonra siliyor, ajan kapanmış olabiliyor, ya da adı ağ sürücüsünden yazılmış bir
+   * dosya tutuyor olabiliyor. Eskiden bu durumda klasörde NE eski NE yeni dosya kalıyordu — eski
+   * dosya çöp kutusunda, üstelik `rapor (2).pdf` gibi kullanıcının hiç koymadığı bir adla. Yayım
+   * düşerse park GERİ ALINIYOR: satır çöpten çıkarılıp eski adına döndürülüyor, ve kullanıcının
+   * gördüğü cümle yalnız yayımın neden düştüğü.
    */
   @Post(':uploadId/resolve')
   @HttpCode(200)
@@ -127,7 +140,14 @@ export class UploadsController {
       throw new ProblemException('conflict', 'yükleme henüz tamamlanmadı');
     }
 
-    const share = await this.shareFor(session.organizationId, upload.parent_id);
+    // OTURUMUN KENDİ PAYLAŞIMI, hedef klasörden türetilen değil. Ara dosya `share_id`nin altında
+    // açıldı; kökteki bir yükleme için `parent_id` null olduğundan yeniden türetmek kiracının
+    // VARSAYILAN paylaşımını verirdi ve yayımlama başka bir ağaçta ara dosya arardı.
+    const share = await this.files
+      .shareFor(session.organizationId, upload.share_id)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
     // Aynı kapı, aynı gerekçe: yükleme oluşturulurken sorulan izin burada TEKRAR soruluyor,
     // çünkü çakışmanın çözülmesi ile yüklemenin başlaması arasında bir hak geri alınmış olabilir.
     requirePermission(
@@ -142,7 +162,17 @@ export class UploadsController {
         ? []
         : await this.files.componentsOf(session.organizationId, upload.parent_id);
 
+    // KİMLİK PARKTAN ÖNCE. Sırası önemli: `posixUidFor` de düşebilen bir adım, ve park edilmiş bir
+    // dosyayı geri almak zorunda kalmamanın en ucuz yolu, düşebilecek her şeyi parktan önce
+    // bitirmek.
+    const uid = await this.posix
+      .posixUidFor(session.organizationId, session.userId)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
     let name = upload.filename;
+    let parked: string | null = null;
     if (parsed.data.policy === 'keep-both') {
       name = await this.copies.freeName(
         session.organizationId,
@@ -151,14 +181,8 @@ export class UploadsController {
         upload.filename,
       );
     } else {
-      await this.moveExistingToTrash(session, upload, share, correlationId);
+      parked = await this.moveExistingToTrash(session, upload, share, correlationId);
     }
-
-    const uid = await this.posix
-      .posixUidFor(session.organizationId, session.userId)
-      .catch((error: unknown) => {
-        throw translate(error);
-      });
 
     const bytes = await this.files
       .publish(
@@ -171,7 +195,10 @@ export class UploadsController {
         correlationId,
         `resolving the name clash on ${upload.filename}`,
       )
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
+        // Yayım düştü ve "değiştir" seçilmişti: eski dosya şu anda çöpte, üstelik başka bir adla.
+        // Geri alınmazsa kullanıcının klasöründe hiçbir şey kalmıyor.
+        await this.unpark(session, upload, share, parked, correlationId);
         throw translate(error);
       });
 
@@ -214,13 +241,15 @@ export class UploadsController {
    * İKİ ADIM, ve sırası önemli. Çöpe atmak diskte hiçbir şeyi taşımıyor — yalnız satıra bir
    * damga yazıyor — yani ad çöpe atıldıktan sonra da dolu kalır ve yayımlama yine reddedilirdi.
    * Önce taşımak, adı gerçekten serbest bırakan tek adım.
+   *
+   * Park edilen satırın kimliğini döndürüyor: yayım düşerse `unpark` onu geri getiriyor.
    */
   private async moveExistingToTrash(
     session: { organizationId: string; userId: string },
     upload: SessionRow,
     share: { id: string; name: string },
     correlationId: string,
-  ): Promise<void> {
+  ): Promise<string | null> {
     const existing = await this.copies.entryNamed(
       session.organizationId,
       share.id,
@@ -230,7 +259,7 @@ export class UploadsController {
     // ADI TUTAN SATIR YOKSA YAPACAK BİR ŞEY DE YOK: ad diskte SMB'den açılmış bir dosyanın
     // elinde olabilir, ve o durumda yayımlama yine reddediliyor — ama kullanıcıya söylenen cümle
     // "böyle bir dosya var" olmaya devam ediyor, sessiz bir başarı değil.
-    if (existing === null) return;
+    if (existing === null) return null;
 
     const parked = await this.copies.freeName(
       session.organizationId,
@@ -252,6 +281,44 @@ export class UploadsController {
         throw translate(error);
       });
     await this.files.trash(session.organizationId, existing.id, session.userId);
+    return existing.id;
+  }
+
+  /**
+   * Parkı geri alır: satır çöpten çıkıyor ve eski adına dönüyor.
+   *
+   * SESSİZ, ve bilerek. Bu yol yalnız yayım zaten düşmüşken koşuyor, ve çağıranın kullanıcıya
+   * söyleyeceği cümle yayımın kendi hatası. Geri alma da düşerse — adı bu arada ağ sürücüsünden
+   * başka bir dosya kapmış olabilir — dosya çöpte, park adıyla, geri alınabilir hâlde duruyor;
+   * kaybolmuş değil. Kaydedilen satır, bunu elle çözecek kişinin ihtiyacı olan şey.
+   */
+  private async unpark(
+    session: { organizationId: string; userId: string },
+    upload: SessionRow,
+    share: { id: string; name: string },
+    parkedId: string | null,
+    correlationId: string,
+  ): Promise<void> {
+    if (parkedId === null) return;
+    try {
+      // Çöpten önce çıkıyor: `rename` çöpteki bir satırı bulunamamış sayıyor.
+      await this.files.restore(session.organizationId, parkedId);
+      await this.files.rename(
+        session.organizationId,
+        parkedId,
+        upload.filename,
+        share,
+        session.userId,
+        correlationId,
+        `restoring ${upload.filename} after a failed replace`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `could not put '${upload.filename}' back after a failed replace in ${share.name}: ` +
+          `${error instanceof Error ? error.message : String(error)}. The file is in the bin ` +
+          'under its parked name.',
+      );
+    }
   }
 
   // §8's `Idempotency-Key`, on the route the contract declares it on. Without a key the request
@@ -291,11 +358,20 @@ export class UploadsController {
     // answer that also distinguishes a malformed id from a well-formed one naming another tenant's
     // folder, which is the distinction RLS exists to erase.
     if (parentId !== null) requireUuid(parentId);
-    // From the destination folder, so an upload into a share created after the first one lands in
-    // the right tree instead of being staged under the default share.
-    const share = await this.shareFor(session.organizationId, parentId).catch((e: unknown) => {
-      throw translate(e);
-    });
+    // ── KÖKE YÜKLEMEDE PAYLAŞIM ──────────────────────────────────────────────────────────────
+    //
+    // Bir üst klasör varsa paylaşımı O belirliyor; kökte belirleyen hiçbir şey yoktu ve burası
+    // kiracının VARSAYILAN — yani ilk oluşturulan — paylaşımını seçiyordu. Ekranda "Arşiv" seçili
+    // olsa bile kökte bırakılan dosyanın bütün baytları başka bir paylaşıma iniyor, yükleme çubuğu
+    // %100 oluyor ve dosya açık olan listede hiç görünmüyordu. `POST /files/folders` `shareId`i
+    // zaten alıyor (`files.controller.ts`); eksik olan tek yol yüklemeydi.
+    const shareId = metadata.get('shareId') ?? null;
+    if (shareId !== null) requireUuid(shareId);
+    const share = await this.shareFor(session.organizationId, parentId, shareId).catch(
+      (e: unknown) => {
+        throw translate(e);
+      },
+    );
     if (parentId !== null) {
       const parent = await this.files.find(session.organizationId, parentId).catch((e: unknown) => {
         throw translate(e);
@@ -331,8 +407,88 @@ export class UploadsController {
     const id = rows[0]?.id;
     if (id === undefined) throw new Error('the upload session was not created');
 
+    // ── SIFIR BAYTLIK DOSYA BURADA BİTİYOR ───────────────────────────────────────────────────
+    //
+    // Yayımlama son PATCH'in içinde tetikleniyor, ve sıfır uzunluklu bir oturuma hiç PATCH
+    // giremiyor: `sendChunk` sıfır uzunluklu bir parçayı reddediyor, tarayıcı da `offset < size`
+    // döngüsüne hiç girmiyor. Sonuç, boş bir `notlar.txt` ya da `.gitkeep` sürükleyen kullanıcının
+    // %100 ve hatasız bir yükleme görmesi, klasörde ise hiçbir şey olmamasıydı — oturum da
+    // yirmi dört saat "takılmış" olarak aktarım listesinde duruyordu.
+    if (length === 0) {
+      await this.publishEmpty(session, id, share, parentId, filename, stagingName);
+    }
+
     response.setHeader('Location', `/api/v1/uploads/${id}`);
     response.setHeader('Upload-Offset', '0');
+  }
+
+  /**
+   * Sıfır baytlık bir yüklemeyi tek istekte bitirir.
+   *
+   * ÜÇ ADIM, ve üçü de gerekli. `open_transfer` ara dosyayı yaratıyor — yayımlamanın taşıyacağı
+   * bir dosya olmadan `publish_transfer` "bulunamadı" diyor. Sonra jeton SIFIR baytlık bir veri
+   * bağlantısıyla tüketiliyor: ajan açık her jetonu `TRANSFER_TTL` boyunca tutuyor ve o süre
+   * boyunca `publish_transfer` aynı ara dosya için "hâlâ açık" diye reddediyor, yani jetonu
+   * bırakmadan yayımlamak mümkün değil. En sonda olağan yayımlama ve satır.
+   */
+  private async publishEmpty(
+    session: { organizationId: string; userId: string },
+    uploadId: string,
+    share: { id: string; name: string },
+    parentId: string | null,
+    filename: string,
+    stagingName: string,
+  ): Promise<void> {
+    const correlationId = randomUUID();
+    const opened = expectStatus(
+      await this.agent.call(
+        { op: 'open_transfer', share: share.name, staging_name: stagingName },
+        `staging the empty ${filename}`,
+        correlationId,
+      ),
+      'transfer',
+    );
+    await this.data.send(opened.token, opened.offset, 0, Readable.from([]));
+
+    const uid = await this.posix
+      .posixUidFor(session.organizationId, session.userId)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+    const destination =
+      parentId === null
+        ? [filename]
+        : [...(await this.files.componentsOf(session.organizationId, parentId)), filename];
+
+    const bytes = await this.files
+      .publish(
+        share.name,
+        stagingName,
+        destination,
+        0,
+        uid,
+        uid,
+        correlationId,
+        `publishing the empty ${filename}`,
+      )
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
+    const entry = await this.files
+      .recordPublishedFile(session.organizationId, share.id, parentId, filename, bytes, null)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
+    await this.db.withTenant(session.organizationId, (db) =>
+      db.query(
+        `UPDATE public.upload_sessions
+            SET file_id = $3, completed_at = now()
+          WHERE organization_id = $1 AND id = $2`,
+        [session.organizationId, uploadId, entry.id],
+      ),
+    );
   }
 
   @Head(':uploadId')
@@ -391,13 +547,16 @@ export class UploadsController {
       );
     }
 
-    // The share the SESSION was opened against, not the tenant's default: a chunk has to be staged
-    // in the same tree its `OpenTransfer` resolved, or the publish at the end has nothing to move.
-    const share = await this.shareFor(session.organizationId, upload.parent_id).catch(
-      (e: unknown) => {
+    // The share the SESSION was opened against, and read from the session's OWN column rather than
+    // re-derived from the destination folder: a chunk has to be staged in the same tree its
+    // `OpenTransfer` resolved, or the publish at the end has nothing to move. Re-deriving gives the
+    // tenant's default share for a root-level upload, which is a different tree the moment the
+    // caller named a share at `POST /uploads`.
+    const share = await this.files
+      .shareFor(session.organizationId, upload.share_id)
+      .catch((e: unknown) => {
         throw translate(e);
-      },
-    );
+      });
     const correlationId = randomUUID();
 
     // Two connections, in this order. The control call resolves the staging file under
@@ -443,17 +602,45 @@ export class UploadsController {
     if (expected !== null && digest !== undefined) {
       const actual = digest.digest();
       if (!timingSafeEqualBuffers(actual, expected)) {
-        // The offset is NOT advanced, and that is the whole mechanism. The bytes reached the
-        // staging file — they were streamed straight through — so there is nothing to undo here;
-        // leaving the recorded offset where it was means the next PATCH is told to resume from the
-        // same place and rewrites the region. tus specifies exactly this: the chunk is discarded
-        // by being overwritten, not by being erased.
-        response.setHeader('Upload-Offset', String(offset));
+        // ── BOZUK PARÇA ARA DOSYADAN ATILIYOR ───────────────────────────────────────────────
+        //
+        // Eskiden burada yalnız kaydedilen ofset ilerletilmiyordu, ve yanındaki yorum bunu
+        // "parça üzerine yazılarak atılıyor" diye anlatıyordu. Öyle değil: ajan ara dosyayı
+        // `Append` açıyor ve veri kanalı `start != preamble.offset` olan her bağlantıyı
+        // reddediyor, yani bir bölgenin üzerine yazmak MÜMKÜN DEĞİL. Baytlar diske yazılıp
+        // `fsync` edilmiş oluyor; bir sonraki PATCH'te `open_transfer` dosyayı `seek(End)` ile
+        // ölçüyor, aşağıdaki 409 istemciye bozuk parçanın SONRASINDAN devam etmesini söylüyor ve
+        // yükleme, ortasında bozuk bir bölgeyle, hatasız "tamamlanıyordu".
+        //
+        // Ajanın kesme (truncate) işlemi yok — `DiscardTransfer`in kendi belgesi de "her başarısız
+        // sağlama" için yazıldığını söylüyor — o yüzden tek doğru cevap ara dosyayı atıp oturumu
+        // sıfırdan başlatmak. Pahalı: on gigabaytlık bir yükleme baştan gidiyor. Ama alternatifi
+        // sessizce bozulmuş bir dosya, ve sessiz bozulma her zaman daha pahalı.
+        const discarded = await this.agent
+          .call(
+            { op: 'discard_transfer', share: share.name, staging_name: upload.staging_name },
+            `discarding ${upload.filename} after a checksum mismatch`,
+            correlationId,
+          )
+          .catch(() => ({ status: 'unreachable' }) as const);
+        if (discarded.status !== 'discarded') {
+          this.logger.error(
+            `could not discard '${upload.staging_name}' after a checksum mismatch: ` +
+              `${discarded.status}. The staged file still holds the corrupt region.`,
+          );
+          throw new ProblemException(
+            'dependency-unavailable',
+            'Gönderilen parçanın sha256 özeti uyuşmadı ve bozuk parça ara dosyadan ' +
+              'temizlenemedi. Bu yüklemeyi iptal edip yeniden başlatın.',
+          );
+        }
+        await this.setOffset(session.organizationId, upload.id, 0);
+        response.setHeader('Upload-Offset', '0');
         response.setHeader('Tus-Resumable', '1.0.0');
         throw new ProblemException(
           'checksum-mismatch',
-          'Gönderilen parçanın sha256 özeti Upload-Checksum ile uyuşmadı; aynı konumdan tekrar ' +
-            'gönderin.',
+          'Gönderilen parçanın sha256 özeti Upload-Checksum ile uyuşmadı. Bozuk parça diskten ' +
+            'silindi; yüklemeye baştan devam edin.',
         );
       }
     }
@@ -602,11 +789,15 @@ export class UploadsController {
   private async shareFor(
     organizationId: string,
     parentId: string | null,
+    shareId: string | null = null,
   ): Promise<{ id: string; name: string }> {
     if (parentId !== null) {
       const parent = await this.files.find(organizationId, parentId);
       return this.files.shareFor(organizationId, parent.share_id);
     }
+    // Kökteki bir yükleme için paylaşımı çağıran söylüyor. Söylemediyse varsayılan — tek
+    // paylaşımlı bir cihazda ve `shareId` göndermeyen eski bir istemcide davranış değişmiyor.
+    if (shareId !== null) return this.files.shareFor(organizationId, shareId);
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<{ slug: string }>(`SELECT slug FROM public.organizations WHERE id = $1`, [
         organizationId,

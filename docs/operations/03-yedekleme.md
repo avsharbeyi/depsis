@@ -77,18 +77,33 @@ bütün amacı bu.
 
 **`depsis_backup` ile alınan bir dökümle sistemi geri yükleyemezsiniz.** Bu rol bilerek eksik:
 
-| Okuyamadığı           | Sonucu                                             |
-| --------------------- | -------------------------------------------------- |
-| `user_totp_secrets`   | Kimsenin iki adımlı doğrulaması geri gelmez        |
-| `user_recovery_codes` | Kurtarma kodları geri gelmez                       |
-| `users.nt_hash`       | Kimse SMB'ye giremez                               |
-| `sessions`            | Herkes yeniden giriş yapar (bu zararsız)           |
-| `password_resets`     | Açık sıfırlama biletleri kaybolur (bu da zararsız) |
+| Okuyamadığı                            | Sonucu                                             |
+| -------------------------------------- | -------------------------------------------------- |
+| `user_totp_secrets`                    | Kimsenin iki adımlı doğrulaması geri gelmez        |
+| `user_recovery_codes`                  | Kurtarma kodları geri gelmez                       |
+| `users.password_hash`, `users.nt_hash` | Kimse giriş yapamaz, kimse SMB'ye giremez          |
+| `sessions`, `pending_logins`           | Herkes yeniden giriş yapar (bu zararsız)           |
+| `password_resets`                      | Açık sıfırlama biletleri kaybolur (bu da zararsız) |
+| `license`                              | Lisans belgesi yeniden kurulmalı                   |
+
+Bunların üstüne, bu role hiç SELECT verilmemiş yirmi dört tablo daha var ve dökümde **hiç yoklar**:
+`notes`, `notifications`, görevlerin alt tabloları (yorum, alt görev, etiket, izleyici, etkinlik),
+uygulama kataloğu, `job_queue`, `index_queue`, `login_attempts`, `idempotency_keys`,
+`user_preferences` ve kurulum satırı.
 
 `depsis_backup` **raporlama** rolüdür: kimlik bilgisi taşımayan bir kopya çıkarmak için. Kurtarma
 için değil.
 
 **Geri yüklenebilir bir döküm `depsis_owner` ile alınır.**
+
+> Bu tablo 0061'e kadar yanlıştı, ve iki yönde birden. Bir: `users` üzerindeki tablo düzeyi
+> `GRANT SELECT` duruyordu ve PostgreSQL'de kolon düzeyinde bir `REVOKE` onu daraltmıyor — yani
+> `nt_hash` ve `password_hash` bu role AÇIKTI, kapalı sanıldıkları hâlde. İki: SELECT verilmiş
+> yirmi tabloda bu rol için hiçbir satır seviyesi güvenlik politikası yoktu, yani `pg_dump`
+> onları hatasız ama SIFIR SATIR olarak döküyordu. 0061 ilkini kolon listesine çevirdi, ikincisi
+> için sırsız tablolara okuma politikası ekledi. Bir sürümü 0061 öncesinden alınmış "raporlama
+> dökümü" varsa, içindeki `users` satırları parola özeti taşıyor: onu sır muamelesi görecek bir
+> yerde tutun ya da silin.
 
 ### 3.2 Döküm
 

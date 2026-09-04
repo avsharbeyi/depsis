@@ -108,9 +108,24 @@ gün grant'sız bir paylaşım üretirdi.
 
 'Herkes' ekibi SIRADAN bir ekip: bayrağı yok, kod onu isimle aramıyor, yönetici yeniden
 adlandırabilir ya da silebilir. Amaç bir sistem grubu icat etmek değil, örtük bir kuralı GÖRÜNÜR
-bir satıra çevirmek — örtük kural denetlenemez, bir grant satırı denetlenebilir. Bu ekibe sonradan
-açılan kullanıcılar otomatik girmez: yeni bir üyeyi kendiliğinden her eski paylaşıma sokmak,
-erişimi GENİŞLETEN bir otomatizm olurdu ve bu ADR'nin tam olarak engellemek için var olduğu yön.
+bir satıra çevirmek — örtük kural denetlenemez, bir grant satırı denetlenebilir.
+
+**Bu karar sahadan gelen bir bulguyla değişti.** Bu ADR ve migration 0016 önce şunu söylüyordu:
+"bu ekibe sonradan açılan kullanıcılar otomatik girmez; yeni bir üyeyi kendiliğinden her eski
+paylaşıma sokmak, erişimi GENİŞLETEN bir otomatizm olurdu." Gerçekte olan şuydu: ilk kurulumdan
+sonra açılan her hesap hiçbir paylaşımı göremiyordu, ve sahibi bunu bir arıza olarak bildirdi —
+cihazın vaadi "aile/ofis paylaşımı", boş bir Dosyalar ekranı değil. `UsersService.create` bugün
+her hesap açılışında AYNI işlemde `everyone_team()` çağırıyor ve hesabı 'Herkes' ekibine üye
+yapıyor.
+
+Genişleyen şey bir paylaşımın izinleri değil, ekibin ÜYELİĞİ: 'Herkes' ekibinin hangi klasörlere
+eriştiği hâlâ yalnız grant satırlarında yazılı ve yalnız bir yönetici değiştirebiliyor, ve ekip
+sıradan bir ekip olduğu için yönetici üyeyi çıkarabiliyor ya da ekibi tamamen silebiliyor. Yani
+"örtük kural yok, yalnız denetlenebilir satırlar" kuralı yerinde duruyor; değişen, yeni bir
+hesabın varsayılan olarak hangi tarafta başladığı.
+
+0016'nın o dönem doğru olan notu olduğu gibi bırakıldı: göç dosyaları o günün kararını taşıyan bir
+tarih kaydı, yaşayan belge burası.
 
 ### Paylaşımın KÖKÜ de kapatılmak zorunda
 

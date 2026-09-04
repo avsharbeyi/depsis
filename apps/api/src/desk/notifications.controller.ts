@@ -7,6 +7,7 @@ import {
   Query,
   Req,
   UnauthorizedException,
+  UnprocessableEntityException,
   UseGuards,
 } from '@nestjs/common';
 import type { OpenApi } from '@depsis/contracts';
@@ -76,7 +77,13 @@ export class NotificationsController {
     // Gövdesiz istek de geçerli: `{}` ve gövde yokluğu ikisi de "hepsi" demek, ve ikisini
     // ayırmak istemciye anlamı olmayan bir seçim dayatırdı.
     const parsed = readSchema.safeParse(body ?? {});
-    const ids = parsed.success ? parsed.data.ids : undefined;
+    // Bozuk gövde "hepsi" DEĞİL: yukarıdaki gerekçe yalnız boş gövde için geçerli. Ayrıştırma
+    // düşünce `ids`i undefined bırakmak, tek satır işaretlemek isteyen istemcinin bütün gelen
+    // kutusunu okundu yapıyordu — ve okunmamışlık geri alınamıyor.
+    if (!parsed.success) {
+      throw new UnprocessableEntityException('ids must be up to 200 uuids');
+    }
+    const ids = parsed.data.ids;
 
     const marked =
       ids === undefined

@@ -201,13 +201,53 @@ describeDb('the notification centre, against a real PostgreSQL', () => {
     );
 
     expect(await notifications.sweepOverdue(orgA)).toEqual({ overdue: 1, due: 0 });
-    // İkinci tur AYNI işi buluyor — gecikmiş bir iş gecikmiş kalıyor — ve hiçbir yeni satır
-    // yazmıyor. Kısmi benzersiz indeks olmasa bu bir haftada bin satır olurdu.
-    expect(await notifications.sweepOverdue(orgA)).toEqual({ overdue: 1, due: 0 });
+    // İkinci tur AYNI işi görüyor — gecikmiş bir iş gecikmiş kalıyor — ve hiçbir yeni satır
+    // yazmıyor. Sayılar bu turda DUYURULANLAR, o yüzden sıfır.
+    expect(await notifications.sweepOverdue(orgA)).toEqual({ overdue: 0, due: 0 });
     // Isi olustururken dusen `task.assigned` disinda tek satir. Toplam sayimi kullanmak, ikinci
     // turun bir sey yazmadigini degil, yalnizca toplamin degismedigini gosterirdi.
     const late = await notifications.inbox(orgA, bora, true);
     expect(late.filter((n) => n.kind === 'task.overdue')).toHaveLength(1);
+  });
+
+  it('does not re-announce an overdue job the moment its reminder is read', async () => {
+    const task = await tasks.create(orgA, ayla, 'Okunmuş hatırlatma', bora);
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE tasks SET due_at = now() - interval '3 days' WHERE id = $1`, [task.id]),
+    );
+    expect(await notifications.sweepOverdue(orgA)).toEqual({ overdue: 1, due: 0 });
+
+    // Tekrarı kesen tek şey `notifications_one_unread_per_task_kind` idi ve o indeks kısmi:
+    // `WHERE read_at IS NULL`. Yani okunan satır çakışmayı bırakıyordu ve bir sonraki tarama —
+    // on beş dakika sonra — aynı bildirimi yeniden yazıyordu, iş kapanana kadar günde doksan
+    // altı kez. Kullanıcı da zili okumayı bırakıyordu.
+    const inbox = await notifications.inbox(orgA, bora, true);
+    const reminder = inbox.find((n) => n.kind === 'task.overdue');
+    expect(await notifications.markRead(orgA, bora, [reminder?.id ?? ''])).toBe(1);
+
+    expect(await notifications.sweepOverdue(orgA)).toEqual({ overdue: 0, due: 0 });
+    const all = await notifications.inbox(orgA, bora, false);
+    expect(all.filter((n) => n.kind === 'task.overdue')).toHaveLength(1);
+  });
+
+  it('writes no reminder into a disabled account’s inbox', async () => {
+    const task = await tasks.create(orgA, ayla, 'Ayrılan kişinin işi', bora);
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE tasks SET due_at = now() - interval '2 days' WHERE id = $1`, [task.id]),
+    );
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE users SET disabled_at = now() WHERE id = $1`, [bora]),
+    );
+    try {
+      // Kapatılmış hesap oturum açamıyor, yani bu gelen kutusunu kimse açmayacak — her on beş
+      // dakikada bir oraya satır yazmak yalnız tabloyu şişirir.
+      expect(await notifications.sweepOverdue(orgA)).toEqual({ overdue: 0, due: 0 });
+      expect(await notifications.unreadCount(orgA, bora)).toBe(1); // yalnız `task.assigned`
+    } finally {
+      await owner.withoutTenant('migration-status', (q) =>
+        q.query(`UPDATE users SET disabled_at = NULL WHERE id = $1`, [bora]),
+      );
+    }
   });
 
   it('separates a job that is late from one that is merely close', async () => {
@@ -241,6 +281,34 @@ describeDb('the notification centre, against a real PostgreSQL', () => {
     );
 
     expect(await notifications.sweepOverdue(orgA)).toEqual({ overdue: 0, due: 0 });
+  });
+
+  it('starts the reminder chain the first time a job is given a due date', async () => {
+    const queuedSweeps = async (): Promise<string> => {
+      const rows = await owner.withoutTenant('migration-status', (q) =>
+        q.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM job_queue
+            WHERE organization_id = $1 AND kind = $2 AND status = 'queued'`,
+          [orgA, OVERDUE_SWEEP_KIND],
+        ),
+      );
+      return rows[0]?.n ?? '0';
+    };
+
+    const task = await tasks.create(orgA, ayla, 'İlk son tarih', bora);
+    // Zinciri kuran tek yer açılıştı, ve orası "şu anda son tarihli açık işi olan kiracılar" ile
+    // kapılı: kurulumdan yeni çıkmış bir cihazda `tasks` boş, yani kuyrukta hiçbir tarama yok.
+    expect(await queuedSweeps()).toBe('0');
+
+    await tasks.update(
+      orgA,
+      task.id,
+      { dueAt: new Date(Date.now() + 86_400_000).toISOString() },
+      ayla,
+    );
+    // Son tarih vermek zinciri kuruyor. Onsuz "Gecikti"/"Yarına kadar" bildirimleri API bir
+    // dahaki kez yeniden başlayana kadar — haftalarca — hiç düşmüyordu.
+    expect(await queuedSweeps()).toBe('1');
   });
 
   it('keeps exactly one sweep queued, so the chain neither dies nor doubles', async () => {

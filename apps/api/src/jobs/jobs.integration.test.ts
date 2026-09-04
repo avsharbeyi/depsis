@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { DbService } from '../db/db.service.js';
@@ -520,6 +521,43 @@ describeDb('the job queue, against a real PostgreSQL', () => {
       innerSaw = inner.acquired;
     });
     expect(innerSaw).toBe(true);
+  });
+
+  it('cancels a queued job so no worker ever claims it', async () => {
+    // §5.1. Yanlış klasöre başlatılmış bir kopyalamanın duracak yeri olmalı, ve "duracak" demek
+    // satırın kuyruktan ÇIKMASI demek: bayrak bırakmak claim_job'a, heartbeat_job'a ve çöken
+    // işçinin satırını toplayacak birine ayrı ayrı iş çıkarırdı.
+    const id = await jobs.enqueue(orgA, 'test.cancel');
+    expect(await jobs.cancel(orgA, id)).toBe(true);
+
+    expect((await jobs.find(orgA, id))?.status).toBe('cancelled');
+    expect(await jobs.claim(['test.cancel']), 'a cancelled job must never be claimed').toBeNull();
+  });
+
+  it('stops a RUNNING job at its next heartbeat', async () => {
+    // İptalin çalışan iş üzerindeki mekanizması: satır gittiği için `heartbeat_job` false döner,
+    // ve worker.service.ts'in sözleşmesinde false "dur" demektir — CopyService de tam olarak
+    // bunu yapıyor, düğüm aralarında `report()` çağırıp döndüğü değere bakarak.
+    const id = await jobs.enqueue(orgA, 'test.cancel.running');
+    const claimed = await jobs.claim(['test.cancel.running']);
+    expect(claimed?.id).toBe(id);
+    expect(await jobs.heartbeat(id), 'the lease is live before the cancel').toBe(true);
+
+    expect(await jobs.cancel(orgA, id)).toBe(true);
+    expect(await jobs.heartbeat(id), 'false is the signal the handler stops on').toBe(false);
+    // Ve geç gelen bir sonuç yazımı iptali ezmiyor: kira artık kimsede değil.
+    expect(await jobs.finish(id, 'succeeded')).toBeNull();
+    expect((await jobs.find(orgA, id))?.status).toBe('cancelled');
+  });
+
+  it('will not let one tenant cancel another’s job', async () => {
+    const mine = await jobs.enqueue(orgA, 'test.cancel.tenant');
+    // Aynı cevap: olmayan bir iş de false döner. Uç, hangi iş kimliklerinin var olduğunu söyleyen
+    // bir kehanet hâline gelmemeli.
+    expect(await jobs.cancel(orgB, mine)).toBe(false);
+    expect((await jobs.find(orgA, mine))?.status).toBe('queued');
+    // Bitmiş bir iş de iptal edilemez — kuyrukta satırı yok.
+    expect(await jobs.cancel(orgA, randomUUID())).toBe(false);
   });
 
   it('refuses a running job with no lease at the schema', async () => {

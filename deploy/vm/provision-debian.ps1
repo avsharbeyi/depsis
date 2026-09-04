@@ -312,10 +312,19 @@ try {
         [IO.File]::WriteAllText("${drv}:\$name", ($text -replace "`r`n", "`n"), $utf8NoBom)
     }
 
-    $userData = @"
+    # LITERAL here-string (@'...'@), and the four host-side values are injected afterwards.
+    #
+    # It used to be @"..."@, so PowerShell tried to expand every `$` in the body — including the
+    # SHELL variables that belong to cloud-init. `$VERSION_CODENAME` was not escaped, and with
+    # `Set-StrictMode -Version Latest` at the top of this file the script died right here with
+    # "cannot be retrieved because it has not been set" — after the ~3 GiB image had been
+    # downloaded and the system VHDX written, so the run looked like it was nearly done. `$HOME`
+    # on the rustup line silently expanded to the Windows profile path for the same reason.
+    # A literal body means every shell variable added here in future is safe by construction.
+    $userData = @'
 #cloud-config
-hostname: $VMName
-fqdn: $VMName.depsis.test
+hostname: __VMNAME__
+fqdn: __VMNAME__.depsis.test
 preserve_hostname: false
 
 users:
@@ -325,7 +334,7 @@ users:
     shell: /bin/bash
     lock_passwd: true
     ssh_authorized_keys:
-      - $pubKey
+      - __PUBKEY__
 
 ssh_pwauth: false
 disable_root: true
@@ -360,9 +369,9 @@ write_files:
     permissions: '0644'
     content: |
       {
-        "vm": "$VMName",
-        "debian_build": "$DebianBuild",
-        "image_variant": "$ImageVariant",
+        "vm": "__VMNAME__",
+        "debian_build": "__DEBIAN_BUILD__",
+        "image_variant": "__IMAGE_VARIANT__",
         "provisioned_by": "deploy/vm/provision-debian.ps1"
       }
 
@@ -392,12 +401,11 @@ runcmd:
   # went missing, taking P0-C's whole environment with it; putting it here means the VM is
   # reproducible instead of depending on what someone typed months ago.
   - [ sh, -c, "install -d -m 0755 /usr/share/postgresql-common/pgdg && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc" ]
-  - [ sh, -c, ". /etc/os-release; printf 'Types: deb
-URIs: https://apt.postgresql.org/pub/repos/apt
-Suites: %s-pgdg
-Components: main
-Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
-' \"$VERSION_CODENAME\" > /etc/apt/sources.list.d/pgdg.sources" ]
+  # ONE LINE, with `\\n` for the line breaks. A YAML double-quoted scalar FOLDS a real line break
+  # into a single space, so the multi-line printf that used to sit here produced a one-line
+  # pgdg.sources — invalid deb822, `apt-get update` failing, and no postgresql-18. YAML turns
+  # `\\n` into `\n`, and the shell's printf turns that into the newline the file needs.
+  - [ sh, -c, ". /etc/os-release; printf 'Types: deb\\nURIs: https://apt.postgresql.org/pub/repos/apt\\nSuites: %s-pgdg\\nComponents: main\\nSigned-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc\\n' \"$VERSION_CODENAME\" > /etc/apt/sources.list.d/pgdg.sources" ]
   - [ sh, -c, "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-18 postgresql-contrib-18" ]
   - [ sh, -c, "pg_lsclusters > /var/log/depsis-pg-clusters.txt 2>&1 || echo 'WARN: no pg cluster' >&2" ]
   # Node, because the migration runner (ADR-0014) and the API are Node, and P1-A has to exercise
@@ -411,8 +419,13 @@ Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
   - [ sh, -c, "su - depsis -c '$HOME/.cargo/bin/cargo --version' >> /var/log/depsis-rustup.log 2>&1 || echo 'WARN: rust toolchain unusable' >&2" ]
   - [ sh, -c, "touch /var/lib/depsis-cloud-init-done" ]
 
-final_message: "DEPSIS PoC VM ready after `$UPTIME seconds."
-"@
+final_message: "DEPSIS PoC VM ready after $UPTIME seconds."
+'@
+
+    # Düz metin değişimi (.Replace), regex olan `-replace` değil: ortak anahtar base64 taşıyor ve
+    # bir regex'te `$` ile başlayan her şey değiştirme dizesi olarak yorumlanır.
+    $userData = $userData.Replace('__VMNAME__', $VMName).Replace('__PUBKEY__', $pubKey)
+    $userData = $userData.Replace('__DEBIAN_BUILD__', $DebianBuild).Replace('__IMAGE_VARIANT__', $ImageVariant)
 
     # Two NICs: one for outbound apt over the Default Switch (DHCP, subnet changes on host
     # reboot), one static on the Internal switch as the stable control plane. Matching on MAC

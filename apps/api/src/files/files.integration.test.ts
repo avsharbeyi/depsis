@@ -245,6 +245,28 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     expect(page.hasMore).toBe(false);
   });
 
+  it('keeps a SIBLING out of a folder subtree size, whatever follows the folder name', async () => {
+    // Alt ağaç bir ARALIK: `path >= '/Proje/' AND path < '/Proje0'`. Bu aralığın anlamı, `/` ile
+    // `0` arasında başka hiçbir şeyin sıralanmamasına bağlı — ve bu YALNIZ bayt sırasında doğru.
+    // Veritabanının harmanlaması ICU (`und-x-icu`) ve orada `&`, `+`, `~` gibi karakterler tam da
+    // o aralığın içine düşüyor: `Proje` klasörü, yanındaki 2 GB'lık `Proje+notlar.zip`i kendi
+    // boyutu sanıyordu — listede yanlış bir rakam, ve arşiv indirmede "2 GB yer gerekiyor" diyerek
+    // 507 dönen bir uç.
+    const folder = await mkdir(orgA, shareA, null, 'Proje');
+    await files.recordPublishedFile(orgA, shareA, folder.id, 'icerik.bin', 10, null);
+    for (const sibling of ['Proje+notlar.zip', 'Proje&ek.bin', 'Proje~eski.bin']) {
+      await files.recordPublishedFile(orgA, shareA, null, sibling, 2_000, null);
+    }
+
+    expect(await files.subtreeBytes(orgA, folder.id)).toBe(10);
+
+    // Ve listeleme sütunu aynı sayıyı vermeli: ikisi ayrılırsa ekran ile arşiv tahmini birbirini
+    // yalanlar.
+    const page = await files.list(orgA, shareA, null, null, 50);
+    const row = page.items.find((i) => i.name === 'Proje');
+    expect(Number(row?.subtree_bytes)).toBe(10);
+  });
+
   // ─── folder creation reaches the disk ───────────────────────────────────────
   //
   // The hole these close: `createFolder` used to write a row and nothing else, so a folder existed
@@ -1523,6 +1545,13 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
           return Promise.resolve({ status: 'moved' });
         case 'remove_entry':
           return Promise.resolve({ status: 'removed' });
+        // The two halves of a publish. Only the zero-byte upload below reaches them: every other
+        // test here stops at a permission check, and the offset the token reports is 0 because a
+        // staging file that has just been created is empty.
+        case 'open_transfer':
+          return Promise.resolve({ status: 'transfer', token: 'tok-fixture', offset: 0 });
+        case 'publish_transfer':
+          return Promise.resolve({ status: 'publish', bytes: 0 });
         default:
           return Promise.reject(new Error(`no fixture answers '${String(request['op'])}'`));
       }
@@ -2286,6 +2315,83 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     ).rejects.toBeInstanceOf(NotFoundException);
   });
 
+  it('stages a root-level upload in the share the caller NAMED, not in the default one', async () => {
+    // Bir üst klasör varsa paylaşımı o belirliyor; kökte belirleyen hiçbir şey yoktu. Ekranda
+    // "Arşiv" seçiliyken köke bırakılan dosyanın bütün baytları ilk oluşturulan paylaşıma iniyor,
+    // yükleme çubuğu %100 oluyor ve dosya açık olan listede hiç görünmüyordu. `POST /files/folders`
+    // `shareId`i zaten alıyordu; eksik olan tek yol yüklemeydi.
+    const rows = await pdb.withTenant(org, (q) =>
+      q.query<{ id: string }>(
+        `INSERT INTO public.shares (organization_id, name, dataset)
+         VALUES ($1, 'yukleme-arsiv', 'tank/depsis/yukleme-arsiv') RETURNING id::text AS id`,
+        [org],
+      ),
+    );
+    const secondId = rows[0]?.id ?? '';
+    await pdb.withTenant(org, (q) =>
+      q.query(
+        `INSERT INTO public.folder_grants
+           (organization_id, share_id, entry_id, user_id, permissions)
+         VALUES ($1,$2,NULL,$3,'{list,read,create,modify,move,delete}')`,
+        [org, secondId, alice],
+      ),
+    );
+
+    const recorded = recordingResponse();
+    await uploads.create(
+      as(alice),
+      recorded.response,
+      '10',
+      `filename ${b64('arsivlik.bin')},shareId ${b64(secondId)}`,
+    );
+    const location = recorded.headers.get('Location') ?? '';
+    const uploadId = location.slice(location.lastIndexOf('/') + 1);
+
+    const session = await pdb.withTenant(org, (q) =>
+      q.query<{ share_id: string }>(
+        `SELECT share_id::text AS share_id FROM public.upload_sessions
+          WHERE organization_id = $1 AND id = $2`,
+        [org, uploadId],
+      ),
+    );
+    expect(session[0]?.share_id).toBe(secondId);
+
+    await pdb.withTenant(org, async (q) => {
+      await q.query(`DELETE FROM public.upload_sessions WHERE id = $1`, [uploadId]);
+      await q.query(`DELETE FROM public.folder_grants WHERE share_id = $1`, [secondId]);
+      await q.query(`DELETE FROM public.shares WHERE id = $1`, [secondId]);
+    });
+  });
+
+  it('publishes a zero-byte file at POST, because no PATCH can ever carry one', async () => {
+    // Yayımlama son parçanın içinde tetikleniyordu ve sıfır uzunluklu bir oturuma hiç parça
+    // giremiyor: `sendChunk` sıfır uzunluklu bir parçayı reddediyor, tarayıcı da `offset < size`
+    // döngüsüne hiç girmiyor. Boş bir `.gitkeep` sürükleyen kullanıcı %100 ve hatasız bir yükleme
+    // görüyor, klasörde ise hiçbir şey olmuyordu.
+    await grantTo({ user: alice }, null, ['list', 'read', 'create']);
+
+    const recorded = recordingResponse();
+    await uploads.create(as(alice), recorded.response, '0', `filename ${b64('bos-dosya.txt')}`);
+    const location = recorded.headers.get('Location') ?? '';
+    const uploadId = location.slice(location.lastIndexOf('/') + 1);
+
+    expect(await names(as(alice))).toContain('bos-dosya.txt');
+    // Ara dosya AÇILDI ve YAYIMLANDI: jetonu tüketmeden yayımlamak mümkün değil, çünkü ajan açık
+    // bir jeton varken aynı ara dosya için yayımlamayı reddediyor.
+    expect(agentCalls.map((call) => call['op'])).toEqual(
+      expect.arrayContaining(['open_transfer', 'publish_transfer']),
+    );
+    // Ve oturum bitmiş sayılıyor — yoksa aktarım listesinde yirmi dört saat "takılmış" kalırdı.
+    const session = await pdb.withTenant(org, (q) =>
+      q.query<{ file_id: string | null }>(
+        `SELECT file_id::text AS file_id FROM public.upload_sessions
+          WHERE organization_id = $1 AND id = $2`,
+        [org, uploadId],
+      ),
+    );
+    expect(session[0]?.file_id).not.toBeNull();
+  });
+
   it('hides the rows a caller cannot list from SEARCH as well as from the tree', async () => {
     const open = await folder(null, 'arama-acik');
     await folder(null, 'arama-gizli');
@@ -2325,8 +2431,14 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
 const stubData = { isAvailable: () => false } as unknown as AgentDataService;
 
 /** `UploadsController` refuses every request when the data socket is down, before it checks
- * anything else — so the upload test needs one that claims to be there and is never used. */
-const stubUploadData = { isAvailable: () => true } as unknown as AgentDataService;
+ * anything else — so the upload test needs one that claims to be there. `send` is reached by
+ * exactly one test: a zero-byte upload has to consume its transfer token before it can publish,
+ * and consuming it is a data connection carrying no bytes. */
+const stubUploadData = {
+  isAvailable: () => true,
+  send: (_token: string, _offset: number, length: number): Promise<number> =>
+    Promise.resolve(length),
+} as unknown as AgentDataService;
 
 /** An Express response that keeps its headers, for the one test that needs the `Location` back. */
 const recordingResponse = (): { response: Response; headers: Map<string, string> } => {

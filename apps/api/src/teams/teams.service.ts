@@ -76,6 +76,40 @@ export class TeamNameTakenError extends Error {
 }
 
 /**
+ * 'Herkes' ekibinin ADI ONUN KİMLİĞİ, o yüzden adı değişemiyor ve ekip silinemiyor.
+ *
+ * `public.everyone_team()` bu ekibi `name_fold = fold_identity('Herkes')` ile ARIYOR, ve
+ * bulamazsa YENİSİNİ AÇIP kiracının bütün kullanıcılarını ona üye yapıyor. Fonksiyonu üç yol
+ * çağırıyor: hesap açmak, paylaşım kurmak, ve ilk `GET /files`in varsayılan paylaşımı.
+ *
+ * Yani ekibin adını 'Tüm Personel' yapmak, bir sonraki hesap açılışında İKİNCİ bir 'Herkes'
+ * doğuruyor: paylaşımların kök hibeleri adı değişen ESKİ ekipte kalıyor, yeni hesaplar YENİ
+ * ekibe giriyor, ve "herkes görür" diye açılmış paylaşımları ne SMB'den ne arayüzden
+ * görebiliyorlar. Ekibi silmek de aynı kapıdan giriyor. Hiçbir ekran bunu söylemiyor.
+ *
+ * BU BİR ARA ÇÖZÜM ve öyle olduğunu söylüyor. Doğrusu ekibi addan bağımsız bir işaretle
+ * (`teams.is_everyone`, kiracı başına kısmi tekil indeks) tanımlamak ve `everyone_team()`'i o
+ * işarete göre yeniden yazmak; o zaman yeniden adlandırma serbest kalır — ki 0016'nın kendi
+ * notu bunu bir hak olarak yazıyor. O göç yazılana kadar, sessizce ikiye bölünen bir izin
+ * modeli yerine anlaşılır bir ret veriliyor.
+ */
+export class EveryoneTeamIsFixedError extends Error {
+  constructor(readonly attempted: 'rename' | 'delete') {
+    super(
+      attempted === 'rename'
+        ? "'Herkes' ekibinin adı değiştirilemez: yeni hesaplar ve yeni paylaşımlar bu ekibi adıyla " +
+            'buluyor, ve adı değişirse bir sonraki hesap açılışında ikinci bir "Herkes" ekibi doğar; ' +
+            'bugünkü paylaşımların izinleri eski ekipte kalır ve yeni kullanıcılar onları göremez'
+        : "'Herkes' ekibi silinemez: yeni hesaplar ve yeni paylaşımlar bu ekibi adıyla buluyor, ve " +
+            'silinirse bir sonraki hesap açılışında boş bir "Herkes" ekibi yeniden doğar; bugünkü ' +
+            'paylaşımların izinleri onunla birlikte gider. İzni daraltmak için ekibin hibelerini ' +
+            'düzenleyin',
+    );
+    this.name = 'EveryoneTeamIsFixedError';
+  }
+}
+
+/**
  * Deleting this team would take the last grant out of a share.
  *
  * `folder_grants.team_id` is `ON DELETE CASCADE`, so deleting a team deletes its grants — and a
@@ -230,6 +264,15 @@ export class TeamsService {
   async rename(organizationId: string, id: string, name: string): Promise<TeamRow> {
     try {
       return await this.db.withTenant(organizationId, async (db) => {
+        // 'Herkes' hariç — gerekçesi `EveryoneTeamIsFixedError`da. Yeni ad AYNI kimliğe
+        // katlanıyorsa serbest: büyük/küçük harf düzeltmesi ekibi kaybettirmiyor.
+        if (await isEveryoneTeam(db, organizationId, id)) {
+          const same = await db.query<{ same: boolean }>(
+            `SELECT public.fold_identity($1) = public.fold_identity('Herkes') AS same`,
+            [name],
+          );
+          if (same[0]?.same !== true) throw new EveryoneTeamIsFixedError('rename');
+        }
         const changed = await db.query<{ id: string }>(
           `UPDATE public.teams SET name = $3
             WHERE organization_id = $1 AND id = $2
@@ -266,6 +309,12 @@ export class TeamsService {
   ): Promise<ImpactSummary> {
     const done = await this.db.withTenant(organizationId, async (db) => {
       await findWithin(db, organizationId, id);
+
+      // Kuru koşuda da reddediliyor, aşağıdaki kontrolle aynı gerekçeyle: gerçekleşemeyecek bir
+      // silmenin önizlemesi, retten daha kötü bir cevap.
+      if (await isEveryoneTeam(db, organizationId, id)) {
+        throw new EveryoneTeamIsFixedError('delete');
+      }
 
       // Refused on a dry run too, for the reason `PermissionsService.write` refuses its own
       // version there: a preview of a deletion that cannot happen is a worse answer than the
@@ -665,6 +714,27 @@ async function impactOfDroppingTeamGrants(
     },
     shareIds,
   };
+}
+
+/**
+ * Bu ekip, `everyone_team()`'in adıyla aradığı 'Herkes' ekibi mi.
+ *
+ * Katlanmış ad üzerinden, çünkü fonksiyonun kendisi de öyle arıyor (`name_fold =
+ * fold_identity('Herkes')`) — ve kararı orada duran kuralın AYNISIYLA vermek, iki tarafın
+ * ayrışabileceği bir kopya bırakmıyor. Bir işaret sütunu geldiği gün değişecek tek yer burası.
+ */
+async function isEveryoneTeam(
+  db: TenantQuery,
+  organizationId: string,
+  id: string,
+): Promise<boolean> {
+  const rows = await db.query<{ id: string }>(
+    `SELECT id::text AS id FROM public.teams
+      WHERE organization_id = $1 AND id = $2
+        AND name_fold = public.fold_identity('Herkes')`,
+    [organizationId, id],
+  );
+  return rows.length > 0;
 }
 
 /**

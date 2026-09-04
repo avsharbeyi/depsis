@@ -328,6 +328,39 @@ describeConsole('console sessions, against a real PostgreSQL and a real socket',
     expect(all.some((row) => row.line.includes('verysecrethash'))).toBe(false);
   });
 
+  it('masks what was typed at a password prompt, and only that', async () => {
+    // Satırları üreten taraf yalnız `\r`/`\n` sayıyor: pty'nin eko kipini bilmediği için `sudo`
+    // istemine yazılan parola tamamlanmış bir satır sayılıp `console_commands`'a DÜZ METİN olarak
+    // giriyordu — ve o tablo `dump_database` yedeğinin içinde, yani parola yedek diskine de
+    // gidiyordu. İstemi tanıyan şey eko: parola isteminde karakterler geri gelmediği için ekranda
+    // en son duran şey hâlâ istemin kendisidir.
+    const [service, fake] = await withConsole();
+    const view = await service.open(organizationId, adminA, 80, 24);
+
+    fake.latest().out('[sudo] password for depsis: ');
+    fake.latest().send({ t: 'line', s: 'kasadaki-parola' });
+
+    // Eko açık: olağan bir komut yazılırken karakterler geri geliyor, dolayısıyla kuyrukta artık
+    // istem değil komutun kendisi duruyor ve gizleme kapanıyor.
+    fake.latest().out('\r\ndepsis:~$ ');
+    fake.latest().out('ls -la');
+    fake.latest().send({ t: 'line', s: 'ls -la' });
+
+    const lines = await until(async () => {
+      const rows = await db.withTenant(organizationId, (q) =>
+        q.query<{ line: string }>(
+          `SELECT line FROM console_commands WHERE session_id = $1 ORDER BY at`,
+          [view.id],
+        ),
+      );
+      return rows.length === 2 ? rows : null;
+    }, 'both typed lines to be recorded');
+
+    // Satırın VARLIĞI kayıtta kalıyor — ADR-0018 "her satır kaydedilir" diyor — yalnız içeriği yok.
+    expect(lines.map((row) => row.line)).toEqual(['<gizlenmiş girdi>', 'ls -la']);
+    expect(lines.some((row) => row.line.includes('kasadaki-parola'))).toBe(false);
+  });
+
   it('streams output to a subscriber that attaches after the prompt was printed', async () => {
     const [service, fake] = await withConsole();
     const view = await service.open(organizationId, adminA, 80, 24);

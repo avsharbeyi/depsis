@@ -6,16 +6,16 @@ import { BackupRunService } from './backup-run.service.js';
 import type { BackupTargetRow, BackupTargetService } from './backup-target.service.js';
 
 /**
- * Turun İKİ SESSİZ ARIZASI, ikisi de sahada ölçülmüş türden.
+ * Turun SESSİZ ARIZALARI, hepsi sahada ölçülmüş türden — hiçbiri ekranda görünmüyordu.
  *
- * BİRİNCİSİ: ajanın dizin listelemesi 5.000 girdide kesiliyor ve gerisi `after` imleciyle
- * geliyor. İmleci kullanmayan bir ilk tur, içinde 5.000'den fazla girdi olan tek bir klasörde
- * hata veriyor, taban hiç yazılmıyor, ve o paylaşımın hiçbir dosyası hiçbir zaman yedeğe
- * girmiyor — ekranda "6 saatte bir yedekleniyor" yazarken.
- *
- * İKİNCİSİ: her tur bir `depsis-yedek-*` görüntüsü alıyor ve eskisini kimse yok etmiyordu.
- * Kullanıcının sildiği her blok o görüntülerde asılı kaldığı için havuz doluyor, ve dolduğunda
- * duran şey yedek değil SMB yazmaları oluyor.
+ * Ajanın dizin listelemesi 5.000 girdide kesiliyor ve gerisi `after` imleciyle geliyor. İmleci
+ * kullanmayan bir ilk tur, içinde 5.000'den fazla girdi olan tek bir klasörde hata veriyor, taban
+ * hiç yazılmıyor, ve o paylaşımın hiçbir dosyası hiçbir zaman yedeğe girmiyor — ekranda "6 saatte
+ * bir yedekleniyor" yazarken. Her tur bir `depsis-yedek-*` görüntüsü alıyor ve eskisini kimse yok
+ * etmiyordu; kullanıcının sildiği her blok o görüntülerde asılı kaldığı için havuz doluyor.
+ * Değişen bir dosyanın yedekteki eski sürümü, yenisi yazılmadan ÖNCE siliniyordu. Bir klasörün
+ * yeniden adlandırılması hiç işlenmiyordu. Ve silinenler klasörü tek listelemeye sığmadığında
+ * saklama süresi orada hiç işlemiyordu.
  *
  * Veritabanı taklit ediliyor: ölçülen şey turun KARARLARI — hangi çağrı, hangi sırayla — ve
  * bunların hiçbiri PostgreSQL'e bağlı değil.
@@ -53,6 +53,19 @@ interface Behaviour {
   inventory?: { name: string; used_bytes: number; created_at: number }[];
   /** `diff_snapshots` cevabı. */
   diff?: AgentResponse;
+  /** Diskin durumu — verilmezse hazır, açık ve bağlı. */
+  root?: { prepared: boolean; key_loaded: boolean; mounted: boolean };
+  /** `copy_file_to_backup` cevabı; dolu bir diski taklit etmenin yolu. */
+  copy?: AgentResponse;
+  /** `backup_move_entry` cevabı, isteğe göre. Verilmezse her taşıma başarılı. */
+  move?: (request: { from: string[]; to: string[] }) => AgentResponse;
+  /**
+   * YEDEK ağacı: anahtar yolun '/' ile birleşmiş hâli. Silme bu haritayı gerçekten değiştiriyor,
+   * yani temizlik turunun ilerleyip ilerlemediği ölçülebiliyor.
+   */
+  backupTree?: Record<string, DirRow[]>;
+  /** `backup_list_directory`nin tek yanıtta verdiği girdi sayısı — sahadaki 5.000. */
+  backupPageSize?: number;
 }
 
 interface Harness {
@@ -71,6 +84,8 @@ function harness(behaviour: Behaviour = {}, base: string | null = null): Harness
   );
   const pageSize = behaviour.pageSize ?? 3;
   const tree = behaviour.tree ?? {};
+  const backupTree = behaviour.backupTree ?? {};
+  const backupPageSize = behaviour.backupPageSize ?? 3;
   let endless = 0;
 
   const agent = {
@@ -81,9 +96,9 @@ function harness(behaviour: Behaviour = {}, base: string | null = null): Harness
         case 'backup_root_status':
           return Promise.resolve<AgentResponse>({
             status: 'backup_root',
-            prepared: true,
-            key_loaded: true,
-            mounted: true,
+            prepared: behaviour.root?.prepared ?? true,
+            key_loaded: behaviour.root?.key_loaded ?? true,
+            mounted: behaviour.root?.mounted ?? true,
             available_bytes: 1_000_000_000,
             used_bytes: 0,
           });
@@ -140,9 +155,41 @@ function harness(behaviour: Behaviour = {}, base: string | null = null): Harness
           });
         }
         case 'copy_file_to_backup':
-          return Promise.resolve<AgentResponse>({ status: 'copied', offset: 4, done: true });
-        case 'backup_remove_entry':
+          return Promise.resolve<AgentResponse>(
+            behaviour.copy ?? { status: 'copied', offset: 4, done: true },
+          );
+        case 'backup_move_entry':
+          return Promise.resolve<AgentResponse>(
+            behaviour.move?.({ from: request.from, to: request.to }) ?? { status: 'moved' },
+          );
+        case 'backup_list_directory': {
+          const key = request.path.join('/');
+          const all = backupTree[key];
+          if (all === undefined) {
+            return Promise.resolve<AgentResponse>({ status: 'not_found', reason: 'yok' });
+          }
+          const page = all.slice(0, backupPageSize);
+          return Promise.resolve<AgentResponse>({
+            status: 'listing',
+            truncated: all.length > page.length,
+            entries: page.map((entry) => row(entry.name, entry.directory)),
+          });
+        }
+        case 'backup_remove_entry': {
+          const key = request.path.join('/');
+          const parent = request.path.slice(0, -1).join('/');
+          const name = request.path[request.path.length - 1];
+          if (request.directory && (backupTree[key]?.length ?? 0) > 0) {
+            // DOLU BİR DİZİN silinemiyor: ajanın kendi cevabı da bu.
+            return Promise.resolve<AgentResponse>({ status: 'conflict', reason: 'dolu dizin' });
+          }
+          if (request.directory) delete backupTree[key];
+          const siblings = backupTree[parent];
+          if (siblings !== undefined) {
+            backupTree[parent] = siblings.filter((entry) => entry.name !== name);
+          }
           return Promise.resolve<AgentResponse>({ status: 'removed' });
+        }
         case 'backup_create_directory':
           return Promise.resolve<AgentResponse>({ status: 'directory_created' });
         default:
@@ -387,5 +434,182 @@ describe('tur görüntüleri', () => {
     await runs.runOnce(ORG, 'zamanli');
 
     expect(calls.filter((call) => call.op === 'destroy_snapshot')).toHaveLength(0);
+  });
+});
+
+/** Yeniden adlandırma girdisi — `zfs diff`in tek satırlık `R`si. */
+function renamed(kind: 'file' | 'directory', from: string, to: string): AgentResponse {
+  return {
+    status: 'diff',
+    truncated: false,
+    entries: [
+      {
+        change: 'renamed',
+        kind,
+        path: `${SHARE_ROOT}/${SHARE.name}/${to}`,
+        old_path: `${SHARE_ROOT}/${SHARE.name}/${from}`,
+      },
+    ],
+  };
+}
+
+describe('değişmiş bir dosyanın yedekteki eski sürümü', () => {
+  const ONE_FILE = { tree: { '': [{ name: 'video.mp4', directory: false }] } };
+
+  it('yeni kopya yazılmadan ÖNCE kaldırılmıyor', async () => {
+    // SIRA BURADA MEKANİK. Eski sürüm ilk çağrıda siliniyordu: kırk gigabaytlık bir dosya
+    // değişip disk dolduğunda o dosyanın yedekte NE eski NE yeni sürümü kalıyordu.
+    const { runs, calls } = harness(ONE_FILE);
+
+    await runs.runOnce(ORG, 'zamanli');
+
+    const ops = calls.map((call) => call.op);
+    expect(ops.lastIndexOf('copy_file_to_backup')).toBeLessThan(ops.indexOf('backup_remove_entry'));
+  });
+
+  it('kopyalama YER YOK ile düştüğünde eski sürüme hiç dokunulmuyor', async () => {
+    // ASIL ÖLÇÜM: dolu bir diskte yedekteki sağlam kopya YERİNDE kalıyor.
+    const { runs, calls } = harness({
+      ...ONE_FILE,
+      copy: { status: 'out_of_space', reason: 'yedek diskinde video.mp4 için yer yok' },
+    });
+
+    const outcome = await runs.runOnce(ORG, 'zamanli');
+
+    expect(outcome.state).toBe('yer-yok');
+    expect(calls.some((call) => call.op === 'backup_remove_entry')).toBe(false);
+  });
+
+  it('yeni sürümü geçici bir ada yazıp sonra yerine taşıyor', async () => {
+    const { runs, calls } = harness(ONE_FILE);
+
+    await runs.runOnce(ORG, 'zamanli');
+
+    const copy = calls.find((call) => call.op === 'copy_file_to_backup');
+    const move = calls.find((call) => call.op === 'backup_move_entry');
+    // Kopyalama hedefi GEÇİCİ ad; son adım onu asıl adın yerine koyuyor.
+    if (copy === undefined || copy.op !== 'copy_file_to_backup') {
+      throw new Error('kopyalama çağrısı yok');
+    }
+    expect(copy.to[copy.to.length - 1]).not.toBe('video.mp4');
+    expect(move).toMatchObject({ to: ['Dosyalar', SHARE.name, 'video.mp4'] });
+  });
+});
+
+describe('yedek diski okunamadığında', () => {
+  it('disk TAKILI DEĞİLKEN sebebi kaydediyor', async () => {
+    // Havuz içe alınmamışken durum "kilitli" diye kaydediliyordu ve ekran parola soruyordu:
+    // doğru parola da `dataset does not exist` ile düşüyor, ve arızanın adı hiçbir yerde
+    // geçmiyordu.
+    const { runs } = harness({ root: { prepared: false, key_loaded: false, mounted: false } });
+
+    const outcome = await runs.runOnce(ORG, 'zamanli');
+
+    expect(outcome.state).toBe('kilitli');
+    expect(outcome.error).toMatch(/takılı değil/u);
+  });
+
+  it('disk gerçekten kilitliyken parolayı istiyor', async () => {
+    const { runs } = harness({ root: { prepared: true, key_loaded: false, mounted: false } });
+
+    const outcome = await runs.runOnce(ORG, 'zamanli');
+
+    expect(outcome.state).toBe('kilitli');
+    expect(outcome.error).toMatch(/parola/u);
+  });
+});
+
+describe('yeniden adlandırma', () => {
+  it('bir KLASÖRÜ yedekte de taşıyor, içindekileri yeniden kopyalamadan', async () => {
+    // `zfs diff` kırk bin fotoğraflık bir klasörün yeniden adlandırılmasını TEK satır olarak
+    // veriyor. Bu satır yok sayıldığında yedekte klasör eski adıyla kalıyor, yeni ad hiç
+    // oluşmuyor, ve eski kopya silinme defterine hiç girmediği için saklama süresi ona hiç
+    // bakmıyordu.
+    const { runs, calls, bases } = harness(
+      { diff: renamed('directory', '2024', '2024-eski') },
+      'depsis-yedek-1000',
+    );
+
+    const outcome = await runs.runOnce(ORG, 'zamanli');
+
+    expect(outcome.state).toBe('bitti');
+    expect(outcome.movedFiles).toBe(1);
+    expect(calls.find((call) => call.op === 'backup_move_entry')).toMatchObject({
+      from: ['Dosyalar', SHARE.name, '2024'],
+      to: ['Dosyalar', SHARE.name, '2024-eski'],
+    });
+    expect(calls.some((call) => call.op === 'copy_file_to_backup')).toBe(false);
+    expect(bases.get(SHARE.id)).toMatch(/^depsis-yedek-/u);
+  });
+
+  it('yedekte bulunamayan bir DOSYAYI yeni adıyla kopyalıyor', async () => {
+    const { runs, calls } = harness(
+      {
+        diff: renamed('file', 'eski.txt', 'yeni.txt'),
+        move: (request) =>
+          request.from.includes('eski.txt')
+            ? { status: 'not_found', reason: 'yedekte yok' }
+            : { status: 'moved' },
+      },
+      'depsis-yedek-1000',
+    );
+
+    const outcome = await runs.runOnce(ORG, 'zamanli');
+
+    expect(outcome.state).toBe('bitti');
+    expect(copied(calls)).toEqual(['yeni.txt']);
+  });
+
+  it('taşıma ÇAKIŞTIĞINDA hedefi silmiyor, tabanı düşürüyor', async () => {
+    // `zfs diff` satırlarının sırası garanti değil: hedefte duran şey bu turda yeni ada yazılmış
+    // gerçek bir dosya olabilir, ve onu silip üstüne taşımak kullanıcının yedeğini yok ederdi.
+    const { runs, calls, bases } = harness(
+      {
+        diff: renamed('directory', '2024', '2024-eski'),
+        move: () => ({ status: 'conflict', reason: 'hedefte zaten bir düğüm var' }),
+      },
+      'depsis-yedek-1000',
+    );
+
+    const outcome = await runs.runOnce(ORG, 'zamanli');
+
+    expect(calls.some((call) => call.op === 'backup_remove_entry')).toBe(false);
+    // Taban düşürüldü: bir sonraki tur ağacın tamamını yürüyecek.
+    expect(bases.get(SHARE.id)).toBeNull();
+    expect(outcome.state).toBe('devam');
+  });
+});
+
+describe('silinenler klasörünün temizliği', () => {
+  it('tek listelemeye SIĞMAYAN bir gün klasörünü de boşaltıyor', async () => {
+    // `backup_list_directory` tek yanıtta 5.000 girdi veriyor ve bir `after` imleci taşımıyor.
+    // Kesilmiş listelemede hiç dokunmamak, 8.000 fotoğrafın silindiği bir gün klasörünün ASLA
+    // temizlenmemesi demekti: her saat aynı uyarı, ve o bloklar diskte sonsuza kadar.
+    const backupTree: Record<string, DirRow[]> = {
+      'DEPSIS-YEDEK/silinenler': [{ name: '2000-01-01', directory: true }],
+      'DEPSIS-YEDEK/silinenler/2000-01-01': Array.from({ length: 8 }, (_, n) => ({
+        name: `foto-${n}.jpg`,
+        directory: false,
+      })),
+    };
+    const { runs } = harness({ backupTree, backupPageSize: 3 });
+
+    const purged = await runs.purgeExpired(ORG);
+
+    expect(purged).toBe(8);
+    // Gün klasörünün kendisi de gitti: dolu kaldığı sürece üst dizin de silinemiyordu.
+    expect(backupTree['DEPSIS-YEDEK/silinenler']).toEqual([]);
+  });
+
+  it('saklama süresi dolmamış bir güne dokunmuyor', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const backupTree: Record<string, DirRow[]> = {
+      'DEPSIS-YEDEK/silinenler': [{ name: today, directory: true }],
+      [`DEPSIS-YEDEK/silinenler/${today}`]: [{ name: 'dun.txt', directory: false }],
+    };
+    const { runs } = harness({ backupTree });
+
+    expect(await runs.purgeExpired(ORG)).toBe(0);
+    expect(backupTree[`DEPSIS-YEDEK/silinenler/${today}`]).toHaveLength(1);
   });
 });

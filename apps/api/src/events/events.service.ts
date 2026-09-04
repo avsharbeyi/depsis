@@ -26,6 +26,7 @@ interface JobRow {
   progress: number;
   created_at: Date;
   updated_at: Date;
+  updated_at_raw: string;
   last_error: string | null;
 }
 
@@ -36,6 +37,24 @@ interface TransferRow {
   offset_bytes: string;
   completed: boolean;
   updated_at: Date;
+  updated_at_raw: string;
+}
+
+/**
+ * Bir kiracının filigranı: aynı anın iki gösterimi.
+ *
+ * `raw`, PostgreSQL'in `updated_at::text` ile yazdığı metnin TA KENDİSİ — saat dilimi kaymasını da
+ * içerdiği için `$2::timestamptz` olarak geri verildiğinde mikrosaniyesine kadar aynı ana çözülür.
+ * Sorguya bunun gitmesi gerekiyor: node-postgres bir `Date` parametresini milisaniyeye kırpar, ve
+ * `.123456 > .123` her tikte doğru olduğu için en yeni satır iki saniyede bir yeniden yayınlanırdı.
+ *
+ * `at` yalnızca KARŞILAŞTIRMA içindir (hangi aday daha yeni, bir devam noktası filigranın gerisinde
+ * mi). Ham metinler asla string olarak kıyaslanmaz; aynı anı farklı saat dilimlerinde iki farklı
+ * metin gösterebilir.
+ */
+interface Watermark {
+  raw: string;
+  at: Date;
 }
 
 /**
@@ -91,13 +110,26 @@ export class EventsService implements OnModuleDestroy {
    */
   static readonly MAX_STREAMS = 64;
 
+  /**
+   * Bir `Last-Event-ID`'nin filigranı en fazla ne kadar geri alabileceği.
+   *
+   * Filigran KİRACININ ORTAK'ı: bir sekmenin devam noktası, o an bağlı her yöneticinin akışını da
+   * geri sarar. Sınırsız bırakıldığında bir gün uyuyan dizüstünün dünkü kimliği, on binlerce
+   * `job_history` satırını 200'lük sayfalarla herkese yeniden akıtıyordu — ve sıradan bir üye
+   * `Last-Event-ID: 1` göndererek aynı yükü isteyerek yaptırabiliyordu.
+   *
+   * On dakika kaybı yok: istemci akışa bağlanırken zaten REST anlık görüntüsünü çekiyor
+   * (`Jobs.tsx`), akış yalnızca ondan SONRA olanı taşıyor.
+   */
+  static readonly MAX_REWIND_MS = 10 * 60 * 1000;
+
   private readonly logger = new Logger(EventsService.name);
   private readonly subscribers = new Map<number, Subscriber>();
   private nextId = 1;
   private timer: NodeJS.Timeout | null = null;
   private pinger: NodeJS.Timeout | null = null;
   /** Per organisation, the newest `updated_at` already sent. */
-  private watermark = new Map<string, Date>();
+  private watermark = new Map<string, Watermark>();
   private ticking = false;
 
   constructor(private readonly db: DbService) {}
@@ -113,6 +145,11 @@ export class EventsService implements OnModuleDestroy {
    * `since` is the client's `Last-Event-ID`, when it sent one. It seeds this organisation's
    * watermark BACKWARDS only — a reconnecting client may ask to see events again, and must not be
    * able to make another subscriber skip forward past events it has not received.
+   *
+   * Geri sarma `MAX_REWIND_MS` ile tabanlanıyor, ve taban SUNUM KATMANINDA DEĞİL burada: filigran
+   * kiracının ortağı olduğu için bir istemcinin gönderdiği devam noktası başkalarının akışını da
+   * belirliyor, ve tek savunmanın controller'da durması bu servisi çağıran her yeni yolu sessizce
+   * açık bırakırdı.
    */
   subscribe(
     organizationId: string,
@@ -124,14 +161,17 @@ export class EventsService implements OnModuleDestroy {
     const key = this.nextId++;
     this.subscribers.set(key, { organizationId, userId, isAdmin, subject });
 
+    const floor = Date.now() - EventsService.MAX_REWIND_MS;
+    const resume = since === null ? null : new Date(Math.max(since.getTime(), floor));
+
     const current = this.watermark.get(organizationId);
-    if (since !== null && (current === undefined || since < current)) {
-      this.watermark.set(organizationId, since);
+    if (resume !== null && (current === undefined || resume < current.at)) {
+      this.watermark.set(organizationId, mark(resume));
     } else if (current === undefined) {
       // No history for a fresh stream. The client fetches a snapshot over the ordinary REST route
       // and this carries what changes AFTER it — replaying yesterday's finished jobs into a
       // just-opened screen would be noise, not state.
-      this.watermark.set(organizationId, new Date());
+      this.watermark.set(organizationId, mark(new Date()));
     }
 
     this.start();
@@ -217,15 +257,27 @@ export class EventsService implements OnModuleDestroy {
     const owners = new Set(listeners.map((s) => s.userId));
 
     let newest = since;
+    /**
+     * Adayı ham metniyle birlikte al.
+     *
+     * `>=`, `>` değil, ve fark tam olarak bu düzeltmenin konusu: satırın `updated_at` alanı JS
+     * tarafında milisaniyeye kırpılmış hâlde geliyor, yani `.123456` bir satır ile `.123000` olan
+     * filigran BURADA eşit görünüyor. `>` olsaydı ham metin hiç ilerlemez, satır her tikte yeniden
+     * seçilirdi. Sorgu zaten `updated_at > $2` ile süzüldüğü için buraya gelen her satır gerçekten
+     * daha yenidir; sıralama artan olduğundan eşitlikte sonuncusu kazanır.
+     */
+    const advance = (row: { updated_at: Date; updated_at_raw: string }): void => {
+      if (row.updated_at >= newest.at) newest = { raw: row.updated_at_raw, at: row.updated_at };
+    };
     const emit = (event: DepsisEvent, to: Subscriber[]): void => {
       for (const subscriber of to) subscriber.subject.next(event);
     };
 
     if (wantsJobs) {
-      const jobs = await this.jobsSince(organizationId, since);
+      const jobs = await this.jobsSince(organizationId, since.raw);
       const admins = listeners.filter((s) => s.isAdmin);
       for (const row of jobs) {
-        if (row.updated_at > newest) newest = row.updated_at;
+        advance(row);
         emit(
           {
             type: 'job',
@@ -245,10 +297,10 @@ export class EventsService implements OnModuleDestroy {
     }
 
     for (const userId of owners) {
-      const rows = await this.transfersSince(organizationId, userId, since);
+      const rows = await this.transfersSince(organizationId, userId, since.raw);
       const mine = listeners.filter((s) => s.userId === userId);
       for (const row of rows) {
-        if (row.updated_at > newest) newest = row.updated_at;
+        advance(row);
         emit(
           {
             type: 'transfer',
@@ -277,16 +329,18 @@ export class EventsService implements OnModuleDestroy {
    * the row leaves the table a poller would naturally watch. Reading only `job_queue` would show
    * every job progressing and none of them ever finishing.
    */
-  private async jobsSince(organizationId: string, since: Date): Promise<JobRow[]> {
+  private async jobsSince(organizationId: string, since: string): Promise<JobRow[]> {
     return this.db.withTenant(organizationId, (q) =>
       q.query<JobRow>(
-        `SELECT id::text AS id, kind, status, progress, created_at, updated_at, last_error
+        `SELECT id::text AS id, kind, status, progress, created_at, updated_at,
+                updated_at::text AS updated_at_raw, last_error
            FROM public.job_queue
-          WHERE organization_id = $1 AND updated_at > $2
+          WHERE organization_id = $1 AND updated_at > $2::timestamptz
           UNION ALL
-         SELECT id::text AS id, kind, status, progress, created_at, updated_at, last_error
+         SELECT id::text AS id, kind, status, progress, created_at, updated_at,
+                updated_at::text AS updated_at_raw, last_error
            FROM public.job_history
-          WHERE organization_id = $1 AND updated_at > $2
+          WHERE organization_id = $1 AND updated_at > $2::timestamptz
           ORDER BY updated_at
           LIMIT 200`,
         [organizationId, since],
@@ -305,19 +359,32 @@ export class EventsService implements OnModuleDestroy {
   private async transfersSince(
     organizationId: string,
     userId: string,
-    since: Date,
+    since: string,
   ): Promise<TransferRow[]> {
     return this.db.withTenant(organizationId, (q) =>
       q.query<TransferRow>(
         `SELECT id::text AS id, filename, length_bytes::text AS length_bytes,
                 offset_bytes::text AS offset_bytes,
-                (completed_at IS NOT NULL) AS completed, updated_at
+                (completed_at IS NOT NULL) AS completed, updated_at,
+                updated_at::text AS updated_at_raw
            FROM public.upload_sessions
-          WHERE organization_id = $1 AND created_by = $2 AND updated_at > $3
+          WHERE organization_id = $1 AND created_by = $2 AND updated_at > $3::timestamptz
           ORDER BY updated_at
           LIMIT 200`,
         [organizationId, userId, since],
       ),
     );
   }
+}
+
+/**
+ * Bir JS anını filigrana çevir.
+ *
+ * `toISOString()` — yerel biçim değil: metin `$2::timestamptz` olarak geri gidiyor ve ISO-8601'in
+ * `Z` eki sunucunun saat diliminden bağımsız olarak tek bir anı gösteriyor. Milisaniye tabanlı
+ * olması sorun değil, çünkü buraya yalnızca istemcinin devam noktası ve "şimdi" giriyor: ikisi de
+ * geriye-güvenli, en fazla birkaç kopya olaya mal olur.
+ */
+function mark(at: Date): Watermark {
+  return { raw: at.toISOString(), at };
 }

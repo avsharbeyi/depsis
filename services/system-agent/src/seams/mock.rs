@@ -370,11 +370,6 @@ impl SafePath for MockSafePath {
         Ok(names)
     }
 
-    /// A real directory read under the temp root, matching what the kernel implementation drops.
-    ///
-    /// The exclusions are copied deliberately rather than left out: a mock that reported symlinks
-    /// and sockets would make the dispatcher's filtering untestable here, which is the same
-    /// fidelity gap `open_dir` and `open` each had to have fixed.
     /// A snapshot, as an ORDINARY DIRECTORY at `<share>/.zfs/snapshot/<name>`.
     ///
     /// The mock cannot reproduce the one property that makes the real method interesting — that
@@ -409,6 +404,11 @@ impl SafePath for MockSafePath {
         self.open(&walk, OpenIntent::Read)
     }
 
+    /// A real directory read under the temp root, matching what the kernel implementation drops.
+    ///
+    /// The exclusions are copied deliberately rather than left out: a mock that reported symlinks
+    /// and sockets would make the dispatcher's filtering untestable here, which is the same
+    /// fidelity gap `open_dir` and `open` each had to have fixed.
     fn list_entries(&self, relative: &[&str]) -> Result<Vec<DirEntryInfo>, SeamError> {
         let path = self.join(relative)?;
         let mut found = Vec::new();
@@ -469,6 +469,16 @@ impl SafePath for MockSafePath {
         older_than: std::time::Duration,
     ) -> Result<Vec<String>, SeamError> {
         let path = self.join(relative)?;
+        // `open_dir`daki sınıflandırmanın aynısı, ve aynı sebeple. Süpürücü "ara alan hiç yok" ile
+        // "okunamadı"yı ayırmak zorunda: ilki her taze paylaşımın olağan hâli, ikincisi rapor
+        // edilmesi gereken bir arıza. Blanket bir `Io` ikisini tek dala indiriyordu, yani hiç
+        // süpürülemeyen bir paylaşım portatif bir testten görünmüyordu. Gerçek mühür aynı iki
+        // errno'yu `classify_openat2`de ayırıyor.
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|_| SeamError::NotFound(path.display().to_string()))?;
+        if !metadata.is_dir() {
+            return Err(SeamError::NotADirectory(path.display().to_string()));
+        }
         let now = std::time::SystemTime::now();
         let mut names = Vec::new();
         for entry in std::fs::read_dir(&path)
@@ -645,6 +655,24 @@ impl CommandRunner for MockCommandRunner {
         let mut argv = vec![program.to_string()];
         argv.extend(args.iter().map(|a| (*a).to_string()));
         argv.push("<stdin>".to_string());
+        self.calls.borrow_mut().push(argv);
+        self.answer(program)
+    }
+
+    /// Kaydediliyor, ve DEĞERLER KAYDEDİLMİYOR — yalnız adlar.
+    ///
+    /// `run_with_stdin` ile aynı gerekçe: bir test "parola ortamdan mı gitti" sorusunu
+    /// sorabilmeli, ama parolanın kendisi test çıktısına, panik mesajına ya da CI günlüğüne
+    /// düşmemeli. Ad `<env:PGPASSWORD>` biçiminde çağrı listesine giriyor.
+    fn run_with_env(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<String, SeamError> {
+        let mut argv = vec![program.to_string()];
+        argv.extend(args.iter().map(|a| (*a).to_string()));
+        argv.extend(env.iter().map(|(name, _)| format!("<env:{name}>")));
         self.calls.borrow_mut().push(argv);
         self.answer(program)
     }

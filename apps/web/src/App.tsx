@@ -2,7 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { Account } from './Account.js';
-import { api } from './api.js';
+import { api, isTransportFailure } from './api.js';
 import { Apps } from './Apps.js';
 import { Backups } from './Backups.js';
 import { Disks } from './Disks.js';
@@ -47,6 +47,15 @@ import { Users } from './Users.js';
  * already typing through.
  */
 const Console = lazy(() => import('./Console.js').then((module) => ({ default: module.Console })));
+
+/**
+ * Açılış yoklaması cevapsız kaldığında ne kadar sonra yeniden sorulacağı.
+ *
+ * Beş saniye, `usePrefs`in on beşinden kısa: bu ekran cihazın kendi ekranında (kiosk) açılışta
+ * duruyor ve API'nin ayağa kalkması saniyeler sürüyor. Sahibinin ekrana bakıp hiçbir şey
+ * yapmadan geçmesi gereken süre, kutunun açılma süresinden uzun olmamalı.
+ */
+const BOOT_RETRY_MS = 5_000;
 
 /** Straight from the contract, so a field renamed in the YAML breaks this file. */
 type CurrentUser = OpenApi.components['schemas']['CurrentUser'];
@@ -454,6 +463,22 @@ function AuthShell({ children }: { children: React.ReactNode }): React.JSX.Eleme
   );
 }
 
+/**
+ * Yeniden başlatma isteği GERÇEKTEN reddedildi mi.
+ *
+ * AJANIN SUSMASI BEKLENEN BİR SONUÇ. Ajan `systemctl reboot`'u bırakıp dönüyor ve systemd
+ * nginx'i ile API'yi cevap tarayıcıya varmadan durdurabiliyor; o pencerede bağlantı düşüyor.
+ * `api.ts` düşen her bağlantıyı gövdesi dolu bir 504'e çevirdiği için `error !== undefined`
+ * tek başına bu ayrımı yapamıyordu: tam da kapanmakta olan cihaz için ekrana kırmızı bir
+ * "Cihaz yeniden başlatılamadı" düşüyor, sahibi de düğmeye bir kez daha basmaya çalışıyordu.
+ *
+ * Cevabı GELMİŞ ve olumsuz gelmiş bir istek başka: onu hata saymak doğru, çünkü orada
+ * gerçekten hiçbir şey başlamadı.
+ */
+export function rebootRefused(error: unknown, transport: boolean): boolean {
+  return error !== undefined && !transport;
+}
+
 type Screen =
   | { name: 'loading' }
   | { name: 'unreachable' }
@@ -465,11 +490,26 @@ export function App(): React.JSX.Element {
   const [screen, setScreen] = useState<Screen>({ name: 'loading' });
 
   useEffect(() => {
-    void (async () => {
+    let alive = true;
+    let timer = 0;
+
+    /**
+     * AÇILIŞ YOKLAMASI KENDİ KENDİNE SÜRÜYOR.
+     *
+     * Bu ekran bir kez soruyor ve cevap gelmezse orada duruyordu; tek çıkış "Yeniden dene"ye
+     * basmaktı. Oysa bu sayfa çoğu zaman cihazın KENDİ ekranında (kiosk) açık duruyor ve kiosk
+     * sayfayı kendisi yenilemiyor — cihaz açılırken web sunucusu API'den önce ayağa kalktığı
+     * için karşılama ekranı, kimsenin dokunmadığı bir kutuda kalıcı bir hata ekranına
+     * dönüşüyordu. Beş saniyede bir yeniden sormak, sahibinin hiçbir şey yapmasını
+     * gerektirmeyen tek doğru davranış.
+     */
+    const ask = async (): Promise<void> => {
       try {
         const { data } = await api.GET('/setup/status', {});
+        if (!alive) return;
         if (data === undefined) {
           setScreen({ name: 'unreachable' });
+          timer = window.setTimeout(() => void ask(), BOOT_RETRY_MS);
           return;
         }
         if (data.setupRequired) {
@@ -480,14 +520,23 @@ export function App(): React.JSX.Element {
         // Asking `/me` is what decides it, because the cookie is HttpOnly and this code cannot
         // read it.
         const me = await api.GET('/me', {});
+        if (!alive) return;
         setScreen(me.data === undefined ? { name: 'sign-in', note: null } : { name: 'signed-in' });
       } catch {
+        if (!alive) return;
         // Deliberately not "setup required". A server that cannot answer is a different problem
         // from a server that has not been claimed, and showing the wizard here would invite
         // someone to type a claim token into a form that cannot possibly work.
         setScreen({ name: 'unreachable' });
+        timer = window.setTimeout(() => void ask(), BOOT_RETRY_MS);
       }
-    })();
+    };
+
+    void ask();
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
   }, []);
 
   switch (screen.name) {
@@ -504,8 +553,15 @@ export function App(): React.JSX.Element {
           <main className="authcard">
             <BrandMark />
             <h1>Sunucuya ulaşılamıyor</h1>
-            <p>DEPSIS API yanıt vermedi. Servisin çalıştığını doğrulayın:</p>
-            <p className="val">systemctl status depsis-api</p>
+            {/* BURADA BİR KOMUT YAZMIYOR, ve yazmamasının sebebi kimin baktığı. Bu kart çoğu
+                zaman cihazın kendi ekranında ya da bir telefonda duruyor; ikisinde de bir kabuk
+                yok, ve `systemctl status depsis-api` satırı sahibine yapamayacağı bir şey
+                söylüyordu. Yukarıdaki yoklama zaten beş saniyede bir yeniden soruyor: burada
+                anlatılacak tek şey beklemesi gerektiği. */}
+            <p>
+              Cihaz başlatılıyor ya da servis yanıt vermiyor. Birkaç saniyede bir yeniden deneniyor;
+              bağlantı geri geldiğinde bu ekran kendiliğinden açılır.
+            </p>
             <div className="row">
               <button type="button" className="b pri" onClick={() => window.location.reload()}>
                 Yeniden dene
@@ -1042,11 +1098,8 @@ function Desktop({
           onYes={() => {
             setRebootAsk(false);
             void (async () => {
-              const { error } = await api.POST('/system/power/reboot', {});
-              // AJANIN SUSMASI BEKLENEN BİR SONUÇ: kapanma başladıysa cevap gelmeyebilir, ve o
-              // durumda "başlatılamadı" demek olan bitenin tam tersini söylemek olurdu. Yalnız
-              // sunucunun AÇIKÇA reddettiği durum hata sayılıyor.
-              if (error !== undefined) {
+              const { error, response } = await api.POST('/system/power/reboot', {});
+              if (rebootRefused(error, isTransportFailure(response))) {
                 push('error', 'Cihaz yeniden başlatılamadı.');
                 return;
               }

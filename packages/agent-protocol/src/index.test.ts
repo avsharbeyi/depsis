@@ -346,7 +346,12 @@ describe('envelope sanitising', () => {
   });
 
   it('pins the schema version the API expects', () => {
-    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 43 since `EntryName` and
+    // Must equal `SCHEMA_VERSION` in services/system-agent/src/op.rs. 44 since
+    // `backup_list_directory` took the `after` cursor: without it a `silinenler/<day>` folder
+    // holding more than one listing's worth of files is skipped by every retention round and
+    // stays on the backup disk for ever, and the recovery browser can never show past the first
+    // page of it. A stale agent simply ignores the operand and answers the truncated first page,
+    // so the handshake has to refuse rather than let the caller believe it paged. 43 since `EntryName` and
     // the two ownership operands on `restore_file_from_backup`. No operation was added or
     // removed — the list above is unchanged — but two operand TYPES were widened and two
     // operands are now required, so a new API against a stale agent must fail at the handshake:
@@ -392,7 +397,7 @@ describe('envelope sanitising', () => {
     // handshake instead of on the first privileged call. For these last two operations that
     // matters more than usual: a stale agent would leave share roots world-traversable and every
     // ACL entry pointing at a uid no account holds, with the API believing both were handled.
-    expect(EXPECTED_SCHEMA_VERSION).toBe(43);
+    expect(EXPECTED_SCHEMA_VERSION).toBe(44);
   });
 
   it('agrees with the number the agent actually reports', () => {

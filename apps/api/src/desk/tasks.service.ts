@@ -224,6 +224,20 @@ export class AssigneeNotFoundError extends Error {
   }
 }
 
+/**
+ * Parçası yapılmak istenen üst iş bu kuruluşta yok.
+ *
+ * Kendi tipi, çünkü tamiri farklı: `AssigneeNotFoundError` "seçicideki isim eskimiş" diyor, bu ise
+ * "işaret ettiğin iş yok" diyor. İkisi tek bir hataya çevrildiğinde, silinmiş bir üst iş için
+ * "bu kuruluşta böyle bir kullanıcı yok" cevabı dönüyordu.
+ */
+export class ParentTaskNotFoundError extends Error {
+  constructor() {
+    super('no such parent task in this organization');
+    this.name = 'ParentTaskNotFoundError';
+  }
+}
+
 /** SQLSTATE 23514 from `tasks_body_present`: an empty body, or one past 2000 characters. */
 export class TaskRejectedError extends Error {
   constructor(reason = 'a task needs a body of between 1 and 2000 characters') {
@@ -308,6 +322,9 @@ export class TasksService {
         // account in another household — a foreign key to `public.users` says the person exists,
         // not that they are one of us.
         await assertAssignee(db, organizationId, assigneeId);
+        // Ebeveyn de aynı işlemde, ve aynı gerekçeyle: yabancı anahtar kontrolleri satır
+        // güvenliğini atlıyor, yani başka bir kiracının işinin uuid'si buraya kadar geliyordu.
+        await assertParent(db, organizationId, parentId);
 
         const inserted = await db.query<TaskRow>(
           `WITH inserted AS (
@@ -402,7 +419,12 @@ export class TasksService {
           ? 'done'
           : // Geri alırken hangi duruma dönüleceği atanana bakıyor: atanmış bir işin kutusunun
             // işareti kaldırıldığında "taslak" demek, atamayı görünmez biçimde yok saymak olurdu.
-            (changes.assigneeId ?? before.assignee_id) !== null
+            //
+            // `??` DEĞİL, açık `undefined` kontrolü: aynı istekte gelen `assigneeId: null` atamayı
+            // KALDIRMAK demek, "belirtilmedi" demek değil. `??` ikisini birleştirip eski atanana
+            // bakıyordu, ve satır `status = 'assigned'` + `assignee_id = NULL` olarak yazılıyordu —
+            // panoda kimseye ait olmayan bir "Atandı" rozeti.
+            (changes.assigneeId !== undefined ? changes.assigneeId : before.assignee_id) !== null
             ? 'assigned'
             : 'draft');
 
@@ -456,21 +478,40 @@ export class TasksService {
       // `tasks_one_level_deep` tetikleyicisi reddediyor, burada değil. Kural veritabanında
       // olduğu için ikinci bir yazma yolu onu atlayamıyor; buradaki iş yalnız hatayı okunabilir
       // bir cevaba çevirmek (`translateDbError`).
+      //
+      // Tetikleyicinin GÖREMEDİĞİ tek şey ebeveynin BAŞKA bir kiracıya ait olması: `EXISTS`i RLS
+      // altında koşuyor, yani yabancı satırı bulamayıp sessizce geçiyor, ve yabancı anahtar
+      // kontrolleri satır güvenliğini her zaman atlıyor. Onu `assertParent` kesiyor (aşağıda).
       params.push(changes.parentId);
       sets.push(`parent_id = $${params.length}::uuid`);
     }
     if (sets.length === 0) return this.find(organizationId, id);
+
+    // Geçiş yukarıda BELLEKTE doğrulandı, ve okuma ile yazma ayrı işlemlerde: aynı saniyede iki
+    // kişi `in_progress` okuyup biri "Tamamlandı" öteki "İptal" yazarsa, net etki makinenin
+    // yasakladığı tek geçiş olan `done → cancelled` oluyor ve denetim izi bunu hiç göstermiyor.
+    // Beklenen eski durumu WHERE'e koymak yazmayı okumaya bağlıyor: kaybeden istek sıfır satır
+    // güncelliyor, ve aşağıda satırın GERÇEK hâliyle yeniden değerlendiriliyor.
+    let guard = '';
+    if (wanted !== undefined) {
+      // `sets` kurulduktan SONRA push ediliyor, yoksa yukarıdaki $n indeksleri kayardı.
+      params.push(before.status);
+      guard = ` AND status = $${params.length}`;
+    }
 
     try {
       const rows = await this.db.withTenant(organizationId, async (db) => {
         if (changes.assigneeId !== undefined) {
           await assertAssignee(db, organizationId, changes.assigneeId);
         }
+        if (changes.parentId !== undefined) {
+          await assertParent(db, organizationId, changes.parentId);
+        }
 
         return db.query<TaskRow>(
           `WITH updated AS (
              UPDATE public.tasks SET ${sets.join(', ')}
-              WHERE organization_id = $1 AND id = $2
+              WHERE organization_id = $1 AND id = $2${guard}
               RETURNING *
            )
            SELECT ${SELECT_COLUMNS}
@@ -480,7 +521,14 @@ export class TasksService {
         );
       });
       const row = rows[0];
-      if (!row) throw new TaskNotFoundError();
+      // Sıfır satır iki şey demek olabiliyor: iş silinmiş, ya da durumu okuduğumuzdan beri
+      // değişmiş. İkincisini "bulunamadı" diye cevaplamak, aynı anda çalışan bir meslektaşı
+      // silinmiş bir iş gibi göstermek olurdu.
+      if (!row) {
+        const current = await this.find(organizationId, id);
+        if (wanted !== undefined) throw new TaskStatusTransitionRefused(current.status, wanted);
+        throw new TaskNotFoundError();
+      }
       // `fields` ve `changes` DEĞİL: aynı blokta `changes` adında bir sabit tanımlamak, dışarıdaki
       // parametreyi bloğun TAMAMI için gölgeliyor — yukarıdaki `changes.assigneeId` dahil.
       const fields = diff(before, row);
@@ -503,9 +551,49 @@ export class TasksService {
       }
       await this.record(organizationId, id, actorId, fields);
       await this.announce(organizationId, actorId, before, row, fields);
+      await this.ensureSweepScheduled(organizationId, before, row);
       return row;
     } catch (error) {
       throw translateDbError(error);
+    }
+  }
+
+  /**
+   * Son tarih hatırlatmalarının zincirini kur — henüz kurulu değilse.
+   *
+   * Zinciri kuran TEK yer açılıştı (`NotificationsService.onModuleInit`), ve orası "şu anda son
+   * tarihli açık işi olan kiracılar" ile kapılıydı. Kurulumdan yeni çıkmış bir cihazda `tasks`
+   * boş: hiçbir `tasks.overdue-sweep` satırı yazılmıyor, ve ilk işine son tarih veren sahibi için
+   * "Gecikti"/"Yarına kadar" bildirimleri API bir dahaki kez yeniden başlayana kadar — yani
+   * haftalarca — hiç düşmüyor. Eksik olan şey bir bildirimin YOKLUĞU, yani hiçbir ekran yanlış
+   * görünmüyor.
+   *
+   * `due_at` yalnız `update` üzerinden yazılıyor, o yüzden kanca burada. Kapalı bir işin yeniden
+   * açılması da aynı kancayı hak ediyor: zincir o kiracıda hiç kurulmamış olabilir.
+   *
+   * Hata YUTULUYOR: kuyruğa yazamamak, gerçekleşmiş bir güncellemeyi çağırana başarısız
+   * göstermemeli. `ON CONFLICT DO NOTHING` + `job_queue_one_scheduled_overdue_sweep` zaten
+   * bekleyen bir taramanın ikinci kopyasını kesiyor, yani bu çağrı çoğu zaman boşa dönen bir
+   * INSERT — `BackupTargetController.prepare` ile aynı kalıp.
+   */
+  private async ensureSweepScheduled(
+    organizationId: string,
+    before: TaskRow,
+    after: TaskRow,
+  ): Promise<void> {
+    if (after.due_at === null) return;
+    if (after.status === 'done' || after.status === 'cancelled') return;
+    const dueChanged = before.due_at?.getTime() !== after.due_at.getTime();
+    const reopened = before.status !== after.status;
+    if (!dueChanged && !reopened) return;
+    try {
+      await this.notifications.scheduleSweep(organizationId, new Date());
+    } catch (error) {
+      this.logger.warn(
+        `task ${after.id}: due date set, but the overdue sweep was not scheduled: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
@@ -775,6 +863,12 @@ export class TasksService {
  * Runs on the tenant-scoped connection, so the lookup itself is behind the same policy as the
  * write it guards — an id from another tenant returns no row here for the same reason it would
  * return no row anywhere else, rather than because this function compared two strings.
+ *
+ * DEVRE DIŞI HESAP DA REDDEDİLİYOR. Kapatılmış bir hesap oturum açamıyor (0003), yani ona atanan
+ * bir iş kimseye ulaşmıyor: sahibi işi "atandı" sanıyor, kimse yapmıyor, ve gecikme taraması
+ * kimsenin açmayacağı bir gelen kutusuna hatırlatma yazıyor. Var olan atamalar bundan
+ * ETKİLENMİYOR — kontrol yalnız `assigneeId` gönderilen isteklerde koşuyor, ve arayüz kısmi PATCH
+ * gönderiyor.
  */
 async function assertAssignee(
   db: TenantQuery,
@@ -783,10 +877,39 @@ async function assertAssignee(
 ): Promise<void> {
   if (assigneeId === null) return;
   const rows = await db.query<{ id: string }>(
-    `SELECT id::text AS id FROM public.users WHERE organization_id = $1 AND id = $2`,
+    `SELECT id::text AS id FROM public.users
+      WHERE organization_id = $1 AND id = $2 AND disabled_at IS NULL`,
     [organizationId, assigneeId],
   );
   if (rows.length === 0) throw new AssigneeNotFoundError();
+}
+
+/**
+ * Üst işin BU kiracıya ait olduğunu doğrula.
+ *
+ * `assertAssignee` ile aynı gerekçe, ama eksikliği daha sessizdi: `parent_id` hiç doğrulanmıyordu.
+ * Olmayan bir uuid yabancı anahtar ihlaline düşüyor ve `translateDbError` onu "bu kuruluşta böyle
+ * bir kullanıcı yok" diye çeviriyordu — atanan kişinin gittiğini sanan bir kullanıcı. Başka bir
+ * kiracının işinin uuid'si ise KABUL EDİLİYORDU: yabancı anahtar kontrolleri satır güvenliğini her
+ * zaman atlıyor, ve `tasks_one_level_deep` tetikleyicisinin `EXISTS`'i RLS altında o satırı
+ * göremediği için sessizce geçiyordu. Sonuç, görünmeyen bir ebeveyne bağlı bir iş — ve o kiracı
+ * kendi işini sildiğinde `ON DELETE CASCADE` bunu da siliyordu.
+ *
+ * Kalıcı çözüm bileşik bir yabancı anahtar (`(organization_id, parent_id)`), ki o zaman kural
+ * veritabanında durur; bu kontrol onun yerini tutuyor, oku-sonra-yaz aralığı kadar dar bir
+ * pencereyle.
+ */
+async function assertParent(
+  db: TenantQuery,
+  organizationId: string,
+  parentId: string | null,
+): Promise<void> {
+  if (parentId === null) return;
+  const rows = await db.query<{ id: string }>(
+    `SELECT id::text AS id FROM public.tasks WHERE organization_id = $1 AND id = $2`,
+    [organizationId, parentId],
+  );
+  if (rows.length === 0) throw new ParentTaskNotFoundError();
 }
 
 /** SQLSTATE, not message text — see the note on the same function in `notes.service.ts`. */
@@ -823,7 +946,16 @@ function translateDbError(error: unknown): Error {
     }
     // The assignee vanished between the check above and the write. Rare, but it is a stale picker
     // rather than a fault, so it gets the same answer as the check that normally catches it.
-    if (code === '23503') return new AssigneeNotFoundError();
+    //
+    // HANGİ yabancı anahtar olduğu önemli: `tasks` üçünü birden taşıyor (`assignee_id`,
+    // `created_by`, `parent_id`) ve üçünü aynı cümleye çevirmek, silinmiş bir ÜST İŞ için
+    // "bu kuruluşta böyle bir kullanıcı yok" cevabı üretiyordu — okuyanı yanlış yere bakmaya
+    // gönderen bir mesaj. Kısıt adı PostgreSQL'in otomatik verdiği ad, ve hata nesnesinde geliyor.
+    if (code === '23503') {
+      const constraint = (error as { constraint?: string }).constraint ?? '';
+      if (constraint === 'tasks_parent_id_fkey') return new ParentTaskNotFoundError();
+      return new AssigneeNotFoundError();
+    }
   }
   return error instanceof Error ? error : new Error(String(error));
 }

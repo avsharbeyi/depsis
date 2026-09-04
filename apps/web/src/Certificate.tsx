@@ -34,6 +34,27 @@ function bareName(name: string): string {
 }
 
 /**
+ * Rozetin ne diyeceği — ve "HENÜZ OKUNMADI" ile "OKUNAMADI" AYRI.
+ *
+ * İkisini tek bir `status === null` dalında toplamak, ajan çalışmadığında paneli sonsuza dek
+ * "okunuyor…" bırakıyordu: uç 503 dönüyor, ekranda dönen bir şey yok, ve parmak izini
+ * karşılaştırmak için gelen kişi neyin yanlış olduğunu hiçbir yerde göremiyor. Bir cihazda
+ * bekleyen bir rozet, bekleyen bir kullanıcı demektir.
+ */
+export type CertificateBadge = 'okunuyor' | 'okunamadı' | 'sertifika yok' | 'kendinden' | 'güvenli';
+
+export function certificateBadge(
+  status: Pick<TlsStatus, 'fingerprint' | 'selfSigned'> | null,
+  loading: boolean,
+  problem: string | null,
+): CertificateBadge {
+  if (problem !== null) return 'okunamadı';
+  if (loading || status === null) return 'okunuyor';
+  if (status.fingerprint === '') return 'sertifika yok';
+  return status.selfSigned ? 'kendinden' : 'güvenli';
+}
+
+/**
  * Sertifika — kutunun HTTPS kimliği.
  *
  * İKİ İŞ, VE İLKİ EN AZ İKİNCİSİ KADAR ÖNEMLİ.
@@ -53,6 +74,9 @@ function bareName(name: string): string {
  */
 export function CertificatePanel({ notify }: { notify: Notify }): React.JSX.Element | null {
   const [status, setStatus] = useState<TlsStatus | null>(null);
+  /** İlk okuma daha dönmedi mi — `status === null` bunu artık tek başına söyleyemiyor. */
+  const [loading, setLoading] = useState(true);
+  const [problem, setProblem] = useState<string | null>(null);
   const [allowed, setAllowed] = useState(true);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -61,12 +85,21 @@ export function CertificatePanel({ notify }: { notify: Notify }): React.JSX.Elem
   const [password, setPassword] = useState('');
 
   const load = useCallback(async (): Promise<void> => {
-    const { data, response } = await api.GET('/system/tls', {});
+    setProblem(null);
+    const { data, error, response } = await api.GET('/system/tls', {});
     if (response.status === 403) {
       setAllowed(false);
       return;
     }
-    setStatus(data ?? null);
+    setLoading(false);
+    if (data === undefined) {
+      // Ajan düşükse uç 503 veriyor. Bunu `status = null` ile geçiştirmek, cevabı gelmiş ama
+      // OLUMSUZ gelmiş bir isteği hiç gelmemiş gibi göstermekti; ekranda kalan tek şey dönen
+      // bir rozetti ve sebebi hiçbir yerde yazmıyordu.
+      setProblem(problemMessage(error, 'Sertifika okunamadı.'));
+      return;
+    }
+    setStatus(data);
   }, []);
 
   useEffect(() => {
@@ -96,6 +129,7 @@ export function CertificatePanel({ notify }: { notify: Notify }): React.JSX.Elem
   }
 
   const names = status?.names ?? [];
+  const badge = certificateBadge(status, loading, problem);
 
   return (
     <>
@@ -104,18 +138,29 @@ export function CertificatePanel({ notify }: { notify: Notify }): React.JSX.Elem
       <div className="netrow">
         <span className="lbl">Kimlik</span>
         <span className="val">{status === null ? '—' : commonName(status.subject)}</span>
-        {status === null ? (
+        {badge === 'okunuyor' ? (
           <span className="pill dim">okunuyor…</span>
-        ) : status.fingerprint === '' ? (
+        ) : badge === 'okunamadı' ? (
+          <span className="pill bad">okunamadı</span>
+        ) : badge === 'sertifika yok' ? (
           // Ajan sertifikayi okuyamadi. Bunu bos alanlarla gostermek, kurulmamis bir kutuyu
           // bozuk bir kutudan ayirt edilemez yapardi.
           <span className="pill warn">okunabilir bir sertifika yok</span>
-        ) : status.selfSigned ? (
+        ) : badge === 'kendinden' ? (
           <span className="pill warn">kendinden imzalı</span>
         ) : (
           <span className="pill">güvenilir bir kurum imzaladı</span>
         )}
       </div>
+
+      {problem !== null && (
+        <p className="note warn">
+          {problem} Cihaz yeni açılıyorsa birkaç saniye içinde okunur.{' '}
+          <button type="button" className="lnk" onClick={() => void load()}>
+            Yeniden dene
+          </button>
+        </p>
+      )}
 
       {status !== null && status.fingerprint !== '' && (
         <>

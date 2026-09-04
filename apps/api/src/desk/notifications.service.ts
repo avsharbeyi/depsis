@@ -155,6 +155,12 @@ export class NotificationsService implements OnModuleInit {
            SELECT $1, n.user_id::uuid, n.kind, n.task_id::uuid, n.title
              FROM unnest($2::text[], $3::text[], $4::text[], $5::text[])
                AS n(user_id, kind, task_id, title)
+             -- Alıcı SATIRINA bakılıyor, çünkü listeyi toplamakla yazmak arasında geçen sürede
+             -- hesap silinmiş olabilir: yabancı anahtar ihlali TÜM partiyi düşürürdü, yani yirmi
+             -- alıcının hiçbiri bildirim almazdı. Devre dışı hesap da eleniyor — oturum açamayan
+             -- birinin gelen kutusuna yazmak yalnız tabloyu şişirir.
+             JOIN public.users u
+               ON u.organization_id = $1 AND u.id = n.user_id::uuid AND u.disabled_at IS NULL
            -- Kısmi benzersiz indeks tekrarı kesiyor; burada bu bir HATA değil, beklenen durum.
            ON CONFLICT DO NOTHING`,
           [
@@ -183,24 +189,52 @@ export class NotificationsService implements OnModuleInit {
    * yeniden başlatmada kayboluyor — bir hatırlatma sisteminin sessizce durmasının yolu. Zamanlayıcı
    * kuyruğun kendisi (`run_after`), ve her tarama bir sonrakini kuyruğa alıyor.
    *
-   * "YAKLAŞAN" YİRMİ DÖRT SAAT, ve tek bir kez düşüyor. Bir hatırlatma her saat tekrar ederse
-   * hatırlatma olmaktan çıkıp gürültü olur; kısmi benzersiz indeks bunu şemada tutuyor, burada
-   * `ON CONFLICT DO NOTHING` ile karşılanıyor.
+   * "YAKLAŞAN" YİRMİ DÖRT SAAT, ve günde en çok bir kez düşüyor. Bir hatırlatma her saat tekrar
+   * ederse hatırlatma olmaktan çıkıp gürültü olur. Şemadaki kısmi benzersiz indeks bunu TEK BAŞINA
+   * tutamıyor: o indeks `WHERE read_at IS NULL`, yani kullanıcı "Gecikti"yi okur okumaz çakışacak
+   * satır kalmıyor ve bir sonraki tarama (on beş dakika sonra) aynı bildirimi yeniden yazıyor —
+   * iş kapanana kadar günde doksan altı kez. Bu yüzden sorgu, aynı iş+kişi+tür için son yirmi dört
+   * saatte YAZILMIŞ bir satır varsa — okunmuş olsun ya da olmasın — o işi hiç seçmiyor.
+   *
+   * Eşiğin zamana bağlı olması ayrıca yeniden gecikmeyi kendiliğinden çözüyor: son tarihi ileriye
+   * alınan ya da kapanıp yeniden açılan bir iş tekrar gecikirse, ertesi gün yeniden hatırlatılıyor.
+   * "Hiç bildirilmiş mi" diye sormak onu sonsuza kadar susturur ve bildirim satırlarını elle
+   * silmeyi gerektirirdi.
    *
    * `actorId: null` — bunu yapan bir insan yok. Kendine-bildirme kontrolü de bu yüzden hiçbir şeyi
    * elemiyor, ki doğrusu bu: bir işin gecikmesi, atananın kendi yaptığı bir şey değil.
+   *
+   * Dönen sayılar BU TURDA DUYURULANLAR, "şu anda gecikmiş olanlar" değil: son yirmi dört saatte
+   * zaten hatırlatılmış bir iş sayılmıyor. Sessiz bir tur normal ve çoğunluk.
    */
   async sweepOverdue(organizationId: string): Promise<{ overdue: number; due: number }> {
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<{ id: string; body: string; assignee_id: string | null; late: boolean }>(
-        `SELECT id::text AS id, body, assignee_id::text AS assignee_id,
-                (due_at < now()) AS late
-           FROM public.tasks
-          WHERE organization_id = $1
-            AND due_at IS NOT NULL
-            AND status <> 'done' AND status <> 'cancelled'
-            AND due_at < now() + interval '24 hours'
-            AND assignee_id IS NOT NULL
+        `SELECT t.id::text AS id, t.body, t.assignee_id::text AS assignee_id,
+                (t.due_at < now()) AS late
+           FROM public.tasks t
+           -- Devre dışı bırakılmış hesap bildirim almıyor: gelen kutusunu kimse açmayacak, ve o
+           -- kutuya günde bir satır yazmak yalnız tabloyu şişirir.
+           JOIN public.users u
+             ON u.organization_id = t.organization_id
+            AND u.id = t.assignee_id
+            AND u.disabled_at IS NULL
+          WHERE t.organization_id = $1
+            AND t.due_at IS NOT NULL
+            AND t.status <> 'done' AND t.status <> 'cancelled'
+            AND t.due_at < now() + interval '24 hours'
+            AND t.assignee_id IS NOT NULL
+            -- Aynı iş+kişi+tür için son yirmi dört saatte yazılmış satır varsa bu işi hiç seçme.
+            -- Okunmuş bir bildirim de sayılıyor; kısmi benzersiz indeks yalnız okunmamışları
+            -- kapsadığı için tekrarı o kesemiyor.
+            AND NOT EXISTS (
+              SELECT 1 FROM public.notifications n
+               WHERE n.organization_id = t.organization_id
+                 AND n.task_id = t.id
+                 AND n.user_id = t.assignee_id
+                 AND n.kind = CASE WHEN t.due_at < now() THEN 'task.overdue' ELSE 'task.due' END
+                 AND n.created_at > now() - interval '24 hours'
+            )
           -- tasks_due kismi indeksi tam bu sorgu icin: son tarihi olmayan ve kapanmis isler
           -- indekste hic yer kaplamiyor, ve bir yapilacaklar listesinde satirlarin cogu zamanla o
           -- iki kumeye giriyor.

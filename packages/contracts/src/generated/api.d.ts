@@ -498,6 +498,105 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/me/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bu hesabın açık oturumları
+         * @description ADR-0009 §60 "kullanıcı kendi oturumlarını görür ve sonlandırır" diyor, ve `sessions`
+         *     tablosu `user_agent` ile `ip_address` sütunlarını bu liste için taşıyor (0003). Uç yoktu:
+         *     başka bir bilgisayarda oturumunu açık bıraktığından şüphelenen birinin tek çaresi parola
+         *     değiştirmekti, ki o da hepsini birden kapatıyor.
+         *
+         *     Oturum jetonunun kendisi ya da özeti HİÇBİR ZAMAN dönmez. `current`, isteği yapan
+         *     oturumun hangisi olduğunu söylüyor.
+         *
+         *     Liste yalnız YAŞAYAN oturumları taşıyor: iptal edilmiş ve süresi geçmiş satırlar zaten
+         *     kimseyi içeri almıyor, ve onları göstermek listeyi okunmaz yapardı.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Açık oturumlar, en son görülen önce */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DeviceSessionPage"];
+                    };
+                };
+                401: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me/sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Bir cihazın oturumunu sonlandır
+         * @description Yalnız İSTEĞİ YAPANIN kendi oturumları. Kullanıcı kimliği sorgunun içinde, RLS'e
+         *     bırakılmış değil: politika kiracıyı ayırıyor ama oturumdaki kişiyi bilmiyor, yani onsuz
+         *     aynı kiracının herhangi bir üyesi bir başkasının oturumunu kapatabilirdi.
+         *
+         *     KENDİ OTURUMU DA KAPATILABİLİR. Asıl amaç kişinin kendi cihazını uzaktan düşürebilmesi;
+         *     listedeki `current` satırını istisna yapmak, "bu cihazı çıkar" düğmesini tam da en çok
+         *     istendiği yerde çalışmaz kılardı. Kapatılan oturum isteği yapansa çerez de temizlenir ve
+         *     bir sonraki istek 401 döner.
+         *
+         *     Bilinmeyen ya da başkasına ait bir id 404 döner.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Oturum sonlandırıldı */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/directory/users": {
         parameters: {
             query?: never;
@@ -512,10 +611,17 @@ export interface paths {
          *     `/users` ona 403 döner. Arayüz o 403'ü boş bir listeye çevirdiği sürece devredilmiş yetki
          *     "kutuda hiç kullanıcı yok" gibi görünüyordu — çalışan bir yetki, çalışmayan bir ekran.
          *
-         *     DÖNEN ŞEY BİR AD VE BİR KİMLİKTİR, BAŞKA HİÇBİR ŞEY DEĞİL. Rol, e-posta, kapatılma
-         *     durumu, oluşturulma zamanı — hiçbiri yok. Kullanıcı adları zaten her üyeye görünüyor: iş
-         *     panosunda atanan kişi, dosya listesinde sahip, yorumda yazar. Bu uç yeni bir şey
-         *     sızdırmıyor, var olanı seçilebilir hâle getiriyor.
+         *     DÖNEN ŞEY BİR AD, BİR KİMLİK VE HESABIN AÇIK OLUP OLMADIĞIDIR. Rol, e-posta, oluşturulma
+         *     zamanı — hiçbiri yok. Kullanıcı adları zaten her üyeye görünüyor: iş panosunda atanan
+         *     kişi, dosya listesinde sahip, yorumda yazar. Bu uç yeni bir şey sızdırmıyor, var olanı
+         *     seçilebilir hâle getiriyor.
+         *
+         *     `disabled` SONRADAN EKLENDİ ve bir gerekçesi var: kapatılmış hesaplar listede KALMAK
+         *     zorunda — izin paneli ile ekipler ekranı var olan yetkilerin adını buradan çözüyor, ve
+         *     süzülselerdi o satırlar adsız kalırdı. Ama atama seçicisinin onları göstermemesi gerekiyor:
+         *     kapatılmış bir hesap oturum açamıyor, yani ona atanan iş kimseye ulaşmıyor ve gecikme
+         *     taraması kimsenin okumayacağı bir gelen kutusuna hatırlatma yazıyor. Sunucu da aynı kuralı
+         *     uyguluyor — kapatılmış bir hesabı atamaya çalışmak 404 döner.
          */
         get: {
             parameters: {
@@ -760,6 +866,79 @@ export interface paths {
                 409: components["responses"]["Problem"];
             };
         };
+        trace?: never;
+    };
+    "/users/{id}/mfa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Bir hesabın ikinci faktörünü sıfırla
+         * @description Yalnız yöneticiler. Telefonunu VE kurtarma kodlarını kaybeden birinin üründen
+         *     kurtarılmasının yolu.
+         *
+         *     BU UÇ YOKTU, ve eksikliği terminale mahkûm ediyordu: ikinci faktörü silen tek yer
+         *     `DELETE /me/mfa` idi ve orası hesabın KENDİ oturumunu ve KENDİ parolasını istiyor —
+         *     girişi ikinci adımda duran biri oraya hiç ulaşamıyor. Parola sıfırlama bileti de
+         *     kurtarmıyor, çünkü bilet kayıtlı bir hesapta yine kod soruyor. Geriye iki tablodan elle
+         *     satır silmek ya da hesabı silip yeniden açmak kalıyordu — ikincisi ekip üyeliklerini,
+         *     klasör hibelerini ve POSIX kimliğini de götürüyor.
+         *
+         *     YÖNETİCİNİN KENDİ PAROLASI İSTENİYOR, `DELETE /users/{id}` ile aynı §0.5 gerekçesiyle:
+         *     bir hesabın ikinci adımını kaldırmak, ele geçirilmiş bir yönetici oturumunun yapmak
+         *     isteyeceği ilk şeydir.
+         *
+         *     HEDEFİN OTURUMLARI KAPATILIYOR. İkinci faktörü kaldırılan hesabın açık oturumları,
+         *     kaldırmanın sebebi olan şüpheyi taşıyor olabilir.
+         *
+         *     KENDİ HESABI İÇİN 409. Yöneticinin kendi ikinci faktörünün yolu `/me/mfa`; buradan
+         *     yapması hem gereksiz hem de kendi oturumunu iptal edip kilitlenmesi demek.
+         *
+         *     İkinci faktörü zaten olmayan bir hesap için de 204 döner: istenen durum zaten sağlanmış.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Çağıran YÖNETİCİNİN kendi parolası. Hedef kullanıcının değil. */
+                        password: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description İkinci faktör kaldırıldı; hedefin oturumları sonlandırıldı */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Problem"];
+                401: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/users/{id}/password-reset": {
@@ -6308,6 +6487,14 @@ export interface paths {
          *     yalnız etki döner — §6.2'nin "her izin değişimi dry-run ile etkilenecek kullanıcı/klasör
          *     sayısını göstermeli" şartı burada da geçerli, çünkü ekip silmek toplu bir izin
          *     değişikliğidir.
+         *
+         *     İKİ RET, ikisi de 409 ve ikisi de kuru koşuda da veriliyor — gerçekleşemeyecek bir
+         *     silmenin önizlemesi, retten kötü bir cevap. Birincisi: silme bir paylaşımın SON izin
+         *     satırını götürecekse reddediliyor, çünkü kuralsız kalan paylaşım yöneticiden başka
+         *     herkese görünmez oluyor. İkincisi: 'Herkes' ekibi silinemiyor — yeni hesaplar ve yeni
+         *     paylaşımlar onu adıyla buluyor, silinirse boş bir kopyası yeniden doğuyor ve bugünkü
+         *     paylaşımların izinleri onunla birlikte gidiyor. İzni daraltmak için ekibin hibeleri
+         *     düzenlenir.
          */
         delete: {
             parameters: {
@@ -6340,6 +6527,7 @@ export interface paths {
                 };
                 403: components["responses"]["Problem"];
                 404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
             };
         };
         options?: never;
@@ -6348,6 +6536,13 @@ export interface paths {
          * Ekibi yeniden adlandır
          * @description Yalnız organizasyon yöneticileri ya da o ekibin yöneticisi (§6.1: "Ekip yöneticisi —
          *     kendi ekibi içindeki kullanıcı, klasör ve görevler").
+         *
+         *     'HERKES' EKİBİ HARİÇ, ve 409 döner. Yeni hesaplar ile yeni paylaşımlar o ekibi ADIYLA
+         *     buluyor (`everyone_team()`), bulamazsa yenisini açıp bütün kullanıcıları ona alıyor: adı
+         *     değiştirilirse bir sonraki hesap açılışında ikinci bir "Herkes" doğuyor, bugünkü
+         *     paylaşımların izinleri adı değişen eski ekipte kalıyor, ve yeni kullanıcılar "herkes
+         *     görür" diye açılmış paylaşımları ne SMB'den ne arayüzden görebiliyor. Aynı kimliğe
+         *     katlanan bir düzeltme (büyük/küçük harf) serbest.
          */
         patch: {
             parameters: {
@@ -6918,6 +7113,28 @@ export interface components {
             password: string;
         };
         /**
+         * @description Açık bir oturum, sahibine gösterildiği hâliyle. Jeton ya da özeti yok: `sessions.token_hash`
+         *     bu şemanın hiçbir alanına karşılık gelmiyor ve gelmemeli.
+         */
+        DeviceSession: {
+            /** Format: uuid */
+            id: string;
+            /** @description Bu listeyi isteyen oturumun kendisi mi. */
+            current: boolean;
+            /** @description Tarayıcının kendi tanıttığı ad; güvenilmez bir metin. */
+            userAgent: string | null;
+            ipAddress: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            lastSeenAt: string;
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        DeviceSessionPage: {
+            items: components["schemas"]["DeviceSession"][];
+        };
+        /**
          * @description Allow-only. deny yoktur — POSIX ACL'de deny ACE diye bir şey yok ve uygulanan
          *     substrat onu ifade edemez (ADR-0004).
          * @enum {string}
@@ -6962,6 +7179,7 @@ export interface components {
             /** Format: uuid */
             id: string;
             username: string;
+            disabled: boolean;
         };
         DirectoryPage: {
             items: components["schemas"]["DirectoryEntry"][];
@@ -7352,6 +7570,13 @@ export interface components {
              *     listesinin kendisi eklendiğinin kaydı, ve iki yere yazmak iki farklı doğruluk kaynağı
              *     demek. Kaybolan şeyin izi ise başka hiçbir yerde kalmıyor — `oldValue` silinen gövdenin
              *     ilk 200 karakteri, `newValue` null.
+             *
+             *     İKİ ALAN YÖNETİCİDEN BAŞKASINA NULL DÖNER. `comment` satırında `oldValue`: silinen bir
+             *     yorumun gövdesini her üyeye geri vermek, silmeyi görüntüden ibaret yapardı. `file_link`
+             *     satırında İKİSİ BİRDEN: denetim satırı dosyanın tam yolunu tutuyor — altı ay sonra bir
+             *     uuid hiçbir şeye çözülmüyor — ama bağ listesi (`GET /tasks/{id}/files`) o yolu, dosyayı
+             *     göremeyen üyeden özenle gizliyor, ve dosya adının kendisi bilgi. Yol denetimde kalıyor,
+             *     akran görmüyor.
              * @enum {string}
              */
             field: "status" | "priority" | "due_at" | "assignee_id" | "body" | "description" | "file_link" | "comment" | "parent_id" | "checklist" | "tag";

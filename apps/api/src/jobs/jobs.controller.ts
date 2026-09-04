@@ -12,13 +12,21 @@ import {
 import type { OpenApi } from '@depsis/contracts';
 
 import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import { requireUuid } from '../files/files.controller.js';
 import { JobsService, type Job, type JobStatus } from './jobs.service.js';
 
 type Schemas = OpenApi.components['schemas'];
 type JobResponse = Schemas['Job'];
 
-/** The five the queue can be in. Written here so a typo in a query string is a 422, not an empty page. */
-const STATUSES: readonly JobStatus[] = ['queued', 'running', 'succeeded', 'failed', 'dead'];
+/** The six the queue can be in. Written here so a typo in a query string is a 422, not an empty page. */
+const STATUSES: readonly JobStatus[] = [
+  'queued',
+  'running',
+  'succeeded',
+  'failed',
+  'dead',
+  'cancelled',
+];
 
 /** How many rows one page returns when the caller does not say. */
 const DEFAULT_LIMIT = 50;
@@ -87,6 +95,11 @@ export class JobsController {
    * security already makes them the same query result, and they should be the same ANSWER too: a
    * 403 here would confirm that the id names something real, turning this endpoint into an oracle
    * for which job ids exist elsewhere.
+   *
+   * `requireUuid` ÖNCE. `find_job(p_id uuid)` bir uuid bekliyor, yani `/jobs/abc` PostgreSQL'de
+   * 22P02 fırlatıyor; `HttpException` olmadığı için filtre bunu 500 `internal-error` yapıp her
+   * istekte günlüğe bir yığın izi yazıyordu. Bozuk bir bağlantı sunucu hatası değil, olmayan bir
+   * kaynaktır.
    */
   @Get(':jobId')
   async find(
@@ -95,12 +108,31 @@ export class JobsController {
   ): Promise<JobResponse> {
     const session = request.depsis;
     if (session === undefined) throw new UnauthorizedException();
+    requireUuid(jobId);
 
     const job = await this.jobs.find(session.organizationId, jobId);
     if (job === null) throw new NotFoundException();
 
     return toResponse(job);
   }
+
+  // ── İPTAL UCU HENÜZ BURADA DEĞİL, VE SEBEBİ BİR KARAR ────────────────────────────────────────
+  //
+  // §5.1 "mümkünse iptal edilir" diyor ve sunucu tarafı hazır: göç 0059 `cancel_job`ı ve
+  // `cancelled` durumunu ekliyor, `JobsService.cancel` onu sürüyor, davranışı
+  // `jobs.integration.test.ts` ölçüyor — kuyruktaki iş hiç alınmıyor, çalışan iş bir sonraki
+  // `report()`ta duruyor.
+  //
+  // Eksik olan tek şey SÖZLEŞME. `contract.test.ts` bilerek her iki yönde de hata veriyor: belgede
+  // yazmayan bir rota, üretilen hiçbir istemcinin çağıramayacağı bir rotadır. `POST
+  // /jobs/{jobId}/cancel` ve `Job.status` enum'una `cancelled`,
+  // `packages/contracts/openapi/depsis.yaml`a eklenip `generated/api.d.ts` yeniden üretilmeden bu
+  // uç eklenirse kapı kırmızı yanar — ve bu dosya o belgeyi yazamaz.
+  //
+  // Eklendiğinde: `@Post(':jobId/cancel')`, `@HttpCode(204)`, `requireUuid(jobId)`,
+  // `this.jobs.cancel(...)` false ise 404. Yönetici kapısı OLMADAN, `GET /jobs/:jobId` ile aynı
+  // gerekçeyle: kimliği elde tutmak yetkinin kendisi, ve kopyalamayı yanlış klasöre başlatan
+  // kişinin onu durdurabilmesi gerekiyor. `toResponse`'daki `as` de o zaman kalkar.
 }
 
 /**
@@ -113,7 +145,11 @@ function toResponse(job: Job): JobResponse {
   return {
     id: job.id,
     kind: job.kind,
-    status: job.status,
+    // `as`, ve bu bir kestirme değil bir borç: `cancelled` sözleşmenin `Job.status` enum'unda
+    // henüz yok (packages/contracts/openapi/depsis.yaml, `Job`). Durum veritabanında ve bu
+    // serviste gerçek; eksik olan yalnız belgenin listesi ve ondan üretilen tip. Enum'a
+    // `cancelled` eklenip `generated/api.d.ts` yeniden üretildiğinde bu dönüşüm kaldırılmalı.
+    status: job.status as JobResponse['status'],
     progress: job.progress,
     createdAt: job.createdAt.toISOString(),
     // `error` is present only when there is one. The queue stores a single string, so it is

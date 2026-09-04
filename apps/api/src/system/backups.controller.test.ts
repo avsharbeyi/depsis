@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { OpenApi } from '@depsis/contracts';
 
 import { BackupsController, explain } from './backups.controller.js';
+import { MAX_DATASETS } from './backups.service.js';
 import type { BackupsService, PoolSnapshot, SnapshotRow } from './backups.service.js';
 
 type Schemas = OpenApi.components['schemas'];
@@ -180,5 +181,39 @@ describe('the backups list, compared against the pool', () => {
     const byDataset = new Map(page.items.map((item) => [item.dataset, item.state]));
     expect(byDataset.get('tank/a')).toBe('present');
     expect(byDataset.get('tank/b')).toBe('missing');
+  });
+
+  it('sorulmamis bir veri kumesinin satirini "kayip" gostermiyor', async () => {
+    // `inventory` en cok `MAX_DATASETS` kume soruyor. Sorulmayan kumenin satirlari eskiden
+    // `missing` cikiyordu — yani "kabuktan silinmis; geri donulemez" — oysa havuzda duruyorlardi:
+    // on yedinci paylasimi olan bir cihazda o paylasimin butun geri donus noktalari yok
+    // goruluyordu. Sorulmamis bir sey hakkinda verilebilecek tek durust cevap `unknown`.
+    const datasets = Array.from(
+      { length: MAX_DATASETS + 1 },
+      (_, n) => `tank/pay${String(n).padStart(2, '0')}`,
+    );
+    const last = datasets[MAX_DATASETS] as string;
+    const page = await controllerWith(
+      datasets.map((dataset) => row('nightly', dataset)),
+      datasets.slice(0, MAX_DATASETS).map((dataset) => onPool('nightly', dataset)),
+    ).list();
+
+    const byDataset = new Map(page.items.map((item) => [item.dataset, item.state]));
+    expect(byDataset.get('tank/pay00')).toBe('present');
+    expect(byDataset.get(last)).toBe('unknown');
+    // VE CEVABIN TAMAMI EKSIK. Yalnizca durumu degistirmek, ekranin "liste eksiksiz" demeye
+    // devam etmesi demek olurdu.
+    expect(page.complete).toBe(false);
+  });
+
+  it('kumelerin hepsi sorulabildiginde liste eksiksiz kaliyor', async () => {
+    const datasets = Array.from({ length: MAX_DATASETS }, (_, n) => `tank/pay${n}`);
+    const page = await controllerWith(
+      datasets.map((dataset) => row('nightly', dataset)),
+      datasets.map((dataset) => onPool('nightly', dataset)),
+    ).list();
+
+    expect(page.complete).toBe(true);
+    expect(page.items.every((item) => item.state === 'present')).toBe(true);
   });
 });

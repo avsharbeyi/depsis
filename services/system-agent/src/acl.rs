@@ -81,20 +81,18 @@
 //! The API stores the tree, so a mass re-apply is a loop of these calls on the API's side, where
 //! each folder's own grant row is the thing being written.
 //!
-//! ## Nothing calls this yet
+//! ## Who calls this
 //!
-//! Stated plainly because two comments here used to describe an API that does not exist. No
-//! controller sends `apply_folder_acl` and nothing writes `folder_grants` — the operation is
-//! dispatchable and complete, and it has no caller. The practical consequence, since every folder
-//! is created 0750 owned by its creator's private group, is that a second user in a share cannot
-//! reach another's folder over SMB at all: the grant model is written, the kernel has not been
-//! told, and until an API caller exists §6.2's per-folder permissions live only in Postgres.
+//! `apps/api/src/permissions/apply-acl.service.ts` sends one `apply_folder_acl` per folder, driven
+//! by the `apply-acl` job in `apps/worker`, and `folder_grants` is the table it reads. §6.2's
+//! per-folder permissions therefore reach the kernel — an earlier version of this paragraph said
+//! the operation had no caller at all, which stopped being true when that service was written and
+//! left anyone reading this module believing permissions lived only in Postgres.
 //!
-//! When that caller is written it must route the errors below through the API's `logged()` helper,
-//! the way `files.controller.ts` already does for agent prose. Several variants embed absolute
-//! host paths and raw `setfacl`/`getfacl` stderr, which is journal material and not a sentence for
-//! a client — `shares.service.ts` and `smb.controller.ts` pass agent reasons straight through, and
-//! that is the nearest pattern for someone to copy by mistake.
+//! The errors below still need care on the way out: several variants embed absolute host paths and
+//! raw `setfacl`/`getfacl` stderr, which is journal material and not a sentence for a client. The
+//! caller runs inside a JOB rather than an HTTP request, so there is no card to put them on — they
+//! belong in the job's failure reason and in a readable line on the permissions screen.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

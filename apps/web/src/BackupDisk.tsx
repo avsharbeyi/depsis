@@ -6,7 +6,6 @@ import { formatBytes } from './Dashboard.js';
 
 type Target = OpenApi.components['schemas']['BackupTarget'];
 type Status = OpenApi.components['schemas']['BackupTargetStatus'];
-type Disk = OpenApi.components['schemas']['DiskInventoryEntry'];
 type Listing = OpenApi.components['schemas']['BackupListing'];
 type Importable = OpenApi.components['schemas']['ImportableBackupPools']['pools'][number];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
@@ -71,7 +70,6 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
   const [pools, setPools] = useState<string[]>([]);
   /** Paylaşımların açıldığı veri kümesi; havuzu aday listesinden düşmek için tutuluyor. */
   const [parentDataset, setParentDataset] = useState<string | undefined>(undefined);
-  const [disks, setDisks] = useState<Disk[]>([]);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
 
@@ -94,8 +92,6 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
         setPools(setup.data.pools);
         setParentDataset(setup.data.parentDataset);
       }
-      const inventory = await api.GET('/system/disks', {});
-      if (alive && inventory.data !== undefined) setDisks(inventory.data.disks);
     })();
     return () => {
       alive = false;
@@ -202,7 +198,6 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
       ) : !configured ? (
         <Kurulmamis
           pools={backupCandidatePools(pools, parentDataset)}
-          disks={disks}
           open={mode === 'kur'}
           busy={busy}
           pool={pool}
@@ -264,7 +259,6 @@ export function BackupDisk({ notify }: { notify: Notify }): React.JSX.Element | 
 function Kurulmamis(props: {
   /** ADAY havuzlar — paylaşımların durduğu havuz `backupCandidatePools` ile çıkarılmış olarak. */
   pools: string[];
-  disks: Disk[];
   open: boolean;
   busy: boolean;
   pool: string;

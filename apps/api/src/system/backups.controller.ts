@@ -23,6 +23,7 @@ import { IdempotencyInterceptor } from '../common/idempotency.interceptor.js';
 import {
   BackupsService,
   InvalidSnapshotNameError,
+  MAX_DATASETS,
   SnapshotNameTakenError,
   UnknownDatasetError,
   defaultSnapshotName,
@@ -80,13 +81,22 @@ export class BackupsController {
    * Ajana ulaşılamıyorsa hiçbiri: `complete: false` ve durumlar `unknown`. Kayıtlı satırları
    * "kayıp" göstermek, ajanı bir dakikalığına düşmüş bir kutuda bütün yedekleri silinmiş gibi
    * göstermek olurdu.
+   *
+   * SORULMAYAN KÜME DE `unknown`. `inventory` en çok `MAX_DATASETS` veri kümesi soruyor — sıralı
+   * ajan soketinde bir ekran çizimini yüzlerce çağrıya çevirmemek için. Sorulmayan kümelerin
+   * satırları eskiden `missing` çıkıyordu, yani "kabuktan silinmiş; geri dönülemez": on yedinci
+   * paylaşımı olan bir cihazda o paylaşımın bütün geri dönüş noktaları yok görünüyordu, oysa
+   * havuzda duruyorlardı. Sorulmamış bir şey hakkında verilebilecek tek dürüst cevap `unknown`,
+   * ve cevabın tamamı da `complete: false` — yoksa ekran listenin eksiksiz olduğunu söylemeye
+   * devam ederdi.
    */
   @Get()
   async list(@Req() request: AuthenticatedRequest): Promise<Schemas['SnapshotPage']> {
     const session = requireSession(request);
     const rows = await this.backups.list(session.organizationId);
+    const datasets = [...new Set(rows.map((row) => row.dataset))];
     const pool = await this.backups.inventory(
-      rows.map((row) => row.dataset),
+      datasets,
       'GET /backups: comparing the record against the pool',
     );
 
@@ -94,11 +104,21 @@ export class BackupsController {
       return { items: rows.map((row) => toSnapshot(row, 'unknown')), complete: false };
     }
 
+    // `inventory`nin daraltmasının AYNISI. Hangi kümelerin sorulduğunu servis geri döndürmüyor,
+    // ve sınırın kendisi ortak (`MAX_DATASETS`) olduğu için buradaki dilim onunla birlikte
+    // değişiyor — bu satır kalkarsa sorulmamış küme yeniden "kayıp" diye çizilir.
+    const asked = new Set(datasets.slice(0, MAX_DATASETS));
     const onPool = new Map(pool.map((s) => [`${s.dataset}@${s.name}`, s]));
     const recorded = new Set(rows.map((row) => row.full_name));
 
     const items: Schemas['Snapshot'][] = rows.map((row) =>
-      toSnapshot(row, onPool.has(row.full_name) ? 'present' : 'missing', onPool.get(row.full_name)),
+      asked.has(row.dataset)
+        ? toSnapshot(
+            row,
+            onPool.has(row.full_name) ? 'present' : 'missing',
+            onPool.get(row.full_name),
+          )
+        : toSnapshot(row, 'unknown'),
     );
 
     // Havuzda olup kayıtta olmayanlar. Kimliği YOK, çünkü DEPSIS'in onlar için bir satırı yok —
@@ -122,7 +142,7 @@ export class BackupsController {
     // En yeni önce, ikisi birleştikten SONRA: iki listeyi ayrı sıralayıp uç uca eklemek, ekranda
     // tarihlerin bir yerde geri sarması demek olurdu.
     items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return { items, complete: true };
+    return { items, complete: asked.size === datasets.length };
   }
 
   // §8's `Idempotency-Key`, on the route the contract declares it on. Without a key the request

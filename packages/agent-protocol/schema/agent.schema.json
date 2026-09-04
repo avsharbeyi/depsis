@@ -1251,6 +1251,17 @@
       "description": "Yedek ağacında bir dizini listeler.\n\n── KÖK, ÇAĞIRANIN SEÇTİĞİ BİR ŞEY DEĞİL ─────────────────────────────────────────────\n\n`ListDirectory` canlı paylaşımları, bu ise yedek diskini okuyor. İki AYRI işlem\nolmalarının sebebi ADR-0006: çağıran taraf bir yol adlandıramadığı gibi bir KÖK de\nadlandıramamalı. Tek bir işleme `realm: Live | Backup` diye bir alan koymak, tek bir\nalan değeriyle canlı ağacı hedefleyen bir yedek çağrısı yaratırdı — ve o alanın doğru\ndolduğunu ajan değil çağıran taraf garanti ederdi.\n\nYedek ağacının kendi düzeni var ve ilk bileşen onu söylüyor: `Dosyalar/` gecikmeli\nayna, `DEPSIS-YEDEK/` defter ve günlükler.",
       "type": "object",
       "properties": {
+        "after": {
+          "description": "Bu addan SONRAKİLERİ ver — `ListDirectory`dekiyle aynı imleç.\n\n── NEDEN BURADA DA GEREKLİ ──────────────────────────────────────────────────────\n\nBu listeleme de `MAX_LISTING` satırda kesiliyor, ve kesilmenin bedeli burada canlı\ntaraftakinden ağır. Saklama süresi dolmuş silinenleri budayan tur, kesilmiş bir\nlisteleme gördüğünde o dizini ATLIYOR; dizin küçülmediği için bir sonraki tur aynı\nkararı veriyor. İmleçsiz, 5.000'den fazla dosya taşıyan bir `silinenler/<gün>`\nklasörü yedek diskinde KALICI olarak duruyor — ve kurtarma gezgininden bakan sahibi\nde yalnız ilk 5.000 adı görüyor, kalanını hiç geri getiremiyor.\n\nAd, ofset değil — gerekçesi `ListDirectory::after` ile birebir aynı. Sıra bunun için\nSABİT: girdiler ada göre bayt sırasıyla veriliyor, çünkü `readdir`ın kendi sırası\ndosya sistemine ait ve iki çağrı arasında aynı kalacağının garantisi yok.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntryName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "op": {
           "type": "string",
           "const": "backup_list_directory"
@@ -1946,6 +1957,7 @@
       "type": "string"
     },
     "DiskRef": {
+      "description": "A disk named twice: the stable link to use, and the WWN it must still be.",
       "type": "object",
       "properties": {
         "by_id": {
@@ -3695,6 +3707,7 @@
       ]
     },
     "DiskInfo": {
+      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.",
       "type": "object",
       "properties": {
         "by_id": {
@@ -3830,7 +3843,6 @@
       ]
     },
     "ProcessSummary": {
-      "description": "A disk named twice: the stable link to use, and the WWN it must still be.",
       "type": "object",
       "properties": {
         "args": {
@@ -3900,7 +3912,7 @@
       ]
     },
     "UpdateCandidate": {
-      "description": "One whole disk, as `ListDisks` found it.\n\nPartitions are not reported as disks. They appear only through `holds`, `mounted` and\n`holds_system` — which is what a caller about to overwrite the device needs to know, and a\nper-partition inventory is not.\nKurulabilecek bir sürüm — DENETİMİN bulduğu, isteğin seçtiği değil.",
+      "description": "Kurulabilecek bir sürüm — DENETİMİN bulduğu, isteğin seçtiği değil.",
       "type": "object",
       "properties": {
         "commit": {

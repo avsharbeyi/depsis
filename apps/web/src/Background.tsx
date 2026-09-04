@@ -1,5 +1,5 @@
 import type { OpenApi } from '@depsis/contracts';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { api, API_BASE_URL } from './api.js';
 import type { Prefs } from './prefs.js';
@@ -32,6 +32,36 @@ function isMedia(entry: FileEntry): boolean {
     return mime.startsWith('image/') || mime.startsWith('video/');
   }
   return MEDIA_NAME.test(entry.name);
+}
+
+/**
+ * Bir sayfayı listeye ekler — ve SAYFANIN DEVAMI OLDUĞUNU DA SÖYLER.
+ *
+ * Seçici bir zamanlar tek sayfa okuyup `hasMore`'u hiç okumuyordu. Sunucunun varsayılan sınırı
+ * 100; 400 fotoğrafı olan bir klasörde geriye kalan 300'ü hiçbir şey belirtmiyordu — "gizlendi"
+ * sayacı yalnız medya süzgecini sayıyor, sayfa sınırını değil. Kullanıcı orada olduğunu bildiği
+ * resmi bulamıyor ve seçici bozuk görünüyordu.
+ *
+ * Sıralama BİRİKMİŞ LİSTENİN TAMAMI üzerinde yeniden yapılıyor: yalnız yeni sayfayı sıralamak,
+ * ikinci sayfanın klasörlerini birinci sayfanın dosyalarının altında bırakırdı.
+ */
+export function appendPage(
+  current: readonly FileEntry[],
+  page: { items: FileEntry[]; hasMore: boolean; nextCursor?: string },
+): { entries: FileEntry[]; hiddenAdded: number; cursor: string | undefined; more: boolean } {
+  const shown = page.items.filter((item) => item.kind === 'folder' || isMedia(item));
+  const entries = [...current, ...shown].sort((a, b) => {
+    const byKind = Number(a.kind === 'file') - Number(b.kind === 'file');
+    return byKind !== 0 ? byKind : a.name.localeCompare(b.name, 'tr');
+  });
+  return {
+    entries,
+    hiddenAdded: page.items.length - shown.length,
+    // İMLEÇSİZ BİR "devamı var" ÇAĞIRILAMAZ: düğmeyi çizmemek, basılınca hiçbir şey yapmayan
+    // bir düğmeden iyidir.
+    cursor: page.nextCursor,
+    more: page.hasMore && page.nextCursor !== undefined,
+  };
 }
 
 /** Enter and Space on a `div` that behaves like a button; a row drawn as `.frow` is not one. */
@@ -73,13 +103,28 @@ function FilePicker({
   const [hidden, setHidden] = useState(0);
   const [failed, setFailed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  /** Sunucunun bıraktığı yer; `undefined` ise istenecek bir sayfa kalmadı. */
+  const [cursor, setCursor] = useState<string | undefined>(undefined);
+  const [more, setMore] = useState(false);
+  const [paging, setPaging] = useState(false);
+  /**
+   * Yürürlükteki listelemenin numarası.
+   *
+   * Yoldaki bir "daha fazla" cevabı, döndüğünde kullanıcının başka bir klasöre girmiş olabilir;
+   * bununla kendi listesine mi döndüğünü anlıyor. Yoksa satırlar hiç bulunmadıkları bir klasörün
+   * altında görünürdü.
+   */
+  const run = useRef(0);
 
   const parentId = trail.length === 0 ? undefined : trail[trail.length - 1]?.id;
 
   useEffect(() => {
     let cancelled = false;
+    run.current += 1;
     setEntries(null);
     setFailed(false);
+    setCursor(undefined);
+    setMore(false);
     void (async () => {
       const { data } = await api.GET('/files', {
         params: { query: parentId === undefined ? {} : { parentId } },
@@ -93,19 +138,40 @@ function FilePicker({
         setHidden(0);
         return;
       }
-      const shown = data.items.filter((item) => item.kind === 'folder' || isMedia(item));
-      setHidden(data.items.length - shown.length);
-      setEntries(
-        [...shown].sort((a, b) => {
-          const byKind = Number(a.kind === 'file') - Number(b.kind === 'file');
-          return byKind !== 0 ? byKind : a.name.localeCompare(b.name, 'tr');
-        }),
-      );
+      const page = appendPage([], data);
+      setEntries(page.entries);
+      setHidden(page.hiddenAdded);
+      setCursor(page.cursor);
+      setMore(page.more);
     })();
     return () => {
       cancelled = true;
     };
   }, [parentId, notify, reloadKey]);
+
+  async function loadMore(): Promise<void> {
+    if (cursor === undefined || paging) return;
+    const mine = run.current;
+    setPaging(true);
+    const { data } = await api.GET('/files', {
+      params: {
+        query: parentId === undefined ? { cursor } : { parentId, cursor },
+      },
+    });
+    setPaging(false);
+    if (mine !== run.current) return;
+    if (data === undefined) {
+      // Ekrandaki satırlar duruyor: okunamayan şey devamı, ve okunabilmiş olanı silmek
+      // kullanıcıyı ikinci kez cezalandırmak olurdu.
+      notify('error', 'Sonraki sayfa okunamadı.');
+      return;
+    }
+    const page = appendPage(entries ?? [], data);
+    setEntries(page.entries);
+    setHidden((count) => count + page.hiddenAdded);
+    setCursor(page.cursor);
+    setMore(page.more);
+  }
 
   return (
     <Win title="Arka plan görseli seç" glyph="🖼" tone="cool" onClose={onClose}>
@@ -149,7 +215,9 @@ function FilePicker({
 
       {!failed && entries === null && <p className="note">Yükleniyor…</p>}
 
-      {!failed && entries !== null && entries.length === 0 && (
+      {/* `!more` ŞART: okunmamış sayfalar dururken "bu klasör boş" demek, kullanıcıyı orada
+          olduğunu bildiği resimden vazgeçirmek olurdu. */}
+      {!failed && entries !== null && entries.length === 0 && !more && (
         <Empty
           glyph="🖼"
           text={hidden > 0 ? 'Bu klasörde arka plan olabilecek bir dosya yok.' : 'Bu klasör boş.'}
@@ -181,6 +249,17 @@ function FilePicker({
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* SONSUZ KAYDIRMA DEĞİL, BİR DÜĞME — Dosyalar ekranındaki ile aynı kalıp. Kendiliğinden
+          yüklenen bir liste, altındaki açıklamayı her seferinde bir sayfa aşağı iter ve kullanıcı
+          listenin bittiğini hiçbir zaman göremez. */}
+      {more && cursor !== undefined && entries !== null && (
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0' }}>
+          <button type="button" className="b" disabled={paging} onClick={() => void loadMore()}>
+            {paging ? 'Yükleniyor…' : 'Daha fazla göster'}
+          </button>
         </div>
       )}
 

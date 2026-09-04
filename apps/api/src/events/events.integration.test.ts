@@ -250,6 +250,47 @@ describeDb('the event stream', () => {
     expect((event?.data as { kind: string }).kind).toBe('permissions.apply');
   }, 20_000);
 
+  it('sends a row ONCE, not on every tick', async () => {
+    // Filigran `updated_at`'in ham metniyle saklanmazsa ne olur: node-postgres parametreyi
+    // milisaniyeye kırpar, PostgreSQL mikrosaniye tutar, ve `.123456 > .123` her tikte doğrudur.
+    // Satır iki saniyede bir yeniden yayınlanır, akışın yerine geçtiği poll aynen geri gelir —
+    // her açık sekme için. Üç tik dinleyip aynı işi kaç kez gördüğümüzü sayıyoruz.
+    const stream = events.subscribe(org, admin, true, null);
+    const seen: DepsisEvent[] = [];
+    const subscription = stream.subscribe((event) => {
+      if (event.type === 'job') seen.push(event);
+    });
+    const id = await enqueue('permissions.apply');
+
+    await new Promise((resolve) => setTimeout(resolve, 7_000));
+    subscription.unsubscribe();
+
+    const mine = seen.filter((event) => (event.data as { id: string }).id === id);
+    expect(mine).toHaveLength(1);
+  }, 25_000);
+
+  it('will not rewind the shared watermark past the replay window', async () => {
+    // Filigran KİRACININ ORTAĞI: bir sekmenin devam noktası o an bağlı her yöneticinin akışını da
+    // geri sarar. Bir gün uyuyan dizüstü — ya da `Last-Event-ID: 1` yazan sıradan bir üye — bütün
+    // geçmişi herkese yeniden akıtabiliyordu.
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO job_queue (organization_id, kind, created_at, updated_at)
+         VALUES ($1, 'storage.snapshot', now() - interval '1 hour', now() - interval '1 hour')`,
+        [org],
+      ),
+    );
+
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const stream = events.subscribe(org, admin, true, yesterday);
+    const waiting = collect(stream, 'job', 1);
+    const fresh = await enqueue('identity.sync');
+
+    const [event] = await waiting;
+    // Bir saatlik satır pencerenin dışında kaldı; gelen ilk olay taze olan.
+    expect((event?.data as { id: string }).id).toBe(fresh);
+  }, 20_000);
+
   it('does no work while nobody is listening', async () => {
     // The reason the timer is reference-counted. An appliance with no open screen should make no
     // queries at all, and a poller that ran regardless would be thirty pointless transactions a

@@ -17,6 +17,11 @@
 //! BAĞLANTI DİZESİ ORTAMDAN, İSTEKTEN DEĞİL. `samba::CONFIG_PATH_ENV` ile aynı kural: ayrıcalıklı
 //! daemon'un hangi veritabanına bağlanacağı, ayrıcalıksız bir çağıranın cevaplayabileceği bir soru
 //! değil, ve istek enum'ında bunun için bir operand yok ve olmamalı.
+//!
+//! VE PAROLASI ARGV'YE HİÇ GİRMİYOR. Dize `split_password` ile ikiye ayrılıyor: parolasız yarı
+//! `--dbname`e, parolanın kendisi `PGPASSWORD` ile ortama. `/proc/<pid>/cmdline` bu kutudaki her
+//! kullanıcıya okunabilir ve ajanın kendi `list_processes` işlemi argv'yi ekrana taşıyor;
+//! `/proc/<pid>/environ` ise yalnız sahibine okunur.
 
 use crate::seams::SeamError;
 
@@ -31,6 +36,139 @@ pub const DUMP_DIR_ENV: &str = "DEPSIS_DB_BACKUP_DIR";
 /// Yoksa işlem REDDEDİLİYOR. Varsayılan bir bağlantı dizesi uydurmak — `postgres://localhost/depsis`
 /// gibi — yanlış veritabanının dökümünü alıp "yedek var" demek olurdu, ki yedeği olmamaktan kötü.
 pub const DATABASE_URL_ENV: &str = "DEPSIS_BACKUP_DATABASE_URL";
+
+/// Bağlantı dizesinin OKUNACAĞI DOSYA — tercih edilen yol.
+///
+/// ── NEDEN DOSYA ──────────────────────────────────────────────────────────────────────────
+///
+/// Ajanın ortam dosyası (`/etc/depsis/agent.env`) 0644 kuruluyor: parolalı bir bağlantı dizesi
+/// oraya yazılırsa kutudaki her yerel hesap onu okur. Kurulum zaten 0400 root olan bir dosya
+/// üretiyor; birime O YOLU vermek, sırrın dosya izinleriyle korunduğu tek düzen — API tarafındaki
+/// db-url düzeninin aynısı.
+///
+/// İKİSİ DE VARSA DOSYA KAZANIYOR. Tersi olsaydı, ortamda unutulmuş eski bir değer, dönmesi
+/// gereken dosyanın önüne geçer ve bunu kimse fark etmezdi.
+pub const DATABASE_URL_FILE_ENV: &str = "DEPSIS_BACKUP_DATABASE_URL_FILE";
+
+/// Dökümün alınacağı veritabanının bağlantı dizesi — dosyadan, yoksa ortamdan.
+///
+/// `Ok(None)` "yapılandırılmamış" demek ve bir hata değil: kurulum sihirbazı bitmeden önce kutunun
+/// olağan hâli bu. `Err` ise "yapılandırılmış ama okunamadı" — o, sessizce geçilecek bir şey değil,
+/// çünkü ekranda "yedek alınmadı" ile "yedek diye bir şey kurulmamış" farklı cümleler.
+pub fn database_url() -> Result<Option<String>, SeamError> {
+    if let Some(path) = std::env::var_os(DATABASE_URL_FILE_ENV) {
+        let path = std::path::PathBuf::from(path);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| SeamError::Io(format!("{}: {e}", path.display())))?;
+        let url = text.trim().to_string();
+        if url.is_empty() {
+            return Err(SeamError::Io(format!("{} boş", path.display())));
+        }
+        return Ok(Some(url));
+    }
+    match std::env::var_os(DATABASE_URL_ENV) {
+        None => Ok(None),
+        Some(raw) => match raw.to_str() {
+            Some(url) => Ok(Some(url.to_string())),
+            None => {
+                let why = format!("{DATABASE_URL_ENV} geçerli UTF-8 değil");
+                Err(SeamError::Io(why))
+            }
+        },
+    }
+}
+
+/// Bağlantı dizesinin argv'ye konabilecek yarısı ve ayrı tutulan sırrı.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Connection {
+    /// `--dbname`e gidecek dize. PAROLA İÇERMİYOR.
+    pub url: String,
+    /// `PGPASSWORD` ile geçirilecek parola, varsa.
+    ///
+    /// Yüzde kodlaması ÇÖZÜLMÜŞ hâlde: libpq bir URI'deki parolayı çözerek kullanıyor, `PGPASSWORD`
+    /// ise ham değeri bekliyor. Çözmemek, içinde `@` ya da `:` geçen her parolayı sessizce yanlış
+    /// yapardı.
+    pub password: Option<String>,
+}
+
+/// Bağlantı dizesini argv'ye konabilecek bir yarıya ve bir sırra ayırır.
+///
+/// ── NEDEN ────────────────────────────────────────────────────────────────────────────────
+///
+/// `/proc/<pid>/cmdline` bu kutudaki HER kullanıcıya okunabilir — deponun kendi kuralı,
+/// `seams::CommandRunner::run_with_stdin`in belgesinde yazılı — ve ajanın kendi `list_processes`
+/// işlemi her sürecin argv'sini olduğu gibi ekrana taşıyor. Parolayı argv'de bırakmak, onu tam da
+/// saklamak için seçilmiş kanaldan (`/proc/<pid>/environ`, yalnız sahibine okunur) çıkarıp herkese
+/// açık kanala koymak demekti.
+///
+/// ── ÇÖZÜLEMEYEN DİZE REDDEDİLİYOR ────────────────────────────────────────────────────────
+///
+/// Ayrıştıramadığı bir dizeyi sessizce argv'ye geri koymak, bu işlevi bir süsten ibaret bırakırdı:
+/// kusur tam da anlaşılmayan biçimlerde geri gelir ve hiçbir şey söylemez.
+pub fn split_password(url: &str) -> Result<Connection, String> {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        // URI değil: `host=… password=…` biçimli bir libpq conninfo olabilir. O biçimi ayrıştırmak
+        // ayrı bir iş ve burada desteklenmiyor — ama parola taşıyorsa argv'ye geçirilemez.
+        if url.contains("password") {
+            return Err("bağlantı dizesi bir URI değil ve parola taşıyor".to_string());
+        }
+        return Ok(Connection {
+            url: url.to_string(),
+            password: None,
+        });
+    };
+    // Yetki bölümü ilk `/`, `?` ya da `#`e kadar; sonrası yol ve parametreler.
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    // `rsplit_once`, çünkü kodlanmamış bir `@` yalnız ayırıcı olabilir: parolanın içindeki `@`
+    // URI'de `%40` olmak zorunda.
+    let Some((userinfo, host)) = authority.rsplit_once('@') else {
+        return Ok(Connection {
+            url: url.to_string(),
+            password: None,
+        });
+    };
+    let Some((user, secret)) = userinfo.split_once(':') else {
+        return Ok(Connection {
+            url: url.to_string(),
+            password: None,
+        });
+    };
+    Ok(Connection {
+        url: format!("{scheme}://{user}@{host}{tail}"),
+        password: Some(percent_decode(secret)?),
+    })
+}
+
+/// URI yüzde kaçışlarını çözer. Yarım ya da geçersiz bir kaçış REDDEDİLİYOR.
+fn percent_decode(raw: &str) -> Result<String, String> {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while let Some(byte) = bytes.get(index) {
+        if *byte == b'%' {
+            let hex = raw
+                .get(index.saturating_add(1)..index.saturating_add(3))
+                .ok_or_else(|| "parola yarım bir yüzde kaçışı taşıyor".to_string())?;
+            if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err("parola geçersiz bir yüzde kaçışı taşıyor".to_string());
+            }
+            let decoded = u8::from_str_radix(hex, 16)
+                .map_err(|_| "parola geçersiz bir yüzde kaçışı taşıyor".to_string())?;
+            out.push(decoded);
+            index = index.saturating_add(3);
+        } else {
+            out.push(*byte);
+            index = index.saturating_add(1);
+        }
+    }
+    String::from_utf8(out).map_err(|_| "parola UTF-8 değil".to_string())
+}
+
+/// `pg_dump`a parolanın geçirileceği ortam değişkeni.
+///
+/// argv değil ortam, ve gerekçesi `split_password`ta.
+pub const PGPASSWORD_ENV: &str = "PGPASSWORD";
 
 /// Dosya adının uzantısı. Budama YALNIZ bunu taşıyan dosyalara dokunuyor.
 pub const DUMP_SUFFIX: &str = ".dump";
@@ -52,6 +190,10 @@ pub fn dump_dir() -> std::path::PathBuf {
 ///
 /// `-d <url>` EN SONA konmuyor, ve konum önemli değil ama SAYISI önemli: tek bir bağlantı dizesi,
 /// ve o da ortamdan. Çağıran hiçbir argüman katmıyor.
+///
+/// BURAYA GELEN URL PAROLASIZ. Ayırmayı `split_password` yapıyor ve parola `PGPASSWORD` ile
+/// geçiyor; gerekçesi orada. Bu işlev sırrı görmüyor, yani bir gün argv'yi değiştiren biri onu
+/// yanlışlıkla geri koyamıyor.
 pub fn dump_argv<'a>(url: &'a str, out: &'a str) -> Vec<&'a str> {
     vec![
         "--format=custom",
@@ -258,5 +400,57 @@ mod tests {
         // `keep: 1` is legal and means "only the newest". Zero is not offered: a policy that
         // deletes the dump it just took is not a backup policy.
         assert_eq!(prunable(&dumps, 1).len(), 3);
+    }
+
+    #[test]
+    fn the_password_leaves_the_url_and_the_rest_of_it_survives() {
+        // ARGV DÜNYAYA AÇIK. `/proc/<pid>/cmdline` bu kutudaki her kullanıcıya okunabilir ve
+        // ajanın kendi `list_processes` işlemi argv'yi ekrana taşıyor. Ayırmadan sonra dizede
+        // parola KALMAMALI, ama kalan her şey — kullanıcı, sunucu, kapı, veritabanı, parametreler
+        // — aynen durmalı: eksik bir parça, dökümün yanlış veritabanından alınması demek.
+        let url = "postgres://depsis_owner:gizli@localhost:5432/depsis?ssl=1";
+        let split = split_password(url).expect("çözülmeli");
+        assert_eq!(
+            split.url,
+            "postgres://depsis_owner@localhost:5432/depsis?ssl=1"
+        );
+        assert_eq!(split.password.as_deref(), Some("gizli"));
+        assert!(!split.url.contains("gizli"));
+    }
+
+    #[test]
+    fn a_percent_encoded_password_is_decoded_for_the_environment() {
+        // libpq URI'deki parolayı ÇÖZEREK kullanıyor, `PGPASSWORD` ise ham değeri bekliyor. İkisini
+        // karıştırmak, içinde `@` ya da `:` geçen her parolayı sessizce yanlış yapardı — ve o
+        // yanlış, kutuya bakan kimsenin bakmayacağı bir yerde "kimlik doğrulaması başarısız" olur.
+        let split = split_password("postgres://u:a%40b%3Ac@localhost/depsis").expect("çözülmeli");
+        assert_eq!(split.password.as_deref(), Some("a@b:c"));
+        assert_eq!(split.url, "postgres://u@localhost/depsis");
+    }
+
+    #[test]
+    fn a_url_without_a_password_is_passed_through_untouched() {
+        // Yerel soket + peer doğrulaması ile parola hiç yok, ve o düzen bozulmamalı.
+        for url in [
+            "postgres:///depsis?host=/var/run/postgresql",
+            "postgres://depsis_owner@localhost/depsis",
+        ] {
+            let split = split_password(url).expect("çözülmeli");
+            assert_eq!(split.url, url);
+            assert_eq!(split.password, None);
+        }
+    }
+
+    #[test]
+    fn an_unparseable_string_that_carries_a_secret_is_refused_rather_than_passed_on() {
+        // SESSİZCE ARGV'YE GERİ KOYMAK, düzeltmenin kendisini kapatırdı: kusur tam da anlaşılmayan
+        // biçimlerde geri gelir ve hiçbir şey söylemez.
+        for bad in [
+            "host=localhost password=gizli dbname=depsis",
+            "postgres://u:a%zz@localhost/depsis",
+            "postgres://u:yarim%4@localhost/depsis",
+        ] {
+            assert!(split_password(bad).is_err(), "{bad}");
+        }
     }
 }

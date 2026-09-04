@@ -248,10 +248,13 @@ export class BackupTargetController {
   ): Promise<unknown> {
     const session = await this.requireAdmin(request);
     // Bos ya da eksik `path` KOKUN kendisi, ve bu bir hata degil: gezgin oradan basliyor.
-    const parts = (rawPath ?? '')
-      .split('/')
-      .map((part) => part.trim())
-      .filter((part) => part !== '');
+    //
+    // BILESENLER KIRPILMIYOR. Ajanin `SafeComponent`i bosluga karismiyor, yani yedekte adi
+    // 'Taslaklar ' olan bir klasor gercekten olabilir — SMB'den boyle bir ad yaratmak serbest.
+    // Kirpan bir ayristirici o klasoru 'Taslaklar' diye ariyor, ajan `not_found` diyor ve gezgin
+    // BOS BIR LISTE ciziyor: kullanici dosyalarinin yedekte olmadigini saniyor. Anlik goruntu
+    // gezgini de (snapshots.controller) ayni yeri kirpmadan ayristiriyor.
+    const parts = (rawPath ?? '').split('/').filter((part) => part !== '');
     const parsed = z.array(COMPONENT).safeParse(parts);
     if (!parsed.success) throw new BadRequestException(parsed.error.issues[0]?.message);
     try {

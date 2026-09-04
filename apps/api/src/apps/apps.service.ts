@@ -617,7 +617,7 @@ export class AppsService {
    * could get wrong, so it is stated three times: here, at the client method that carries the
    * flag, and on the volume column in migration 0031.
    */
-  async remove(organizationId: string, slug: string): Promise<void> {
+  async remove(organizationId: string, slug: string): Promise<string> {
     const { entry, containers, instance } = await this.requireInstalled(organizationId, slug);
 
     // Removal is the one operation a stale record must still be able to finish — it is the way
@@ -649,6 +649,10 @@ export class AppsService {
     }
 
     await this.unreserve(organizationId, entry.id);
+    // Uygulamanın ADI, silinmiş satırdan sonra okunamayacağı için buradan dönüyor: denetim
+    // kaydının etiketi 'jellyfin' değil 'Jellyfin' olmalı, ve `app_instances` satırı DELETE ile
+    // gittiği için geriye bakıp adı bulacak bir yer kalmıyor.
+    return entry.name;
   }
 
   async logs(organizationId: string, slug: string, lines: number): Promise<string[]> {
@@ -757,8 +761,29 @@ export class AppsService {
     imageReference(input.image, input.tag);
 
     try {
-      const rows = await this.db.withTenant(organizationId, (db) =>
-        db.query<CustomRow>(
+      const rows = await this.db.withTenant(organizationId, async (db) => {
+        // KATALOĞA KARŞI DA DENETLE. Tek kısıt `app_custom_slug_unique (organization_id, slug)`
+        // idi, yani katalogla aynı kısa ada sahip bir özel uygulama 201 dönüyor, `GET /apps`
+        // listesine ikinci bir 'jellyfin' kartı olarak giriyor (aynı React anahtarıyla), ve
+        // `requireCatalogue` önce kataloğa baktığı için `POST /apps/jellyfin` her zaman katalog
+        // sürümünü kuruyordu: eklenen uygulama hiçbir zaman kurulamaz, kullanıcı neden olduğunu
+        // göremezdi.
+        //
+        // INSERT ile AYNI geri çağrının içinde: ayrı bir `withTenant`, ikinci bir bağlantı ve
+        // ikinci bir an demek olurdu. `app_catalogue` her yerde kiracı bağlamı altında okunuyor.
+        const clash = await db.query<{ name: string }>(
+          `SELECT name FROM public.app_catalogue WHERE slug = $1`,
+          [input.slug],
+        );
+        const taken = clash[0];
+        if (taken !== undefined) {
+          throw new CustomAppInvalidError(
+            `'${input.slug}' kısa adı katalogdaki '${taken.name}' uygulamasına ait; ` +
+              'özel uygulamanıza başka bir kısa ad verin',
+          );
+        }
+
+        return db.query<CustomRow>(
           `INSERT INTO public.app_custom
                   (organization_id, slug, name, icon, image, tag, container_port, env, volumes, created_by)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10)
@@ -775,8 +800,8 @@ export class AppsService {
             JSON.stringify(input.volumes),
             userId,
           ],
-        ),
-      );
+        );
+      });
       const row = rows[0];
       if (row === undefined) throw new Error('the custom app row was not returned');
       return row;

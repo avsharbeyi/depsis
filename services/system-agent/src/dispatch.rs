@@ -430,11 +430,6 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
-    /// Move a finished staging file into place, durably.
-    ///
-    /// ADR-0008 steps 4 and 5. The directory fsync is the one people skip, and skipping it means
-    /// a power cut can leave the data on disk with nothing pointing at it — the file survived and
-    /// the rename did not.
     /// Open a published file for reading and register a one-time token for it.
     ///
     /// The mirror of `open_transfer`, and deliberately built from the same pieces: the same
@@ -457,6 +452,17 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         if path.is_empty() {
             return Ok(Response::Refused {
                 reason: "a download needs a path".to_string(),
+            });
+        }
+        // Kardeş işlemlerdeki kapı burada da kapalı olmalı. Ara alan aktarım kayıt defterinin ve
+        // `PublishTransfer`in bayt sayısı denetiminin arkasında duruyor; oradan doğrudan okumak,
+        // o denetimleri atlayan ikinci bir kapı bırakırdı.
+        if Self::touches_agent_state(path) {
+            return Ok(Response::Refused {
+                reason: format!(
+                    "{}/ is the agent's own tree; use discard_transfer",
+                    STAGING_DIR[0]
+                ),
             });
         }
 
@@ -504,18 +510,15 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         );
         drop(registry);
 
-        match inserted {
-            Ok(()) => Ok(Response::Download { token, size }),
-            // A second reader while one is still open. Refused rather than queued: the interlock
-            // exists so a publish cannot rename a file out from under an open descriptor, and one
-            // reader at a time is a price a download can pay by retrying.
-            Err(InsertError::Occupied) => Ok(Response::Refused {
-                reason: "this file already has a reader".to_string(),
-            }),
-            Err(InsertError::Full) => Ok(Response::Refused {
+        // BİR OKUMA AD REZERVE ETMİYOR (`TransferRegistry::insert`), dolayısıyla buraya
+        // `Occupied` hiç dönmüyor: aynı dosyayı iki kişi aynı anda indirebilir. Geriye tek gerçek
+        // ret olarak tanımlayıcı bütçesi kalıyor.
+        if let Err(InsertError::Full) = inserted {
+            return Ok(Response::Refused {
                 reason: format!("too many transfers are open (limit {MAX_PENDING_TRANSFERS})"),
-            }),
+            });
         }
+        Ok(Response::Download { token, size })
     }
 
     /// Throw a staging file away.
@@ -547,6 +550,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         Ok(Response::Discarded { existed })
     }
 
+    /// Move a finished staging file into place, durably.
+    ///
+    /// ADR-0008 steps 4 and 5. The directory fsync is the one people skip, and skipping it means
+    /// a power cut can leave the data on disk with nothing pointing at it — the file survived and
+    /// the rename did not.
     #[allow(
         clippy::too_many_arguments,
         reason = "Every operand is one the agent must not infer. The share and the staging name \
@@ -659,12 +667,6 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         path.first() == Some(&STAGING_DIR[0])
     }
 
-    /// Where shares are served from, and whether anything is there yet.
-    ///
-    /// The path is the agent's own, never a caller's. Every field is reported rather than reduced
-    /// to a "ready" boolean, because the three states the API has to tell apart — no root
-    /// configured, a root with nothing on it, a root that already has a dataset — need different
-    /// sentences on screen and a boolean would collapse two of them.
     /// Which dataset DEPSIS serves shares from, for `ReplicateDataset`'s refusals.
     ///
     /// `Ok(None)` means the agent serves NO shares — `DEPSIS_SHARES_ROOT` is unset — so there is
@@ -793,6 +795,12 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         })
     }
 
+    /// Where shares are served from, and whether anything is there yet.
+    ///
+    /// The path is the agent's own, never a caller's. Every field is reported rather than reduced
+    /// to a "ready" boolean, because the three states the API has to tell apart — no root
+    /// configured, a root with nothing on it, a root that already has a dataset — need different
+    /// sentences on screen and a boolean would collapse two of them.
     fn share_root_status(&self) -> Result<Response, SeamError> {
         let Ok(root) = crate::acl::shares_root_from_env() else {
             return Ok(Response::ShareRoot {
@@ -1434,11 +1442,6 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
-    /// Delete exactly ONE entry inside a share.
-    ///
-    /// Not a tree. A directory with children comes back as `Conflict`, and the API — which stores
-    /// the tree and therefore knows it — walks the children itself. See `op::Request::RemoveEntry`
-    /// for why the agent must not be given an operation whose blast radius the caller chooses.
     /// Copy at most one SLICE of a file into staging, and publish when the source is exhausted.
     ///
     /// WHY THE AGENT DOES THE COPY AT ALL. The obvious shape is for the API to read the source over
@@ -2229,6 +2232,17 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 reason: "no share root is configured; storage is not set up".to_string(),
             });
         };
+        // Denetim TAM yola uygulanıyor, ad/üst ayrımından önce: `[".depsis", "staging"]` biçiminde
+        // bir istek yalnız `name`e bakan bir denetimden kaçardı. Ara alanı tek bir tar'a koyup
+        // indirilebilir kılmak, aktarım kayıt defterinin arkasına açılan ikinci kapıdır.
+        if Self::touches_agent_state(path) {
+            return Ok(Response::Refused {
+                reason: format!(
+                    "{}/ is the agent's own tree; use discard_transfer",
+                    STAGING_DIR[0]
+                ),
+            });
+        }
         let Some((name, parents)) = path.split_last() else {
             return Ok(Response::Refused {
                 reason: "the share root cannot be archived".to_string(),
@@ -2311,16 +2325,14 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         );
         drop(registry);
 
-        match inserted {
-            Ok(()) => Ok(Response::Download { token, size }),
-            // Kayıt kabul etmezse `file` burada düşüyor ve adsız düğüm onunla birlikte gidiyor.
-            Err(InsertError::Occupied) => Ok(Response::Refused {
-                reason: "this archive already has a reader".to_string(),
-            }),
-            Err(InsertError::Full) => Ok(Response::Refused {
+        // Kayıt kabul etmezse `file` burada düşüyor ve adsız düğüm onunla birlikte gidiyor. Bu da
+        // bir okuma olduğu için ad rezerve etmiyor; tek ret tanımlayıcı bütçesi.
+        if let Err(InsertError::Full) = inserted {
+            return Ok(Response::Refused {
                 reason: format!("too many transfers are open (limit {MAX_PENDING_TRANSFERS})"),
-            }),
+            });
         }
+        Ok(Response::Download { token, size })
     }
 
     /// Cihazı yeniden başlatır.
@@ -2367,8 +2379,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// havuzun KENDİ içinde yazılı, yani tanımadığımız bir havuzu olağan şekilde takmak, onun
     /// seçtiği yerlere — `/srv/depsis` dâhil — bağlanmasına izin vermek demek.
     ///
-    /// Sonra imza doğrulanıyor. Doğrulanmazsa havuz GERİ BIRAKILIYOR: takmak bir yan etki ve
-    /// yanlış havuzu takılı bırakmak, kullanıcının hiç istemediği bir şeyi yapmış olmak.
+    /// Sonra imza doğrulanıyor. Doğrulanmazsa — ve imza hiç okunamazsa da — havuzu GERİ BIRAKMAK
+    /// DENENİYOR: takmak bir yan etki ve yanlış havuzu takılı bırakmak, kullanıcının hiç
+    /// istemediği bir şeyi yapmış olmak. Bırakma başarısız olabilir; o zaman cevap "olduğu gibi
+    /// bırakıldı" demiyor, diskin hâlâ takılı olduğunu söylüyor — ekranın söylediğiyle cihazın
+    /// durumu ayrışırsa kullanıcı yan etkiyi hiç öğrenemez.
     ///
     /// En son yalnız şifresiz yarı bağlanıyor. Şifreli yarı burada bağlanmıyor ve bağlanamaz:
     /// anahtarı yok, ve anahtar yalnız kullanıcı bir ekrana parolasını girdiği anda var oluyor.
@@ -2387,20 +2402,48 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             &borrow(&crate::backup::import_argv(pool, adopt)),
         )?;
 
-        let listing = self
-            .runner
-            .run(bin::ZFS, &crate::pools::list_filesystems_argv())?;
+        // BURADAN SONRAKİ HER ÇIKIŞ HAVUZU GERİ BIRAKMAYI DENİYOR. Takmak bir yan etki: imzayı
+        // hiç okuyamadan `?` ile çıkmak, kullanıcının hiç istemediği yabancı bir havuzu takılı
+        // bırakırdı — ve ZFS onu bir sonraki açılışta önbellekten `-N`siz takıp KENDİ bağlama
+        // noktalarına bağlardı, ki `-N`in var olma sebebi tam olarak bu.
+        let list_argv = crate::pools::list_filesystems_argv();
+        let listing = match self.runner.run(bin::ZFS, &list_argv) {
+            Ok(listing) => listing,
+            Err(error) => {
+                if self
+                    .runner
+                    .run(bin::ZPOOL, &borrow(&crate::backup::export_argv(pool)))
+                    .is_err()
+                {
+                    return Err(SeamError::Io(format!(
+                        "{pool} takıldı ama içeriği okunamadı ve geri bırakılamadı; \
+                         disk hâlâ takılı: {error}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
         let datasets: Vec<String> = crate::pools::parse_filesystems(&listing)
             .into_iter()
             .map(|fs| fs.name)
             .collect();
         if !crate::backup::looks_like_backup_pool(&datasets, pool) {
-            let _ = self
+            // BIRAKMA DENENİYOR, GARANTİ EDİLMİYOR. Cümle hangisinin olduğunu söylüyor: "olduğu
+            // gibi bırakıldı" diyen bir ekranın ardında takılı kalmış bir havuz, kullanıcının
+            // hiç haberi olmayan bir yan etkidir.
+            let released = self
                 .runner
-                .run(bin::ZPOOL, &borrow(&crate::backup::export_argv(pool)));
-            return Ok(Response::Refused {
-                reason: format!("{pool} bir DEPSIS yedek diski değil; havuz olduğu gibi bırakıldı"),
-            });
+                .run(bin::ZPOOL, &borrow(&crate::backup::export_argv(pool)))
+                .is_ok();
+            let reason = if released {
+                format!("{pool} bir DEPSIS yedek diski değil; havuz olduğu gibi bırakıldı")
+            } else {
+                format!(
+                    "{pool} bir DEPSIS yedek diski değil ve GERİ BIRAKILAMADI; disk hâlâ cihaza \
+                     takılı"
+                )
+            };
+            return Ok(Response::Refused { reason });
         }
 
         // Yalnız şifresiz yarı. `canmount=on` olduğu için `-N` olmasaydı kendiliğinden bağlanırdı;
@@ -2639,11 +2682,22 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
 
     /// Yedek ağacında bir dizini listeler.
     ///
-    /// `list_directory` ile aynı şekil, iki farkla. Kök farklı, ve o fark İŞLEMİN ADINDA sabit.
-    /// Ve `.depsis` süzgeci YOK: yedek ağacının kendi düzeni var (`Dosyalar/`, `DEPSIS-YEDEK/`)
-    /// ve ikisi de kullanıcıya GÖRÜNMELİ — defterin görünmesi, diski başka bir bilgisayara takan
-    /// insanın silinme tarihlerini okuyabilmesinin ta kendisi.
-    fn backup_list_directory(&self, path: &[&str]) -> Result<Response, SeamError> {
+    /// `list_directory` ile aynı şekil, tek farkla: kök farklı, ve o fark İŞLEMİN ADINDA sabit.
+    ///
+    /// `DEPSIS-YEDEK/` GİZLENMİYOR. Yedek ağacının kendi düzeni var (`Dosyalar/` ayna,
+    /// `DEPSIS-YEDEK/` defter) ve ikisi de kullanıcıya GÖRÜNMELİ — defterin görünmesi, diski başka
+    /// bir bilgisayara takan insanın silinme tarihlerini okuyabilmesinin ta kendisi.
+    ///
+    /// Ama `.depsis` KÖKTE gizleniyor, canlı taraftakiyle birebir aynı koşulla. O iskeleti yedek
+    /// köküne ajanın kendisi kuruyor (`copy_file_to_backup`), yani kurtarma gezgininde kullanıcıya
+    /// hiç yüklemediği yarım `yedek-<uuid>` dosyalarının durduğu bir klasör olarak görünürdü. Koşul
+    /// kökle sınırlı, çünkü kullanıcının `Dosyalar/` aynasının altında `.depsis` adlı KENDİ klasörü
+    /// olabilir ve onu gizlemek, yedeklediği bir şeyi geri getirememesi demek olurdu.
+    fn backup_list_directory(
+        &self,
+        path: &[&str],
+        after: Option<&str>,
+    ) -> Result<Response, SeamError> {
         let Some(paths) = self.backup_root() else {
             return Ok(Self::backup_unavailable());
         };
@@ -2667,11 +2721,23 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             Err(other) => return Err(other),
         };
 
+        // SABİT SIRA, SONRA SAYFA — `list_directory` ile birebir aynı sıra. Sıralama `retain`den
+        // ÖNCE gelmeli: `readdir`ın sırası dosya sistemine ait ve iki çağrı arasında aynı
+        // kalacağının garantisi yok, yani sıralamadan uygulanan bir imleç kararsız sayfa üretir.
+        let mut found = found;
+        found.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+        if let Some(cursor) = after {
+            found.retain(|entry| entry.name.as_bytes() > cursor.as_bytes());
+        }
+
         let truncated = found.len() > crate::op::MAX_LISTING;
         let entries = found
             .into_iter()
             .take(crate::op::MAX_LISTING)
             .filter_map(|entry| {
+                if path.is_empty() && entry.name == STAGING_DIR[0] {
+                    return None;
+                }
                 Some(DirEntry {
                     name: EntryName::parse(entry.name).ok()?,
                     directory: entry.directory,
@@ -2762,6 +2828,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
     }
 
+    /// Delete exactly ONE entry inside a share.
+    ///
+    /// Not a tree. A directory with children comes back as `Conflict`, and the API — which stores
+    /// the tree and therefore knows it — walks the children itself. See `op::Request::RemoveEntry`
+    /// for why the agent must not be given an operation whose blast radius the caller chooses.
     fn remove_entry(
         &self,
         share: &str,
@@ -3108,12 +3179,16 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         match applier.apply(paths, share, path, entries) {
             Ok(written) => Ok(Response::AclApplied { entries: written }),
 
-            // Not a fault. DEPSIS does not package `acl`, so its absence is an ordinary state of
-            // a machine, and 503-with-a-card is what the API SHOULD answer here. It does not yet:
-            // nothing in `apps/api/src` sends `apply_folder_acl` and nothing writes `folder_grants`
-            // (both verified by grep, not assumed), so this response has no consumer at all. Said
-            // in the future tense on purpose — a comment describing a caller that does not exist is
-            // the same "two realities" this project refuses everywhere else.
+            // Not a fault. DEPSIS does not package `acl`, so its absence is an ordinary state of a
+            // machine and this answer means "the box is missing a package", not "something broke".
+            //
+            // THE CONSUMER EXISTS AND MISREADS IT. `apps/api/src/permissions/apply-acl.service.ts`
+            // sends this operation from the `apply-acl` JOB — there is no HTTP request here, so
+            // there is no card to put a 503 on — and it wraps the call in `expectStatus(...,
+            // 'acl_applied')`, which turns this response into a thrown "unexpected status". The job
+            // then burns its whole retry budget on a box where nothing will ever change without an
+            // operator installing a package. It needs its own branch: end the job as "not
+            // retryable, the box is missing `acl`" and put that sentence on the permissions screen.
             Err(e) if e.is_unavailable() => Ok(Response::AclUnavailable {
                 reason: e.to_string(),
             }),
@@ -3221,6 +3296,21 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     Outcome::Refused(why.clone()),
                 ));
                 Response::Refused { reason: why }
+            }
+            // İŞLEMİN KENDİ KARARIYLA DÜŞEN BAŞARISIZLIK DA AYNI GİRDİYİ ALIYOR. `execute` her
+            // başarısızlığı `Err` yapmıyor: geri okunan `acltype` beklenenden başkaysa ya da
+            // ZeroTier kendi adresini bozuk bildirdiğinde cevap `Ok(Response::Failed)` oluyor.
+            // Girdisiz bırakılırsa append-only günlükte o istekten geriye yalnız "allowed" satırı
+            // kalır — yani kayıt, isteğin gerçekte ne yaptığını yanlış anlatır.
+            Ok(Response::Failed { reason: why }) => {
+                self.audit.record(audit::entry(
+                    correlation_id,
+                    peer,
+                    &request,
+                    reason,
+                    Outcome::Failed(why.clone()),
+                ));
+                Response::Failed { reason: why }
             }
             Ok(response) => response,
             Err(e) => {
@@ -3560,21 +3650,29 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             }
 
             Request::DumpDatabase { name, keep } => {
-                let Some(url) = std::env::var_os(crate::dbdump::DATABASE_URL_ENV) else {
+                let Some(url) = crate::dbdump::database_url()? else {
                     // REFUSED rather than defaulted. Inventing `postgres://localhost/depsis` would
                     // mean dumping the wrong database and reporting "you have a backup", which is
                     // worse than having none.
                     return Ok(Response::Refused {
                         reason: format!(
-                            "{} is not set, so there is no database to dump",
+                            "ne {} ne {} ayarlı; dökümü alınacak bir veritabanı yok",
+                            crate::dbdump::DATABASE_URL_FILE_ENV,
                             crate::dbdump::DATABASE_URL_ENV
                         ),
                     });
                 };
-                let Some(url) = url.to_str().map(str::to_string) else {
-                    return Ok(Response::Refused {
-                        reason: format!("{} is not valid UTF-8", crate::dbdump::DATABASE_URL_ENV),
-                    });
+                // PAROLA ARGV'YE GİRMİYOR. `/proc/<pid>/cmdline` bu kutudaki her kullanıcıya
+                // okunabilir ve ajanın kendi `list_processes` işlemi argv'yi ekrana taşıyor;
+                // `/proc/<pid>/environ` ise yalnız sahibine okunur. Ayrıştırılamayan bir dize
+                // REDDEDİLİYOR — sessizce argv'ye geri koymak, düzeltmenin kendisini kapatırdı.
+                let connection = match crate::dbdump::split_password(&url) {
+                    Ok(connection) => connection,
+                    Err(why) => {
+                        return Ok(Response::Refused {
+                            reason: format!("bağlantı dizesi çözülemedi: {why}"),
+                        })
+                    }
                 };
 
                 let dir = crate::dbdump::dump_dir();
@@ -3591,8 +3689,13 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 (self.private_writer)(&out, "")
                     .map_err(|e| SeamError::Io(format!("{out_display}: {e}")))?;
 
-                let argv = crate::dbdump::dump_argv(&url, &out_display);
-                if let Err(error) = self.runner.run(bin::PG_DUMP, &argv) {
+                let argv = crate::dbdump::dump_argv(&connection.url, &out_display);
+                let env: Vec<(&str, &str)> = connection
+                    .password
+                    .as_deref()
+                    .map(|secret| vec![(crate::dbdump::PGPASSWORD_ENV, secret)])
+                    .unwrap_or_default();
+                if let Err(error) = self.runner.run_with_env(bin::PG_DUMP, &argv, &env) {
                     // A failed dump leaves the empty 0600 file behind, and an empty `.dump` in the
                     // directory is worse than no file: the next listing would show it as a backup.
                     let _ = std::fs::remove_file(&out);
@@ -3777,9 +3880,9 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             Request::BackupWriteMeta { name, content } => {
                 self.backup_write_meta(name.as_str(), content)
             }
-            Request::BackupListDirectory { path } => {
+            Request::BackupListDirectory { path, after } => {
                 let parts: Vec<&str> = path.iter().map(EntryName::as_str).collect();
-                self.backup_list_directory(&parts)
+                self.backup_list_directory(&parts, after.as_ref().map(EntryName::as_str))
             }
             Request::BackupCreateDirectory { path } => {
                 let parts: Vec<&str> = path.iter().map(EntryName::as_str).collect();
@@ -4677,6 +4780,109 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_the_operation_decided_itself_is_audited_as_failed() {
+        // Kardeşi yukarıda: `execute` bu başarısızlığı `Err` olarak değil `Ok(Response::Failed)`
+        // olarak veriyor. Girdisiz bırakılırsa append-only günlükte bu istekten geriye yalnız
+        // "allowed" satırı kalır ve sonradan "o gece ne oldu" diye bakan kişi bir başarısızlık
+        // bulamaz — kayıt isteğin gerçekte ne yaptığını yanlış anlatır.
+        let r = MockCommandRunner::with_responses(["".into(), "nfsv4".into()]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"create_dataset","dataset":"tank/u/3","acltype":"posixacl"}"#,
+            peer(API_UID),
+            "c7",
+            "provision user",
+        );
+        assert!(matches!(resp, Response::Failed { .. }), "{resp:?}");
+
+        let entries = s.entries();
+        let recorded = entries
+            .iter()
+            .find(|e| matches!(e.outcome, Outcome::Failed(_)))
+            .unwrap_or_else(|| panic!("no failure record in {entries:?}"));
+        assert_eq!(recorded.operation, "create_dataset");
+        assert_eq!(recorded.correlation_id, "c7");
+    }
+
+    #[test]
+    fn a_database_dump_keeps_the_password_out_of_argv() {
+        // `/proc/<pid>/cmdline` bu kutudaki her kullanıcıya okunabilir, ve ajanın kendi
+        // `list_processes` işlemi argv'yi ekrana taşıyor. Parola argv'ye konursa, tam da saklamak
+        // için seçilmiş kanaldan çıkıp herkese açık kanala geçer.
+        let dumps = tempfile::tempdir().expect("temp dir");
+        let url = std::ffi::OsStr::new("postgres://depsis_owner:GIZLI@localhost/depsis");
+        let _env = EnvGuard::set(&[
+            (crate::dbdump::DATABASE_URL_ENV, url),
+            (crate::dbdump::DUMP_DIR_ENV, dumps.path().as_os_str()),
+        ]);
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"dump_database","name":"gecelik","keep":3}"#,
+            peer(API_UID),
+            "db1",
+            "gecelik veritabanı dökümü",
+        );
+        assert!(matches!(resp, Response::DatabaseDumps { .. }), "{resp:?}");
+
+        let call = r.call(0).expect("pg_dump koştu");
+        assert_eq!(call[0], bin::PG_DUMP);
+        assert!(
+            !call.iter().any(|a| a.contains("GIZLI")),
+            "parola argv'de: {call:?}"
+        );
+        assert!(
+            call.contains(&"postgres://depsis_owner@localhost/depsis".to_string()),
+            "parolasız URL argv'de olmalı: {call:?}"
+        );
+        // Ve sır ORTAMDAN geçti. Sahte koşucu yalnız ADI kaydediyor: parolanın kendisi bir test
+        // çıktısına ya da CI günlüğüne düşmemeli.
+        assert!(
+            call.contains(&"<env:PGPASSWORD>".to_string()),
+            "parola ortamdan geçmeli: {call:?}"
+        );
+    }
+
+    #[test]
+    fn a_database_url_file_is_preferred_over_the_environment() {
+        // Ajanın ortam dosyası 0644; parolalı bir dize oraya yazılırsa kutudaki her yerel hesap
+        // okur. Kurulum zaten 0400 root bir dosya üretiyor, ve doğru düzen o dosyayı okumak.
+        // İKİSİ DE VARSA DOSYA KAZANIYOR: tersi olsaydı ortamda unutulmuş eski bir değer, dönmesi
+        // gereken dosyanın önüne geçer ve bunu kimse fark etmezdi.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("db-url-owner");
+        let from_file = "postgres://depsis_owner:DOSYADAN@localhost/depsis\n";
+        std::fs::write(&file, from_file).expect("write");
+        let from_env = std::ffi::OsStr::new("postgres://ortamdan@localhost/depsis");
+        let _env = EnvGuard::set(&[
+            (crate::dbdump::DATABASE_URL_ENV, from_env),
+            (crate::dbdump::DATABASE_URL_FILE_ENV, file.as_os_str()),
+            (crate::dbdump::DUMP_DIR_ENV, dir.path().as_os_str()),
+        ]);
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let h = Harness::bare();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"dump_database","name":"gecelik","keep":3}"#,
+            peer(API_UID),
+            "db2",
+            "gecelik veritabanı dökümü",
+        );
+        assert!(matches!(resp, Response::DatabaseDumps { .. }), "{resp:?}");
+
+        let call = r.call(0).expect("pg_dump koştu");
+        assert!(
+            call.contains(&"postgres://depsis_owner@localhost/depsis".to_string()),
+            "dosyadaki dize kullanılmalı: {call:?}"
+        );
+        assert!(!call.iter().any(|a| a.contains("DOSYADAN")), "{call:?}");
+    }
+
+    #[test]
     fn smart_reads_are_confined_to_dev_disk_by_id() {
         // The fixture is what `--json=c` actually writes. It used to be the bare word `PASSED`,
         // which smartctl cannot produce under the flags this code passes — so the test agreed with
@@ -4756,8 +4962,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let cert = dir.path().join("depsis.crt");
         let key = dir.path().join("depsis.key");
-        std::env::set_var(crate::tls::CERT_PATH_ENV, &cert);
-        std::env::set_var(crate::tls::KEY_PATH_ENV, &key);
+        let _env = with_tls_paths(&cert, &key);
 
         // İki FARKLI açık anahtar: biri sertifikadan, biri anahtardan.
         let r = MockCommandRunner::with_responses([
@@ -4789,13 +4994,17 @@ mod tests {
         );
         assert!(!key.with_extension("new").exists(), "staged anahtar kaldı");
         assert!(!cert.exists(), "var olmayan sertifika yerine bir şey kondu");
-
-        std::env::remove_var(crate::tls::CERT_PATH_ENV);
-        std::env::remove_var(crate::tls::KEY_PATH_ENV);
     }
 
     #[test]
     fn reading_the_certificate_asks_openssl_with_the_path_last() {
+        // Yol TESTİN sabitlediği bir yol. Eskiden iddia, argv kurulduktan SONRA yeniden okunan
+        // `crate::tls::cert_path()` ile karşılaştırılıyordu: aynı süreçte paralel koşan başka bir
+        // test o değişkeni değiştirdiğinde, kodda hiçbir şey değişmemişken kırmızı yanıyordu.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cert = dir.path().join("depsis.crt");
+        let key = dir.path().join("depsis.key");
+        let _env = with_tls_paths(&cert, &key);
         let r = MockCommandRunner::with_responses([
             "subject=CN=depsis\nissuer=CN=depsis\nsha256 Fingerprint=AA:BB\n".into(),
         ]);
@@ -4824,7 +5033,7 @@ mod tests {
         // `--` YOK: openssl onu anlamiyor (bkz. tls::describe_argv). Yol son arguman.
         assert_eq!(
             call.last().map(String::as_str),
-            Some(crate::tls::cert_path().to_string_lossy().as_ref())
+            Some(cert.to_string_lossy().as_ref())
         );
     }
     /// PEM başlığını PARÇALI kurar, ve sebebi gizli tarayıcı.
@@ -4841,23 +5050,26 @@ mod tests {
     ///
     /// Testi koşturan makinede o dosyaların bulunmamasına bel bağlamak, bir gün bir geliştirme
     /// kutusunda DEPSIS kurulu olduğunda anlaşılmaz biçimde düşen testler demek olurdu.
-    fn no_update_files() {
-        std::env::set_var(
-            crate::update::STATE_FILE_ENV,
-            "/nonexistent/depsis/state.json",
-        );
-        std::env::set_var(crate::update::LOG_FILE_ENV, "/nonexistent/depsis/log");
-        std::env::set_var(
-            crate::update::INSTALLED_VERSION_ENV,
-            "/nonexistent/depsis/version",
-        );
+    /// Bir MUHAFIZ döndürüyor, ve bu bir düzeltme: eski hâli üç değişkeni yazıp hiç geri almıyordu
+    /// ve kilidi de almıyordu, yani hem paralel koşan başka testleri kırıyor hem de kalıntı değeri
+    /// aynı süreçteki sonraki testlere sızdırıyordu.
+    #[must_use = "bind the guard, or the paths are restored before the test runs"]
+    fn no_update_files() -> EnvGuard {
+        let state = std::ffi::OsStr::new("/nonexistent/depsis/state.json");
+        let log = std::ffi::OsStr::new("/nonexistent/depsis/log");
+        let version = std::ffi::OsStr::new("/nonexistent/depsis/version");
+        EnvGuard::set(&[
+            (crate::update::STATE_FILE_ENV, state),
+            (crate::update::LOG_FILE_ENV, log),
+            (crate::update::INSTALLED_VERSION_ENV, version),
+        ])
     }
 
     #[test]
     fn a_running_update_refuses_a_second_one() {
         // İki güncelleme aynı anda koşarsa ikisi de aynı kaynak ağacını yazar ve ortaya çıkan şey
         // ne eski ne yeni sürümdür. Ret ARAYÜZDE DEĞİL BURADA: gri bir düğme bir savunma değil.
-        no_update_files();
+        let _env = no_update_files();
         let r = MockCommandRunner::with_responses(["active".into(), "inactive".into()]);
         let s = MemorySink::default();
         let h = Harness::bare();
@@ -4887,7 +5099,7 @@ mod tests {
 
     #[test]
     fn checking_starts_the_check_unit_with_no_operand_from_the_caller() {
-        no_update_files();
+        let _env = no_update_files();
         let r = MockCommandRunner::with_responses([
             "inactive".into(),
             "inactive".into(),
@@ -4920,7 +5132,7 @@ mod tests {
         // ADR-0006 §2.2'nin buradaki biçimi: kurulacak kodu çağıran seçemez, bir önceki denetim
         // seçer. Denetim yoksa onaylanmış bir sürüm de yoktur, ve "en yenisini getir" demek
         // operatörün gördüğünden başka bir şeyi kurmak olurdu.
-        no_update_files();
+        let _env = no_update_files();
         let r = MockCommandRunner::with_responses(["inactive".into(), "inactive".into()]);
         let s = MemorySink::default();
         let h = Harness::bare();
@@ -4972,7 +5184,7 @@ mod tests {
         // `no_update_files` durum dosyasını olmayan bir yola alıyor; okunamayan bir dosya
         // "dokunulmadı" demek, "az önce dokunuldu" değil — tersi, bayat fazı sonsuza kadar taze
         // sayardı ve düzeltmenin tamamını geri alırdı.
-        no_update_files();
+        let _env = no_update_files();
         assert!(!state_file_touched_within(UPDATE_START_GRACE));
     }
 
@@ -4980,7 +5192,7 @@ mod tests {
     fn the_status_reads_both_units_and_reports_an_unknown_box_honestly() {
         // Sürümü bilinmeyen bir kutu GÜNCEL DEĞİLDİR. "Bilmiyorum"u "güncel" diye raporlamak,
         // güncellemeyi hiç yapmamanın en sessiz yolu olurdu.
-        no_update_files();
+        let _env = no_update_files();
         let r = MockCommandRunner::with_responses(["inactive".into(), "inactive".into()]);
         let s = MemorySink::default();
         let h = Harness::bare();
@@ -5621,6 +5833,58 @@ mod tests {
         );
     }
 
+    /// İMZA HİÇ OKUNAMAZSA DA havuz geri bırakılmaya çalışılıyor.
+    ///
+    /// `zfs list` düştüğünde eskiden `?` doğrudan çıkıyordu: yabancı havuz takılı kalıyor ve
+    /// hiçbir cümle bunu söylemiyordu. ZFS onu bir sonraki açılışta önbellekten `-N`siz takıp
+    /// KENDİ bağlama noktalarına bağlar — `-N`in var olma sebebi tam olarak bu.
+    #[test]
+    fn imza_okunamasa_da_havuz_geri_birakilmaya_calisiliyor() {
+        let h = Harness::with_share("belgeler");
+        let r = MockCommandRunner::failing_after(1, "");
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"import_backup_pool","pool":"baska","adopt":false}"#,
+            peer(API_UID),
+            "kt5",
+            "yabanci havuz",
+        );
+        assert!(matches!(resp, Response::Failed { .. }), "{resp:?}");
+        assert_eq!(
+            &r.call(2).expect("geri birakma denenmeli")[1..],
+            ["export", "baska"]
+        );
+    }
+
+    /// GERİ BIRAKMA DÜŞERSE cevap "olduğu gibi bırakıldı" DEMİYOR.
+    ///
+    /// Ekranın söylediğiyle cihazın durumu ayrışırsa kullanıcı takılı kalmış yabancı havuzu hiç
+    /// öğrenemez; ve öğrenemediği bir yan etkiyi geri alamaz.
+    #[test]
+    fn geri_birakilamayan_havuz_icin_cevap_dogruyu_soyluyor() {
+        let h = Harness::with_share("belgeler");
+        let r = MockCommandRunner::failing_after(2, "");
+        let s = MemorySink::default();
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"import_backup_pool","pool":"baska","adopt":false}"#,
+            peer(API_UID),
+            "kt6",
+            "yabanci havuz",
+        );
+        match resp {
+            Response::Refused { reason } => {
+                assert!(reason.contains("GERİ BIRAKILAMADI"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            &r.call(2).expect("geri birakma denenmeli")[1..],
+            ["export", "baska"]
+        );
+    }
+
     /// İmzası doğrulanan havuzun YALNIZ şifresiz yarısı bağlanıyor.
     ///
     /// Şifreli yarı burada bağlanmıyor ve bağlanamaz: anahtarı yok, ve anahtar yalnız kullanıcı
@@ -6009,6 +6273,77 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"Dosyalar"), "{names:?}");
         assert!(names.contains(&"DEPSIS-YEDEK"), "{names:?}");
+    }
+
+    /// Ajanın KENDİ ara alanı yedek kökünde de görünmüyor.
+    ///
+    /// `.depsis/staging` iskeletini yedek köküne ajanın kendisi kuruyor. Süzülmezse kurtarma
+    /// gezgininde, kullanıcının hiç yüklemediği yarım `yedek-<uuid>` dosyalarının durduğu bir
+    /// klasör olarak çıkıyor. Koşul KÖKLE sınırlı: `Dosyalar/` aynasının altındaki `.depsis` adlı
+    /// bir kullanıcı klasörü görünmeye devam etmeli, yoksa yedeklediğini geri getiremez.
+    #[test]
+    fn yedek_listelemesi_ajanin_kendi_agacini_gostermiyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let backup = h.backup_path();
+        std::fs::create_dir_all(backup.join(".depsis").join("staging")).expect("mkdir");
+        std::fs::create_dir_all(backup.join("Dosyalar").join(".depsis")).expect("mkdir");
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"backup_list_directory","path":[]}"#,
+            peer(API_UID),
+            "yk8",
+            "yedek koku listeleniyor",
+        );
+        let Response::Listing { entries, .. } = resp else {
+            panic!("{resp:?}")
+        };
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains(&".depsis"), "{names:?}");
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"backup_list_directory","path":["Dosyalar"]}"#,
+            peer(API_UID),
+            "yk9",
+            "kullanicinin kendi klasoru",
+        );
+        let Response::Listing { entries, .. } = resp else {
+            panic!("{resp:?}")
+        };
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&".depsis"),
+            "kullanıcının kendi klasörü gizlenmemeli: {names:?}"
+        );
+    }
+
+    /// Yedek listelemesi SAYFALANABİLİYOR, ve sıra sabit.
+    ///
+    /// İmleçsiz hâlde 5.000'den büyük bir `silinenler/<gün>` klasörü hiç budanamıyordu: budama
+    /// turu kesilmiş listelemeyi görüp dizini atlıyor, dizin küçülmediği için her tur aynı kararı
+    /// veriyordu.
+    #[test]
+    fn yedek_listelemesi_imlecle_devam_ediyor() {
+        let h = Harness::with_backup("belgeler");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let backup = h.backup_path();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(backup.join(name), b"x").expect("write");
+        }
+
+        let resp = agent(&r, &s, &h).handle(
+            r#"{"op":"backup_list_directory","path":[],"after":"a.txt"}"#,
+            peer(API_UID),
+            "yk10",
+            "ikinci sayfa",
+        );
+        let Response::Listing { entries, .. } = resp else {
+            panic!("{resp:?}")
+        };
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["b.txt", "c.txt"], "{names:?}");
     }
 
     /// Yedek diski kurulurken parola ARGV'YE HİÇ GİRMİYOR.
@@ -8002,6 +8337,33 @@ mod tests {
     }
 
     #[test]
+    fn a_download_and_an_archive_cannot_reach_the_agents_own_tree() {
+        // Okuma tarafındaki kapı da kapalı olmalı: ara alan aktarım kayıt defterinin ve
+        // `PublishTransfer`in bayt sayısı denetiminin arkasında duruyor, ve oradan doğrudan
+        // okuyabilmek o denetimleri atlayan ikinci bir kapı bırakırdı. Arşiv tarafında denetim
+        // TAM yola uygulanıyor, yoksa `[".depsis","staging"]` ad/üst ayrımından sonra kaçardı.
+        let h = Harness::with_share("alice");
+        std::fs::write(
+            h.share_path(&["alice", ".depsis", "staging", "live.part"]),
+            b"in flight",
+        )
+        .expect("stage");
+
+        let download =
+            r#"{"op":"open_download","share":"alice","path":[".depsis","staging","live.part"]}"#;
+        match call(&h, download) {
+            Response::Refused { reason } => assert!(reason.contains(".depsis"), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        let archive = r#"{"op":"archive_folder","share":"alice","path":[".depsis","staging"],"staging_name":"a.tgz"}"#;
+        match call(&h, archive) {
+            Response::Refused { reason } => assert!(reason.contains(".depsis"), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_remove_cannot_reach_the_agents_own_tree_or_the_share_root() {
         let h = Harness::with_share("alice");
         std::fs::write(
@@ -8704,6 +9066,59 @@ mod tests {
     /// `std::env::set_var` is process-global and Rust runs tests in threads. Shared by both
     /// helpers below, so one cannot run while the other is halfway through restoring.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Süreç-genel ortam değişkenlerini test süresince kurar, düşerken eskisini geri koyar.
+    ///
+    /// ── NEDEN BİR MUHAFIZ ────────────────────────────────────────────────────────────────
+    ///
+    /// `std::env::set_var` bütün SÜRECİ değiştiriyor ve Rust testleri iş parçacıklarında paralel
+    /// koşturuyor. Kilitsiz yazan bir test, aynı değişkeni o sırada okuyan başka bir testi kodda
+    /// hiçbir şey değişmemişken kırmızıya düşürüyordu — ve yeniden koşunca geçtiği için kaynağı en
+    /// zor bulunan kusur türü bu.
+    ///
+    /// GERİ KOYMAK DA MUHAFIZIN İŞİ. Eski `no_update_files` üç değişkeni yazıp hiç geri almıyordu,
+    /// yani kalıntı değer aynı süreçteki sonraki bütün testlere sızıyordu. `Drop`, testin
+    /// panikleyerek bitmesi hâlinde de koşuyor; elle yazılan bir `remove_var` koşmuyor.
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        #[must_use = "the guard restores the environment when it is dropped; binding it to `_` \
+                      would restore it immediately and leave the test running with the real one"]
+        fn set(pairs: &[(&'static str, &std::ffi::OsStr)]) -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut saved = Vec::with_capacity(pairs.len());
+            for (name, value) in pairs {
+                saved.push((*name, std::env::var(name).ok()));
+                std::env::set_var(name, value);
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, saved) in &self.saved {
+                match saved {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    /// TLS sertifika ve anahtar yollarını geçici bir dizine alır.
+    #[must_use = "bind the guard, or the paths are restored before the test runs"]
+    fn with_tls_paths(cert: &std::path::Path, key: &std::path::Path) -> EnvGuard {
+        EnvGuard::set(&[
+            (crate::tls::CERT_PATH_ENV, cert.as_os_str()),
+            (crate::tls::KEY_PATH_ENV, key.as_os_str()),
+        ])
+    }
 
     /// Run `f` with `DEPSIS_SHARES_ROOT` unset, then restore it.
     ///

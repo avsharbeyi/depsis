@@ -2,12 +2,14 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AuditService } from '../audit/audit.service.js';
-import type { AgentService } from '../agent/agent.service.js';
+import { AgentUnavailableError } from '../agent/agent.service.js';
+import type { AgentResponse, AgentService } from '../agent/agent.service.js';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
 import type { ReauthService } from '../auth/reauth.service.js';
 import type { JobsService } from '../jobs/jobs.service.js';
@@ -51,15 +53,21 @@ function controller(options: {
   enqueue?: ReturnType<typeof vi.fn>;
   /** What `storageSetup` reports about the share root — bare-and-empty unless a test says else. */
   shareRoot?: { path?: string; dataset?: string; empty?: boolean };
+  /** `storageSetup`in düşmesi: ajanın susması bu yolda bir 500 üretiyordu. */
+  storageSetupFails?: () => Promise<never>;
+  /** Tarama uçlarının ajanı — verilmezse çağrılması gürültü çıkarıyor. */
+  agentCall?: () => Promise<AgentResponse>;
 }): { controller: PoolsController; enqueue: ReturnType<typeof vi.fn> } {
   const enqueue = options.enqueue ?? vi.fn().mockResolvedValue('job-1');
   const system = {
     isSystemAdministrator: () => Promise.resolve(options.admin ?? true),
-    storageSetup: () =>
-      Promise.resolve({
-        pools: [],
-        shareRoot: options.shareRoot ?? { path: '/srv/depsis', empty: true },
-      }),
+    storageSetup:
+      options.storageSetupFails ??
+      (() =>
+        Promise.resolve({
+          pools: [],
+          shareRoot: options.shareRoot ?? { path: '/srv/depsis', empty: true },
+        })),
     poolExists:
       typeof options.poolExists === 'function'
         ? options.poolExists
@@ -76,11 +84,11 @@ function controller(options: {
         : Promise.reject(new UnauthorizedException('the password is wrong')),
   } as unknown as ReauthService;
 
-  // The agent is only reached by the scrub routes, which this file does not exercise: what it
-  // measures is §8.1's sequence in front of pool creation. A stub that throws would make an
-  // accidental call loud rather than silent.
+  // The agent is only reached by the scrub routes. A stub that throws makes an accidental call
+  // from the creation path loud rather than silent; the scrub suite passes its own.
   const agent = {
-    call: () => Promise.reject(new Error('this suite does not drive the agent')),
+    call:
+      options.agentCall ?? (() => Promise.reject(new Error('this suite does not drive the agent'))),
   } as unknown as AgentService;
   // Denetim gerçek tabloya yazamaz — bu dosya veritabanısız çalışıyor. Kayıt çağrısının
   // kendisi bu suite'in ölçtüğü şey değil; sessiz bir stub yeter.
@@ -229,5 +237,65 @@ describe('POST /storage/pools', () => {
     await expect(
       c.create(request(), { ...VALID, topology: 'stripe' as unknown as 'mirror' }),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+/**
+ * Ajan yokken bu dosyanın verdiği CEVAP.
+ *
+ * `AgentUnavailableError` bir `HttpException` değil: sarmalanmadan geçtiğinde `ProblemFilter` onu
+ * ayrıntısız bir 500'e çevirip yığın izini günlüğe yazıyor. Depolama ekranı her havuz için bir kez
+ * tarama durumu sorduğu için, bakım için durmuş bir ajan havuz başına bir hata yığını üretiyor ve
+ * operatöre "Beklenmeyen hata" diyordu — oysa doğru cümle "sistem ajanına ulaşılamıyor".
+ */
+describe('ajana ulaşılamadığında', () => {
+  it('GET /storage/pools/{pool}/scrub 503 diyor', async () => {
+    const { controller: c } = controller({
+      agentCall: () => Promise.reject(new AgentUnavailableError('socket is gone')),
+    });
+
+    await expect(c.scrubStatus(request(), 'tank')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('POST /storage/pools/{pool}/scrub 503 diyor', async () => {
+    const { controller: c } = controller({
+      agentCall: () => Promise.reject(new AgentUnavailableError('socket is gone')),
+    });
+
+    // Başlıklar BOŞ: `requireSameOrigin` köken bildirmeyen bir isteği geçiriyor, yani ölçülen şey
+    // yalnız ajanın yokluğuna verilen cevap.
+    const writing = { ...request(), headers: {} } as unknown as AuthenticatedRequest;
+    await expect(c.startScrub(writing, 'tank')).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
+  it('POST /storage/pools 503 diyor ve İŞ KUYRUĞA GİRMİYOR', async () => {
+    // Karar verilemeyen yerde disk silen bir iş kuyruğa alınmıyor: 503, `enqueue`den önce.
+    const { controller: c, enqueue } = controller({
+      storageSetupFails: () => Promise.reject(new AgentUnavailableError('socket is gone')),
+    });
+
+    await expect(c.create(request(), VALID)).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('ajan sağken tarama durumunu olduğu gibi veriyor', async () => {
+    // Sarmalama, ÇALIŞAN yolu değiştirmiyor: 503 yalnız ulaşılamama hâlinde.
+    const { controller: c } = controller({
+      agentCall: () =>
+        Promise.resolve<AgentResponse>({
+          status: 'scrub',
+          scan: 'scrub repaired 0B in 00:12:01',
+          errors: 'No known data errors',
+          in_progress: false,
+          has_errors: false,
+        }),
+    });
+
+    await expect(c.scrubStatus(request(), 'tank')).resolves.toMatchObject({
+      inProgress: false,
+      hasErrors: false,
+    });
   });
 });

@@ -53,10 +53,12 @@ import { UpdateController } from './update.controller.js';
     {
       provide: SystemService,
       inject: [AgentService, DbService, APP_CONFIG],
-      // Which POOLS comes from configuration: the agent's closed operation set has no "list
-      // pools", so there is nothing to discover from. Which DISKS no longer has to —
-      // `ListDisks` closed that half — and `config.smartDisks` is now a narrowing rather than
-      // the only source; empty means ask the box (see `SystemService.smartTargets`).
+      // Pools and disks are BOTH discovered from the box — `ListPools` and `ListDisks` are in
+      // the agent's operation set and `SystemService` calls them. `config.zfsPools` and
+      // `config.smartDisks` are narrowings rather than the only source; empty means ask the box
+      // (see `SystemService.poolTargets` and `SystemService.smartTargets`). This comment used to
+      // say there was no "list pools" operation, which sent the next reader looking for a second
+      // one to add.
       useFactory: (agent: AgentService, db: DbService, config: AppConfig) =>
         new SystemService(
           agent,

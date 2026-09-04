@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { ProblemException } from '../common/problem.filter.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
 import { OrganizationsService } from '../organizations/organizations.service.js';
 import { MfaService } from './mfa.service.js';
@@ -9,7 +10,6 @@ import {
   KEY_VERSION_AES_GCM,
   KEY_VERSION_PLAINTEXT,
   SecretBox,
-  SecretKeyUnavailableError,
 } from './secret-box.js';
 import { base32Decode, totp } from './totp.js';
 
@@ -175,13 +175,23 @@ describeDb('TOTP secrets at rest', () => {
     expect(stolen.outcome, "Alice's secret must not authenticate Bob").toBe('rejected');
   });
 
-  it('will not enrol anyone when there is no key', async () => {
+  it('will not enrol anyone when there is no key, and says so on the screen', async () => {
     // Refused, not degraded. Silently writing a raw secret would give an operator who configured
     // encryption exactly the exposure they think they closed.
+    //
+    // VE 503, 500 DEĞİL. Düz bir `Error` `ProblemFilter`'ın 500 dalına düşüyordu ve bir 500 asla
+    // `detail` taşımaz: sahibi yalnız "Kayıt başlatılamadı." görüyor, sebebi `journalctl`
+    // söylüyordu. Bu ürün için kabul edilebilir bir cevap değil.
     const keyless = new MfaService(db, null);
-    await expect(keyless.beginEnrolment(orgId, bob, 'bob')).rejects.toBeInstanceOf(
-      SecretKeyUnavailableError,
-    );
+    const failure = await keyless
+      .beginEnrolment(orgId, bob, 'bob')
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ProblemException);
+    const problem = failure as ProblemException;
+    expect(problem.getStatus()).toBe(503);
+    expect(problem.code).toBe('dependency-unavailable');
+    expect(problem.detail).toMatch(/secret\.key/);
   });
 
   it('refuses a row that lies about which form it is in', async () => {

@@ -635,6 +635,22 @@ export class FilesController {
    * The size used for the range check is the AGENT's, not the `size_bytes` column. The column is
    * what DEPSIS last recorded and a file changed over SMB is exactly where the two diverge — a
    * range validated against a stale number is a range validated against nothing.
+   *
+   * ── `?inline=1`: YALNIZ PDF, VE YALNIZ UZANTIDAN ────────────────────────────────────────────
+   *
+   * Bu uç her zaman `Content-Disposition: attachment` gönderiyor, ve gerekçesi sağlam: kiracının
+   * yüklediği bir HTML dosyasını API'nin kendi kökeninde satır içi sunmak, her oturuma karşı
+   * depolanmış XSS demek. Ama o kural PDF önizlemesini de kapatıyordu — sahibi bir sözleşmeye
+   * bakmak için onu diske indirmek zorunda kalıyordu (§5.1 PDF önizlemesini istiyor).
+   *
+   * Kapı UZANTIYLA açılıyor, `content_type` ile değil: ajan o sütunu her zaman doldurmuyor, yani
+   * türe bakan bir kontrol aynı dosyayı bazen açar bazen açmazdı. Adı `.pdf` ile bitmeyen hiçbir
+   * şeyde bayrak YOK SAYILIYOR (ret değil: istemci en kötü ihtimalle indirmeye düşer).
+   *
+   * Güvenliği tutan şey, türün DOSYADAN OKUNMAMASI: `.pdf` uzantılı bir HTML dosyası da
+   * `application/pdf` olarak, `nosniff` ile gidiyor — tarayıcı onu PDF görüntüleyicisine verir ve
+   * belge olarak asla çalıştırmaz. `nosniff` burada ayrıca yazılıyor çünkü nginx başlıklarına
+   * güvenmek, API'ye doğrudan ulaşılan bir kurulumda kuralı sessizce kaldırmak olurdu.
    */
   @Get(':id/content')
   async content(
@@ -643,6 +659,7 @@ export class FilesController {
     @Param('id') id: string,
     @Headers('range') range?: string,
     @Headers('if-range') ifRange?: string,
+    @Query('inline') inline?: string,
   ): Promise<void> {
     const caller = requireSession(request);
     requireUuid(id);
@@ -696,16 +713,23 @@ export class FilesController {
     const start = wanted?.start ?? 0;
     const length = wanted === null ? opened.size : wanted.end - wanted.start + 1;
 
+    // Satır içi açılabilecek tek tür, ve türü DOSYA DEĞİL AD söylüyor — yukarıdaki nota bak.
+    const asPdf = servesInline(entry.name, inline);
+
     response.setHeader('Accept-Ranges', 'bytes');
     response.setHeader('ETag', etag);
     response.setHeader('Content-Length', String(length));
-    response.setHeader('Content-Type', entry.content_type ?? 'application/octet-stream');
+    response.setHeader(
+      'Content-Type',
+      asPdf ? 'application/pdf' : (entry.content_type ?? 'application/octet-stream'),
+    );
     // `attachment` is not a nicety. Serving a tenant-supplied file inline on the API's own origin
     // makes an uploaded HTML file a stored XSS against every other tenant's session.
     response.setHeader(
       'Content-Disposition',
-      `attachment; filename*=UTF-8''${encodeURIComponent(entry.name)}`,
+      `${asPdf ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(entry.name)}`,
     );
+    if (asPdf) response.setHeader('X-Content-Type-Options', 'nosniff');
     if (wanted !== null) {
       response.status(206);
       response.setHeader('Content-Range', `bytes ${start}-${wanted.end}/${opened.size}`);
@@ -1001,6 +1025,17 @@ export function requirePermission(
 }
 
 /**
+ * `?inline=1` bu dosyada gerçekten satır içi sunulmayı hak ediyor mu.
+ *
+ * TEK ÖLÇÜT UZANTI, ve bu bilinçli: `content_type` sütununu ajan her zaman doldurmuyor, ona bakan
+ * bir kontrol aynı PDF'i bazen açar bazen açmazdı. Adı `.pdf` ile bitmeyen her şey `false` —
+ * yani kiracının yüklediği bir HTML dosyası hiçbir zaman API'nin kökeninde belge olarak açılmaz.
+ */
+export function servesInline(name: string, inline: string | undefined): boolean {
+  return inline === '1' && name.toLowerCase().endsWith('.pdf');
+}
+
+/**
  * A STRONG validator, because `If-Range` is only useful with one.
  *
  * Built from the id, the modification time and the size the agent just measured. A weak tag would
@@ -1068,6 +1103,19 @@ function parseRange(
  * "some row exists in this folder" — which the folder's own presence already implies. Removing
  * even that would mean resolving permissions inside the SQL, and then ADR-0021's rule would live
  * in two places written in two languages.
+ *
+ * ── SAYAÇLAR SATIR DÜŞTÜĞÜ ANDA HİÇ YAZILMIYOR ──────────────────────────────────────────────
+ *
+ * `total`/`folders`/`files` servisin COUNT'undan geliyor ve o sorgu izne BAKMIYOR: bir üyeden
+ * daraltılmış alt klasör listeden çıkarılıyor ama sayaçta durmaya devam ediyordu. Ekranın altında
+ * "6 klasör · 42 dosya" yazarken listede beş satır olması, kullanıcıya kendisinden saklanan bir
+ * klasörün VARLIĞINI söylüyor (ADR-0021'in kapattığı şeyin ta kendisi) ve gördüğü listeyle de
+ * çelişiyor.
+ *
+ * Gizlenen satırı sayaçtan ÇIKARMAK doğru olmazdı: sayaç klasörün tamamını anlatıyor, gizlenenler
+ * ise yalnız BU sayfayı — çok sayfalı bir klasörde çıkarılmış sayı da yanlış olurdu. Bu yüzden
+ * bir satır bile düştüyse üç alan da hiç gönderilmiyor; sözleşmede üçü de isteğe bağlı ve ekran
+ * alan yokken dürüst "N+" gösterimine düşüyor (Tiles.tsx, Files.tsx alt bilgisi).
  */
 export function toPage(
   source: FileEntryPage,
@@ -1081,20 +1129,26 @@ export function toPage(
   retentionDays: number | null = null,
 ): Schemas['FileEntryPage'] {
   const items: Schemas['FileEntry'][] = [];
+  let hidden = 0;
   for (const row of source.items) {
     const effective = permissions.get(row.id) ?? new Set<Permission>();
-    if (!effective.has('list')) continue;
+    if (!effective.has('list')) {
+      hidden += 1;
+      continue;
+    }
     items.push(toEntry(row, effective, expiryOf(row, retentionDays)));
   }
+  // Süzülmemiş bir sayacın süzülmüş bir listenin altında durması sızıntı; yukarıdaki nota bak.
+  const counted = hidden === 0;
   return {
     items,
     ...(source.nextCursor === null ? {} : { nextCursor: source.nextCursor }),
     // `total` yalnız klasör listelemesinde dolu. Arama ve çöp sayfa sayfa gezilen şeyler değil,
     // ve orada bir toplam sorusunun karşılığı yok — alan yazılmıyor, sıfır yazılmıyor.
-    ...(source.total === undefined ? {} : { total: source.total }),
+    ...(source.total === undefined || !counted ? {} : { total: source.total }),
     // Aynı gerekçe, ve aynı yerden geliyorlar: `total`la tek sorgudan. Biri varsa üçü de var.
-    ...(source.folders === undefined ? {} : { folders: source.folders }),
-    ...(source.files === undefined ? {} : { files: source.files }),
+    ...(source.folders === undefined || !counted ? {} : { folders: source.folders }),
+    ...(source.files === undefined || !counted ? {} : { files: source.files }),
     hasMore: source.hasMore,
   };
 }

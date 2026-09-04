@@ -397,4 +397,40 @@ describeDb('browsing a snapshot and restoring out of it', () => {
       ),
     ).toBe('validation-failed');
   });
+
+  it('refuses a path component the agent will refuse, instead of enqueuing a job that dies', async () => {
+    // The body's `path` went straight into the job. The agent parses each component as an
+    // `EntryName` and refuses `..`, a separator or a NUL — but it does that in the WORKER, after
+    // this endpoint has already answered 202 and written "geri yükleme istendi" into the audit
+    // log. The user was told their file was coming back and then watched a job die five times
+    // with no reason anywhere they could see.
+    const { jobs, enqueued } = stubJobs();
+    for (const path of [['..', 'rapor.txt'], ['Arsiv/rapor.txt'], ['rapor\0.txt'], ['.depsis']]) {
+      expect(
+        await codeOf(() =>
+          controller({ jobs }).restore(asRequest(org, admin, 'admin'), share, 'gunluk-2026-08-24', {
+            path,
+            destinationId: folder,
+          }),
+        ),
+      ).toBe('validation-failed');
+    }
+    expect(enqueued).toEqual([]);
+  });
+
+  it('still restores a file whose name begins with a dash', async () => {
+    // The browse path refuses a leading dash and this one must not: `EntryName` (schema 43) took
+    // path and entry-name positions out of every argv, so `-eski.txt` is an ordinary file that
+    // gets indexed and backed up — and therefore a file somebody can lose and want back.
+    const { jobs, enqueued } = stubJobs();
+    const accepted = await controller({ jobs }).restore(
+      asRequest(org, admin, 'admin'),
+      share,
+      'gunluk-2026-08-24',
+      { path: ['Arsiv', '-eski.txt'], destinationId: folder },
+    );
+
+    expect(accepted.name).toBe('-eski.txt');
+    expect(enqueued).toHaveLength(1);
+  });
 });

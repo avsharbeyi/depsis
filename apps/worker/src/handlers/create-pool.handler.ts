@@ -25,22 +25,27 @@ export { CREATE_POOL_KIND };
 /**
  * Create a ZFS pool through the privileged agent. THE ONE DESTRUCTIVE HANDLER.
  *
- * `maxAttempts: 1` DOES NOT MEAN THIS RUNS ONCE, and believing it did was a mistake worth writing
- * down. `claim_job` reclaims a RUNNING job whose lease has expired without consulting
- * `max_attempts` — the counter is read only by `finish_job`, to choose between `failed` and
- * `dead`. So `maxAttempts: 1` prevents a retry after a REPORTED failure and nothing else: a worker
- * killed mid-`zpool create` has its job reclaimed sixty seconds later, by design, because that is
- * how the queue detects a crashed worker at all.
+ * `maxAttempts: 1` MEANS THIS RUNS ONCE, and it did not always. Bu yorum bir zamanlar tersini
+ * söylüyordu — "kirası dolan RUNNING bir işi `claim_job` `max_attempts`e bakmadan geri alır" — ve
+ * o cümle 0018'den beri yanlış. `claim_job` artık İLK İŞ olarak, kirası dolmuş ve bütçesi tükenmiş
+ * (`attempt >= max_attempts`) satırları `job_history`'ye `dead` olarak taşıyor; ikinci kapı olarak
+ * da seçim yükleminde `attempt < max_attempts` var. `maxAttempts: 1` ile ilk claim `attempt`i 1
+ * yapıyor, yani bu işleyici bir iş için İKİNCİ KEZ hiç çağrılmıyor.
+ *
+ * BUNUN BEDELİ, ve burada kapatılamıyor: `zpool create` başarılıyken ölen bir işçinin işi
+ * "işçi durdu" diyen bir `dead` satırına dönüşüyor. Diskler silinmiş, havuz kurulmuş, ve sihirbaz
+ * kurulamadığını söylüyor. Sahibin oradan çıkış yolu Depolama ekranında havuzu görmek; işleyicinin
+ * yapabileceği bir şey yok, çünkü o satır bir daha hiç alınmıyor. Kuyruğu iki denemeye açmak bunu
+ * ÇÖZMEZ, kötüleştirir: TEMİZ bildirilmiş bir başarısızlıktan sonra ikinci deneme `zpool create`i
+ * tekrar eder ve aşağıdaki varlık kontrolü yalnız havuz gerçekten kurulduysa koruyor.
  *
  * The existence check below is therefore the thing that stops a second `zpool create`, not a
- * courtesy. And it has to distinguish two cases that look identical afterwards:
- *
- *   * ATTEMPT 1 finding the pool already there means it existed before this job ran. The route's
- *     409 check should have caught it and did not — most likely because the agent was unreachable
- *     at that moment and `exists()` swallows the error. Reporting success here would tell the
- *     operator their disks had been used when nothing touched them.
- *   * ATTEMPT 2 OR LATER finding the pool there means the previous attempt created it and died
- *     before the answer came back. That is a success whose receipt was lost.
+ * courtesy. Bulduğu havuz HER ZAMAN bu işten önce vardı: tek deneme olduğu için "önceki deneme
+ * kurdu ve cevabı kayboldu" hâli buraya değil, aşağıdaki `AgentUnavailableError` dalına düşüyor —
+ * o dal aynı denemenin içinde, cevabı kaybolan çağrının hemen ardından soruyor. Rotanın 409
+ * kontrolü bunu yakalamalıydı ve yakalayamadı, büyük olasılıkla o an ajan ulaşılamaz olduğu ve
+ * `exists()` hatayı yuttuğu için. Burada başarı bildirmek, sahibe hiç dokunulmamış disklerinin
+ * kullanıldığını söylemek olurdu.
  *
  * WHAT THIS HANDLER DOES NOT CHECK. Not whether the disks are blank, not whether they exist, not
  * whether one of them holds the running system. All three live in the agent, checked against an
@@ -59,24 +64,17 @@ export function createPoolHandler(agent: AgentService): JobHandler {
     if (!(await report(0.1))) return;
 
     if (await exists(agent, payload.name, job.id)) {
-      if (job.attempt <= 1) {
-        // Not ours. See the note on this handler: on the first attempt a pool that is already
-        // there existed before this job ran, and calling that a success would tell the operator
-        // their disks had been used.
-        throw new Error(
-          `a pool called '${payload.name}' already exists on this machine and was not created by ` +
-            `this job; nothing was done to the disks named`,
-        );
-      }
-      // A previous attempt created it and died before the answer came back. Reporting a failure
-      // here would send an operator to investigate a machine that is fine, and the obvious next
-      // thing they would try is running it again.
-      logger.log(
-        `'${payload.name}' already exists on attempt ${job.attempt}; a previous attempt created ` +
-          `it and lost the answer. Recording the success.`,
+      // Not ours. See the note on this handler: this kind is enqueued with `maxAttempts: 1`, so
+      // there is no earlier attempt of THIS job that could have created it — a pool that is
+      // already there existed before the job ran, and calling that a success would tell the
+      // operator their disks had been used.
+      //
+      // If this kind is ever given a second attempt, the "a previous attempt created it and lost
+      // the answer" case comes back and has to be told apart from this one again.
+      throw new Error(
+        `a pool called '${payload.name}' already exists on this machine and was not created by ` +
+          `this job; nothing was done to the disks named`,
       );
-      await report(1);
-      return;
     }
 
     logger.log(

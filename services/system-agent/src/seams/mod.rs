@@ -220,6 +220,15 @@ pub trait SafePath {
     /// and the visible cost of not making it is that `ls -l` prints numbers instead of names.
     fn create_dir(&self, dir: &[&str], name: &str, uid: u32, gid: u32) -> Result<(), SeamError>;
 
+    /// Bir dizinin sahibinin uid'i.
+    ///
+    /// SEAM'DE, çünkü `dispatch` platformdan bağımsız kalmak zorunda (ADR-0006) ve `MetadataExt`
+    /// Unix'e ait. İlk hâli `prepare_app_data_dir` içinde doğrudan `std::os::unix`'i çağırıyordu;
+    /// Windows çapraz denetimi onu yakaladı — `identity.rs`'in aynı ihlalini yakaladığı gibi.
+    /// Sahiplik testi burada yapılamaz: çağıran onu bir REDDE çeviriyor, ve reddin gerekçesi
+    /// (uid) cümlenin içinde geçiyor.
+    fn owner_of(&self, relative: &[&str]) -> Result<u32, SeamError>;
+
     /// Give an already-open file to a uid and gid.
     ///
     /// Takes the FILE, not a path, for the same reason `open` returns one: a path would be
@@ -232,15 +241,6 @@ pub trait SafePath {
     /// who uploaded it cannot read it back over SMB or through the API. That presents as "uploads
     /// are broken", and the fastest-looking repair is to widen the mode — which is exactly the
     /// cross-tenant read the threat model exists to prevent. Ownership is the correct axis.
-    /// Bir dizinin sahibinin uid'i.
-    ///
-    /// SEAM'DE, çünkü `dispatch` platformdan bağımsız kalmak zorunda (ADR-0006) ve `MetadataExt`
-    /// Unix'e ait. İlk hâli `prepare_app_data_dir` içinde doğrudan `std::os::unix`'i çağırıyordu;
-    /// Windows çapraz denetimi onu yakaladı — `identity.rs`'in aynı ihlalini yakaladığı gibi.
-    /// Sahiplik testi burada yapılamaz: çağıran onu bir REDDE çeviriyor, ve reddin gerekçesi
-    /// (uid) cümlenin içinde geçiyor.
-    fn owner_of(&self, relative: &[&str]) -> Result<u32, SeamError>;
-
     fn set_owner(&self, file: &std::fs::File, uid: u32, gid: u32) -> Result<(), SeamError>;
 
     /// Set the mode of an already-open directory.
@@ -282,14 +282,14 @@ pub trait SafePath {
 
     /// Everything directly under `relative`: name, kind and size.
     ///
-    /// The primitive the indexer needs and the two above cannot serve. `list_dirs` drops files and
-    /// `list_stale_files` drops directories and sizes, and a reconciliation has to see both kinds
-    /// together — a name that is a file in the database and a directory on disk is exactly the
-    /// divergence it exists to find.
+    /// The primitive the indexer needs and the two above cannot serve. `list_share_dirs` drops
+    /// files and `list_stale_files` drops directories and sizes, and a reconciliation has to see
+    /// both kinds together — a name that is a file in the database and a directory on disk is
+    /// exactly the divergence it exists to find.
     ///
-    /// SYMLINKS ARE DROPPED, as they are for `list_dirs` and for the same reason: the stat is an
-    /// `fstatat` with `SYMLINK_NOFOLLOW`, so a link pointing out of the share is neither followed
-    /// nor reported. An indexer that recorded one would put a row in `file_entries` naming
+    /// SYMLINKS ARE DROPPED, as they are for `list_share_dirs` and for the same reason: the stat
+    /// is an `fstatat` with `SYMLINK_NOFOLLOW`, so a link pointing out of the share is neither
+    /// followed nor reported. An indexer that recorded one would put a row in `file_entries` naming
     /// something the agent will refuse to open, and the user would see a file that cannot be
     /// downloaded, moved or deleted.
     ///
@@ -532,6 +532,37 @@ pub trait CommandRunner {
     ) -> Result<String, SeamError> {
         Err(SeamError::Io(format!(
             "bu koşucu stdin'den girdi veremiyor ({program}); yalnız gerçek koşucu verebilir"
+        )))
+    }
+
+    /// `run`, ama komuta EK ORTAM DEĞİŞKENLERİ vererek.
+    ///
+    /// ── NEDEN ARGV DEĞİL ─────────────────────────────────────────────────────────────────
+    ///
+    /// `run_with_stdin`in gerekçesinin kardeşi, ve aynı ölçüme dayanıyor: `/proc/<pid>/cmdline`
+    /// bu kutudaki HER kullanıcıya okunabilir, `/proc/<pid>/environ` ise yalnız sahibine. Ajanın
+    /// kendi `list_processes` işlemi de her sürecin argv'sini olduğu gibi ekrana taşıyor, yani
+    /// argv'ye konan bir parola cihazın kendi arayüzünde görünür.
+    ///
+    /// stdin bu komut için bir seçenek DEĞİL: `pg_dump` parolayı stdin'den okumuyor, bağlantıyı
+    /// `--dbname <URI>` ile alıyor. `PGPASSWORD` tam olarak bunun için var.
+    ///
+    /// ── VARSAYILAN REDDEDİYOR ────────────────────────────────────────────────────────────
+    ///
+    /// `run_with_stdin` ile aynı sebeple. Sessizce `run`a düşen bir varsayılan, sırrı hiç
+    /// vermeden koşup anlaşılmaz bir kimlik doğrulama hatası üretirdi — ve daha kötüsü, bir gün
+    /// sırrı argv'ye geri koyan bir uygulamaya sessizce izin verirdi.
+    ///
+    /// DEĞERLER GÜNLÜĞE YAZILMAMALI. Bir uygulama çağrıyı kaydediyorsa yalnız ADLARI kaydeder;
+    /// sahte koşucu bunu `<env:AD>` işaretiyle yapıyor.
+    fn run_with_env(
+        &self,
+        program: &str,
+        _args: &[&str],
+        _env: &[(&str, &str)],
+    ) -> Result<String, SeamError> {
+        Err(SeamError::Io(format!(
+            "bu koşucu ortam değişkeni geçiremiyor ({program}); yalnız gerçek koşucu geçirebilir"
         )))
     }
 

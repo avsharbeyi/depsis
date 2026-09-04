@@ -1,4 +1,4 @@
-import { UnauthorizedException } from '@nestjs/common';
+import { NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AuditService } from '../audit/audit.service.js';
@@ -25,6 +25,10 @@ import { MeController } from './me.controller.js';
 
 const PASSWORD = 'dogru-parola';
 
+/** Bu oturum ve bir başkası. Gerçek uuid'ler, çünkü `DELETE /me/sessions/{id}` biçimi denetliyor. */
+const SESSION = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const OTHER = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
 interface Harness {
   controller: MeController;
   requirePassword: ReturnType<typeof vi.fn>;
@@ -32,10 +36,14 @@ interface Harness {
   confirmEnrolment: ReturnType<typeof vi.fn>;
   revokeAllForUser: ReturnType<typeof vi.fn>;
   queries: string[];
+  params: unknown[][];
 }
 
-function harness(options: { passwordOk?: boolean } = {}): Harness {
+function harness(
+  options: { passwordOk?: boolean; rows?: (text: string) => unknown[] } = {},
+): Harness {
   const queries: string[] = [];
+  const params: unknown[][] = [];
   const requirePassword = vi.fn();
   requirePassword.mockImplementation((_org: string, _user: string, given: string) =>
     (options.passwordOk ?? true) && given === PASSWORD
@@ -51,9 +59,10 @@ function harness(options: { passwordOk?: boolean } = {}): Harness {
   const db = {
     withTenant: (_org: string, fn: (q: unknown) => Promise<unknown>) =>
       fn({
-        query: (text: string) => {
+        query: (text: string, values?: unknown[]) => {
           queries.push(text);
-          return Promise.resolve([]);
+          params.push(values ?? []);
+          return Promise.resolve(options.rows?.(text) ?? []);
         },
       }),
   } as unknown as DbService;
@@ -90,14 +99,29 @@ function harness(options: { passwordOk?: boolean } = {}): Harness {
     confirmEnrolment,
     revokeAllForUser,
     queries,
+    params,
   };
 }
 
 function request(): AuthenticatedRequest {
   return {
     headers: {},
-    depsis: { userId: 'u-1', organizationId: 'o-1', sessionId: 's-1', role: 'member' },
+    depsis: { userId: 'u-1', organizationId: 'o-1', sessionId: SESSION, role: 'member' },
   } as unknown as AuthenticatedRequest;
+}
+
+/** `@Res({ passthrough: true })` ile gelen yanıt; yalnız `Set-Cookie` okunuyor. */
+function response(): {
+  headers: Record<string, string>;
+  setHeader: (n: string, v: string) => void;
+} {
+  const headers: Record<string, string> = {};
+  return {
+    headers,
+    setHeader: (name: string, value: string) => {
+      headers[name] = value;
+    },
+  };
 }
 
 describe('POST /me/mfa/enrolment/confirm', () => {
@@ -128,6 +152,78 @@ describe('POST /me/mfa/enrolment/confirm', () => {
     });
     expect(answer).toEqual({ codes: ['kod-1', 'kod-2'] });
     expect(h.confirmEnrolment).toHaveBeenCalledWith('o-1', 'u-1', '123456');
+  });
+});
+
+describe('the device session list ADR-0009 asks for', () => {
+  const listed = [
+    {
+      id: SESSION,
+      user_agent: 'Mozilla/5.0 (Windows NT 10.0)',
+      ip_address: '192.168.1.20',
+      created_at: new Date('2026-01-01T08:00:00Z'),
+      last_seen_at: new Date('2026-01-01T09:00:00Z'),
+      expires_at: new Date('2026-01-01T20:00:00Z'),
+    },
+    {
+      id: OTHER,
+      user_agent: null,
+      ip_address: null,
+      created_at: new Date('2025-12-31T08:00:00Z'),
+      last_seen_at: new Date('2025-12-31T09:00:00Z'),
+      expires_at: new Date('2026-01-01T20:00:00Z'),
+    },
+  ];
+
+  it('marks which row is the caller’s own device, and never returns a token', async () => {
+    const h = harness({ rows: () => listed });
+    const page = await h.controller.listSessions(request());
+
+    expect(page.items.map((s) => s.id)).toEqual([SESSION, OTHER]);
+    expect(page.items[0]?.current).toBe(true);
+    expect(page.items[1]?.current).toBe(false);
+    // Sorulmayan bir sütun yanlışlıkla da dönemez, ve `token_hash` sorulmuyor.
+    expect(h.queries[0]).not.toContain('token_hash');
+    // Kişi filtresi SORGUNUN İÇİNDE: RLS kiracıyı ayırıyor ama oturumdaki kullanıcıyı bilmiyor.
+    expect(h.queries[0]).toContain('user_id = $2');
+    expect(h.params[0]).toEqual(['o-1', 'u-1']);
+  });
+
+  it('refuses an id that is not a uuid without touching the table', async () => {
+    const h = harness();
+    await expect(
+      h.controller.revokeSession(request(), response() as never, 'bozuk'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(h.queries).toEqual([]);
+  });
+
+  it('ends another device and leaves this one signed in', async () => {
+    const h = harness({ rows: () => [{ id: OTHER }] });
+    const res = response();
+    await h.controller.revokeSession(request(), res as never, OTHER);
+
+    expect(h.queries[0]).toContain('revoked_at = now()');
+    expect(h.params[0]).toEqual(['o-1', 'u-1', OTHER]);
+    // Başka bir cihazı kapatmak, isteği yapanın çerezine dokunmuyor.
+    expect(res.headers['Set-Cookie']).toBeUndefined();
+  });
+
+  it('lets the caller end their own session, and clears the cookie when it does', async () => {
+    // Asıl amaç kişinin kendi cihazını düşürebilmesi; mevcut oturumu istisna yapmak, "bu cihazı
+    // çıkar" düğmesini tam da en çok istendiği yerde çalışmaz kılardı.
+    const h = harness({ rows: () => [{ id: SESSION }] });
+    const res = response();
+    await h.controller.revokeSession(request(), res as never, SESSION);
+    expect(res.headers['Set-Cookie']).toContain('depsis_session=');
+  });
+
+  it('answers "no such session" for a row that is not the caller’s', async () => {
+    // Sıfır satır: ya başkasının oturumu ya da zaten kapalı. "Bu senin değil" demek, başkasının
+    // cihaz listesi hakkında bilgi vermek olurdu.
+    const h = harness({ rows: () => [] });
+    await expect(
+      h.controller.revokeSession(request(), response() as never, OTHER),
+    ).rejects.toBeInstanceOf(NotFoundException);
   });
 });
 

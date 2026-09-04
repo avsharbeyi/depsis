@@ -16,6 +16,29 @@ import { parseDocument } from 'yaml';
 const DIR = '.github/workflows';
 const problems = [];
 
+/**
+ * Bir `run:` gövdesini komutlara böler: yorum satırları atılır, ters bölü ile devam eden satırlar
+ * TEK komutta birleştirilir. Birleştirme şart — yakalanması gereken kusur tam da iki satıra
+ * yayılmıştı: `vitest` ilk satırda, `|| true` üçüncü satırın sonundaydı, ve satır satır bakan bir
+ * denetim ikisini hiç yan yana görmezdi.
+ */
+function shellCommands(run) {
+  const commands = [];
+  let current = '';
+  for (const raw of String(run ?? '').split('\n')) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#')) continue;
+    if (line.endsWith('\\')) {
+      current += line.slice(0, -1).trimEnd() + ' ';
+      continue;
+    }
+    commands.push((current + line).trim());
+    current = '';
+  }
+  if (current !== '') commands.push(current.trim());
+  return commands;
+}
+
 for (const name of readdirSync(DIR).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))) {
   const path = join(DIR, name);
   const doc = parseDocument(readFileSync(path, 'utf8'), { uniqueKeys: true });
@@ -44,6 +67,22 @@ for (const name of readdirSync(DIR).filter((f) => f.endsWith('.yml') || f.endsWi
     for (const [index, step] of (job?.steps ?? []).entries()) {
       if (step?.run === undefined && step?.uses === undefined) {
         problems.push(`${path}: "${id}" işinin ${index + 1}. adımı ne \`run\` ne \`uses\` taşıyor`);
+      }
+      // KIRMIZI OLAMAYAN BİR SÜİT. Yukarıdaki kurallar "GitHub bu dosyayı reddeder mi"
+      // sorusunu soruyor; bu kural başka bir soruyu soruyor ve yine buraya ait: bir test
+      // süiti `|| true` ile koşuyorsa iş onun DÜŞMESİNİ hiçbir zaman göremez. Worker'ın
+      // veritabanı kapılı kuyruk süiti tam olarak böyle koşuyordu — onu koşan başka bir iş
+      // yoktu, ardındaki kapı da yalnız "atlandı" sayıyordu, yani kırılan bir test yeşil
+      // geçiyordu. Çıkış kodu saklanabilir (`|| status=$?`), yutulamaz.
+      for (const command of shellCommands(step?.run)) {
+        const swallowed = /\|\|\s*true$/.test(command);
+        const isSuite = /\bvitest\b|\btest:unit\b|\bplaywright\b/.test(command);
+        if (swallowed && isSuite) {
+          problems.push(
+            `${path}: "${id}" işinin ${index + 1}. adımı bir test süitini \`|| true\` ile ` +
+              'koşuyor; süit düşse de iş yeşil kalır',
+          );
+        }
       }
     }
   }
