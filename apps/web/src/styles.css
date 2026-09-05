@@ -3267,10 +3267,32 @@ label textarea,
   z-index: 61;
   display: flex;
   justify-content: center;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
   pointer-events: none;
 }
 .clashalt .b {
   pointer-events: auto;
+}
+
+/* "Kalan N dosyaya da uygula": kararı kuyruğun tamamına yayan onay kutusu. Düğmenin yanında ve
+   ondan sonra okunuyor — önce ne yapılacağı, sonra kaç dosyaya. */
+.clashall {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--mut);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.clashall input {
+  accent-color: var(--cool);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
 }
 
 /* ─── sign-in and setup ────────────────────────────────────────────────────── */

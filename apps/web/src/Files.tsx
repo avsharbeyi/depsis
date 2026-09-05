@@ -382,7 +382,22 @@ export function Files({
   // variable going back twice returns to where you already were.
   const [history, setHistory] = useState<Loc[]>([ROOT]);
   /** Yayımlanmayı bekleyen bir yükleme: baytlar ara alanda, karar kullanıcıda. */
-  const [clash, setClash] = useState<{ location: string; filename: string } | null>(null);
+  /**
+   * Çözülmeyi bekleyen ad çakışmaları — TEK BİR TANE DEĞİL, KUYRUK.
+   *
+   * ── SAHADA ÖLÇÜLDÜ ──────────────────────────────────────────────────────────────────────
+   *
+   * Toplu yüklemede her çakışma `setClash(...)` çağırıp bir sonraki dosyaya geçiyordu, ve React
+   * yalnız SONUNCUSUNU tutuyordu: yirmi fotoğraf seçen biri tek bir pencere görüyor, on dokuz
+   * dosya hiçbir iz bırakmadan kayboluyordu. Cihazda bir turda 90 yükleme böyle düştü — baytların
+   * hepsi sunucuya ulaşmış, hiçbiri yayımlanmamıştı, ve kullanıcının gördüğü tek şey "yüklenmiyor"
+   * oluyordu.
+   *
+   * Kuyruk sırayla soruluyor, ve "hepsine uygula" ile yirmi dosya tek bir karara bakıyor.
+   */
+  const [clashes, setClashes] = useState<{ location: string; filename: string }[]>([]);
+  /** Verilen kararın kuyruğun tamamına uygulanıp uygulanmayacağı. */
+  const [clashAll, setClashAll] = useState(false);
   /** Klasörün kendi öğe sayısı; sunucudan geliyor ve sayfa sınırından bağımsız. */
   const [total, setTotal] = useState<number | undefined>(undefined);
 
@@ -400,25 +415,49 @@ export function Files({
    * yalnız onu yayımlıyor. Bir gigabaytlık dosyada aradaki fark, bir saniye ile yarım saat.
    */
   async function resolveClash(policy: 'keep-both' | 'replace'): Promise<void> {
-    const pending = clash;
-    if (pending === null) return;
-    setClash(null);
-    const sent = await fetch(`${pending.location}/resolve`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ policy }),
-    }).catch(() => null);
-    if (sent === null || !sent.ok) {
-      notify('error', `"${pending.filename}" yayımlanamadı.`);
-      return;
+    const queue = clashAll ? clashes : clashes.slice(0, 1);
+    const rest = clashAll ? [] : clashes.slice(1);
+    if (queue.length === 0) return;
+    setClashes(rest);
+    setClashAll(false);
+
+    let done = 0;
+    const failedNames: string[] = [];
+    for (const pending of queue) {
+      const sent = await fetch(`${pending.location}/resolve`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ policy }),
+      }).catch(() => null);
+      if (sent === null || !sent.ok) {
+        failedNames.push(pending.filename);
+        continue;
+      }
+      done += 1;
     }
-    notify(
-      'ok',
-      policy === 'replace'
-        ? `"${pending.filename}" değiştirildi; eskisi çöp kutusunda.`
-        : `"${pending.filename}" ikinci bir adla kaydedildi.`,
-    );
+
+    // HER DOSYA SAYILIYOR. Tek bir "yayımlanamadı" bildirimi, on dokuz dosyanın ne olduğunu
+    // söylemeyen bir cümleydi.
+    if (done > 0) {
+      const what =
+        policy === 'replace' ? 'değiştirildi; eskisi çöp kutusunda' : 'ikinci bir adla kaydedildi';
+      const first = queue[0];
+      notify(
+        'ok',
+        done === 1 && first !== undefined
+          ? `"${first.filename}" ${what}.`
+          : `${done} dosya ${what}.`,
+      );
+    }
+    if (failedNames.length > 0) {
+      notify(
+        'error',
+        failedNames.length === 1
+          ? `"${failedNames[0] ?? ''}" yayımlanamadı.`
+          : `${failedNames.length} dosya yayımlanamadı.`,
+      );
+    }
     reload();
   }
 
@@ -1529,7 +1568,12 @@ export function Files({
         // Baytlar karşı tarafta ve duruyor; eksik olan tek şey kullanıcının kararı. Bunu bir
         // bildirimle geçiştirmek, bir gigabaytı çöpe atıp "yüklenemedi" demek olurdu.
         if (problem instanceof UploadNameClash) {
-          setClash({ location: problem.location, filename: problem.filename });
+          // KUYRUĞA EKLENİYOR, ÜSTÜNE YAZILMIYOR. Eskiden her çakışma bir öncekini siliyordu ve
+          // toplu bir yüklemede yalnız son dosya sorulup gerisi sessizce kayboluyordu.
+          setClashes((current) => [
+            ...current,
+            { location: problem.location, filename: problem.filename },
+          ]);
           continue;
         }
         notify('error', problem instanceof Error ? problem.message : `"${file.name}" yüklenemedi.`);
@@ -2633,24 +2677,48 @@ export function Files({
           veri kaybetmiyor: "değiştir" eskisini silmiyor, çöp kutusuna atıyor — üzerine yazmak
           ürünün hiçbir katmanında yok (ADR-0008) ve "değiştir" diyen kişinin istediği şey yeni
           dosyanın o adı alması, eskisinin geri getirilemez olması değil. */}
-      {clash !== null && (
+      {clashes[0] !== undefined && (
         <ConfirmBox
-          title="Aynı adda bir dosya var"
+          title={
+            clashes.length === 1
+              ? 'Aynı adda bir dosya var'
+              : `Aynı adda dosyalar var (${clashes.length})`
+          }
           body={
-            `"${clash.filename}" adında bir dosya bu klasörde zaten duruyor. Yüklediğiniz dosya ` +
-            'sunucuda bekliyor, yeniden gönderilmeyecek. "Değiştir" eskisini silmez, çöp ' +
-            'kutusuna atar.'
+            `"${clashes[0].filename}" adında bir dosya bu klasörde zaten duruyor. Yüklediğiniz ` +
+            'dosya sunucuda bekliyor, yeniden gönderilmeyecek. "Değiştir" eskisini silmez, çöp ' +
+            'kutusuna atar.' +
+            (clashes.length > 1 ? ` Sırada ${clashes.length - 1} dosya daha var.` : '') +
+            // ADI ÇÖPTEKİ BİR DOSYA DA TUTABİLİR, ve o hâl listede görünmüyor: satır çöpte ama
+            // dosya diskte, adıyla. Kullanıcının "ama böyle bir dosya yok" demesinin sebebi bu,
+            // ve cümlenin onu söylemesi gerekiyor.
+            ' Listede göremiyorsanız ad çöp kutusundaki bir dosyada duruyor olabilir.'
           }
           yesLabel="İkisini de tut"
           onYes={() => void resolveClash('keep-both')}
-          onNo={() => setClash(null)}
+          onNo={() => {
+            setClashes([]);
+            setClashAll(false);
+          }}
         />
       )}
-      {clash !== null && (
+      {clashes[0] !== undefined && (
         <div className="clashalt">
           <button type="button" className="b" onClick={() => void resolveClash('replace')}>
             Değiştir (eskisi çöpe)
           </button>
+          {/* TEK KARAR, YİRMİ DOSYA. Bir fotoğraf grubunu yeniden yükleyen biri aynı soruyu
+              yirmi kez cevaplamak istemiyor. */}
+          {clashes.length > 1 && (
+            <label className="clashall">
+              <input
+                type="checkbox"
+                checked={clashAll}
+                onChange={(event) => setClashAll(event.target.checked)}
+              />
+              Kalan {clashes.length - 1} dosyaya da uygula
+            </label>
+          )}
         </div>
       )}
 
@@ -3447,6 +3515,15 @@ function entryFile(entry: FileSystemFileEntry): Promise<File | null> {
 const CHUNK_BYTES = 5 * 1024 * 1024;
 
 /**
+ * Kopan bir parça kaç kez yeniden denenir.
+ *
+ * Üç: bir kopma sıradan (asansör, tünel, uyanan bir telefon), üçü üst üste ise ağ gerçekten yok
+ * ve devam etmek ilerlemeyen bir çubuk göstermek olurdu. Her denemede sunucuya nerede kaldığı
+ * soruluyor, yani tekrar gönderilen şey yalnız eksik kalan kısım.
+ */
+const BROKEN_CHUNK_RETRIES = 3;
+
+/**
  * A tus upload, yielding percent complete.
  *
  * `fetch` directly rather than through the generated client, and the reason is worth stating
@@ -3518,17 +3595,39 @@ async function* uploadFile(
     rememberUpload(key, fresh);
   }
 
+  // ── KOPAN BİR PARÇA BÜTÜN DOSYAYI KAYBETTİRMİYOR ────────────────────────────────────────
+  //
+  // Sahada ölçüldü: telefonun yüklemesi parçanın ortasında kesiliyor ve ajan "akış 524288 baytta
+  // bitti, 1667035 bekleniyordu" diye reddediyordu. `fetch` bu durumda bir HTTP durumu değil bir
+  // ağ hatası veriyor, ve o hata dosyanın tamamını "yüklenemedi"ye çeviriyordu — oysa sunucuda
+  // yazılmış baytlar duruyor.
+  //
+  // Cevap: sunucuya NEREDE KALDIĞINI sor ve oradan devam et. Sunucu ara dosyayı kendisi ölçüyor,
+  // yani anlaşmazlıkta haklı olan taraf o. Deneme sayısı sınırlı — kopmayı sonsuza kadar
+  // kovalamak, kopmuş bir ağda ilerlemeyen bir çubuk göstermek olurdu.
+  let broken = 0;
   while (offset < file.size) {
     const end = Math.min(offset + CHUNK_BYTES, file.size);
-    const sent = await fetch(location, {
-      method: 'PATCH',
-      credentials: 'same-origin',
-      headers: {
-        'content-type': 'application/offset+octet-stream',
-        'upload-offset': String(offset),
-      },
-      body: file.slice(offset, end),
-    });
+    let sent: Response;
+    try {
+      sent = await fetch(location, {
+        method: 'PATCH',
+        credentials: 'same-origin',
+        headers: {
+          'content-type': 'application/offset+octet-stream',
+          'upload-offset': String(offset),
+        },
+        body: file.slice(offset, end),
+      });
+    } catch (network) {
+      broken += 1;
+      if (broken > BROKEN_CHUNK_RETRIES) throw network;
+      const where = await probe(location, file.size);
+      if (where === null) throw network;
+      offset = where;
+      yield Math.round((offset / Math.max(1, file.size)) * 100);
+      continue;
+    }
 
     if (sent.status === 409) {
       const what = conflict(await problemCode(sent), sent.headers.get('upload-offset'));
