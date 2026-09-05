@@ -41,15 +41,26 @@ export class LoginThrottleService {
   /**
    * Count recent failures for this pair and apply the resulting delay.
    *
-   * Returns `false` when the caller should refuse outright. The delay is applied HERE rather than
-   * returned, so a caller cannot forget to honour it.
+   * Returns `allowed: false` when the caller should refuse outright. The delay is applied HERE
+   * rather than returned, so a caller cannot forget to honour it.
+   *
+   * ── NEDEN KALAN SÜREYİ DE DÖNDÜRÜYOR ────────────────────────────────────────────────────────
+   *
+   * Reddedilen deneme KAYDEDİLMİYOR (`AuthService.login` `gate` yanlış dönünce `record`
+   * çağırmıyor), yani sayaç kendiliğinden azalmaz: bekleme, sayılan hatalardan EN YENİ ONUNCUSUNUN
+   * 15 dakikalık pencereden çıkmasına kadar sürer. Bu, ekranda söylenmesi gereken tek sayı — ve
+   * söylenmediği sürece kullanıcı "biraz bekle" deyip erken deniyor, hiçbir şey değişmiyor,
+   * cihazın bozuk olduğunu sanıyor. Ürün kuralı gereği kilit süresi arayüzde görünmeli.
    */
-  async gate(emailNormalized: string, ip: string): Promise<boolean> {
+  async gate(emailNormalized: string, ip: string): Promise<GateDecision> {
     const failures = await this.recentFailures(emailNormalized, ip);
 
     if (failures >= LoginThrottleService.REFUSE_AFTER) {
       this.logger.warn(`refusing login attempt after ${failures} recent failures from ${ip}`);
-      return false;
+      return {
+        allowed: false,
+        retryAfterSeconds: await this.retryAfterSeconds(emailNormalized, ip),
+      };
     }
 
     if (failures > 0) {
@@ -58,7 +69,7 @@ export class LoginThrottleService {
       await sleep(delay);
     }
 
-    return true;
+    return { allowed: true };
   }
 
   /**
@@ -77,6 +88,43 @@ export class LoginThrottleService {
     );
   }
 
+  /**
+   * Kilidin ne zaman kalkacağı, saniye cinsinden.
+   *
+   * Sayılan hataların en yenisinden geriye `REFUSE_AFTER - 1` adım gidilir: eşiğin altına düşmek
+   * için pencereden çıkması gereken satır tam odur. Ofset sabitten türetiliyor, elle yazılmıyor —
+   * eşik değişince bu sorgunun sessizce yanlışlaşmasının yolu buydu.
+   *
+   * Yüklem sayımla birebir aynı (aynı çift, başarısız, aynı pencere), yoksa iki sorgu farklı
+   * satır kümesine bakar ve gösterilen süre kilidin süresi olmaz. En az 1 saniyeye kırpılıyor:
+   * satır tam sınırdayken ya da saat kayarken sıfır/negatif çıkabilir, ve "0 saniye bekleyin"
+   * yazan bir ekran hiçbir şey söylememiş olur.
+   */
+  private async retryAfterSeconds(emailNormalized: string, ip: string): Promise<number> {
+    const rows = await this.db.withoutTenant('login-throttle', (q) =>
+      q.query<{ s: string }>(
+        `SELECT ceil(
+                  extract(epoch FROM (attempted_at + ($3 || ' minutes')::interval - now()))
+                )::text AS s
+           FROM login_attempts
+          WHERE email_normalized = $1
+            AND ip_address = $2
+            AND NOT succeeded
+            AND attempted_at > now() - ($3 || ' minutes')::interval
+          ORDER BY attempted_at DESC
+         OFFSET $4 LIMIT 1`,
+        [
+          emailNormalized,
+          ip,
+          String(LoginThrottleService.WINDOW_MINUTES),
+          LoginThrottleService.REFUSE_AFTER - 1,
+        ],
+      ),
+    );
+    const seconds = Number(rows[0]?.s ?? '0');
+    return Math.max(1, Number.isFinite(seconds) ? seconds : 1);
+  }
+
   private async recentFailures(emailNormalized: string, ip: string): Promise<number> {
     const rows = await this.db.withoutTenant('login-throttle', (q) =>
       q.query<{ n: string }>(
@@ -92,6 +140,12 @@ export class LoginThrottleService {
     return Number(rows[0]?.n ?? '0');
   }
 }
+
+/**
+ * `gate`'in cevabı. `retryAfterSeconds` yalnız reddedilen dalda dolu: izin verilen bir çağrının
+ * bekleyeceği bir şey yok, ve `Retry-After` başlığına yazılacak bir sayı da yok.
+ */
+export type GateDecision = { allowed: true } | { allowed: false; retryAfterSeconds: number };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

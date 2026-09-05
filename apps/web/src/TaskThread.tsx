@@ -79,6 +79,8 @@ export function TaskThread({
   const [subDraft, setSubDraft] = useState('');
   const [tagDraft, setTagDraft] = useState('');
   const [draft, setDraft] = useState('');
+  /** Düzenlenmekte olan yorum ve o anki metni. `null` iken hiçbir yorum düzenlenmiyor. */
+  const [editing, setEditing] = useState<{ id: string; body: string } | null>(null);
   const [describing, setDescribing] = useState(description ?? '');
   /** Bağlı dosyalar. `hidden`: çağıranın GÖREMEDİĞİ bağ sayısı — §7, sayı olarak bile sızmasın. */
   const [links, setLinks] = useState<{ items: FileLink[]; hidden: number } | null>(null);
@@ -328,6 +330,43 @@ export function TaskThread({
       setComments((current) =>
         (current ?? []).map((c) => (c.id === id ? { ...c, deleted: true, body: '' } : c)),
       );
+    },
+    [onError, taskId],
+  );
+
+  /**
+   * Kendi yorumunu düzenle.
+   *
+   * SUNUCUDA HEP VARDI, ARAYÜZDE YOKTU: `PATCH /tasks/{id}/comments/{commentId}` yazılmış, testi
+   * bile yazılmış, ama web'den tek bir çağrı yoktu — ve satırdaki "· düzenlendi" rozetini
+   * doldurabilecek hiçbir yol olmadığı için o rozet hiç çizilemiyordu. Bir yazım hatasının tek
+   * çaresi silip yeniden yazmaktı: satır "Bu yorum silindi" olarak kalıyor, denetim izine bir
+   * silme düşüyor ve izleyicilere ikinci bir bildirim gidiyordu.
+   *
+   * DÜĞME YALNIZ YAZANA. Sunucu düzenlemeyi yöneticiye de açmıyor (bir yöneticinin başkasının
+   * ağzından cümle değiştirebilmesi, yorum listesini alıntılanamaz yapardı), o yüzden silme
+   * düğmesinin `isAdmin || …` koşulu buraya kopyalanmıyor — kopyalansaydı yöneticiye basıldığında
+   * 403 dönen bir düğme çizilirdi.
+   */
+  const editComment = useCallback(
+    async (id: string, body: string): Promise<void> => {
+      const text = body.trim();
+      if (text === '') return;
+      const { data, error } = await api.PATCH('/tasks/{id}/comments/{commentId}', {
+        params: { path: { id: taskId, commentId: id } },
+        body: { body: text },
+      });
+      if (data === undefined) {
+        onError(problemMessage(error, 'Yorum düzenlenemedi.'));
+        return;
+      }
+      const saved = data;
+      // Süren bir okuma bu satırı eski hâliyle geri yazmasın.
+      reading.current += 1;
+      setComments((current) =>
+        current === null ? null : current.map((c) => (c.id === saved.id ? saved : c)),
+      );
+      setEditing(null);
     },
     [onError, taskId],
   );
@@ -655,6 +694,19 @@ export function TaskThread({
                 düğme demekti — ve çalışıyormuş gibi duran bir kontrol, hiç olmayandan kötü.
                 Sunucudaki kural burada İKİNCİ KEZ yazılmıyor, GÖRÜNÜRLÜĞE çevriliyor: reddi hâlâ
                 sunucu veriyor, bu yalnız onu istemeyerek tetiklememek için. */}
+            {/* Düzenleme YALNIZ YAZANA: sunucu yöneticiye bile açmıyor, ve silme düğmesinin
+                koşulunu kopyalamak yöneticiye 403 dönen bir düğme çizmek olurdu. */}
+            {!comment.deleted && comment.authorUsername === me && editing?.id !== comment.id && (
+              <button
+                type="button"
+                className="b"
+                aria-label="Yorumu düzenle"
+                title="Yorumu düzenle"
+                onClick={() => setEditing({ id: comment.id, body: comment.body })}
+              >
+                Düzenle
+              </button>
+            )}
             {!comment.deleted && (isAdmin || comment.authorUsername === me) && (
               <button
                 type="button"
@@ -670,7 +722,49 @@ export function TaskThread({
           {/* Silinmiş bir yorum LİSTEDE KALIYOR ve silindiğini söylüyor. Sessizce kaybolan bir
               replika, okuyanı kendi hafızasından şüphe ettirir. */}
           <div className="cbody">
-            {comment.deleted ? <i>Bu yorum silindi.</i> : highlight(comment.body)}
+            {editing?.id === comment.id ? (
+              <div className="cadd">
+                <textarea
+                  value={editing.body}
+                  rows={2}
+                  maxLength={4000}
+                  aria-label="Yorumu düzenle"
+                  autoFocus
+                  onChange={(event) =>
+                    setEditing((current) =>
+                      current === null ? current : { ...current, body: event.target.value },
+                    )
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      setEditing(null);
+                      return;
+                    }
+                    // Yeni yorum kutusuyla aynı kısayol: Enter paragraf yazmayı imkânsız kılardı.
+                    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                      event.preventDefault();
+                      void editComment(comment.id, editing.body);
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="b pri"
+                  disabled={editing.body.trim() === ''}
+                  onClick={() => void editComment(comment.id, editing.body)}
+                >
+                  Kaydet
+                </button>
+                <button type="button" className="b" onClick={() => setEditing(null)}>
+                  Vazgeç
+                </button>
+              </div>
+            ) : comment.deleted ? (
+              <i>Bu yorum silindi.</i>
+            ) : (
+              highlight(comment.body)
+            )}
           </div>
         </div>
       ))}

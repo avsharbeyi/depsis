@@ -121,6 +121,23 @@ export class BackupTargetController {
     private readonly audit: AuditService,
   ) {}
 
+  /**
+   * Yedek diskinin durumu, ve SON TURLARIN ne yaptığı.
+   *
+   * ── TUR GEÇMİŞİ NEDEN BURADA ─────────────────────────────────────────────────────────────
+   *
+   * `backup_runs` her turda yazılıyordu ve hiçbir uç okumuyordu. Yedek diski dolduğunda olan
+   * şuydu: tur 'yer-yok' ile düşüyor, satır tabloya giriyor, ama ekran diski hâlâ "Açık"
+   * gösteriyor ve doğrulama son KOPYALANAN dosyayı okuduğu için — o tur hiç kopyalamadığından
+   * eski dosyayı — "Okundu" diyordu. Sahibi haftalarca yedek aldığını sanıyor, arızanın tek izi
+   * worker günlüğünde duruyordu.
+   *
+   * Ayrı bir uç DEĞİL: ekranın yedekleme kartını çizmek için zaten yaptığı istek bu, ve tur
+   * geçmişini ikinci bir istekle almak, kartın yarısının bir saniye sonra gelmesi demekti.
+   *
+   * GEÇMİŞ OKUNAMAZSA KART YİNE ÇİZİLİYOR: `backup_runs` boş bir tablo olabilir (henüz hiç tur
+   * koşmamış bir cihaz) ve o hâl de bir cevap.
+   */
   @Get()
   async read(@Req() request: AuthenticatedRequest): Promise<unknown> {
     const session = await this.requireAdmin(request);
@@ -128,7 +145,9 @@ export class BackupTargetController {
       const view = await this.targets.view(session.organizationId, randomUUID());
       // KURULU DEĞİL bir hata değil: cihazın olağan ilk hâli. Ekranın diyeceği cümle "yedek
       // diski kurun", ve 404 o cümleyi kurdurmaz — bir yokluk bildirir.
-      return { configured: view !== null, target: view };
+      if (view === null) return { configured: false, target: null };
+      const runs = await this.runs.recent(session.organizationId);
+      return { configured: true, target: { ...view, lastRun: runs[0] ?? null, runs } };
     } catch (error) {
       throw this.translate(error);
     }
@@ -349,6 +368,48 @@ export class BackupTargetController {
       action: 'backup.recovery-adopted',
       target: { kind: 'pool', id: parsed.data.pool, label: view.label },
       summary: `'${parsed.data.pool}' havuzu kurtarma diski olarak tanindi.`,
+    });
+    return view;
+  }
+
+  /**
+   * "Bu cihazin yedek diski olsun" — kurtarma diskini devralir.
+   *
+   * KURTARMA BITTIKTEN SONRAKI ADIM. Ev yaniyor, yeni cihaz aliniyor, disk tanitiliyor, dosyalar
+   * geri getiriliyor; sonra ayni disk yeni cihazin yedek diski olmali. Bugune kadar bunun tek
+   * yolu terminalde `zfs destroy` idi — yani yedegi silmeden devam edilemiyordu.
+   *
+   * ILK TUR YIKICI OLABILIR ve bunu SOYLEYEN taraf ekran: devralmadan sonraki ilk tur, yedekte
+   * olup bu cihazda olmayan her dosyayi `DEPSIS-YEDEK/silinenler/<bugun>/` altina tasiyor.
+   * Dosyalar kaybolmuyor ama geri getirme isi bu adimdan ONCE bitmis olmali.
+   *
+   * ZINCIRLER BURADA TOHUMLANIYOR, `prepare` ile ayni gerekce: aksi halde devralan kullanici
+   * API yeniden baslayana kadar tek bir yedek almiyor — ekran "6 saatte bir" derken.
+   */
+  @Post('recovery/claim')
+  @HttpCode(200)
+  async claim(@Req() request: AuthenticatedRequest): Promise<unknown> {
+    const session = await this.requireAdmin(request);
+    requireSameOrigin(request);
+
+    let view;
+    try {
+      view = await this.targets.claim(session.organizationId, randomUUID());
+    } catch (error) {
+      throw this.translate(error);
+    }
+
+    await this.runs.seedChains(session.organizationId).catch((error: unknown) => {
+      this.logger.error(
+        `yedek zincirleri tohumlanamadı: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+
+    await this.audit.record(session.organizationId, {
+      actorId: session.userId,
+      action: 'backup.recovery-claimed',
+      target: { kind: 'pool', id: view.pool, label: view.label },
+      summary: `'${view.pool}' kurtarma diski devralindi; artik bu cihazin yedek diski.`,
     });
     return view;
   }

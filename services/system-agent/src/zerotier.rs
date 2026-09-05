@@ -563,8 +563,6 @@ struct RawPeer {
 struct RawPath {
     #[serde(default)]
     active: bool,
-    #[serde(default)]
-    preferred: bool,
 }
 
 /// Parse `/peer`.
@@ -573,6 +571,11 @@ struct RawPath {
 /// has no "am I relaying" field. A peer with an ACTIVE path is being reached over that path; a peer
 /// with none is being reached through a root. Reporting the raw path list instead would push that
 /// derivation into the API and then into the browser, and three copies of one rule drift.
+///
+/// `preferred` is deliberately NOT counted. ZeroTier keeps a path in the list after it stops
+/// working, and the preference flag survives with it, so a peer whose only path is a dead
+/// preferred one would be reported as direct while every byte goes through a root — exactly the
+/// answer the table exists to disprove.
 ///
 /// A peer whose address is missing is DROPPED. The address is the only thing that identifies a row,
 /// and a diagnostics table with an unnamed line tells the reader nothing they can act on.
@@ -593,7 +596,7 @@ fn parse_peers_body(body: &[u8]) -> Result<Vec<ZeroTierPeer>, ZeroTierError> {
             } else {
                 Some(peer.latency)
             },
-            direct: peer.paths.iter().any(|path| path.active || path.preferred),
+            direct: peer.paths.iter().any(|path| path.active),
             address: peer.address,
             role: peer.role,
             version: peer.version,
@@ -677,6 +680,16 @@ mod tests {
             // direct link over a route that stopped working.
             let body = br#"[{"address":"aabbccddee","role":"LEAF","version":"1.14.0",
                              "latency":5,"paths":[{"active":false,"preferred":false}]}]"#;
+            assert!(!parse_peers_body(body).expect("parses")[0].direct);
+        }
+
+        #[test]
+        fn a_dead_path_that_is_still_marked_preferred_is_not_a_direct_link() {
+            // The path ZeroTier last preferred keeps its flag after it stops working. Counting the
+            // flag would print "doğrudan" for a peer whose traffic is being relayed — the one
+            // answer the table must never hide.
+            let body = br#"[{"address":"aabbccddee","role":"LEAF","version":"1.14.0",
+                             "latency":5,"paths":[{"active":false,"preferred":true}]}]"#;
             assert!(!parse_peers_body(body).expect("parses")[0].direct);
         }
 

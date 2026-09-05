@@ -375,6 +375,38 @@ describeDb('browsing a snapshot and restoring out of it', () => {
     });
   });
 
+  it('refuses to restore INTO a share opened read-only', async () => {
+    // Gezinme okuma, geri yükleme yazma: anlık görüntüden canlı veri kümesine bir dosya iniyor.
+    // Salt okunur bir arşive ağ sürücüsünden yazılamazken web'den eski bir sürüm bırakılabiliyor
+    // olması, aynı anahtarın iki ayrı gerçeği olması demekti.
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE shares SET read_only = true WHERE id = $1`, [share]),
+    );
+    try {
+      // Okuma tarafı sürüyor.
+      const listing = await controller({}).entries(
+        asRequest(org, admin, 'admin'),
+        share,
+        'gunluk-2026-08-24',
+        '',
+      );
+      expect(listing.items.length).toBeGreaterThan(0);
+
+      expect(
+        await codeOf(() =>
+          controller({}).restore(asRequest(org, admin, 'admin'), share, 'gunluk-2026-08-24', {
+            path: ['Arsiv', 'sunum.pdf'],
+            destinationId: folder,
+          }),
+        ),
+      ).toBe('forbidden');
+    } finally {
+      await owner.withoutTenant('migration-status', (q) =>
+        q.query(`UPDATE shares SET read_only = false WHERE id = $1`, [share]),
+      );
+    }
+  });
+
   it('keeps the original name when nothing holds it', async () => {
     const { jobs, enqueued } = stubJobs();
     const accepted = await controller({ jobs }).restore(

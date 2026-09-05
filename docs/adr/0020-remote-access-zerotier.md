@@ -17,20 +17,29 @@ oluyor; dosya `0600` ve root'a ait.
 
 ## Karar
 
-> **REVİZE (saha).** Aşağıdaki başlık artık geçerli DEĞİL ve olduğu gibi bırakılması yanlış
-> olurdu: cihaz ZeroTier ile birlikte geliyor — kurulumu ISO'nun ilk açılışı yapıyor
-> (`deploy/iso/firstboot.sh`). Sebep, kararın kendisinden güçlü çıktı: sahibi uzaktan erişimi
-> açmak istediğinde karşısına terminal çıktı, ve bu ürünün kabul ölçütü "sahibi terminale
-> girmesin". Kararın DEĞİŞMEYEN yarısı: bir ağa katılmak hâlâ arayüzden ve sahibinin kararıyla
-> olur; DEPSIS kimseyi kendiliğinden bir ağa sokmaz.
+> **REVİZE (saha).** Aşağıdaki başlığın ilk yarısı artık geçerli DEĞİL: cihaz ZeroTier ile
+> birlikte geliyor. Sebep, kararın kendisinden güçlü çıktı: sahibi uzaktan erişimi açmak
+> istediğinde karşısına terminal çıktı, ve bu ürünün kabul ölçütü "sahibi terminale girmesin".
+> Kararın DEĞİŞMEYEN yarısı ikiye ayrılıyor ve ikisi de yürürlükte: bir ağa katılmak hâlâ
+> arayüzden ve sahibinin kararıyla olur — DEPSIS kimseyi kendiliğinden bir ağa sokmaz — ve
+> paket, `curl … | bash` ile değil imzalı apt deposundan kurulur.
+>
+> **KİM KURAR.** Kararı ISO veriyor: ilk açılış `/etc/depsis/zerotier.wanted` dosyasını yazıyor,
+> `tools/install/install.sh` o dosyayı görünce paketi kuruyor. Kuran tarafın ilk açılış DEĞİL
+> kurulum betiği olmasının sebebi ölçülebilir: ilk açılış bir kez koşup kendini devre dışı
+> bırakıyor, yani o gün ağ ya da depo düşerse kutu bir daha hiç denemez ve uzaktan erişim
+> sonsuza kadar 503 döner. `install.sh` her güncellemede yeniden koşuyor.
 
-### DEPSIS ZeroTier'i paketlemez, kurmaz, indirmez
+### DEPSIS ZeroTier'i kök kabuğa boşaltılan bir betikle kurmaz
 
-Kuruluysa yönetir. Kurulu değilse kart "kurulu değil" der ve kurulum yolunu gösterir.
+Kuruluysa yönetir. Kurulu değilse ve kutu onu istiyorsa (`/etc/depsis/zerotier.wanted`), kurulum
+imzalı apt deposunu ekleyip paketi apt ile kurar; imza anahtarı inmezse kaynak hiç yazılmaz ve
+kart "kurulu değil" der.
 
-Bu, `curl … | bash` yapmamak için verilmiş bir karar. ZeroTier'in kendi ön sayfası bunu öneriyor;
-`tools/dev/provision-vm.sh` bunun yerine imzalı apt deposunu ekliyor ve paketi apt ile kuruyor.
-Bir ürünün kurulum betiği, kök kabuğa uzaktan bir betik boşaltmamalı.
+Bu, `curl … | bash` yapmamak için verilmiş bir karar — ve bir süre boyunca ISO'nun ilk açılışı
+tam olarak onu yapıyordu: her cihaz, ilk açılışında, internetten indirdiği doğrulanmamış bir
+betiği root olarak koşturuyordu. `tools/dev/provision-vm.sh` doğru yolu zaten yazmıştı; kurulum
+artık aynı yolu kullanıyor. Bir ürünün kurulum betiği, kök kabuğa uzaktan bir betik boşaltmamalı.
 
 ### Jeton ajanda kalır
 

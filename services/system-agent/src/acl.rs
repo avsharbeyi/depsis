@@ -281,6 +281,47 @@ fn spec(entries: &[AclEntry]) -> String {
         .join(",")
 }
 
+/// Bir klasörün default ACL'ini, oraya yayımlanan DOSYAYA yazılacak `-m` operandına çevirir.
+///
+/// Girdi `getfacl -c -d` çıktısı, çıktı aynı girdilerin ÇALIŞTIRMA BİTİ DÜŞÜRÜLMÜŞ hâli.
+/// Gerekçe çekirdeğin kendi kuralı: bir dosya yaratılırken default ACL, `open`a verilen kiple
+/// KESİŞTİRİLİR, ve bir veri dosyasının kipinde `x` bulunmaz. Bitleri olduğu gibi taşımak,
+/// web'den yüklenen her belgeyi kabuğa çalıştırılabilir göstermek olurdu.
+///
+/// `mask::` satırı çıktıda KALIYOR. `setfacl -m` açıkça verilmiş bir maskı olduğu gibi kullanır,
+/// verilmemişse yazdığı girdilerin birleşimiyle yeniden hesaplar — ve klasörün kendi maskı,
+/// orada yaratılan her şeyin tavanı olduğu için doğru cevap odur.
+///
+/// TEK BİR SATIR OKUNAMIYORSA HİÇBİR ŞEY YAZILMIYOR (`None`). Yarım bir ACL, dosyayı 0600
+/// bırakmaktan kötü: eksik bir `mask::` satırı adlandırılmış her girdiyi sessizce etkisiz kılar,
+/// eksik bir `other::` satırı ise dosyayı olduğundan geniş bırakır.
+fn file_spec_from_default(default_acl: &str) -> Option<String> {
+    let mut entries: Vec<String> = Vec::new();
+    for line in default_acl.lines() {
+        // `#effective:` açıklaması girdinin maskla daraltılmış hâlini bildirir; operanda yazılacak
+        // şey girdinin kendisi. `base_triple` aynı satırı aynı sebeple kesiyor.
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        // `-d` ile başlığı basmayan sürümler bile girdiyi bazen `default:` önekiyle yazıyor.
+        let line = line.strip_prefix("default:").unwrap_or(line);
+        let (who, perms) = line.rsplit_once(':')?;
+        if who.is_empty()
+            || perms.len() != 3
+            || perms.chars().any(|c| !matches!(c, 'r' | 'w' | 'x' | '-'))
+        {
+            return None;
+        }
+        entries.push(format!("{who}:{}", perms.replace('x', "-")));
+    }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries.join(","))
+    }
+}
+
 /// The `setfacl` invocations one application performs, in order, as `(stage, args)`.
 ///
 /// A pure function so the argv can be asserted without running anything — the thing worth
@@ -672,6 +713,81 @@ impl<'a, R: CommandRunner> Applier<'a, R> {
         // it would make it resolve to whatever the next `open` in this process is handed.
         drop(confined);
         Ok(entries.len())
+    }
+
+    /// Yayımlanmak üzere olan bir dosyaya, GİRECEĞİ klasörün default ACL'ini işler.
+    ///
+    /// ── NEDEN ÇEKİRDEK BUNU KENDİSİ YAPMIYOR ─────────────────────────────────────────────
+    ///
+    /// Çekirdek bir dosyayı, YARATILDIĞI dizinin default ACL'iyle damgalar. Web'den gelen yükleme
+    /// ise dosyayı hedef klasörde değil `<paylaşım>/.depsis/staging` altında yaratıyor — ADR-0008,
+    /// yayımlama aynı veri kümesinde O(1) bir `rename` olsun diye — ve ara alanın default ACL'i
+    /// yok. Sonuç ölçüldü: yayımlanan dosya 0600 ve ACL'siz kalıyor, yükleyeni web'den okuyor,
+    /// aynı ekipteki bir başkası SMB'den "erişim reddedildi" alıyordu. Aynı dosya SMB'den
+    /// yaratılsaydı bu hiç olmazdı (`samba.rs`: `inherit acls = yes`), yani arıza yalnız web
+    /// yolunda ve sessizdi.
+    ///
+    /// Burada yapılan şey YENİ BİR YETKİ VERMEK DEĞİL: yazılan girdiler hedef klasörün kendi
+    /// default ACL'inden geliyor, yani orada yaratılan her şeyin zaten taşıdığı yetkiden bir bit
+    /// geniş olamaz. Kipi genişletmek — 0600 yerine 0640 yazmak — bunun yerine geçemez: kip,
+    /// dosyanın GRUBUNA yetki verir ve o grup kullanıcının özel grubu, yani hiç kimse.
+    ///
+    /// ── SIRA ─────────────────────────────────────────────────────────────────────────────
+    ///
+    /// Çağıran bunu `set_owner` ile `fsync` ARASINDA çağırıyor: ACL bir xattr, yani inode
+    /// metadata'sı, ve onu kalıcı kılan şey ardından gelen `fsync`. Dosya bu sırada hâlâ root:root
+    /// 0750 olan ara alanda duruyor, dolayısıyla genişleyen erişim yayımlanmadan önce kimseye
+    /// görünmüyor.
+    ///
+    /// `Ok(false)`: klasörün default ACL'i yok — dosya 0600 kalıyor, ve bu doğru cevap. Default
+    /// ACL'i olmayan bir klasörde SMB'den yaratılan dosya da hiçbir grup girdisi taşımaz.
+    pub fn inherit_onto_file<P: SafePath + ?Sized>(
+        &self,
+        paths: &P,
+        directory: &[&str],
+        file: &std::fs::File,
+    ) -> Result<bool, AclError> {
+        self.ensure_installed()?;
+
+        // Klasör de dosya gibi TANITICIYLA adresleniyor; modül notundaki gerekçe burada da
+        // geçerli, birleştirilmiş bir yol `getfacl` ile `setfacl` arasında değiştirilebilir.
+        let confined = paths.open_dir(directory)?;
+        let shown = self.target(directory)?;
+        let aimed = paths.command_path(&confined).map_err(AclError::Path)?;
+
+        let default = self.default_acl(&aimed, &shown)?;
+        let Some(spec) = file_spec_from_default(&default) else {
+            return Ok(false);
+        };
+
+        let target = paths.command_path(file).map_err(AclError::Path)?;
+        let args = vec!["-m".to_string(), spec, "--".to_string(), target];
+        self.run_pass("inherit", &args, &shown, Instant::now(), self.timeout)?;
+
+        // `apply`daki gerekçeyle açıkça: `aimed` bir `/proc/<pid>/fd/N` adı, ve tanıtıcının ömrünü
+        // kısaltmak onu bu süreçteki bir sonraki `open`a çözdürürdü.
+        drop(confined);
+        Ok(true)
+    }
+
+    /// Bir klasörün default ACL'i, `getfacl -c -d` çıktısı olarak. Default ACL yoksa boş dize.
+    fn default_acl(&self, aimed: &str, shown: &str) -> Result<String, AclError> {
+        match self
+            .runner
+            .run(GETFACL, &["-c", "-d", "--absolute-names", "--", aimed])
+        {
+            Ok(out) => Ok(out),
+            Err(SeamError::Command { stderr, .. }) if is_not_supported(&stderr) => {
+                Err(AclError::AclTypeNotPosix {
+                    path: shown.to_string(),
+                    stderr,
+                })
+            }
+            Err(SeamError::Command { status, stderr, .. }) => Err(AclError::Command(format!(
+                "getfacl -d {shown} failed with status {status}: {stderr}"
+            ))),
+            Err(other) => Err(AclError::Path(other)),
+        }
     }
 }
 
@@ -1299,6 +1415,119 @@ mod tests {
         assert!(
             err.to_string().contains("PARTIALLY APPLIED"),
             "a caller must not record success for a folder that may be half done: {err}"
+        );
+    }
+
+    // ── kalıtım: ara alanda doğan dosyaya hedef klasörün default ACL'i ──
+
+    /// `getfacl -c -d`'nin bastığı satırlar, ekip grubu 300012'ye rwx veren bir klasör için.
+    const DEFAULT_ACL: &str = "user::rwx\ngroup::rwx\ngroup:300012:rwx\nmask::rwx\nother::---\n";
+
+    #[test]
+    fn the_inherited_spec_drops_the_execute_bit_and_keeps_the_mask() {
+        // Çekirdek bir dosya yaratırken default ACL'i `open`ın kipiyle kesiştirir; bir belgede
+        // `x` yoktur. Mask ise operanda AÇIKÇA yazılıyor — `setfacl -m` verilmemiş bir maskı
+        // yazdığı girdilerin birleşimiyle yeniden hesaplar, oysa klasörün kendi maskı orada
+        // yaratılan her şeyin tavanı.
+        assert_eq!(
+            file_spec_from_default(DEFAULT_ACL).expect("a well formed default ACL translates"),
+            "user::rw-,group::rw-,group:300012:rw-,mask::rw-,other::---"
+        );
+    }
+
+    #[test]
+    fn a_folder_with_no_default_acl_translates_to_nothing() {
+        // `getfacl -d` default ACL'i olmayan bir klasör için hiçbir şey basmaz. Boş bir operandla
+        // `setfacl` çağırmak, dosyaya "hiçbir şey" yazmak yerine bir hata olurdu.
+        assert_eq!(file_spec_from_default(""), None);
+        assert_eq!(file_spec_from_default("\n  \n"), None);
+    }
+
+    #[test]
+    fn an_unreadable_default_acl_writes_nothing_rather_than_half_of_it() {
+        // Yarım bir ACL 0600'den KÖTÜ: düşen bir `mask::` satırı adlandırılmış her girdiyi
+        // sessizce etkisiz kılar, düşen bir `other::` satırı ise dosyayı olduğundan geniş
+        // bırakır. Okunamayan tek satır bütün kalıtımı iptal ediyor.
+        assert_eq!(file_spec_from_default("group:300012:rwxr"), None);
+        assert_eq!(file_spec_from_default("user::rwx\nbir tuhaflık\n"), None);
+        assert_eq!(file_spec_from_default("user::rwx\n:rw-\n"), None);
+    }
+
+    #[test]
+    fn publishing_into_a_granted_folder_writes_that_folder_s_default_acl_onto_the_file() {
+        // ARIZANIN KENDİSİ: ara alanda 0600 doğan dosya, hedef klasörün default ACL'ini hiç
+        // görmüyordu — yükleyeni web'den okuyor, aynı ekipteki bir başkası SMB'den "erişim
+        // reddedildi" alıyordu.
+        let f = Fixture::with_folder("belgeler", "faturalar");
+        let file = std::fs::File::create(
+            f.root
+                .path()
+                .join("belgeler")
+                .join("faturalar")
+                .join("teklif.docx"),
+        )
+        .expect("create");
+
+        let mut runner = ScriptedRunner::new(Vec::new());
+        runner.getfacl_reply = DEFAULT_ACL.to_string();
+        let wrote = f
+            .applier(&runner)
+            .inherit_onto_file(&f.paths, &["belgeler", "faturalar"], &file)
+            .expect("the folder has a default ACL");
+        assert!(wrote);
+
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 2, "one getfacl to read, one setfacl to write");
+        assert_eq!(calls[0][0], GETFACL);
+        assert_eq!(calls[0][1], "-c");
+        assert_eq!(
+            calls[0][2], "-d",
+            "the DEFAULT acl is what a new file inherits; the access acl is the folder's own"
+        );
+        assert_eq!(calls[1][0], SETFACL);
+        assert_eq!(
+            calls[1][1], "-m",
+            "`-m` merges; `-b` would clear the owner's own entry first"
+        );
+        assert_eq!(
+            calls[1][2],
+            "user::rw-,group::rw-,group:300012:rw-,mask::rw-,other::---"
+        );
+        assert_eq!(
+            calls[1][3], "--",
+            "without `--` the target could be read as an option"
+        );
+        // `MockSafePath::command_path` son `open_dir`in yolunu döndürüyor ve tanıtıcıya bakmıyor,
+        // yani buradaki hedef dizesi dosyayı değil klasörü adlandırıyor. Bu testin iddiası argv'nin
+        // ŞEKLİ; hedefin gerçekten tanıtıcı olduğu `unix.rs`'in `command_path`ında ölçülüyor.
+        assert_eq!(calls[1].len(), 5);
+    }
+
+    #[test]
+    fn a_folder_with_no_default_acl_leaves_the_file_at_0600() {
+        // Bir hata değil: default ACL'i olmayan bir klasörde SMB'den yaratılan dosya da hiçbir
+        // grup girdisi taşımaz. Dosyayı zorla genişletmek, sahibinin vermediği bir yetki olurdu.
+        let f = Fixture::with_folder("belgeler", "faturalar");
+        let file = std::fs::File::create(
+            f.root
+                .path()
+                .join("belgeler")
+                .join("faturalar")
+                .join("teklif.docx"),
+        )
+        .expect("create");
+
+        let mut runner = ScriptedRunner::new(Vec::new());
+        runner.getfacl_reply = String::new();
+        let wrote = f
+            .applier(&runner)
+            .inherit_onto_file(&f.paths, &["belgeler", "faturalar"], &file)
+            .expect("an absent default ACL is an answer, not a fault");
+        assert!(!wrote);
+        assert_eq!(
+            runner.calls.borrow().len(),
+            1,
+            "nothing is written when there is nothing to inherit"
         );
     }
 

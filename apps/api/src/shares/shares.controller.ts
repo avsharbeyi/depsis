@@ -202,9 +202,16 @@ function toShare(row: ShareView, withDataset: boolean): Schemas['Share'] {
  */
 function translate(error: unknown): unknown {
   if (error instanceof ShareStorageUnconfiguredError) {
+    // TERMİNAL TALİMATI DEĞİL, EKRANDAKİ DÜĞMENİN ADI. Bu cümle "DEPSIS_SHARE_PARENT_DATASET'i
+    // ayarlayın" diyordu — sahibini bir yapılandırma dosyasına gönderen bir tavsiye, ve artık
+    // yanlış: ebeveyn veri kümesi `system.parentDataset` ile keşfediliyor, ortam değişkeni tek
+    // yol değil. Çaresi zaten aynı sayfanın tepesindeki "Paylaşım ağacını kur" düğmesi, ve web
+    // tarafı sunucunun cümlesini yedek metnin ÖNÜNDE gösterdiği için (`problemMessage`) o
+    // yönlendirmeyi söyleyebilecek tek yer burası.
     return new ServiceUnavailableException(
-      'This appliance has no storage configured for new shares. Set DEPSIS_SHARE_PARENT_DATASET ' +
-        'to the dataset mounted at the share root, then try again.',
+      'Bu cihazda paylaşım ağacı henüz kurulu değil. Paylaşımlar sayfasındaki "Paylaşım ağacını ' +
+        'kur" düğmesini kullanın; henüz bir depolama havuzu yoksa önce Diskler sayfasından havuzu ' +
+        'oluşturun.',
     );
   }
   if (error instanceof AgentUnavailableError) {

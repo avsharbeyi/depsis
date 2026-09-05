@@ -1,6 +1,7 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import type { Request } from 'express';
 
+import { ProblemException } from '../common/problem.filter.js';
 import { DbService } from '../db/db.service.js';
 import { LoginThrottleService } from './login-throttle.service.js';
 import { PasswordService } from './password.service.js';
@@ -50,6 +51,10 @@ export class ReauthService {
    * Throws `UnauthorizedException` for a wrong password, for an account that has gone away, and
    * for one that has no password set. The caller does not distinguish them and must not: they are
    * all "you did not prove it".
+   *
+   * Kısıtlanmış bir çağıran ise 429 alır (aşağıdaki gerekçe), 401 değil — o "kanıtlayamadın"
+   * değil, "şu an denemene bakmıyorum" demek, ve ikisini aynı cevaba katlamak sahibini yanlış
+   * teşhise gönderiyordu.
    */
   async require(
     organizationId: string,
@@ -66,10 +71,33 @@ export class ReauthService {
     if (user === undefined) throw new UnauthorizedException();
 
     const ip = clientIp(request);
-    if (!(await this.throttle.gate(user.username_folded, ip))) {
-      // The same answer as a wrong password, deliberately. A distinct "you are being throttled"
-      // would tell an attacker their guesses are landing on a real account.
-      throw new UnauthorizedException('the password is wrong');
+    const decision = await this.throttle.gate(user.username_folded, ip);
+    if (!decision.allowed) {
+      // ── ESKİDEN BURASI DA 401 DÖNÜYORDU, VE GEREKÇESİ TUTMUYORDU ─────────────────────────────
+      //
+      // Yorumu şuydu: "parola yanlışla aynı cevap, bilerek — ayrı bir 'kısıtlandın' cevabı
+      // saldırgana tahminlerinin gerçek bir hesaba düştüğünü söyler". Bu yol için doğru değil.
+      // Buraya gelen çağıran `SessionGuard`'dan geçmiş, yani hesabın var olduğunu ZATEN biliyor;
+      // 429 ona bilmediği hiçbir şey söylemiyor. Söylediği tek şey sayacın dolduğu, ki o sayacı
+      // kendisi doldurdu.
+      //
+      // Karşılığında ödenen bedel gerçekti: doğru parolayla gelen sahibi 15 dakika boyunca
+      // "Parola hatalı." okuyor, parolasını yanlış hatırladığını sanıyor, ve beklemesi gerektiğini
+      // hiçbir yerden öğrenemiyordu — /console, havuz kurma, disk sıfırlama, güncelleme, sertifika
+      // ve çoğaltma ekranlarının hepsinde. Terminalsiz ürün kuralı kilit süresinin ekranda
+      // görünmesini istiyor; `ProblemException.retryAfter` hem `Retry-After` başlığını hem
+      // gövdedeki `retryAfter` alanını üretiyor, Türkçe `detail` ise 429'u ayrıca işlemeyen
+      // ekranlarda da doğru cümleyi gösteriyor.
+      //
+      // Zamanlama eşitliği KORUNUYOR: bu dal Argon2 doğrulamasını yapmıyor, tıpkı eskisi gibi.
+      const minutes = Math.ceil(decision.retryAfterSeconds / 60);
+      throw new ProblemException(
+        'rate-limited',
+        `Çok fazla yanlış parola denemesi. ${minutes} dakika sonra yeniden deneyin — bu sayaç ` +
+          'oturum açmayla ortaktır.',
+        undefined,
+        decision.retryAfterSeconds,
+      );
     }
 
     // An account with NO password reaches here with `password_hash === null`. `PasswordService`

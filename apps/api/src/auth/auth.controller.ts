@@ -2,8 +2,6 @@ import {
   Body,
   Controller,
   HttpCode,
-  HttpException,
-  HttpStatus,
   Post,
   Req,
   Res,
@@ -27,6 +25,7 @@ import { headerString, isSecure, requireSameOrigin } from './origin.js';
 type Schemas = OpenApi.components['schemas'];
 
 import { AuditService } from '../audit/audit.service.js';
+import { ProblemException } from '../common/problem.filter.js';
 import { AuthService } from './auth.service.js';
 import {
   PENDING_COOKIE,
@@ -103,7 +102,21 @@ export class AuthController {
     if (result.outcome === 'throttled') {
       // 429, not 401 and not 403. The caller genuinely should retry later, and a client that cannot
       // tell "wrong password" from "slow down" will hammer a throttle it is already failing.
-      throw new HttpException('too many attempts', HttpStatus.TOO_MANY_REQUESTS);
+      //
+      // VE SÜREYİ SÖYLÜYOR. Çıplak `HttpException` gövdesinde de başlığında da bir sayı taşımıyor
+      // (`ProblemFilter` `Retry-After`'ı yalnız `ProblemException.retryAfter`'dan yazıyor), ve giriş
+      // ekranı bu yüzden sabit bir "bir dakika bekleyin" cümlesi gösteriyordu. Gerçek bekleme
+      // pencere 15 dakika olduğu için çok daha uzun: reddedilen deneme kaydedilmediğinden sayaç
+      // kendiliğinden azalmaz, onuncu hatanın yaşlanmasını beklemek gerekir. Bir dakika sonra
+      // dönüp yine 429 alan sahibi cihazın bozulduğunu sanıyordu.
+      const minutes = Math.ceil(result.retryAfterSeconds / 60);
+      throw new ProblemException(
+        'rate-limited',
+        `Bu adresten çok fazla başarısız giriş denemesi yapıldı. ${minutes} dakika sonra ` +
+          'yeniden deneyin.',
+        undefined,
+        result.retryAfterSeconds,
+      );
     }
     if (result.outcome === 'rejected') {
       throw new UnauthorizedException();

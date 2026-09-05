@@ -66,6 +66,10 @@ interface Behaviour {
   backupTree?: Record<string, DirRow[]>;
   /** `backup_list_directory`nin tek yanıtta verdiği girdi sayısı — sahadaki 5.000. */
   backupPageSize?: number;
+  /** Doğrulamanın okuyacağı dosya — satırdaki `last_copied_*`. Yoksa doğrulanacak bir şey yok. */
+  lastCopied?: { share: string; path: string[] };
+  /** `compare_backup_copy` cevabı. */
+  compare?: AgentResponse;
 }
 
 interface Harness {
@@ -73,6 +77,8 @@ interface Harness {
   calls: AgentRequest[];
   trace: string[];
   bases: Map<string, string | null>;
+  /** Satıra yazılan doğrulama sonuçları: `null` = ölçüm YAPILMADI, `false` = yedek bozuk. */
+  verifications: { ok: boolean | null; note: string }[];
 }
 
 function harness(behaviour: Behaviour = {}, base: string | null = null): Harness {
@@ -192,14 +198,41 @@ function harness(behaviour: Behaviour = {}, base: string | null = null): Harness
         }
         case 'backup_create_directory':
           return Promise.resolve<AgentResponse>({ status: 'directory_created' });
+        case 'compare_backup_copy':
+          return Promise.resolve<AgentResponse>(
+            behaviour.compare ?? {
+              status: 'comparison',
+              identical: true,
+              partial: false,
+              compared_bytes: 4,
+              live_bytes: 4,
+              backup_bytes: 4,
+            },
+          );
         default:
           return Promise.resolve<AgentResponse>({ status: 'ok', schema_version: 42 });
       }
     },
   } as unknown as AgentService;
 
+  const verifications: { ok: boolean | null; note: string }[] = [];
+
   const query = (text: string, params?: readonly unknown[]): Promise<unknown[]> => {
     if (text.includes('FROM public.shares')) return Promise.resolve(shares);
+    if (text.includes('last_copied_share AS share')) {
+      return Promise.resolve(
+        behaviour.lastCopied === undefined
+          ? []
+          : [{ share: behaviour.lastCopied.share, path: behaviour.lastCopied.path }],
+      );
+    }
+    if (text.includes('SET last_verified_at')) {
+      verifications.push({
+        ok: (params?.[1] ?? null) as boolean | null,
+        note: String(params?.[2]),
+      });
+      return Promise.resolve([]);
+    }
     if (text.includes('WHERE base_snapshot IS NOT NULL')) {
       const named = [...bases.values()].filter((name): name is string => name !== null);
       return Promise.resolve(named.map((base_snapshot) => ({ base_snapshot })));
@@ -238,7 +271,7 @@ function harness(behaviour: Behaviour = {}, base: string | null = null): Harness
     writeDiskDescription: () => Promise.resolve(),
   } as unknown as BackupTargetService;
 
-  return { runs: new BackupRunService(db, agent, targets), calls, trace, bases };
+  return { runs: new BackupRunService(db, agent, targets), calls, trace, bases, verifications };
 }
 
 function row(name: string, directory: boolean): DirRow & { size: number; modified_unix: number } {
@@ -357,6 +390,23 @@ describe('ilk yedek turu, tek listelemeye sığmayan bir dizinde', () => {
     expect(outcome.state).toBe('dustu');
     expect(bases.get(SHARE.id)).toBeNull();
     expect(bases.get(NEXT_SHARE.id)).toMatch(/^depsis-yedek-/u);
+  });
+
+  it('İKİ paylaşım da düştüğünde kayıtta İKİSİNİN de gerekçesi duruyor', async () => {
+    // `total.error` her arızada üzerine yazılıyordu: üç paylaşımın bozulduğu bir günde kayıtta
+    // yalnız sonuncusu kalıyor, ekranda sahibinin gördüğü tek cümle o oluyordu — ilk iki arıza
+    // hiçbir yerde yoktu.
+    const { runs } = harness({
+      shares: [SHARE, NEXT_SHARE],
+      tree: { '': [{ name: 'a01', directory: false }] },
+      copy: { status: 'refused', reason: 'ajan kopyalamayı reddetti' },
+    });
+
+    const outcome = await runs.runOnce(ORG, 'zamanli');
+
+    expect(outcome.state).toBe('dustu');
+    expect(outcome.error).toContain(SHARE.name);
+    expect(outcome.error).toContain(NEXT_SHARE.name);
   });
 });
 
@@ -611,5 +661,90 @@ describe('silinenler klasörünün temizliği', () => {
 
     expect(await runs.purgeExpired(ORG)).toBe(0);
     expect(backupTree[`DEPSIS-YEDEK/silinenler/${today}`]).toHaveLength(1);
+  });
+});
+
+/**
+ * GÜNLÜK DOĞRULAMANIN YANLIŞ ALARMI.
+ *
+ * `compare_backup_copy` yedeği CANLI dosyayla karşılaştırıyor, anlık görüntüyle değil. Tur 06:00'da
+ * kopyalıyor, doğrulama 14:00'te bakıyor: o gün üzerinde çalışılan bir tablo dosyası her seferinde
+ * "yedekte aslından FARKLI" çıkıyor ve ekran "Yedek doğrulanamadı, diski kontrol edin" diyen
+ * kırmızı bir kart açıyordu. Arızası olmayan bir cihazda her gün bir arıza kartı — ve gerçek
+ * bozulmayı bu gürültünün içinden ayırmanın yolu yok.
+ */
+describe('yedeğin doğrulanması', () => {
+  const LAST = { share: 'Fotograflar', path: ['Muhasebe', 'defter.xlsx'] };
+
+  it('BOYUTU tutmayan bir farkı "bozuk" saymıyor', async () => {
+    const { runs, verifications } = harness({
+      lastCopied: LAST,
+      compare: {
+        status: 'comparison',
+        identical: false,
+        partial: false,
+        compared_bytes: 1_100_000,
+        live_bytes: 1_200_000,
+        backup_bytes: 1_100_000,
+      },
+    });
+
+    const result = await runs.verifyOnce(ORG);
+
+    // `null` — YAPILMAMIŞ bir ölçüm. `false` yazmak arıza kartı açardı, `true` yazmak yapılmamış
+    // bir ölçümü başarılı göstererek doğrulamanın tamamını süse çevirirdi.
+    expect(verifications).toEqual([
+      { ok: null, note: expect.stringContaining('ölçüm yapılamadı') },
+    ]);
+    expect(result.note).not.toContain('FARKLI');
+  });
+
+  it('boyut AYNIYKEN içerik farklıysa hâlâ arıza diyor', async () => {
+    // Sessiz çürüme tam bu şekilde görünüyor: dosya aynı uzunlukta, içeriği değil.
+    const { runs, verifications } = harness({
+      lastCopied: LAST,
+      compare: {
+        status: 'comparison',
+        identical: false,
+        partial: false,
+        compared_bytes: 1_200_000,
+        live_bytes: 1_200_000,
+        backup_bytes: 1_200_000,
+      },
+    });
+
+    const result = await runs.verifyOnce(ORG);
+
+    expect(verifications).toEqual([{ ok: false, note: expect.stringContaining('FARKLI') }]);
+    expect(result.ok).toBe(false);
+  });
+
+  it('yedekteki kopya BOŞSA ölçülemedi demiyor', async () => {
+    // Dolu bir dosyanın yedekte sıfır bayt olması, canlı tarafta yapılan bir düzenlemenin
+    // üretebileceği bir şey değil: kopyalama yolunun kendisi bozuk.
+    const { runs, verifications } = harness({
+      lastCopied: LAST,
+      compare: {
+        status: 'comparison',
+        identical: false,
+        partial: false,
+        compared_bytes: 0,
+        live_bytes: 1_200_000,
+        backup_bytes: 0,
+      },
+    });
+
+    await runs.verifyOnce(ORG);
+
+    expect(verifications[0]?.ok).toBe(false);
+  });
+
+  it('aynı olduğunda başarılı yazıyor', async () => {
+    const { runs, verifications } = harness({ lastCopied: LAST });
+
+    const result = await runs.verifyOnce(ORG);
+
+    expect(result.ok).toBe(true);
+    expect(verifications[0]?.ok).toBe(true);
   });
 });

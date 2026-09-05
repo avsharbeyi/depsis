@@ -30,11 +30,13 @@ import { IdempotencyInterceptor } from '../common/idempotency.interceptor.js';
 import { DbService } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import { CopyService } from './copy.service.js';
-import { assertValidName, FilesService } from './files.service.js';
+import { formatBytes } from './file-operations.controller.js';
+import { assertValidName, FilesService, type ShareRow } from './files.service.js';
 import {
   requirePermission,
   requireSession,
   requireUuid,
+  requireWritableShare,
   toEntry,
   translate,
 } from './files.controller.js';
@@ -155,6 +157,9 @@ export class UploadsController {
       'create',
       upload.parent_id !== null,
     );
+    // Paylaşım yükleme başladıktan sonra salt okunura çevrilmiş olabilir; çakışmayı çözmek de
+    // yayımlamak demek.
+    requireWritableShare(share);
 
     const correlationId = randomUUID();
     const parentComponents =
@@ -389,6 +394,29 @@ export class UploadsController {
       'create',
       parentId !== null,
     );
+    requireWritableShare(share);
+
+    // ── YER VAR MI, DAHA İLK İSTEKTE ─────────────────────────────────────────────────────────
+    //
+    // §5.4: sunucu kotayı ve boş alanı BAŞLAMADAN denetler. Buraya kadar tek denetim yazma
+    // sırasındaydı: 40 GB'lık bir dosyayı 6 GB boşu kalmış bir paylaşıma sürükleyen kullanıcı
+    // yükleme çubuğunun ilerlediğini görüyor, saatler sonra %15'te 507 alıyor ve yarım dosya yirmi
+    // dört saat ara alanda yer kaplıyordu.
+    //
+    // BİR NEZAKET, GARANTİ DEĞİL — kopyalama yolundaki ölçümün aynısı (`CopyService.available
+    // Bytes`): başka bir yükleme cevapla yazma arasında yeri alabilir, ajan da dolu havuzu kendi
+    // cevabıyla sınıflandırmaya devam ediyor. `null`, ajanın söyleyemediği durum: o zaman eski
+    // davranış sürüyor.
+    const available = await this.copies.availableBytes(
+      share.dataset,
+      `space check before staging ${length} bytes`,
+    );
+    if (available !== null && length > available) {
+      throw new ProblemException(
+        'insufficient-storage',
+        `Bu dosya ${formatBytes(length)} yer istiyor; havuzda ${formatBytes(available)} boş.`,
+      );
+    }
 
     // The staging name comes from a fresh uuid, not from the filename. Two people uploading
     // `report.pdf` into different folders share one staging directory, and a name collision there
@@ -440,15 +468,17 @@ export class UploadsController {
     stagingName: string,
   ): Promise<void> {
     const correlationId = randomUUID();
-    const opened = expectStatus(
-      await this.agent.call(
-        { op: 'open_transfer', share: share.name, staging_name: stagingName },
-        `staging the empty ${filename}`,
-        correlationId,
-      ),
-      'transfer',
+    const opened = await this.openTransfer(
+      share.name,
+      stagingName,
+      `staging the empty ${filename}`,
+      correlationId,
     );
-    await this.data.send(opened.token, opened.offset, 0, Readable.from([]));
+    await this.data
+      .send(opened.token, opened.offset, 0, Readable.from([]))
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
 
     const uid = await this.posix
       .posixUidFor(session.organizationId, session.userId)
@@ -557,19 +587,20 @@ export class UploadsController {
       .catch((e: unknown) => {
         throw translate(e);
       });
+    // İkinci kapı: paylaşım yükleme başladıktan sonra salt okunura çevrilmiş olabilir, ve bir
+    // sonraki parça yine de diske yazılırdı.
+    requireWritableShare(share);
     const correlationId = randomUUID();
 
     // Two connections, in this order. The control call resolves the staging file under
     // openat2(RESOLVE_BENEATH) and hands back a one-time token; the data connection presents that
     // token and streams. Nothing on the data socket names a path, so it cannot reach anything the
     // control call did not already confine (ADR-0017).
-    const opened = expectStatus(
-      await this.agent.call(
-        { op: 'open_transfer', share: share.name, staging_name: upload.staging_name },
-        `tus PATCH for ${upload.filename}`,
-        correlationId,
-      ),
-      'transfer',
+    const opened = await this.openTransfer(
+      share.name,
+      upload.staging_name,
+      `tus PATCH for ${upload.filename}`,
+      correlationId,
     );
 
     if (opened.offset !== offset) {
@@ -596,7 +627,10 @@ export class UploadsController {
         // retry, and a 500 is exactly what a client retries.
         throw new InsufficientStorageException(error.agentReason);
       }
-      throw error;
+      // Geri kalanı `translate`den geçiyor: veri soketi hiç açılamadıysa `AgentUnavailableError`
+      // bir `HttpException` olmadığı için 500'e düşüyordu — "beklenmeyen bir hata", oysa söylenecek
+      // şey ajanın ulaşılamaz olduğu.
+      throw translate(error);
     }
 
     if (expected !== null && digest !== undefined) {
@@ -790,7 +824,9 @@ export class UploadsController {
     organizationId: string,
     parentId: string | null,
     shareId: string | null = null,
-  ): Promise<{ id: string; name: string }> {
+    // Tam SATIR: `read_only` ve `dataset` de gerekiyor — biri yazma kapısı, öteki boş alan
+    // ölçümü için.
+  ): Promise<ShareRow> {
     if (parentId !== null) {
       const parent = await this.files.find(organizationId, parentId);
       return this.files.shareFor(organizationId, parent.share_id);
@@ -808,11 +844,50 @@ export class UploadsController {
     return this.files.defaultShare(organizationId, slug);
   }
 
+  /**
+   * Veri soketi YAPILANDIRILMIŞ mı — ajan şu anda ayakta mı DEĞİL.
+   *
+   * `agent.isAvailable()` buradan kalktı ve gerekçesi, kod tabanının aynı tuzağı üç yerde daha
+   * kaldırırken yazdığı gerekçenin aynısı (`shares.service.ts`, `permissions.service.ts`,
+   * `teams.service.ts`): o bayrak yalnız `onModuleInit`te bir kez `true` oluyor ve bir daha
+   * DEĞERLENDİRİLMİYOR. Açılışta ajan geç yetişirse — havuz içe aktarması el sıkışma bütçesini
+   * aşarsa — bayrak kalıcı olarak `false` kalıyor ve ajan bir dakika sonra tamamen sağlıklı hâle
+   * gelse bile cihaza web'den hiçbir dosya yüklenemiyordu; tek çıkış API'yi yeniden başlatmaktı.
+   *
+   * Ajan gerçekten ulaşılamazsa cevap yine 503: `open_transfer` çağrısı `AgentUnavailableError`
+   * fırlatıyor ve `translate` onu 503'e çeviriyor — bu yüzden o çağrı artık `translate` ile sarılı.
+   */
   private requireAgent(): void {
-    if (!this.agent.isAvailable() || !this.data.isAvailable()) {
+    if (!this.data.isAvailable()) {
       throw new ServiceUnavailableException(
         'the system agent is not reachable; uploads are unavailable',
       );
+    }
+  }
+
+  /**
+   * Ara dosyayı açar ve jetonu döndürür — hatası kullanıcının görebileceği bir cevaba çevrilmiş
+   * olarak.
+   *
+   * `translate` olmadan `AgentUnavailableError` bir `HttpException` olmadığı için 500'e düşüyordu:
+   * ajanın kapalı olduğunu söyleyen 503 yerine "beklenmeyen bir hata". Ajanın reddi de aynı yoldan
+   * 409 oluyor.
+   */
+  private async openTransfer(
+    shareName: string,
+    stagingName: string,
+    reason: string,
+    correlationId: string,
+  ): Promise<{ token: string; offset: number }> {
+    try {
+      const response = await this.agent.call(
+        { op: 'open_transfer', share: shareName, staging_name: stagingName },
+        reason,
+        correlationId,
+      );
+      return expectStatus(response, 'transfer');
+    } catch (error) {
+      throw translate(error);
     }
   }
 }

@@ -391,6 +391,60 @@ describeDb('copying a tree', () => {
     expect(await rowsUnder(await idOfPath('/target/docs'))).toEqual(['a.txt', 'inner']);
   });
 
+  it('skips the whole subtree under a refused folder instead of killing the job', async () => {
+    // Bulunan kusur: reddedilen bir klasör `placed`e girmiyor, ama İZİNLİ çocuğu yine de sıraya
+    // geliyordu — `destinationParent` "klasörün kopyası çocuğundan önce yapılmadı" diye hata
+    // fırlatıyor, hata işi ORTASINDA öldürüyor, beş deneme aynı yerde düşüyor ve kullanıcı yarım
+    // bir kopyayla açıklamasız bir `dead` iş görüyordu.
+    //
+    // Ulaşılabilir bir durum, çünkü klasöre `list`, dosyaya `download` ayrı ayrı verilebiliyor:
+    // burada üye `inner`ı LİSTELEYEMİYOR ama `inner/b.txt`i indirebiliyor.
+    await owner.withoutTenant('migration-status', async (q) => {
+      await q.query(
+        `INSERT INTO folder_grants (organization_id, share_id, entry_id, user_id, permissions)
+         VALUES ($1, $2, NULL, $3, ARRAY['list','read','download','create']::public.folder_permission[])`,
+        [org, share, member],
+      );
+      // `inner` üzerinde listeleme yok — klasör reddedilecek...
+      await q.query(
+        `INSERT INTO folder_grants (organization_id, share_id, entry_id, user_id, permissions)
+         VALUES ($1, $2, $3, $4, ARRAY['read','download']::public.folder_permission[])`,
+        [org, share, inner, member],
+      );
+    });
+
+    const { copies } = service();
+    const { report } = reporter();
+    const result = await copies.copy(org, payload([docs], target, member), report, 'test');
+
+    // İş BİTİYOR: `docs` ve `a.txt` kopyalandı, `inner` ve altındaki `b.txt` reddedildi.
+    expect(result).toMatchObject({ copied: 2, refused: 2, total: 4 });
+    expect(await rowsUnder(await idOfPath('/target/docs'))).toEqual(['a.txt']);
+    // Ve alt ağaç hedefin KÖKÜNE de düşmedi: reddedilen bir klasörün içindekiler ortaya saçılmaz.
+    expect(await rowsUnder(target)).toEqual(['docs']);
+  });
+
+  it('refuses to run at all when the share was turned read-only after the click', async () => {
+    // Uç zaten reddediyor, ama iş kuyruğa girdikten sonra da paylaşım salt okunura çevrilebiliyor.
+    // O pencerede işçi hiçbir şey sormadan yazmaya devam ediyordu.
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`UPDATE shares SET read_only = true WHERE id = $1`, [share]),
+    );
+    const { copies, calls } = service();
+    const { report } = reporter();
+    try {
+      await expect(copies.copy(org, payload([fileA], target), report, 'test')).rejects.toThrow(
+        /salt okunur/,
+      );
+      // Ve tek bir bayt bile taşınmadı.
+      expect(calls).toEqual([]);
+    } finally {
+      await owner.withoutTenant('migration-status', (q) =>
+        q.query(`UPDATE shares SET read_only = false WHERE id = $1`, [share]),
+      );
+    }
+  });
+
   it('refuses to run at all for an account that has since been disabled', async () => {
     // The job runs minutes after the click. Every file it would create would be owned by, and
     // reachable through, an account an administrator has switched off.

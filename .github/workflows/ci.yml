@@ -685,8 +685,11 @@ jobs:
             // on a single project that matched nothing — so a renamed setup.kurulum.spec.ts, or a
             // WIZARD_SPECS glob that drifted, would leave the wizard project contributing zero
             // tests and this job green. That is the first screen anybody who plugs the box in ever
-            // sees. `row.ran === row.skipped` rather than a fixed count, because the project
-            // legitimately carries one declared test.fixme.
+            // sees. `row.ran === row.skipped` rather than a fixed count, so adding a test does
+            // not mean editing this number — and a project that skipped everything it ran still
+            // fails here. The wizard project used to carry a declared test.fixme for a pattern
+            // attribute that no longer compiles wrong; it carries none today, and this check did
+            // not have to change for that.
             for (const required of ["desktop", "mobile-360", "kurulum"]) {
               const row = byProject.get(required);
               if (row === undefined || row.ran === row.skipped) {

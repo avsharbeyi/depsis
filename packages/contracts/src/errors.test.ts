@@ -6,7 +6,9 @@ import {
   problem,
   problemDetailsSchema,
   statusForCode,
+  type ErrorCode,
 } from './errors.js';
+import type { components } from './generated/api.js';
 
 describe('problem()', () => {
   it('produces a body that validates against the schema', () => {
@@ -36,6 +38,41 @@ describe('problem()', () => {
   it('rejects a body whose status is outside the error range', () => {
     const bad = { ...problem('forbidden', 'c'), status: 200 };
     expect(problemDetailsSchema.safeParse(bad).success).toBe(false);
+  });
+});
+
+/**
+ * Kapalı küme gerçekten sözleşmeye ulaşıyor mu?
+ *
+ * `ERROR_CODES` "istemci metin karşılaştırması yapmasın" diye kapalı bir küme, ama OpenAPI'de
+ * `code` düz `string` ilan edilmişti: üretilen istemci tipi de `code: string` oluyordu. Yani
+ * `name-taken` bir gün `name-conflict` olarak yeniden adlandırılsaydı derleme yeşil kalır, web
+ * yükleme çakışmasında kullanıcıya "değiştir mi, ikisini de tut mu" diye sormayı bırakır ve
+ * yerine genel bir hata gösterirdi — `errors.ts`teki yorumun tam olarak engellemek istediği
+ * kırılma, bu kez kodun ADI üzerinden.
+ *
+ * Belgeye bir enum yazmak tek başına ikinci bir liste demek, ve iki liste sessizce ayrışır.
+ * Aşağıdaki tip eşitliği o ayrışmayı derleme hatasına çeviriyor: `ContractCode` üretilen
+ * `api.d.ts`ten geliyor, `api.d.ts` `generate:check` ile belgeye bağlı, belge de bu iddiayla
+ * `ERROR_CODES`a bağlanıyor. Zincirin bir halkası koparsa `pnpm typecheck` düşer.
+ */
+type ContractCode = components['schemas']['ProblemDetails']['code'];
+
+/** Çift yönlü: eksik bir kod da, belgede olup burada olmayan bir kod da `false` üretir. */
+type SameSet<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+/** `true` dışında bir şey verilirse tip kontrolü burada durur. */
+type AssertTrue<T extends true> = T;
+
+export type ErrorCodesMatchTheContract = AssertTrue<SameSet<ErrorCode, ContractCode>>;
+
+describe('ERROR_CODES ile belgenin kapalı kümesi', () => {
+  it('her kodu belgenin kabul ettiği bir değer olarak taşıyor', () => {
+    // Atamanın kendisi `ERROR_CODES ⊆ ContractCode` iddiası; ters yönü yukarıdaki tip eşitliği
+    // taşıyor. Çalışma zamanında kalan iş, listenin kendini tekrarlamadığını doğrulamak: aynı
+    // kodun iki kez yazılması `statusForCode` haritasında sessizce birinin diğerini ezmesi olurdu.
+    const asContract: ContractCode[] = [...ERROR_CODES];
+    expect(new Set(asContract).size).toBe(ERROR_CODES.length);
   });
 });
 

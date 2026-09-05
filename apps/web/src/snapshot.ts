@@ -1,7 +1,7 @@
 import type { OpenApi } from '@depsis/contracts';
 import { useEffect, useRef, useState } from 'react';
 
-import { api } from './api.js';
+import { api, isTransportFailure } from './api.js';
 
 type Telemetry = OpenApi.components['schemas']['Telemetry'];
 type Person = OpenApi.components['schemas']['DirectoryEntry'];
@@ -32,6 +32,47 @@ export interface Snapshot {
 
 const REFRESH_MS = 10_000;
 const HISTORY_LENGTH = 40;
+
+/**
+ * Telemetri okunamadığında masanın altında yazan cümle.
+ *
+ * SUNUCUYA ULAŞILAMAMASI AYRI BİR ŞEY. `api.ts` düşen bir bağlantıyı fırlatmıyor, taşıma
+ * işaretli bir cevaba çeviriyor — yani aşağıdaki `catch` hiç çalışmıyor ve "son bilinen durum
+ * gösteriliyor" sözü hiçbir zaman tutulmuyordu. API beş saniye yeniden başlarken Depolama ve
+ * Sistem kartları "Sistem durumu okunamadı." uyarısına dönüyor, halka, sıcaklık ve havuz
+ * satırları siliniyordu; oysa on saniye önceki gerçek rakamlar elde duruyor.
+ *
+ * ELDE ESKİ BİR CEVAP YOKSA O SÖZ VERİLMİYOR: ilk yoklamada "son bilinen durum gösteriliyor"
+ * demek, ekranda gösterilmeyen bir şeyi gösteriyorum demek olurdu.
+ */
+export function telemetryNoteFor(state: {
+  status: number;
+  transportFailure: boolean;
+  /** Cevap okunabildi mi — okunduysa söylenecek bir şey yok. */
+  read: boolean;
+  hadPrevious: boolean;
+}): string | null {
+  if (state.read) return null;
+  if (state.status === 403) {
+    // Not an error to report loudly, and worded for what the endpoint actually checks.
+    // `SystemController.telemetry` asks `isSystemAdministrator` — the ONE account recorded in
+    // `system_setup` — rather than `role = 'admin'` like `/backups` next door. Saying
+    // "yalnızca yöneticilere" would tell a second promoted administrator, who is shown every
+    // other admin pane, that they are not one.
+    return 'Sistem ayrıntıları yalnız cihazı kuran hesaba açık.';
+  }
+  if (state.status === 503) {
+    // The pool figures can only come from the privileged agent. No agent is the expected state of
+    // an appliance whose pool has not been created yet, so this is not a fault.
+    return 'Depolama ajanı yanıt vermiyor. Havuz henüz kurulmadıysa bu beklenen.';
+  }
+  if (state.transportFailure) {
+    return state.hadPrevious
+      ? 'Sunucuya ulaşılamıyor; son bilinen durum gösteriliyor.'
+      : 'Sunucuya ulaşılamıyor.';
+  }
+  return 'Sistem durumu okunamadı.';
+}
 
 /**
  * Polls `/system/telemetry` and `/directory/users` together and keeps a short load history.
@@ -76,21 +117,7 @@ export function useSnapshot({
           return false;
         }
 
-        let telemetryNote: string | null = null;
-        if (telemetry.response.status === 403) {
-          // Not an error to report loudly, and worded for what the endpoint actually checks.
-          // `SystemController.telemetry` asks `isSystemAdministrator` — the ONE account recorded in
-          // `system_setup` — rather than `role = 'admin'` like `/backups` next door. Saying
-          // "yalnızca yöneticilere" would tell a second promoted administrator, who is shown every
-          // other admin pane, that they are not one.
-          telemetryNote = 'Sistem ayrıntıları yalnız cihazı kuran hesaba açık.';
-        } else if (telemetry.response.status === 503) {
-          // The pool figures can only come from the privileged agent. No agent is the expected
-          // state of an appliance whose pool has not been created yet, so this is not a fault.
-          telemetryNote = 'Depolama ajanı yanıt vermiyor. Havuz henüz kurulmadıysa bu beklenen.';
-        } else if (telemetry.data === undefined) {
-          telemetryNote = 'Sistem durumu okunamadı.';
-        }
+        const dropped = isTransportFailure(telemetry.response);
 
         const load = telemetry.data?.cpu.loadAverage?.[0];
         if (typeof load === 'number' && Number.isFinite(load)) {
@@ -98,8 +125,16 @@ export function useSnapshot({
         }
 
         setSnapshot((previous) => ({
-          telemetry: telemetry.data ?? null,
-          telemetryNote,
+          // Düşen bir bağlantı, bir dakika önce gerçek rakamlar gösteren masayı boşaltmamalı;
+          // cevap gelmiş bir ret (403/503) ise eski rakamları geçersiz kılar ve ekranda
+          // bırakılmamalıdır.
+          telemetry: telemetry.data ?? (dropped ? (previous?.telemetry ?? null) : null),
+          telemetryNote: telemetryNoteFor({
+            status: telemetry.response.status,
+            transportFailure: dropped,
+            read: telemetry.data !== undefined,
+            hadPrevious: (previous?.telemetry ?? null) !== null,
+          }),
           // A failed name list keeps the PREVIOUS one rather than blanking to null: this poll runs
           // every ten seconds, and one miss would otherwise take every column off the job board
           // and put it back a moment later.
@@ -109,11 +144,18 @@ export function useSnapshot({
         return true;
       } catch {
         if (!alive) return false;
-        // A dropped connection must not blank a desk that was showing real figures a moment ago;
-        // the last known state stays on screen and the line above it says why it is not moving.
+        // BURASI BUGÜN ÇALIŞMIYOR ve bilerek duruyor: `api.ts`'in `onError`'ı düşen bağlantıyı
+        // fırlatmadan taşıma işaretli bir cevaba çeviriyor, o yüzden asıl iş yukarıda
+        // `telemetryNoteFor` ile yapılıyor. Sözleşme bir gün değişip fırlatmaya dönerse masayı
+        // boşaltmayan tek koruma bu dal olur.
         setSnapshot((previous) => ({
           telemetry: previous?.telemetry ?? null,
-          telemetryNote: 'Sunucuya ulaşılamıyor; son bilinen durum gösteriliyor.',
+          telemetryNote: telemetryNoteFor({
+            status: 0,
+            transportFailure: true,
+            read: false,
+            hadPrevious: (previous?.telemetry ?? null) !== null,
+          }),
           users: previous?.users ?? null,
           cpuHistory: history.current,
         }));

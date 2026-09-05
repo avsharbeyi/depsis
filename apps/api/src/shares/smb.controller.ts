@@ -15,6 +15,7 @@ import { AdminGuard, SessionGuard, type AuthenticatedRequest } from '../auth/ses
 import { requireSession } from '../files/files.controller.js';
 import {
   ShareListNotDeviceWideError,
+  SharePendingAdoptionError,
   SharesService,
   SmbPublishFailedError,
   SmbUnavailableError,
@@ -113,6 +114,18 @@ function translate(error: unknown): Error {
     return new InternalServerErrorException(
       'Samba yapılandırması yazılamadı ve DEPSIS eskisinin geri konduğunu doğrulayamıyor — ' +
         `paylaşımlar şu an sunulmuyor olabilir. Ajanın bildirdiği sebep: ${error.agentReason}`,
+    );
+  }
+
+  // AgentRefusedError'DAN ÖNCE, ve sırası kararın kendisi. Sahiplenme reddi de o sınıftan
+  // geliyordu ve aşağıdaki dala düşüp "Samba yeni yapılandırmayı kabul etmedi, eskisi geri kondu"
+  // diye anlatılıyordu — `publish_samba_config` daha çağrılmamışken. Sahibi Samba'yı suçlayıp
+  // orada arıyordu; gerçek sebep havuz tarafındaydı ve hiç görünmüyordu.
+  if (error instanceof SharePendingAdoptionError) {
+    return new ConflictException(
+      `'${error.shareName}' paylaşımı için havuzda veri kümesi açılamadı (${error.dataset}), ` +
+        'bu yüzden yayın hiç başlamadı — Samba yapılandırması değişmedi ve sunulan paylaşımlar ' +
+        `etkilenmedi. Ajanın bildirdiği sebep: ${error.agentReason}`,
     );
   }
 

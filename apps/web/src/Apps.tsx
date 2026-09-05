@@ -762,7 +762,7 @@ export function Apps({ notify, isAdmin, onUnauthenticated }: Props): React.JSX.E
                     {manageable && (
                       <button
                         type="button"
-                        className={running ? 'tg stop' : 'tg start'}
+                        className={running ? 'apptg stop' : 'apptg start'}
                         style={{ flex: 1 }}
                         // Starting is what ADR-0019 refuses on a rootful socket; stopping is not.
                         disabled={busy || (!running && !canRun)}

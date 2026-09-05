@@ -35,6 +35,24 @@ describeDb('the idempotency key', () => {
   const print = (label: string): Buffer =>
     IdempotencyService.fingerprint('POST', '/files/folders', { name: label });
 
+  /** Anahtarları saklama penceresinin dışına taşı — süpürmenin göreceği hâl. */
+  const age = async (list: readonly string[]): Promise<void> => {
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `UPDATE idempotency_keys SET created_at = now() - interval '48 hours'
+          WHERE organization_id = $1 AND idempotency_key = ANY($2)`,
+        [orgA, list],
+      ),
+    );
+  };
+
+  const present = async (key: string): Promise<boolean> => {
+    const rows = await db.withTenant(orgA, (q) =>
+      q.query(`SELECT 1 FROM public.idempotency_keys WHERE idempotency_key = $1`, [key]),
+    );
+    return rows.length > 0;
+  };
+
   beforeAll(async () => {
     db = new DbService(APP_URL as string);
     await db.onModuleInit();
@@ -254,6 +272,30 @@ describeDb('the idempotency key', () => {
     expect(await keys.claim(orgA, ayse, ENDPOINT, fresh, print('yeni'))).toEqual({
       outcome: 'in-flight',
     });
+  });
+
+  it('sweeps from the claim path, and then holds off for an hour', async () => {
+    // `purgeExpired` vardı ama onu çağıran hiçbir üretim yolu YOKTU — yalnız bir önceki test.
+    // Yani saklama süresi kâğıt üstündeydi: tabloda hiçbir satır silinmiyordu.
+    const stale = randomUUID();
+    await keys.claim(orgA, ayse, ENDPOINT, stale, print('eski'));
+    await age([stale]);
+
+    // Kendi süpürme sayacı henüz dolmamış taze bir servis — `keys` bu testten önce çoktan
+    // süpürmüş olurdu.
+    const swept = new IdempotencyService(db);
+    expect(await swept.claim(orgA, ayse, ENDPOINT, randomUUID(), print('yeni'))).toEqual({
+      outcome: 'claimed',
+    });
+    expect(await present(stale)).toBe(false);
+
+    // Ve bir sonraki istek yeniden süpürmüyor: silme, her idempotent isteğin sırtına binen bir
+    // maliyet değil, saatte bir koşan bir tur.
+    const second = randomUUID();
+    await keys.claim(orgA, ayse, ENDPOINT, second, print('ikinci'));
+    await age([second]);
+    await swept.claim(orgA, ayse, ENDPOINT, randomUUID(), print('ucuncu'));
+    expect(await present(second)).toBe(true);
   });
 
   it('gives a different body a different fingerprint', () => {

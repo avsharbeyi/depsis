@@ -1173,7 +1173,8 @@ export interface paths {
                     trashed?: boolean;
                     /** @description Opak. İstemci bunu üretmez ve ayrıştırmaz; kodlaması sunucuya aittir. */
                     cursor?: components["parameters"]["Cursor"];
-                    limit?: components["parameters"]["Limit"];
+                    /** @description Dosya listelemesinin sayfa boyu. Sunucu burada 100/500 uyguluyor, 50/200 değil. */
+                    limit?: components["parameters"]["FilesLimit"];
                     /**
                      * @description Sıralama. `kind` dördünde de başta duruyor: klasörler ve dosyalar hiçbir sırada
                      *     birbirine karışmıyor.
@@ -5374,6 +5375,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/backups/target/recovery/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Kurtarma diskini bu cihazin yedek diskine cevir
+         * @description KURTARMANIN SON ADIMI. `scan` -> `adopt` -> `unlock` ile dosyalar geri alindiktan sonra
+         *     geriye tek bir soru kaliyor: bu disk bundan sonra ne olacak? Bu uc onu BU CIHAZIN yedek
+         *     diski yapiyor � kurtarma satiri bir hedef satirina donusuyor, tur/budama/dogrulama
+         *     zincirleri tohumlaniyor ve bir sonraki tur ondan sonra kendiliginde kosuyor.
+         *
+         *     Onsuz sahibi, kurtardigi dosyalari yeniden yedeklemek icin diski silip bastan kurmak
+         *     zorunda kaliyordu � yani elindeki tek kopyayi silerek. Terminalsiz bir yol da yoktu.
+         *
+         *     CIHAZIN ZATEN BIR YEDEK DISKI VARSA reddediliyor: iki hedef, iki ayri yerde biriken iki
+         *     yarim yedek demek.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Artik bu cihazin yedek diski */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BackupTarget"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                403: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/backups/target/run": {
         parameters: {
             query?: never;
@@ -6900,8 +6953,11 @@ export interface components {
             /** @description Secret, dosya içeriği veya çağıranın görmeye yetkili olmadığı yol içermez. */
             detail?: string;
             instance?: string;
-            /** @description Kapalı küme. Kaynak tanım packages/contracts/src/errors.ts. */
-            code: string;
+            /**
+             * @description Kapalı küme. Kaynak tanım packages/contracts/src/errors.ts.
+             * @enum {string}
+             */
+            code: "unauthenticated" | "invalid-credentials" | "mfa-required" | "mfa-invalid" | "session-expired" | "forbidden" | "not-found" | "validation-failed" | "unsupported-media-type" | "bad-request" | "range-not-satisfiable" | "conflict" | "name-taken" | "precondition-failed" | "idempotency-key-reused" | "quota-exceeded" | "insufficient-storage" | "upload-offset-mismatch" | "checksum-mismatch" | "rate-limited" | "dependency-unavailable" | "gone" | "operation-in-progress" | "internal-error";
             /** @description Her yanıtta ve aynı isteğin her log satırında bulunur (§14). */
             correlationId: string;
             errors?: components["schemas"]["ProblemFieldError"][];
@@ -9117,6 +9173,8 @@ export interface components {
         /** @description Opak. İstemci bunu üretmez ve ayrıştırmaz; kodlaması sunucuya aittir. */
         Cursor: string;
         Limit: number;
+        /** @description Dosya listelemesinin sayfa boyu. Sunucu burada 100/500 uyguluyor, 50/200 değil. */
+        FilesLimit: number;
         /**
          * @description Kullanıcı ve uç kapsamında benzersiz. Aynı anahtar farklı bir istek parmak iziyle
          *     gelirse 409 döner. RFC yoktur — IETF taslağı Expired and archived durumundadır — bu

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { Injectable, Logger } from '@nestjs/common';
 
-import { AgentService, expectStatus } from '../agent/agent.service.js';
+import { AgentService, AgentUnavailableError, expectStatus } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
 import { BackupTargetService } from './backup-target.service.js';
 
@@ -72,6 +72,48 @@ function whyUnavailable(status: { prepared: boolean; key_loaded: boolean }): str
   return 'yedek diski bağlı değil';
 }
 
+/**
+ * Bir turun gerekçe metninin en fazla kaç karakter olabileceği.
+ *
+ * `backup_runs.error` tek bir `text` sütunu ve ekranda tek bir cümle olarak okunuyor. Tavan, tek
+ * bir arızanın binlerce satırlık çıktısının kaydı okunamaz hâle getirmemesi için.
+ */
+const MAX_ERROR_CHARS = 2_000;
+
+/**
+ * Düşen paylaşımların gerekçelerini tek bir cümleye toplar.
+ *
+ * ÜZERİNE YAZMIYOR. Her arızada `total.error`ı değiştiren bir tur, üç paylaşımın bozulduğu bir
+ * günde yalnız SONUNCUSUNU anlatıyordu — ve sahibinin ekranda gördüğü tek cümle o oluyordu, yani
+ * ilk iki arıza hiçbir yerde yoktu.
+ */
+function joinFailures(failures: string[]): string {
+  const joined = failures.join('; ');
+  return joined.length <= MAX_ERROR_CHARS ? joined : `${joined.slice(0, MAX_ERROR_CHARS - 1)}…`;
+}
+
+/**
+ * Bir turun ekrana giden özeti.
+ *
+ * `backup_runs` yazılıyor ama HİÇBİR YER OKUMUYORDU. Sonucu şuydu: yedek diski dolduğunda tur
+ * 'yer-yok' ile düşüyor, satır tabloya giriyor, ve ekran hâlâ "Açık" ile son doğrulamanın dünkü
+ * cümlesini gösteriyordu — arızanın tek izi worker günlüğü, yani sahibinin hiç bakmayacağı yer.
+ * 0044'ün tabloyu açarken yazdığı gerekçe ("ekranın son tur ne yaptı cümlesi") ancak bir okuyucu
+ * varsa duruyor.
+ */
+export interface BackupRunSummary {
+  trigger: 'zamanli' | 'elle';
+  state: 'calisiyor' | 'bitti' | 'dustu' | 'kilitli' | 'yer-yok';
+  copiedFiles: number;
+  copiedBytes: number;
+  movedFiles: number;
+  purgedFiles: number;
+  /** Ajanın ya da turun kendi cümlesi — kullanıcıya AYNEN gösteriliyor. */
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
 export interface RunOutcome {
   state: 'bitti' | 'kilitli' | 'yer-yok' | 'dustu' | 'devam';
   copiedFiles: number;
@@ -97,10 +139,10 @@ interface ShareRow {
  *
  * BAYTLAR HÂLÂ CANLI AĞAÇTAN OKUNUYOR, ve bu bilinen bir eksik: `copy_file_to_backup` ajanın
  * paylaşım kökünden okuyor, `.zfs/snapshot/<ad>` altından değil. Kopyalanırken değişen bir dosya
- * bu yüzden görüntüdeki hâliyle yedeklenmiyor — ve günlük doğrulama da yedeği CANLI dosyayla
- * karşılaştırdığı için, turdan sonra düzenlenen bir dosya "yedek bozuk" diye görünebiliyor.
- * İkisini birden kapatmak ajanın işlem kümesinde bir değişiklik istiyor (görüntüden okuyan bir
- * kopyalama ve karşılaştırma), yani burada tek başına düzeltilemiyor.
+ * bu yüzden görüntüdeki hâliyle yedeklenmiyor. Bunu kapatmak ajanın işlem kümesinde bir
+ * değişiklik istiyor (görüntüden okuyan bir kopyalama ve karşılaştırma), yani burada tek başına
+ * düzeltilemiyor. Günlük doğrulamanın aynı sebeple ürettiği YANLIŞ ALARM ise kapatıldı:
+ * `verifyOnce` boyutu tutmayan bir farkı "bozuk" değil "ölçülemedi" sayıyor.
  *
  * ── DEĞİŞİKLİK LİSTESİ, DİZİN YÜRÜYÜŞÜ DEĞİL ─────────────────────────────────────────────────
  *
@@ -195,6 +237,8 @@ export class BackupRunService {
     // izleyen paylaşımlardan biri "devam edecek" dediğinde turun durumu ona dönüp arızanın üstünü
     // örtmesin diye.
     let failure: string | null = null;
+    /** Düşen her paylaşımın gerekçesi, ADIYLA birlikte. Kayda hepsi birden giriyor. */
+    const failures: string[] = [];
 
     for (const share of shares) {
       if (total.copiedFiles >= MAX_FILES_PER_RUN) {
@@ -220,8 +264,9 @@ export class BackupRunService {
         // başka bir şey yapmaz.
         const outOfSpace = reason.includes('yer yok') || reason.includes('yer kalmadı');
         failure = reason;
+        failures.push(`${share.name}: ${reason}`);
         total.state = outOfSpace ? 'yer-yok' : 'dustu';
-        total.error = reason;
+        total.error = joinFailures(failures);
         this.logger.warn(`yedek turu '${share.name}' üzerinde düştü: ${reason}`);
         // ARIZALI PAYLAŞIM SIRADAKİLERİ YEDEKSİZ BIRAKMIYOR. Paylaşımlar ada göre sıralı geliyor,
         // yani buradaki `break` 'Fotograflar' bozulduğunda 'Videolar'ı da her turda sıraya
@@ -230,6 +275,10 @@ export class BackupRunService {
         // 'yer yok' ayrı ve turu gerçekten bitiriyor: dolu bir diske sıradaki paylaşımı yazmayı
         // denemek, yarım dosyalar park etmekten başka bir şey yapmaz.
         if (outOfSpace) break;
+        // AJANIN SUSMASI DA TURU BİTİRİYOR, ve bu paylaşıma özgü bir arıza değil: soket
+        // gittiyse sıradaki paylaşım da aynı yerde düşecek. Devam etmek, kayda aynı cümlenin
+        // paylaşım sayısı kadar kopyasını yazmaktan başka bir şey yapmaz.
+        if (error instanceof AgentUnavailableError) break;
       }
     }
 
@@ -1023,12 +1072,45 @@ export class BackupRunService {
     const howMuch = result.partial
       ? `ilk ${Math.round(Number(result.compared_bytes) / (1024 * 1024))} MB`
       : 'tamamı';
-    const note = result.identical
-      ? `${name} okundu; ${howMuch} aslıyla aynı`
-      : `${name} yedekte aslından FARKLI (asıl ${result.live_bytes} bayt, yedek ${result.backup_bytes} bayt)`;
-    await this.recordVerification(organizationId, target.id, result.identical, note);
-    if (!result.identical) this.logger.error(`yedek doğrulaması düştü: ${note}`);
-    return { ok: result.identical, note };
+    if (result.identical) {
+      const note = `${name} okundu; ${howMuch} aslıyla aynı`;
+      await this.recordVerification(organizationId, target.id, true, note);
+      return { ok: true, note };
+    }
+
+    const live = Number(result.live_bytes);
+    const backup = Number(result.backup_bytes);
+    // ── BOYUT FARKI TEK BAŞINA "YEDEK BOZUK" DEĞİL ───────────────────────────────────────────
+    //
+    // Karşılaştırma yedeği CANLI dosyayla ölçüyor (`compare_backup_copy` paylaşım kökünden
+    // okuyor, anlık görüntüden değil). Tur 06:00'da kopyalıyor, doğrulama 14:00'te bakıyor: o
+    // gün üzerinde çalışılan bir tablo dosyası her seferinde "FARKLI" çıkıyordu ve ekran
+    // "yedeğinizi doğrulayamadık, diski kontrol edin" diyordu — yani her gün kullanılan her
+    // dosya, arızası olmayan bir cihazda kırmızı bir kart üretiyordu. Gerçek bozulmayı bu
+    // gürültünün içinden ayırmanın yolu yoktu.
+    //
+    // BOYUTLAR EŞİTKEN İÇERİK FARKLIYSA hâlâ arıza, ve öyle kalıyor: canlı dosya turdan sonra
+    // aynı uzunlukta kalacak şekilde değişmiş olabilir ama olağan olan bu değil, ve sessiz
+    // çürüme tam bu şekilde görünüyor.
+    //
+    // BOŞ BİR YEDEK KOPYASI da arıza ve ölçülemedi sayılmıyor: dolu bir dosyanın yedekte sıfır
+    // bayt olması, canlı tarafta yapılan bir düzenlemenin üretebileceği bir şey değil.
+    if (live !== backup && backup > 0) {
+      const note =
+        `${name} turdan SONRA değişmiş görünüyor (asıl ${live} bayt,` +
+        ` yedekteki kopya ${backup} bayt); bu dosyayla ölçüm yapılamadı`;
+      // `null` — YAPILMAMIŞ bir ölçüm. `false` yazmak, bir kusuru olmayan cihazda arıza kartı
+      // açardı; `true` yazmak, yapılmamış bir ölçümü başarılı göstererek doğrulamanın tamamını
+      // süse çevirirdi.
+      await this.recordVerification(organizationId, target.id, null, note);
+      this.logger.warn(`yedek doğrulaması ölçülemedi: ${note}`);
+      return { ok: false, note };
+    }
+
+    const note = `${name} yedekte aslından FARKLI (asıl ${live} bayt, yedek ${backup} bayt)`;
+    await this.recordVerification(organizationId, target.id, false, note);
+    this.logger.error(`yedek doğrulaması düştü: ${note}`);
+    return { ok: false, note };
   }
 
   /**
@@ -1158,6 +1240,59 @@ export class BackupRunService {
         [organizationId, shareId, snapshot],
       ),
     );
+  }
+
+  /**
+   * Son turlar, yenisi başta.
+   *
+   * ── NEDEN BEŞ SATIR ──────────────────────────────────────────────────────────────────────
+   *
+   * Ekranın söylemesi gereken iki cümle var: "son tur ne yaptı" ve "bu bir kerelik mi, yoksa
+   * her turda mı oluyor". Birincisi için bir satır yeter, ikincisi için birkaç satır gerekiyor
+   * — altı saatlik ritimde beş satır son bir günü kapsıyor.
+   *
+   * ── KİRACI BAĞLAMI, VE YANINDA AÇIK BİR FİLTRE ───────────────────────────────────────────
+   *
+   * `backup_runs` RLS'li (0044); bağlamsız bir okuma sıfır satır döndürür ve bunu HATA olarak da
+   * söylemez — yani ekran sessizce "hiç tur olmamış" derdi. `WHERE organization_id` o
+   * daraltmanın YERİNE değil YANINDA: ikisinden birini kaldırmak, ötekini tek başına doğru
+   * olduğu için kaldırılabilir gösterir.
+   */
+  async recent(organizationId: string, limit = 5): Promise<BackupRunSummary[]> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{
+        trigger: BackupRunSummary['trigger'];
+        state: BackupRunSummary['state'];
+        copied_files: number;
+        copied_bytes: string | number;
+        moved_files: number;
+        purged_files: number;
+        error: string | null;
+        started_at: Date;
+        finished_at: Date | null;
+      }>(
+        `SELECT trigger, state, copied_files, copied_bytes, moved_files, purged_files,
+                error, started_at, finished_at
+           FROM public.backup_runs
+          WHERE organization_id = $1
+          ORDER BY started_at DESC
+          LIMIT $2`,
+        [organizationId, limit],
+      ),
+    );
+    return rows.map((row) => ({
+      trigger: row.trigger,
+      state: row.state,
+      copiedFiles: row.copied_files,
+      // `bigint` sürücüden metin olarak geliyor: sayıya çevirmeyen bir alan ekranda tırnak
+      // içinde bir bayt sayısı gösterir.
+      copiedBytes: Number(row.copied_bytes),
+      movedFiles: row.moved_files,
+      purgedFiles: row.purged_files,
+      error: row.error,
+      startedAt: row.started_at.toISOString(),
+      finishedAt: row.finished_at?.toISOString() ?? null,
+    }));
   }
 
   private async record(

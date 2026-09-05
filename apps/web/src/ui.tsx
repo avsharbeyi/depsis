@@ -489,6 +489,27 @@ interface PickCrumb {
 const PICK_LIMIT = 200;
 
 /**
+ * Klasör seçicisinin listeleme sorgusu.
+ *
+ * `shareId` HER İKİ DALDA DA gidiyor. Kök dalında paylaşımı seçen tek şey o — verilmezse sunucu
+ * kiracının VARSAYILAN paylaşımını seçiyor, ve seçici bunu bir zamanlar hiç sormuyordu: "Arşiv"
+ * içindeki bir dosyayı taşımak isteyen kullanıcıya varsayılan paylaşımın klasörleri gösteriliyor,
+ * seçtiği hedef başka bir paylaşımda olduğu için taşıma reddediliyordu. Alt klasör dalında ise uç,
+ * satırın paylaşımıyla istenen paylaşımı karşılaştırıyor; seçici doğru ağaçta gezdiği sürece ikisi
+ * hep aynı, ve göndermek listenin hangi paylaşımdan okunduğunu belirsiz bırakmıyor.
+ */
+export function pickQuery(
+  parentId: string | undefined,
+  shareId: string | undefined,
+): { parentId?: string; shareId?: string; limit: number } {
+  return {
+    ...(parentId === undefined ? {} : { parentId }),
+    ...(shareId === undefined ? {} : { shareId }),
+    limit: PICK_LIMIT,
+  };
+}
+
+/**
  * Choose a destination folder.
  *
  * The tree is walked one listing at a time instead of expanded in advance: `GET /files` answers a
@@ -509,12 +530,26 @@ const PICK_LIMIT = 200;
  */
 export function FolderPicker({
   title,
+  shareId,
+  shareName,
   excludeIds,
   confirmLabel,
   onPick,
   onCancel,
 }: {
   title: string;
+  /**
+   * Hangi paylaşımın ağacı geziliyor.
+   *
+   * VERİLMEZSE SUNUCU KİRACININ VARSAYILAN PAYLAŞIMINI SEÇİYOR, ve seçici bunu bir zamanlar hiç
+   * sormuyordu: "Arşiv"deki bir dosyayı taşımak isteyen kullanıcıya varsayılan paylaşımın
+   * klasörleri gösteriliyor, seçtiği klasör de başka bir paylaşımda olduğu için taşıma
+   * `CrossShareMoveError` ile reddediliyordu. Arşiv'in kendi alt klasörleri listede hiç
+   * görünmediğinden, Arşiv içinde taşımanın tek yolu sürükle-bırak kalmıştı.
+   */
+  shareId?: string;
+  /** Kök satırının adı. İki paylaşımlı bir kutuda "Paylaşım kökü" hangi kök olduğunu söylemiyor. */
+  shareName?: string;
   /** Bu girdiler ve alt ağaçları seçilemez — bir klasörü kendi içine taşımak döngü üretir. */
   excludeIds?: ReadonlySet<string>;
   confirmLabel: string;
@@ -543,9 +578,7 @@ export function FolderPicker({
     setFailed(false);
     void (async () => {
       const { data } = await api.GET('/files', {
-        params: {
-          query: parentId === undefined ? { limit: PICK_LIMIT } : { parentId, limit: PICK_LIMIT },
-        },
+        params: { query: pickQuery(parentId, shareId) },
       });
       if (cancelled) return;
       if (data === undefined) {
@@ -566,9 +599,14 @@ export function FolderPicker({
     return () => {
       cancelled = true;
     };
-  }, [parentId]);
+    // `shareId` bağımlılıkta: paylaşım değişince liste tazelenmezse pencere önceki paylaşımın
+    // klasörlerini göstermeye devam ederdi.
+  }, [parentId, shareId]);
 
-  const where = trail.length === 0 ? 'Paylaşım kökü' : trail.map((crumb) => crumb.name).join(' / ');
+  // Kök satırı seçili paylaşımın adıyla anılıyor: iki paylaşımlı bir kurulumda "Paylaşım kökü"
+  // hangi kökün kastedildiğini söylemiyor, ve taşımanın hedefi tam olarak o.
+  const rootName = shareName === undefined ? 'Paylaşım kökü' : `${shareName} (paylaşım kökü)`;
+  const where = trail.length === 0 ? rootName : trail.map((crumb) => crumb.name).join(' / ');
 
   return (
     <div className="ovl" onMouseDown={backdropCloser(onCancel)}>
@@ -606,10 +644,10 @@ export function FolderPicker({
             </span>
             <span className="path">
               {trail.length === 0 ? (
-                <b>Paylaşım kökü</b>
+                <b>{rootName}</b>
               ) : (
                 <button type="button" onClick={() => setTrail([])}>
-                  Paylaşım kökü
+                  {rootName}
                 </button>
               )}
               {trail.map((crumb, index) => (

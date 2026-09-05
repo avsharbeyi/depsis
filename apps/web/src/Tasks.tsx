@@ -43,23 +43,77 @@ const PRIORITY_TONE: Partial<Record<Priority, string>> = {
   urgent: 'pill bad',
 };
 
+/** Yerel gün başlangıcı. Gün farkını buradan ölçmek yaz saatini de (23 ya da 25 saatlik gün) taşır. */
+function midnight(when: Date): number {
+  return new Date(when.getFullYear(), when.getMonth(), when.getDate()).getTime();
+}
+
 /**
  * Son tarih, okunabilir ve GEÇMİŞSE söyleyerek.
  *
  * Gecikmiş bir işi normal bir tarih gibi göstermek, son tarihin var olma sebebini boşa çıkarır —
  * ve "3 gün geçti" bir tarihten daha hızlı okunuyor.
+ *
+ * GÜN FARKI TAKVİMDEN OKUNUYOR, mutlak zamanın yuvarlanmasından değil. Son tarih her zaman yerel
+ * 23:59:59'a sabitlendiği için aradaki fark hiçbir zaman tam gün değil: `Math.round` bugün biten
+ * bir işi sabah 09:00'da "yarın", dün biten bir işi de öğlene kadar "bugün" ve gecikmemiş
+ * gösteriyordu — kırmızı rozet ve "gecikmişler en üstte" sırası yarım gün geç geliyordu.
  */
-function dueLabel(dueAt: string | null | undefined): { text: string; late: boolean } | null {
+export function dueLabel(
+  dueAt: string | null | undefined,
+  now: Date = new Date(),
+): { text: string; late: boolean } | null {
   if (dueAt === null || dueAt === undefined) return null;
   const at = new Date(dueAt);
   if (Number.isNaN(at.getTime())) return null;
-  const days = Math.round((at.getTime() - Date.now()) / 86_400_000);
+  const days = Math.round((midnight(at) - midnight(now)) / 86_400_000);
+  // "Geçti" bir takvim sorusu değil bir saat sorusu: son tarih o günün sonuna kadar geçmemiştir.
+  const late = at.getTime() < now.getTime();
   if (days < 0) return { text: `${-days} gün geçti`, late: true };
-  if (days === 0) return { text: 'bugün', late: false };
+  if (days === 0) return { text: 'bugün', late };
   if (days === 1) return { text: 'yarın', late: false };
   if (days <= 7) return { text: `${days} gün`, late: false };
   return { text: at.toLocaleDateString('tr-TR'), late: false };
 }
+/**
+ * Bir tarihi içeren haftanın PAZARTESİsi, yerel gece yarısında.
+ *
+ * Pazartesi çünkü ürün Türkçe ve hafta burada pazartesi başlıyor; `getDay()` pazarı 0 saydığı için
+ * kaydırma elle yapılıyor. Gün başlangıcı `midnight` ile okunuyor, saat çıkarılarak değil: yaz
+ * saatine geçilen hafta 23 saatlik bir gün taşır ve "24 saat geri" o haftada yanlış güne düşer.
+ */
+export function weekStart(when: Date): Date {
+  const day = new Date(when.getFullYear(), when.getMonth(), when.getDate());
+  const shift = (day.getDay() + 6) % 7;
+  return new Date(day.getFullYear(), day.getMonth(), day.getDate() - shift);
+}
+
+/** `start`'tan başlayan yedi günün yerel gece yarıları. */
+export function weekDays(start: Date): Date[] {
+  return Array.from(
+    { length: 7 },
+    (_, index) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + index),
+  );
+}
+
+/**
+ * O GÜN son tarihi dolan, henüz kapanmamış işler.
+ *
+ * Karşılaştırma TAKVİM GÜNÜ üzerinden: son tarih formda her zaman yerel 23:59:59'a sabitleniyor,
+ * ve iki damgayı doğrudan karşılaştırmak aynı günü farklı saatlerde farklı günler sayardı.
+ * Kapanmış işler dışarıda — takvimin cevapladığı soru "bu hafta neyin süresi doluyor", ve biten
+ * işin süresi dolmuyor.
+ */
+export function tasksDueOn(tasks: Task[], day: Date): Task[] {
+  const at = midnight(day);
+  return tasks.filter((task) => {
+    if (closed(task)) return false;
+    if (task.dueAt === null || task.dueAt === undefined) return false;
+    const due = new Date(task.dueAt);
+    return !Number.isNaN(due.getTime()) && midnight(due) === at;
+  });
+}
+
 type Account = OpenApi.components['schemas']['DirectoryEntry'];
 type CurrentUser = OpenApi.components['schemas']['CurrentUser'];
 type Notify = (kind: 'ok' | 'error', text: string) => void;
@@ -218,6 +272,23 @@ function overdue(task: Task): boolean {
   return !closed(task) && dueLabel(task.dueAt)?.late === true;
 }
 
+/**
+ * Bir işin parça sayacı, PANONUN KENDİSİNDEN türetilerek.
+ *
+ * Sayılar sunucudan yalnız `GET /tasks` ile geliyordu ve pano her değişiklikte yeniden
+ * okunmuyor: tek parçası silinen iş "⑂ 0/1" göstermeye devam ediyor, sonra o işi silmek isteyen
+ * kişiye "1 parçası da silinecek" diye VAR OLMAYAN bir parça için onay soruluyordu. Bir parça ✓
+ * ile kapandığında da üstün sayacı değişmiyordu.
+ *
+ * Kaynak `tasks`, ekrandaki süzülmüş liste değil: etiket süzgeci parçaları gizleyebilir ve gizli
+ * bir parça yok olmuş bir parça değildir. `list()` bütün kiracı işlerini sınırsız döndürdüğü için
+ * parçalar her zaman bu dizinin içinde.
+ */
+export function subtaskCounts(tasks: Task[], parentId: string): { done: number; total: number } {
+  const parts = tasks.filter((task) => task.parentId === parentId);
+  return { done: parts.filter(closed).length, total: parts.length };
+}
+
 function order(items: Task[]): Task[] {
   return [...items].sort((a, b) => {
     if (closed(a) !== closed(b)) return closed(a) ? 1 : -1;
@@ -253,8 +324,10 @@ export function Tasks({
   // ve zaten okunan şey her seferinde tek bir işin konuşması.
   const [open, setOpen] = useState<string | null>(null);
   const [tags, setTags] = useState<Tag[]>([]);
-  /** Pano, arşiv ya da günlük. Arşiv: kapanmış işler panodan buraya taşınır — pano canlı kalır. */
-  const [view, setView] = useState<'board' | 'archive' | 'log'>('board');
+  /** Pano, takvim, arşiv ya da günlük. Arşiv: kapanmış işler panodan buraya taşınır. */
+  const [view, setView] = useState<'board' | 'calendar' | 'archive' | 'log'>('board');
+  /** Takvimde bakılan haftanın pazartesisi. Bugünün haftasıyla açılıyor. */
+  const [week, setWeek] = useState(() => weekStart(new Date()));
   const [log, setLog] = useState<LogEntry[] | null>(null);
   /** Seçili etiketler. Boşsa süzme yok — panonun varsayılanı her şeyi göstermek. */
   const [filter, setFilter] = useState<string[]>([]);
@@ -291,7 +364,8 @@ export function Tasks({
       description?: string | null;
     },
     failure: string,
-  ): Promise<void> {
+    /** Sunucu kabul etti mi — reddedilen bir düzenlemeyi ekrandan geri alabilmek için. */
+  ): Promise<boolean> {
     setBusy(true);
     const { data, error } = await api.PATCH('/tasks/{id}', {
       params: { path: { id: task.id } },
@@ -300,12 +374,13 @@ export function Tasks({
     setBusy(false);
     if (error !== undefined || data === undefined) {
       notify('error', problemMessage(error, failure));
-      return;
+      return false;
     }
     const saved = data;
     setTasks((current) =>
       current === null ? current : current.map((item) => (item.id === saved.id ? saved : item)),
     );
+    return true;
   }
 
   // Etiket sözlüğü, panoyla birlikte. Ayrı bir efekt çünkü ayrı bir uç — ve `reloadKey`'e bağlı,
@@ -382,19 +457,10 @@ export function Tasks({
       return;
     }
     const created = data;
-    setTasks((current) =>
-      current === null
-        ? [created]
-        : [
-            ...current.map((it) =>
-              // Üstün rozetini burada artırıyor: sayıyı sunucu `GET /tasks` ile veriyor ve o çağrı
-              // yapılmadan rozet olduğu yerde kalırdı. Kesin bir artış — yeni parça atanmamış ve
-              // açık doğuyor, yani toplam bir artıyor ve kapananlar değişmiyor.
-              it.id === parentId ? { ...it, subtaskTotal: (it.subtaskTotal ?? 0) + 1 } : it,
-            ),
-            created,
-          ],
-    );
+    // Üstün rozeti burada elle artırılmıyor: sayaç artık `subtaskCounts` ile listenin kendisinden
+    // türetiliyor, ve yeni parça bu listeye giriyor. Elle artırmak yalnız EKLEMEYİ sayıyordu —
+    // silme ve kapanma sayacı olduğu yerde bırakıyordu.
+    setTasks((current) => (current === null ? [created] : [...current, created]));
   }
 
   /**
@@ -424,18 +490,29 @@ export function Tasks({
     // KASKAT ÖNCE SÖYLENİYOR. Bir üst işi silmek parçalarını da siliyor, ve bunu sessizce yapmak
     // veri kaybının en sık biçimi: kullanıcı bir satır sildiğini sanıyor, dört satır gidiyor.
     // Onay yalnız parçası olan işlerde soruluyor — her silmede bir kutu, okunmayan bir kutu.
-    if (
-      task.subtaskTotal !== undefined &&
-      task.subtaskTotal > 0 &&
-      !window.confirm(`Bu işin ${task.subtaskTotal} parçası da silinecek. Devam edilsin mi?`)
-    ) {
+    // Sayı ekrandaki listeden okunuyor: `task.subtaskTotal` sunucunun son `GET /tasks`teki hâli
+    // ve tek parçası silinmiş bir iş için hâlâ 1 diyor — var olmayan bir parça için onay sormak,
+    // onay kutusunu değersizleştiriyor.
+    const parts = tasks === null ? 0 : subtaskCounts(tasks, task.id).total;
+    if (parts > 0 && !window.confirm(`Bu işin ${parts} parçası da silinecek. Devam edilsin mi?`)) {
       return;
     }
     setBusy(true);
-    const { error } = await api.DELETE('/tasks/{id}', { params: { path: { id: task.id } } });
+    const { error, response } = await api.DELETE('/tasks/{id}', {
+      params: { path: { id: task.id } },
+    });
     setBusy(false);
     if (error !== undefined) {
-      notify('error', problemMessage(error, 'İş silinemedi.'));
+      // 403 TÜRKÇE SÖYLENİYOR. Sunucu silmeyi işi açana, atanana ve yöneticiye açıyor; reddi
+      // olduğu gibi geçirmek Türkçe bir ürüne "only the person who created a task, its assignee,
+      // or an administrator may delete it" cümlesini basmak demekti. Düğmenin kime çizileceğini
+      // istemci bilemiyor: sözleşmedeki `Task` şemasında işi kimin açtığı yok.
+      notify(
+        'error',
+        response.status === 403
+          ? 'Bir işi yalnız onu açan kişi, işin atandığı kişi ya da bir yönetici silebilir.'
+          : problemMessage(error, 'İş silinemedi.'),
+      );
       return;
     }
     // Parçaları da listeden düşüyor: sunucu onları sildi, ve ekranda bırakmak bir sonraki
@@ -506,6 +583,28 @@ export function Tasks({
       ? [{ id: me.id, name: me.username, canAdd: true }]
       : users.map((user) => ({ id: user.id, name: user.username, canAdd: true }));
 
+  // ŞERİT ARŞİVDE DE ÇİZİLİYOR. Aynı `filter` iki listeyi birden daraltıyor ama şerit yalnız
+  // panoda duruyordu: "acil"i seçip Arşiv'e geçen kullanıcı, kırk bitmiş işin neden görünmediğini
+  // hiçbir yerden okuyamıyor ve süzgeci kaldıramıyordu — sekme sayacı, "Arşiv boş" cümlesi ve
+  // Excel düğmesinin kapalılığı da o süzülmüş listeden geliyor. Süzgeci arşivde YOK SAYMAK ise
+  // Excel çıktısını sessizce süzgeçsizleştirirdi.
+  const tagBar = (
+    <TagBar
+      tags={tags}
+      selected={filter}
+      isAdmin={me.role === 'admin'}
+      onToggle={(id) =>
+        setFilter((current) =>
+          current.includes(id) ? current.filter((it) => it !== id) : [...current, id],
+        )
+      }
+      // Sözlük değişti: hem şeridi hem PANOYU yeniden okuyor. Bir etiketin adı değiştiğinde
+      // satırlardaki çipler de değişiyor, ve yalnız şeridi tazelemek onları eski adla bırakırdı.
+      onChanged={() => setReloadKey((key) => key + 1)}
+      onError={(text) => notify('error', text)}
+    />
+  );
+
   return (
     <>
       <div className="jviews" role="tablist" aria-label="Pano görünümü">
@@ -517,6 +616,18 @@ export function Tasks({
           onClick={() => setView('board')}
         >
           Pano
+        </button>
+        {/* §7'nin istediği takvim görünümü. Son tarihler yalnız tek tek kartların üstünde
+            yazıyordu: "bu hafta hangi işlerin süresi doluyor" sorusunu hiçbir ekran güne göre
+            dizmiyordu. Yeni bir uç gerekmiyor — pano bütün işleri zaten tek çağrıda getiriyor. */}
+        <button
+          type="button"
+          className={view === 'calendar' ? 'mk on' : 'mk'}
+          role="tab"
+          aria-selected={view === 'calendar'}
+          onClick={() => setView('calendar')}
+        >
+          Takvim
         </button>
         <button
           type="button"
@@ -561,8 +672,107 @@ export function Tasks({
         </>
       )}
 
+      {view === 'calendar' && (
+        <>
+          {tagBar}
+          <div className="netrow">
+            <button
+              type="button"
+              className="b"
+              aria-label="Önceki hafta"
+              onClick={() =>
+                setWeek((at) => new Date(at.getFullYear(), at.getMonth(), at.getDate() - 7))
+              }
+            >
+              ‹
+            </button>
+            <span className="lbl">
+              {weekDays(week)[0]?.toLocaleDateString('tr-TR')} –{' '}
+              {weekDays(week)[6]?.toLocaleDateString('tr-TR')}
+            </span>
+            <button
+              type="button"
+              className="b"
+              onClick={() => setWeek(weekStart(new Date()))}
+              disabled={week.getTime() === weekStart(new Date()).getTime()}
+            >
+              Bu hafta
+            </button>
+            <button
+              type="button"
+              className="b"
+              aria-label="Sonraki hafta"
+              onClick={() =>
+                setWeek((at) => new Date(at.getFullYear(), at.getMonth(), at.getDate() + 7))
+              }
+            >
+              ›
+            </button>
+          </div>
+
+          {/* GECİKMİŞLER HAFTADAN BAĞIMSIZ. Son tarihi geçmiş bir iş, hangi haftaya bakılıyor
+              olursa olsun bugünün sorunudur; onu kendi haftasının hücresinde bırakmak, takvimi
+              açan kişinin görmesi gereken tek şeyi geçmişe gömerdi. */}
+          {shown.filter(overdue).length > 0 && (
+            <div className="notice error" role="status">
+              <span className="ic" aria-hidden>
+                !
+              </span>
+              <span className="tx">
+                <b>Gecikmiş {shown.filter(overdue).length} iş</b>
+                {shown
+                  .filter(overdue)
+                  .map((task) => task.body)
+                  .join(' · ')}
+              </span>
+            </div>
+          )}
+
+          <div className="cal">
+            {weekDays(week).map((day) => {
+              const items = tasksDueOn(shown, day);
+              const today = midnight(day) === midnight(new Date());
+              return (
+                <div className={today ? 'calday now' : 'calday'} key={day.getTime()}>
+                  <div className="calhd">
+                    <b>{day.toLocaleDateString('tr-TR', { weekday: 'short' })}</b>
+                    <span className="s">{day.getDate()}</span>
+                  </div>
+                  {items.length === 0 ? (
+                    <span className="calnone">—</span>
+                  ) : (
+                    items.map((task) => (
+                      <div className="calit" key={task.id} title={task.body}>
+                        <span className="tx">{task.body}</span>
+                        <span className="s">{task.assigneeUsername ?? 'Atanmamış'}</span>
+                        {PRIORITY_TONE[task.priority] !== undefined && (
+                          <span className={PRIORITY_TONE[task.priority]}>
+                            {PRIORITY_LABEL[task.priority]}
+                          </span>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="note">
+            Yalnız son tarihi olan ve henüz kapanmamış işler. Bir işi buradan değiştirmek için
+            <b> Pano</b>ya geçin.
+          </div>
+        </>
+      )}
+
       {view === 'archive' && (
         <>
+          {tagBar}
+          {filter.length > 0 && (
+            <div className="note">
+              Bu liste {filter.length} etiketle süzülü — süzgeci yukarıdaki şeritten kaldırın.
+            </div>
+          )}
           <div className="jviews" style={{ justifyContent: 'flex-end' }}>
             <button
               type="button"
@@ -638,20 +848,7 @@ export function Tasks({
             Bitenler Arşiv sekmesine taşınır.
           </div>
 
-          <TagBar
-            tags={tags}
-            selected={filter}
-            isAdmin={me.role === 'admin'}
-            onToggle={(id) =>
-              setFilter((current) =>
-                current.includes(id) ? current.filter((it) => it !== id) : [...current, id],
-              )
-            }
-            // Sözlük değişti: hem şeridi hem PANOYU yeniden okuyor. Bir etiketin adı değiştiğinde
-            // satırlardaki çipler de değişiyor, ve yalnız şeridi tazelemek onları eski adla bırakırdı.
-            onChanged={() => setReloadKey((key) => key + 1)}
-            onError={(text) => notify('error', text)}
-          />
+          {tagBar}
 
           <div className="jobs">
             {groups.map((group) => (
@@ -669,6 +866,7 @@ export function Tasks({
                 {group.items.map((task) => {
                   const done = task.doneAt !== null;
                   const due = dueLabel(task.dueAt);
+                  const parts = subtaskCounts(tasks, task.id);
                   const shut = closed(task);
                   const talking = open === task.id;
                   return (
@@ -711,14 +909,29 @@ export function Tasks({
                             event.currentTarget.blur();
                           }}
                           onBlur={(event) => {
-                            const next = (event.currentTarget.textContent ?? '').trim();
+                            // Düğüm yerel bir değişkende: `currentTarget` olay işlendikten sonra
+                            // boşalıyor ve aşağıdaki dal yanıtı bekliyor.
+                            const node = event.currentTarget;
+                            const next = (node.textContent ?? '').trim();
                             if (next === task.body) return;
                             if (next === '') {
                               // Emptying the text is not how a task is deleted; the ✕ is.
-                              event.currentTarget.textContent = task.body;
+                              node.textContent = task.body;
                               return;
                             }
-                            void update(task, { body: next }, 'İş metni kaydedilemedi.');
+                            void (async () => {
+                              const saved = await update(
+                                task,
+                                { body: next },
+                                'İş metni kaydedilemedi.',
+                              );
+                              // REDDEDİLEN METNİ EKRANDAN GERİ AL. Yukarıdaki `key` yalnız sunucu
+                              // yeni bir `updatedAt` verdiğinde değişiyor; hata yolunda `tasks`
+                              // değişmediği için React bu contenteditable düğüme hiç dokunmuyor
+                              // ve 422 alan 2001 karakterlik metin ekranda kaydedilmiş gibi
+                              // duruyordu — toast söndükten sonra bunu söyleyen hiçbir şey yok.
+                              if (!saved) node.textContent = task.body;
+                            })();
                           }}
                         >
                           {task.body}
@@ -844,9 +1057,9 @@ export function Tasks({
 
                         {/* Parça ve madde ilerlemesi. İkisi de yalnız VARSA çiziliyor: her satırda
                       "0/0" duran bir rozet, göz için hiçbir şey söylemeyen bir şey. */}
-                        {task.subtaskTotal !== undefined && task.subtaskTotal > 0 && (
+                        {parts.total > 0 && (
                           <span className="pill dim" title="Parçalar">
-                            ⑂ {task.subtaskDone ?? 0}/{task.subtaskTotal}
+                            ⑂ {parts.done}/{parts.total}
                           </span>
                         )}
                         {task.checklistTotal !== undefined && task.checklistTotal > 0 && (

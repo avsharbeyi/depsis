@@ -41,9 +41,10 @@ interface Props {
 /**
  * Remote access — GET /remote, POST /remote/networks, DELETE /remote/networks/{networkId}.
  *
- * `GET /remote` always answers 200, including when zerotier-one is not installed at all, and this
- * screen depends on that: DEPSIS does not package ZeroTier, so "not installed" is a state of the
- * box rather than a fault, and the card has to be able to say so in a readable answer.
+ * `GET /remote` always answers 200, including when zerotier-one is not answering at all, and this
+ * screen depends on that: the appliance SHIPS with ZeroTier (the ISO's first boot installs it), so
+ * a silent daemon is a fault to be explained here rather than a missing component to be installed
+ * by hand — the card has to be able to say so in a readable answer.
  */
 export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
   const [status, setStatus] = useState<RemoteStatus | null>(null);
@@ -153,8 +154,9 @@ export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
         <Empty glyph="🌐" text="Uzak erişim şu an kullanılamıyor." />
         <div className="note">
           ZeroTier bu cihazla birlikte kuruluyor; şu an yanıt vermiyor. Çoğu zaman servis
-          başlatılamamıştır ve cihazı yeniden başlatmak yeterlidir. Sürerse kurulum sırasında
-          indirilememiş olabilir — <b>Sistem</b> ekranındaki günlükler sebebini yazıyor.
+          başlatılamamıştır: <b>Sistem</b> ekranından cihazı yeniden başlatmak yeterlidir. Yeniden
+          başlattıktan sonra da bu ekran aynı şeyi diyorsa ZeroTier kurulum sırasında
+          indirilememiştir; satıcı desteğine başvurun.
         </div>
       </>
     );

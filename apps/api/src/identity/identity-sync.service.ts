@@ -111,6 +111,26 @@ export class IdentitySyncService {
    * güvende. Kuyruğa yazamamak, kapatmayı geri almak için bir sebep değil.
    */
   async enqueueRevokeSmb(organizationId: string, username: string): Promise<void> {
+    // ── ADSIZ BİR DÜŞÜRME İŞİ KUYRUĞA HİÇ GİRMEZ ────────────────────────────────────────────
+    //
+    // Sessiz başarının kaynağı buydu. Çağıran ad yerine `undefined` verdiğinde — ki
+    // `UsersService.update`'in `RETURNING`'inde `username` eksik olduğu için tam olarak bu
+    // oluyordu — payload `{}` olarak yazılıyor, worker "düşürülecek ad yok" deyip işi BAŞARILI
+    // bitiriyor, ve kuyruk hiçbir şey yapmadan yeşil kalıyordu. Kapatılan hesabın Samba parolası
+    // çalışmaya devam ederken kimse bir arıza görmüyordu.
+    //
+    // Worker'da `throw` etmek yanlış çözüm olurdu: kalıcı-başarısızlık yolu yok, yani asla
+    // düzelmeyecek bir satır bütçesi dolana kadar yeniden denenirdi. Doğru yer kaynak — satır
+    // hiç yazılmıyor, ve olan biten günlüğe HATA olarak düşüyor, çünkü buraya düşmek çağıranda
+    // bir kusur demek.
+    if (typeof username !== 'string' || username === '') {
+      this.logger.error(
+        `an SMB revocation was requested with no username for organization ${organizationId}; ` +
+          'nothing was queued. The account this was meant for still has a Samba credential.',
+      );
+      return;
+    }
+
     try {
       await this.jobs.enqueue(
         organizationId,

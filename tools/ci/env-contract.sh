@@ -112,9 +112,42 @@ for manifest in "$REPO"/services/*/Cargo.toml; do
   done
 done
 
+# ── YETKİLİ KONSOLUN İKİ YARISI AYNI YERDEN GELMELİ ──────────────────────────
+#
+# `DEPSIS_CONSOLE_PRIVILEGED=1` tek başına bir şey yapmıyor: konsol, bayrak 1 iken kendi uid'i 0
+# değilse başlamayı REDDEDİYOR (`session.rs`). Yani bayrağın ikinci yarısı `User=root`.
+#
+# Uzun süre o ikinci yarı, operatörün `depsis-console.service`i ELLE düzenlemesiyle veriliyordu ve
+# belgelenen yol buydu. Ama kurulum `deploy/systemd/*` birimlerini her güncellemede KOŞULSUZ üzerine
+# yazıyor: elle konan `User=root` sessizce geri alınıyor, `console.env`deki 1 yerinde kalıyor, ve
+# konsol bir daha hiç açılmıyor — arayüzde görünen tek şey "Konsol servisi çalışmıyor".
+#
+# Karar artık console.env'de, `User=root` satırını kurulum bir drop-in olarak yazıyor. Bu kontrol
+# o düzenin iki tarafını da yerinde tutuyor: birim dosyası root ÇALIŞTIRMAMALI (yoksa bayrak 0 iken
+# root bir kabuk açılırdı) ve kurulum drop-in'i yazmayı bırakmamalı (yoksa bayrak 1 iken konsol
+# hiç açılmaz).
+printf '\n→ yetkili konsolun iki yarısı\n'
+
+CONSOLE_UNIT="$UNITS/depsis-console.service"
+if [ ! -f "$CONSOLE_UNIT" ]; then
+  bad "konsol birimi yok ($CONSOLE_UNIT)"
+elif grep -qE '^User=root[[:space:]]*$' "$CONSOLE_UNIT"; then
+  bad 'depsis-console.service `User=root` taşıyor; ayrıcalık kararı console.env ve drop-in ile verilir'
+else
+  good 'depsis-console.service ayrıcalıksız hesapla koşuyor'
+fi
+
+if grep -q 'depsis-console.service.d' "$INSTALL"; then
+  good 'kurulum ayrıcalık drop-in dosyasını yönetiyor (depsis-console.service.d)'
+else
+  bad 'kurulum depsis-console.service.d drop-in dosyasını yazmıyor: DEPSIS_CONSOLE_PRIVILEGED=1 hiç yürürlüğe girmez'
+  note 'birim her güncellemede üzerine yazıldığı için elle konan User=root kalıcı olamaz'
+fi
+
 if [ "$fail" -ne 0 ]; then
-  printf '\nEnv sözleşmesi tutmuyor: bir servis, kurulumun ona vermediği bir değişkeni şart koşuyor.\n' >&2
-  printf 'Böyle bir servis kurulduğu gün başlamaz ve hatası ancak kullanıcı o ekrana girince görülür.\n' >&2
+  printf '\nBirim ile kurulum arasındaki sözleşme tutmuyor: bir servis, kurulumun ona vermediği\n' >&2
+  printf 'bir ayarı şart koşuyor. Böyle bir servis kurulduğu gün başlamaz ve hatası ancak\n' >&2
+  printf 'kullanıcı o ekrana girince, sebebini söylemeyen bir cümleyle görülür.\n' >&2
   exit 1
 fi
 printf '\nEnv sözleşmesi tutuyor.\n'

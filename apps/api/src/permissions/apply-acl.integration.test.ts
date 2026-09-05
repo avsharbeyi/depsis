@@ -322,6 +322,36 @@ describeDb('applying folder grants to POSIX, against a real PostgreSQL', () => {
     ).resolves.toBeDefined();
   });
 
+  it('names the missing program when the box has no setfacl', async () => {
+    // AJAN BU CÜMLEYİ ÖZELLİKLE ÜRETİYOR ve `setfacl`ı adıyla anıyor; sorun onun buraya kadar
+    // gelip burada atılmasıydı. `acl_unavailable` ne `refused` ne `failed` sayıldığı için
+    // `expectStatus` genel bir "expected 'acl_applied'" hatasına çeviriyor ve gerekçeyi
+    // düşürüyordu — iş kartında ne olduğu, dolayısıyla ne yapılacağı okunamıyordu.
+    const noAcl = new AclApplyService(
+      db,
+      aclAgent(
+        (request) =>
+          request['op'] === 'secure_share_root'
+            ? Promise.resolve({ status: 'share_root_secured', mode: 0o750 })
+            : Promise.resolve({
+                status: 'acl_unavailable',
+                reason: 'setfacl is not installed on this appliance (apt install acl)',
+              }),
+        () => [],
+      ),
+      new PosixIdentityService(db),
+    );
+
+    const error = await noAcl
+      .apply(org, { shareId: share, entryId: null }, 'test')
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    // Eksik programın adı hatanın metninde: iş kartında görünen tek şey bu.
+    expect((error as Error).message).toContain('setfacl');
+  });
+
   it('applies a share larger than one chunk across several jobs, covering every folder once', async () => {
     // THE OLD BEHAVIOUR WAS TOTAL FAILURE, not a partial one. `folderRows` threw when the share
     // held more folders than the bound, and it threw BEFORE the write loop — so a large share got

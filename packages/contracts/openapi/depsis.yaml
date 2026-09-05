@@ -707,7 +707,7 @@ paths:
             yerine bir süzgeç olması da bu yüzden.
           schema: { type: boolean, default: false }
         - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/FilesLimit'
         - name: sort
           in: query
           description: |
@@ -3459,6 +3459,32 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
 
+  /backups/target/recovery/claim:
+    post:
+      tags: [system]
+      summary: Kurtarma diskini bu cihazin yedek diskine cevir
+      description: |
+        KURTARMANIN SON ADIMI. `scan` -> `adopt` -> `unlock` ile dosyalar geri alindiktan sonra
+        geriye tek bir soru kaliyor: bu disk bundan sonra ne olacak? Bu uc onu BU CIHAZIN yedek
+        diski yapiyor � kurtarma satiri bir hedef satirina donusuyor, tur/budama/dogrulama
+        zincirleri tohumlaniyor ve bir sonraki tur ondan sonra kendiliginde kosuyor.
+
+        Onsuz sahibi, kurtardigi dosyalari yeniden yedeklemek icin diski silip bastan kurmak
+        zorunda kaliyordu � yani elindeki tek kopyayi silerek. Terminalsiz bir yol da yoktu.
+
+        CIHAZIN ZATEN BIR YEDEK DISKI VARSA reddediliyor: iki hedef, iki ayri yerde biriken iki
+        yarim yedek demek.
+      responses:
+        '200':
+          description: Artik bu cihazin yedek diski
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupTarget' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+
   /backups/target/run:
     post:
       tags: [system]
@@ -4256,6 +4282,11 @@ components:
       name: limit
       in: query
       schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    FilesLimit:
+      name: limit
+      in: query
+      description: Dosya listelemesinin sayfa boyu. Sunucu burada 100/500 uyguluyor, 50/200 değil.
+      schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -4292,6 +4323,34 @@ components:
         code:
           type: string
           description: Kapalı küme. Kaynak tanım packages/contracts/src/errors.ts.
+          # Liste `ERROR_CODES` ile aynı sırada ve aynı içerikte; `errors.test.ts` ikisinin
+          # eşitliğini derleme zamanında kontrol ediyor. Enum olmadan üretilen istemci tipi
+          # `code: string` oluyordu, yani bir kodun adı değişince istemci sessizce bozuluyordu.
+          enum:
+            - unauthenticated
+            - invalid-credentials
+            - mfa-required
+            - mfa-invalid
+            - session-expired
+            - forbidden
+            - not-found
+            - validation-failed
+            - unsupported-media-type
+            - bad-request
+            - range-not-satisfiable
+            - conflict
+            - name-taken
+            - precondition-failed
+            - idempotency-key-reused
+            - quota-exceeded
+            - insufficient-storage
+            - upload-offset-mismatch
+            - checksum-mismatch
+            - rate-limited
+            - dependency-unavailable
+            - gone
+            - operation-in-progress
+            - internal-error
         correlationId:
           type: string
           description: Her yanıtta ve aynı isteğin her log satırında bulunur (§14).

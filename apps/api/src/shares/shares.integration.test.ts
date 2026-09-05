@@ -13,6 +13,7 @@ import type { OrganizationsService } from '../organizations/organizations.servic
 import {
   ShareListNotDeviceWideError,
   ShareNameTakenError,
+  SharePendingAdoptionError,
   ShareStorageUnconfiguredError,
   ShareWithoutGrantsError,
   SharesService,
@@ -359,6 +360,45 @@ describeDb('shares, against a real PostgreSQL', () => {
       q.query<{ dataset: string }>(`SELECT dataset FROM shares WHERE name = 'ev'`),
     );
     expect(rows[0]?.dataset).toBe(`${PARENT_DATASET}/ev`);
+  });
+
+  it('sahiplenme reddini Samba reddi diye anlatmaz', async () => {
+    // SAHADA ÖDENEN BEDEL BUYDU. `publish` işe `adoptPendingShares` ile başlıyor; oradaki ret
+    // dışarı `AgentRefusedError` olarak sızıp denetleyicide `describeRefusal`'a düşüyor ve ekrana
+    // "Samba yeni yapılandırmayı kabul etmedi, eskisi geri kondu" yazılıyordu — `publish_samba_config`
+    // daha hiç çağrılmamışken. Gerçek sebep (yanlış havuz adı, var olmayan ebeveyn) hiç görünmüyordu.
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`INSERT INTO shares (organization_id, name, dataset) VALUES ($1, 'ev', 'ev')`, [
+        orgA,
+      ]),
+    );
+
+    const { shares, calls } = service((request) =>
+      Promise.resolve<AgentResponse>(
+        request.op === 'create_dataset'
+          ? { status: 'refused', reason: 'zfs get mountpoint ev: dataset does not exist' }
+          : {
+              status: 'published',
+              shares: 'shares' in request ? request.shares.length : 0,
+              verified: true,
+            },
+      ),
+    );
+
+    const error = await shares
+      .publish(orgA, 'ci-adopt-refused')
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(SharePendingAdoptionError);
+    const adoption = error as SharePendingAdoptionError;
+    expect(adoption.shareName).toBe('ev');
+    expect(adoption.dataset).toBe(`${PARENT_DATASET}/ev`);
+    // Ajanın kendi cümlesi AYNEN taşınıyor: ekranda gösterilebilecek kadar somut olan tek şey o.
+    expect(adoption.agentReason).toBe('zfs get mountpoint ev: dataset does not exist');
+
+    // Ve Samba'ya hiç gidilmedi — mesajın "yayın hiç başlamadı" demesini doğru kılan şey bu.
+    expect(calls.filter((c) => c.request.op === 'publish_samba_config')).toHaveLength(0);
   });
 
   it('zaten sağlam olan satırlara dokunmaz', async () => {
@@ -992,9 +1032,42 @@ describeDb('opening a share', () => {
       ]),
     );
     // The share row and the grant are one transaction, so the failing grant took the share with
-    // it. The dataset survives on the pool, which is the trade this ordering accepts and the
-    // reason the name check happens first.
+    // it.
     expect(rows[0]?.n).toBe('0');
+  });
+
+  it('leaves no orphan dataset behind when a grant names an outsider', async () => {
+    // VE BU, ADI KURTARAN KISIM. Doğrulama eskiden `create_dataset`'ten SONRA çalışıyordu:
+    // istek 422 ile dönüyor, ama veri kümesi havuzda kalıyordu. Üründe veri kümesi silmenin yolu
+    // olmadığı için doğru hibeyle yapılan ikinci deneme 409 "bu adda bir veri kümesi zaten var"
+    // alıyor ve o ad arayüzden bir daha hiç açılamıyordu.
+    const { shares, calls } = service();
+
+    await expect(
+      shares.create(
+        org,
+        admin,
+        {
+          name: 'kurtarilan',
+          readOnly: false,
+          quotaBytes: null,
+          grants: [{ userId: outsider, teamId: null, permissions: ['list'] }],
+        },
+        'corr-mk-7b',
+      ),
+    ).rejects.toBeInstanceOf(UnknownGrantPrincipalError);
+
+    // Ajana hiç dokunulmadı, yani havuzda hiçbir iz yok.
+    expect(calls).toHaveLength(0);
+
+    // Ve ad serbest: aynı ad doğru bir hibeyle hemen açılabiliyor.
+    const share = await shares.create(
+      org,
+      admin,
+      { name: 'kurtarilan', readOnly: false, quotaBytes: null, grants: null },
+      'corr-mk-7c',
+    );
+    expect(share.share.name).toBe('kurtarilan');
   });
 
   it('refuses a reserved smb.conf section before it can poison every other share', async () => {

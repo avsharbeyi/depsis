@@ -239,6 +239,22 @@ struct CopySlice<'a> {
     owner_gid: u32,
 }
 
+/// Bir SMART okumasının taze sayıldığı süre.
+///
+/// Beş dakika, ve sayı ölçüye değil ÖLÇEĞE dayanıyor: pano 10 saniyede bir soruyor, disk ise
+/// sağlığını saatler ölçeğinde değiştiriyor. Aradaki fark, disk başına saatte 360 yerine 12
+/// `smartctl` süreci demek. Sıcaklık da bu çözünürlükte veriliyor, ve o bilinçli bir takas: bir
+/// NAS panosunda saniyelik sıcaklık eğrisi, hiç durmayan bir disk pahasına alınırdı.
+pub const SMART_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Bir diskin son SMART okuması, alındığı anla birlikte.
+struct CachedSmart {
+    at: std::time::Instant,
+    healthy: bool,
+    temperature_celsius: Option<i32>,
+    raw: String,
+}
+
 pub struct Agent<'a, R: CommandRunner, S: Sink, P: SafePath> {
     pub policy: Policy,
     pub runner: &'a R,
@@ -298,6 +314,24 @@ pub struct Agent<'a, R: CommandRunner, S: Sink, P: SafePath> {
     /// tries. CI's `cargo check --target x86_64-pc-windows-msvc` does, and CI had never completed
     /// a run until the day this was found.
     pub private_writer: crate::identity::PrivateWriter,
+    /// Disk başına SON SMART okuması.
+    ///
+    /// ── NEDEN AJANIN İÇİNDE BİR ÖNBELLEK ─────────────────────────────────────────────────
+    ///
+    /// `ReadSmartSummary`nin tek çağıranı telemetri, ve telemetri açık her panonun 10 saniyede
+    /// bir tetiklediği bir tur. Her turda her disk için `smartctl -H -A` koşmak iki bedeli
+    /// birden ödetiyordu: öznitelik okuması BEKLEMEDEKİ bir diski döndürüyor — yani diskler hiç
+    /// uyumuyor (güç, ısı, ömür) — ve her okuma ajanın SERİ kontrol soketini bir süreç boyunca
+    /// tutuyor, arkasındaki paylaşım/havuz işlemleri o kuyrukta bekliyor.
+    ///
+    /// Cevap [`SMART_CACHE_TTL`] boyunca burada duruyor; pano anketi diski değil bu haritayı
+    /// okuyor. Önbellek AJANDA, çünkü diski koruyan şey çağıranın kaç tane olduğundan bağımsız
+    /// olmalı: yarın ikinci bir çağıran çıkarsa disk yine dakikada bir kez okunur.
+    ///
+    /// `Mutex` bir yarış için değil — kontrol döngüsü seri (ADR-0006) — `handle`ın `&self`
+    /// alması için. Kilit alınamazsa önbellek yokmuş gibi davranılıyor: cevap yine doğru,
+    /// yalnız pahalı.
+    smart: Mutex<std::collections::HashMap<String, CachedSmart>>,
 }
 
 impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
@@ -332,6 +366,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             tokens,
             transfers,
             private_writer,
+            smart: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -550,6 +585,40 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         Ok(Response::Discarded { existed })
     }
 
+    /// Yayımlanacak dosyaya, gireceği klasörün default ACL'ini işler.
+    ///
+    /// ── NEDEN ELLE ───────────────────────────────────────────────────────────────────────
+    ///
+    /// Çekirdek bu kalıtımı dosya YARATILIRKEN kendisi yapar; ara alanda doğan dosya hedefin
+    /// default ACL'ini hiç görmüyor (gerekçenin tamamı `acl::Applier::inherit_onto_file`de).
+    /// Üç yayımlama yolu — yükleme, kopyalama ve yedekten geri getirme — aynı ara alanı ve aynı
+    /// `publish`i kullandığı için üçü de aynı satırı çağırıyor; yalnız birine koymak, kusurun
+    /// öteki ikisinde sessizce yaşamaya devam etmesi olurdu.
+    ///
+    /// ── NEDEN HATA YAYIMLAMAYI DURDURMUYOR ───────────────────────────────────────────────
+    ///
+    /// Buradaki başarısızlık dosyanın kendisi hakkında hiçbir şey söylemiyor: baytlar diskte,
+    /// sağlam ve sahibine ait. Yayımlamayı iptal etmek, kullanıcının yüklediği veriyi bir izin
+    /// ayrıntısı yüzünden çöpe atmak olurdu. Yazılamayan ACL'in bedeli kusurun eski hâli — dosya
+    /// 0600 kalır, yalnız yükleyeni okur — ve o hâli açıklayan bir satır günlüğe düşüyor.
+    fn inherit_destination_acl(&self, paths: &P, directory: &[&str], file: &std::fs::File) {
+        // Paylaşım ağacının yeri işletmen yapılandırması, `apply_folder_acl` ile aynı gerekçe:
+        // ayarsız bir kutuda kalıtılacak bir ACL de yok.
+        let Ok(root) = acl::shares_root_from_env() else {
+            return;
+        };
+        match acl::Applier::new(self.runner, root).inherit_onto_file(paths, directory, file) {
+            Ok(_) => {}
+            // `acl` paketi kutuda yok. `ApplyFolderAcl` de aynı kutuda çalışmıyor, yani kalıtılacak
+            // bir grup girdisi zaten hiç yazılmamış — sessizce geçmek doğru cevap, ADR-0004.
+            Err(e) if e.is_unavailable() => {}
+            Err(e) => eprintln!(
+                "depsis-agent: could not inherit the folder ACL onto a file published into {}: {e}",
+                directory.join("/")
+            ),
+        }
+    }
+
     /// Move a finished staging file into place, durably.
     ///
     /// ADR-0008 steps 4 and 5. The directory fsync is the one people skip, and skipping it means
@@ -619,6 +688,13 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         // cannot read, with nothing left to fix it, because the staging entry is gone.
         paths.set_owner(&file, owner_uid.get(), owner_gid.get())?;
 
+        // KALITIM, FSYNC'TEN ÖNCE. ACL bir xattr, yani inode metadata'sı, ve onu kalıcı kılan şey
+        // hemen aşağıdaki `fsync`. Dosya bu sırada hâlâ root:root 0750 olan ara alanda duruyor,
+        // yani genişleyen erişim yayımlanmadan önce kimseye görünmüyor.
+        let mut dest_dir: Vec<&str> = vec![share];
+        dest_dir.extend_from_slice(dirs);
+        self.inherit_destination_acl(paths, &dest_dir, &file);
+
         // ADR-0008 step 2, done HERE rather than assumed.
         //
         // `SafePath::publish` bundles step 5 (the destination-directory fsync) so a call site
@@ -641,8 +717,6 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             });
         }
 
-        let mut dest_dir: Vec<&str> = vec![share];
-        dest_dir.extend_from_slice(dirs);
         let staging_dir = [share, STAGING_DIR[0], STAGING_DIR[1]];
 
         // Rename and directory fsync in one call, so step 5 cannot be left out here.
@@ -1017,6 +1091,73 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             .runner
             .run(bin::WIPEFS, &["--all", "--", device.as_str()])?;
         Ok(Response::DiskWiped { detail: out })
+    }
+
+    /// Bir diskin SMART özeti — önce önbellek, sonra disk.
+    ///
+    /// Telemetri bunu açık her pano için 10 saniyede bir soruyor; okuma diski döndürdüğü için
+    /// cevabı [`SMART_CACHE_TTL`] boyunca saklamak, diskin uyuyabilmesinin ve seri kontrol
+    /// soketinin boş kalmasının tek yolu. Gerekçenin tamamı [`Agent::smart`] alanında.
+    fn read_smart_summary(&self, disk_by_id: &str) -> Result<Response, SeamError> {
+        if let Some(cached) = self.remembered_smart(disk_by_id) {
+            return Ok(cached);
+        }
+
+        // Built from a validated single component, so the caller cannot reach outside
+        // /dev/disk/by-id or smuggle a flag (risk R1).
+        let path = format!("/dev/disk/by-id/{disk_by_id}");
+        // ── ÇIKIŞ KODU BURADA BİR CEVAP ────────────────────────────────────────
+        //
+        // `smartctl` SMART uyarılarını çıkış kodunun BİTLERİYLE bildiriyor: `-H -A` ile
+        // 3. bit (8) "disk arızalanıyor", 4. bit (16) "bir öznitelik eşiğin altında".
+        // `run` sıfırdan farklı çıkışı hata sayıp stdout'u atıyordu, yani SAĞLIKLI disk
+        // okunuyor ARIZALI disk okunamıyordu — özelliğin var olma sebebinin tam tersi.
+        //
+        // `run_capturing` raporu her hâlükârda veriyor; `smart::parse` zaten
+        // `smart_status.passed`ı okuyor ve okunamayan çıktıyı `healthy: false` sayıyor.
+        //
+        // `-n standby` BURADA YOK, ve eksikliği bilinçli: bekleyen bir diskte `smartctl` 2 ile
+        // çıkıyor, o çıktıda `smart_status` bulunmuyor ve `smart::parse` onu `healthy: false`
+        // sayıyor — yani bayrak, sözleşme "okunamadı"yı "arızalı"dan ayıran üçüncü bir durum
+        // taşımadan eklenirse uyuyan her disk ekranda kırmızı yanardı. Önbellek o bayrağı
+        // gerektirmeden okuma sıklığını 30 kat düşürüyor.
+        let out = self
+            .runner
+            .run_capturing(bin::SMARTCTL, &["-H", "-A", "--json=c", &path])?;
+        let summary = crate::smart::parse(&out);
+        if let Ok(mut cache) = self.smart.lock() {
+            cache.insert(
+                disk_by_id.to_string(),
+                CachedSmart {
+                    at: std::time::Instant::now(),
+                    healthy: summary.healthy,
+                    temperature_celsius: summary.temperature_celsius,
+                    raw: out.clone(),
+                },
+            );
+        }
+        Ok(Response::Smart {
+            healthy: summary.healthy,
+            temperature_celsius: summary.temperature_celsius,
+            raw: out,
+        })
+    }
+
+    /// Bu disk için hâlâ taze bir okuma varsa onu ver.
+    ///
+    /// Kilit alınamadığında `None`: zehirlenmiş bir kilit yüzünden cevap vermemek yerine diski
+    /// okumak doğru davranış — pahalı ama doğru.
+    fn remembered_smart(&self, disk_by_id: &str) -> Option<Response> {
+        let cache = self.smart.lock().ok()?;
+        let cached = cache.get(disk_by_id)?;
+        if cached.at.elapsed() >= SMART_CACHE_TTL {
+            return None;
+        }
+        Some(Response::Smart {
+            healthy: cached.healthy,
+            temperature_celsius: cached.temperature_celsius,
+            raw: cached.raw.clone(),
+        })
     }
 
     /// Kutunun sunduğu sertifika ne.
@@ -1613,6 +1754,13 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
 
         paths.set_owner(&staging_file, owner_uid, owner_gid)?;
+
+        // Kalıtım, `publish_transfer`daki sırayla: `fsync`ten önce, dosya hâlâ ara alandayken.
+        // Kopyalama da aynı ara alanı kullanıyor, yani ACL'siz 0600 kusuru buradan da çıkıyordu.
+        let mut dest_dir: Vec<&str> = vec![share];
+        dest_dir.extend_from_slice(to_dirs);
+        self.inherit_destination_acl(paths, &dest_dir, &staging_file);
+
         if let Err(e) = staging_file.sync_all() {
             if matches!(
                 crate::data::classify(&e),
@@ -1627,8 +1775,6 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             return Err(SeamError::Io(format!("fsync copy before publish: {e}")));
         }
 
-        let mut dest_dir: Vec<&str> = vec![share];
-        dest_dir.extend_from_slice(to_dirs);
         let staging_dir = [share, STAGING_DIR[0], STAGING_DIR[1]];
 
         match paths.publish(&staging_dir, staging_name, &dest_dir, to_name) {
@@ -2172,7 +2318,13 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         //
         // Kip 0600 kalıyor ve bu bilinçli (bkz. `unix.rs`, `OpenIntent::CreateNew`): dosya
         // sahiplikle sahipleniliyor, kipi genişletmek onu kutudaki her kiracıya okutmak olurdu.
+        // Ekibin erişimi kipten değil, hemen aşağıdaki ACL kalıtımından geliyor.
         live.set_owner(&staging_file, owner_uid.get(), owner_gid.get())?;
+
+        // Kalıtım, `publish_transfer`daki sırayla: `fsync`ten önce, dosya hâlâ ara alandayken.
+        let mut dest_dir: Vec<&str> = vec![share];
+        dest_dir.extend_from_slice(to_dirs);
+        self.inherit_destination_acl(live, &dest_dir, &staging_file);
 
         if let Err(e) = staging_file.sync_all() {
             if matches!(
@@ -2186,8 +2338,6 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             return Err(SeamError::Io(format!("fsync restore before publish: {e}")));
         }
 
-        let mut dest_dir: Vec<&str> = vec![share];
-        dest_dir.extend_from_slice(to_dirs);
         let staging_dir = [share, STAGING_DIR[0], STAGING_DIR[1]];
 
         match live.publish(&staging_dir, staging_name, &dest_dir, to_name) {
@@ -4022,27 +4172,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             ),
 
             Request::ReadSmartSummary { disk_by_id } => {
-                // Built from a validated single component, so the caller cannot reach outside
-                // /dev/disk/by-id or smuggle a flag (risk R1).
-                let path = format!("/dev/disk/by-id/{}", disk_by_id.as_str());
-                // ── ÇIKIŞ KODU BURADA BİR CEVAP ────────────────────────────────────────
-                //
-                // `smartctl` SMART uyarılarını çıkış kodunun BİTLERİYLE bildiriyor: `-H -A` ile
-                // 3. bit (8) "disk arızalanıyor", 4. bit (16) "bir öznitelik eşiğin altında".
-                // `run` sıfırdan farklı çıkışı hata sayıp stdout'u atıyordu, yani SAĞLIKLI disk
-                // okunuyor ARIZALI disk okunamıyordu — özelliğin var olma sebebinin tam tersi.
-                //
-                // `run_capturing` raporu her hâlükârda veriyor; `smart::parse` zaten
-                // `smart_status.passed`ı okuyor ve okunamayan çıktıyı `healthy: false` sayıyor.
-                let out = self
-                    .runner
-                    .run_capturing(bin::SMARTCTL, &["-H", "-A", "--json=c", &path])?;
-                let summary = crate::smart::parse(&out);
-                Ok(Response::Smart {
-                    healthy: summary.healthy,
-                    temperature_celsius: summary.temperature_celsius,
-                    raw: out,
-                })
+                self.read_smart_summary(disk_by_id.as_str())
             }
 
             Request::OpenTransfer {
@@ -4280,9 +4410,14 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                     Err(e) if e.is_unavailable() => Ok(Response::SmbUnavailable {
                         reason: e.to_string(),
                     }),
+                    // `StillInUse` de bir RET, bir arıza değil: hesap hâlâ bir SMB oturumunda
+                    // açık, ve API bunun `reason`unu olduğu gibi ekrana taşıyor
+                    // (`IdentityStillOnBoxError` → 503). Hata olarak dönseydi kullanıcı,
+                    // yapabileceği bir şey söylemeyen bir süreç numarası okuyacaktı.
                     Err(
                         e @ (crate::identity::IdentityError::NotOurs { .. }
-                        | crate::identity::IdentityError::UidTaken { .. }),
+                        | crate::identity::IdentityError::UidTaken { .. }
+                        | crate::identity::IdentityError::StillInUse { .. }),
                     ) => Ok(Response::Refused {
                         reason: e.to_string(),
                     }),
@@ -4914,6 +5049,91 @@ mod tests {
             .last()
             .expect("path arg")
             .starts_with("/dev/disk/by-id/"));
+    }
+
+    #[test]
+    fn a_second_smart_read_is_answered_from_the_cache_and_runs_nothing() {
+        // TELEMETRİ BUNU 10 SANİYEDE BİR SORUYOR. Her soruda `smartctl -A` koşmak, beklemeye
+        // girmek üzere olan diski döndürüyordu — diskler hiç uyumuyordu — ve her okuma seri
+        // kontrol soketini bir süreç boyunca tutuyordu. İkinci cevabın aynı olması ve İKİNCİ BİR
+        // SÜRECİN OLMAMASI, önbelleğin ölçüsü.
+        let r = MockCommandRunner::with_responses([
+            r#"{"smart_status":{"passed":true},"temperature":{"current":34}}"#.into(),
+        ]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let request = r#"{"op":"read_smart_summary","disk_by_id":"wwn-0x600224801b119da9"}"#;
+        let dispatcher = agent(&r, &s, &h);
+        let first = dispatcher.handle(request, peer(API_UID), "c7", "telemetry");
+        let second = dispatcher.handle(request, peer(API_UID), "c8", "telemetry");
+
+        assert_eq!(first, second, "aynı disk, aynı cevap");
+        assert!(
+            matches!(
+                second,
+                Response::Smart {
+                    healthy: true,
+                    temperature_celsius: Some(34),
+                    ..
+                }
+            ),
+            "{second:?}"
+        );
+        assert_eq!(
+            r.calls.borrow().len(),
+            1,
+            "ikinci okuma diski uyandırmamalı: {:?}",
+            r.calls.borrow()
+        );
+    }
+
+    #[test]
+    fn each_disk_gets_its_own_cached_reading() {
+        // Önbellek disk BAŞINA: tek bir anahtar, iki diskli bir kutuda ikinci diskin sıcaklığını
+        // birincininki diye gösterirdi — panonun var olma sebebini ortadan kaldıran hâl.
+        let r = MockCommandRunner::with_responses([
+            r#"{"smart_status":{"passed":true},"temperature":{"current":34}}"#.into(),
+            r#"{"smart_status":{"passed":false},"temperature":{"current":52}}"#.into(),
+        ]);
+        let s = MemorySink::default();
+        let h = Harness::bare();
+        let dispatcher = agent(&r, &s, &h);
+        let first = dispatcher.handle(
+            r#"{"op":"read_smart_summary","disk_by_id":"wwn-0x1111111111111111"}"#,
+            peer(API_UID),
+            "c7",
+            "telemetry",
+        );
+        let second = dispatcher.handle(
+            r#"{"op":"read_smart_summary","disk_by_id":"wwn-0x2222222222222222"}"#,
+            peer(API_UID),
+            "c8",
+            "telemetry",
+        );
+
+        assert!(
+            matches!(
+                first,
+                Response::Smart {
+                    healthy: true,
+                    temperature_celsius: Some(34),
+                    ..
+                }
+            ),
+            "{first:?}"
+        );
+        assert!(
+            matches!(
+                second,
+                Response::Smart {
+                    healthy: false,
+                    temperature_celsius: Some(52),
+                    ..
+                }
+            ),
+            "{second:?}"
+        );
+        assert_eq!(r.calls.borrow().len(), 2, "{:?}", r.calls.borrow());
     }
 
     #[test]

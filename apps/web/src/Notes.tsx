@@ -26,6 +26,24 @@ function clock(): string {
   return new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
 }
 
+/** Yazılmayı bekleyen metin: hangi notun, hangi hâli. */
+export type Pending = { id: string; title: string; body: string };
+
+/**
+ * Başarısız bir yazmadan sonra kuyrukta ne kalmalı.
+ *
+ * `flush` bekleyen metni istekten ÖNCE alıp kuyruğu boşaltıyor — aynı paragrafın iki kez
+ * gönderilmemesi için. Yazma başarısız olduğunda o metni geri koymazsa yeniden denenecek bir şey
+ * kalmıyor: kullanıcı bir daha tuşa basmadıkça (yalnız `edit` kuyruğu yeniden dolduruyor) başka
+ * bir nota tıklamak ya da paneli kapatmak yazdığı paragrafı sessizce siliyor.
+ *
+ * İSTEK SÜRERKEN YENİ BİR YAZI GELDİYSE ONA DOKUNULMAZ: `queued` daha yeni ve aynı notun tam
+ * metnini taşıyor, eskisini üstüne yazmak kullanıcının yeni yazdığı harfleri geri almak olurdu.
+ */
+export function afterFailedSave(pending: Pending, queued: Pending | null): Pending {
+  return queued ?? pending;
+}
+
 /**
  * Notes — GET/POST /notes, PATCH/DELETE /notes/{id}.
  *
@@ -53,7 +71,7 @@ export function Notes({ notify }: { notify: Notify }): React.JSX.Element {
   // What has been typed but not yet written back. Held in a ref rather than in state because the
   // unmount cleanup below has to read the *last* value, and a cleanup closes over the state it was
   // rendered with — which, mid-keystroke, is one render behind.
-  const pendingRef = useRef<{ id: string; title: string; body: string } | null>(null);
+  const pendingRef = useRef<Pending | null>(null);
   const timerRef = useRef<number | null>(null);
 
   const flush = useCallback(async (): Promise<void> => {
@@ -77,8 +95,9 @@ export function Notes({ notify }: { notify: Notify }): React.JSX.Element {
       body: patch,
     });
     if (error !== undefined || data === undefined) {
+      pendingRef.current = afterFailedSave(pending, pendingRef.current);
       notify('error', problemMessage(error, 'Not kaydedilemedi.'));
-      setStatus('kaydedilemedi');
+      setStatus('kaydedilemedi — yeniden denenecek');
       return;
     }
     const saved = data;
@@ -136,11 +155,15 @@ export function Notes({ notify }: { notify: Notify }): React.JSX.Element {
   }, [focusTitle]);
 
   function select(note: Note): void {
+    const carried = pendingRef.current !== null;
     void flush();
     setSelectedId(note.id);
     setTitle(note.title);
     setBody(note.body);
-    setStatus('');
+    // Kaydedilmemiş bir metin varken durum satırını temizlemek, `flush`ın az sonra yazacağı
+    // "kaydedilemedi" uyarısını daha görünmeden silmek olurdu — o uyarı, kullanıcının ekrandan
+    // kaybolan paragrafından haberdar olduğu tek yer.
+    if (!carried) setStatus('');
   }
 
   function edit(next: { title: string; body: string }): void {

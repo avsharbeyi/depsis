@@ -277,6 +277,8 @@ function Members({
   onClose: () => void;
 }): React.JSX.Element {
   const [members, setMembers] = useState<TeamMember[] | null>(null);
+  /** Okuma cevapsız kaldı mı — "kimse yok" ile "okunamadı" aynı ekran olamaz. */
+  const [membersFailed, setMembersFailed] = useState(false);
   const [users, setUsers] = useState<Account[]>([]);
   const [usersFailed, setUsersFailed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -289,7 +291,11 @@ function Members({
       // person. The picker was empty for exactly the people the authority was invented for.
       api.GET('/directory/users', {}),
     ]);
-    setMembers(list.data?.items ?? []);
+    // OKUNAMAYAN LİSTE BOŞ LİSTE DEĞİL. `?? []` her 401, 500 ve düşen bağlantıyı boş bir ekibe
+    // çeviriyordu, ve altındaki cümle "Ekibe verilen izinler şu an kimseye ulaşmıyor" diye bir
+    // İDDİA yazıyordu: yönetici ekibin boşaldığını sanıp üyeleri yeniden eklemeye kalkıyordu.
+    setMembersFailed(list.data === undefined);
+    setMembers(list.data?.items ?? null);
     setUsers(all.data?.items ?? []);
     setUsersFailed(all.data === undefined);
   }, [team.id]);
@@ -333,7 +339,15 @@ function Members({
 
   return (
     <Win title={`${team.name} — üyeler`} glyph="👥" tone="iris" onClose={onClose}>
-      {members === null && <p className="note">Yükleniyor…</p>}
+      {members === null && !membersFailed && <p className="note">Yükleniyor…</p>}
+      {membersFailed && (
+        <p className="note warn">
+          Üye listesi okunamadı; bu ekibin kimlerden oluştuğu şu an bilinmiyor.{' '}
+          <button type="button" className="b" disabled={busy} onClick={() => void load()}>
+            Yeniden dene
+          </button>
+        </p>
+      )}
       {members !== null && members.length === 0 && (
         <p className="note">Bu ekipte kimse yok. Ekibe verilen izinler şu an kimseye ulaşmıyor.</p>
       )}
@@ -358,14 +372,23 @@ function Members({
             className="b"
             value=""
             aria-label="Ekibe eklenecek kişi"
-            disabled={busy}
+            // Kimlerin ekipte olduğu bilinmiyorken seçici, zaten üye olan kişileri de sunuyor:
+            // `inTeam` boş bir kümeye düşüyor. Bilinmeyen bir listeye ekleme yaptırmak, ekranın
+            // az önce yanlış söylediği şeyi kullanıcıya tekrarlatmak olurdu.
+            disabled={busy || members === null}
             onChange={(event) => {
               const id = event.target.value;
               event.target.value = '';
               if (id !== '') void add(id);
             }}
           >
-            <option value="">{usersFailed ? 'Liste alınamadı' : 'Kişi seç…'}</option>
+            <option value="">
+              {membersFailed
+                ? 'Üye listesi okunamadı'
+                : usersFailed
+                  ? 'Liste alınamadı'
+                  : 'Kişi seç…'}
+            </option>
             {users
               .filter((user) => !inTeam.has(user.id))
               .map((user) => (

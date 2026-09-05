@@ -181,6 +181,26 @@ duruyor: bilinen bir sınır, bilinmeyen bir sınırdan iyidir.
 **İkinci kalan:** güncelleme kaynaktan derliyor (pnpm + cargo `--release`), yani yavaş bir
 kutuda saatler sürebilir. Önceden derlenmiş bir sürüm akışı da imzayla aynı teslimatın parçası.
 
+**Üçüncü kalan — geri alma şemayı geri getirmiyor.** `install.sh` migration'ları derlemeden ÖNCE
+koşturuyor, yani bir güncelleme derleme adımında düştüğünde şema çoktan yeni sürümde olur; geri
+alma ise yalnız kaynak ağacını eskiye döndürür. Eski API yeni şemaya bakar, `/health` geçer ve
+migration'ın dokunduğu uçlar 500 verir. `update.sh` artık ağaca dokunmadan önce bir `pg_dump`
+alıyor (ajanın gecelik dökümleriyle aynı dizine, yani "Veritabanı yedekleri" listesinde
+görünüyor) ve geri alma mesajı artık "çalışır durumda" demiyor; şemanın yeni sürümde kalmış
+olabileceğini ve yedeğin adını söylüyor. Kendiliğinden `migrate down` bilerek YOK: ADR-0014 geri
+alınamayan down'lara izin veriyor, ve veri kaybını kimsenin sormadığı bir karara çevirmek daha
+kötü. Kalan borç, o yedeği **arayüzden** geri yükleyebilmek — bugün geri yükleme
+`docs/operations/04-felaket-kurtarma.md`deki elle `pg_restore`, yani terminal.
+
+**Dördüncü kalan — işletim sistemi güncellemeleri görünmüyor.** Bu kutu 443'ü ve 445'i dinliyor
+ve dinleyen yazılım DEPSIS'in değil Debian'ın (nginx, smbd, openssl). Güvenlik yamaları artık
+kendiliğinden uygulanıyor: ilk açılış `unattended-upgrades`i kuruyor ve yalnız
+`Debian-Security` kaynağına açıyor, kendiliğinden yeniden başlatma kapalı (bir NAS bir aktarımın
+ortasında yeniden başlamaz). Kalan yarısı §12'nin istediği görünürlük: yeniden başlatma
+gerektiğinde Debian `/var/run/reboot-required` bırakıyor, ama onu okuyacak bir ajan işlemi ve
+gösterecek bir ekran henüz yok — yani karar sahibine bırakılıyor da, sahibi kararın gerektiğini
+göremiyor.
+
 ---
 
 ## 3. Sonraki faz backlog'u

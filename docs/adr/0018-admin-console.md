@@ -46,9 +46,17 @@ Bunun ajana eklemekten daha iyi olmasının sebebi yalnızca uyum değil, **yar�
 Birim `User=depsis-console` ile çalışır: kendi hesabı, hiçbir ilginç grupta değil, paylaşımlara
 erişimi paylaşımların POSIX izinleri kadar.
 
-Root kabuk isteyen bir kurulum için birim dosyasında tek satırlık, yorumlanmış bir anahtar var
-(`DEPSIS_CONSOLE_PRIVILEGED=1`). **Varsayılan kapalı** ve açmak bir dosyayı elle düzenlemeyi
-gerektirir — bir onay kutusuyla açılabilen root kabuk, kaza ile açılabilen root kabuktur.
+Root kabuk isteyen bir kurulum için tek satırlık bir anahtar var: `/etc/depsis/console.env`
+içinde `DEPSIS_CONSOLE_PRIVILEGED=1`. **Varsayılan kapalı** ve açmak bir dosyayı elle
+düzenlemeyi gerektirir — bir onay kutusuyla açılabilen root kabuk, kaza ile açılabilen root
+kabuktur.
+
+Anahtarın ikinci yarısı olan `User=root` satırını **kurulum** yazıyor
+(`/etc/systemd/system/depsis-console.service.d/privileged.conf`), ve bayrak 0'a döndüğünde aynı
+dosyayı siliyor. Bu bir kolaylık değil bir düzeltme: birim dosyası her güncellemede depodaki
+hâliyle üzerine yazılıyor, yani elle konmuş bir `User=root` sessizce geri alınıyor ve geride
+console.env'de kalan bayrakla uyuşmayan bir birim kalıyordu. Konsol o hâlde başlamayı reddeder ve
+arayüz yalnız "çalışmıyor" der. Kararın tek yeri artık console.env.
 
 ### Erişim: yönetici + parola + süre
 

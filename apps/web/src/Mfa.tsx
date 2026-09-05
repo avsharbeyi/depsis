@@ -62,8 +62,9 @@ export function Mfa({
     setBusy(true);
     // Parola, kodun yanında. Onaylama anına kadar sır etkisiz, ama onaylandığı anda hesabın
     // ikinci faktörü oluyor: çalınmış bir oturum bunu parolasız yapabilseydi, hesabın gerçek
-    // sahibi doğru parolasıyla gelip üretemeyeceği bir kod istenerek dışarıda kalırdı ve
-    // yöneticinin de onu geri açacak bir yolu yok.
+    // sahibi doğru parolasıyla gelip üretemeyeceği bir kod istenerek dışarıda kalırdı — ve
+    // yöneticinin sıfırlaması (`DELETE /users/{id}/mfa`, Kullanıcılar ekranı) o kişiyi ancak
+    // yönetici müsait olduğunda kurtarır.
     const { data, error } = await api.POST('/me/mfa/enrolment/confirm', {
       body: { code, password },
     });
@@ -136,15 +137,16 @@ export function Mfa({
 
       {me.mfaEnrolled && me.recoveryCodesRemaining === 0 && (
         // Worth its own line rather than a number nobody reads: with no codes left, losing the
-        // authenticator means losing the account, and an administrator cannot reset a password
-        // either.
+        // authenticator means waiting for an administrator to reset the second factor from the
+        // Kullanıcılar screen — a door that exists, but not one the person can open themselves.
         <div className="warn" role="status">
           <span className="ic" aria-hidden>
             ⚠
           </span>
           <span className="tx">
             <b>Kurtarma kodunuz kalmadı</b>
-            Doğrulayıcı uygulamanızı kaybederseniz hesabınıza giremezsiniz. Şimdi yenileyin.
+            Doğrulayıcı uygulamanızı kaybederseniz kendi başınıza giremezsiniz; bir yöneticinin iki
+            adımlı doğrulamanızı sıfırlaması gerekir. Şimdi yenileyin.
           </span>
         </div>
       )}
@@ -230,7 +232,7 @@ export function Mfa({
             <span className="tx">
               <b>Bu kodlar bir daha gösterilmeyecek</b>
               Sunucu onları yalnız özet olarak saklıyor. Şimdi kopyalayın ve güvenli bir yere koyun;
-              doğrulayıcınızı kaybederseniz hesabınıza girmenin tek yolu bunlar.
+              doğrulayıcınızı kaybederseniz hesabınıza kendi başınıza girmenin tek yolu bunlar.
             </span>
           </div>
           <p style={{ fontFamily: 'var(--mono)', fontSize: 14, lineHeight: 2, userSelect: 'all' }}>

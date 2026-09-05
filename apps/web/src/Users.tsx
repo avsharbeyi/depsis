@@ -47,6 +47,8 @@ export function Users({ currentUserId, notify, onUnauthenticated }: Props): Reac
   const [confirmPassword, setConfirmPassword] = useState('');
   /** Silinmek üzere olan hesap. Ayrı bir durum: silme, devre dışı bırakmanın daha sertı değil. */
   const [deleting, setDeleting] = useState<User | null>(null);
+  /** İkinci faktörü sıfırlanmak üzere olan hesap. */
+  const [unenrolling, setUnenrolling] = useState<User | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -151,6 +153,43 @@ export function Users({ currentUserId, notify, onUnauthenticated }: Props): Reac
     }
     setDeleting(null);
     notify('ok', `"${user.username}" hesabı silindi.`);
+    reload();
+  }
+
+  /**
+   * Hedefin ikinci faktörünü kaldırır.
+   *
+   * DOĞRULAYICISINI VE KURTARMA KODLARINI KAYBEDEN HESABIN TEK ÇIKIŞI. `DELETE /me/mfa` o kişiye
+   * kapalı — girişi ikinci adımda duruyor, oturumu hiç açılmıyor — ve parola sıfırlama bileti de
+   * kayıtlı bir hesapta yine kod soruyor. Bu düğme olmadan geriye hesabı silip yeniden açmak
+   * kalıyordu, ki o da ekip üyeliklerini, klasör izinlerini ve POSIX kimliğini götürüyor.
+   *
+   * Yöneticinin KENDİ parolası isteniyor, silme ve sıfırlama biletiyle aynı gerekçeyle: ele
+   * geçirilmiş bir yönetici oturumunun yapmak isteyeceği ilk şey, bir hesabın ikinci adımını
+   * kaldırmaktır.
+   */
+  async function resetMfa(user: User): Promise<void> {
+    setBusy(true);
+    const { error, response } = await api.DELETE('/users/{id}/mfa', {
+      params: { path: { id: user.id } },
+      body: { password: confirmPassword },
+    });
+    setBusy(false);
+    setConfirmPassword('');
+    if (response.status === 401) {
+      // Silmedeki ayrımın aynısı: 401 burada "oturum düştü" değil "parolanız yanlış" olabilir.
+      notify('error', problemMessage(error, 'Parolanız yanlış.'));
+      return;
+    }
+    if (!response.ok) {
+      notify('error', problemMessage(error, 'İkinci faktör sıfırlanamadı.'));
+      return;
+    }
+    setUnenrolling(null);
+    notify(
+      'ok',
+      `"${user.username}" hesabının iki adımlı doğrulaması kaldırıldı; açık oturumları kapatıldı.`,
+    );
     reload();
   }
 
@@ -269,6 +308,26 @@ export function Users({ currentUserId, notify, onUnauthenticated }: Props): Reac
                   }}
                 >
                   Parolayı sıfırla
+                </button>
+                {/* Hesabın ikinci faktörü olup olmadığını `User` şeması söylemiyor, ve uç zaten
+                    kayıtlı olmayan hesapta da 204 dönüyor — yani düğme her satırda çizilebilir ve
+                    hiçbir durumda "çalışıyormuş gibi duran" bir kontrol olmuyor. Kendi hesabı için
+                    kapalı: sunucu 409 ile reddediyor, yolu Hesabım ekranı. */}
+                <button
+                  type="button"
+                  className="b"
+                  disabled={busy || self}
+                  title={
+                    self
+                      ? 'Kendi ikinci faktörünüzü Hesabım ekranından kaldırın'
+                      : 'Doğrulayıcısını ve kurtarma kodlarını kaybeden hesap için'
+                  }
+                  onClick={() => {
+                    setConfirmPassword('');
+                    setUnenrolling(user);
+                  }}
+                >
+                  İki adımlıyı sıfırla
                 </button>
                 {/* Devre dışı bırakmanın daha sertı DEĞİL, başka bir şey: kapatılan hesap geri
                     açılıyor, silinen hesap geri gelmiyor. Kendi hesabı için kapalı — sunucu da
@@ -479,6 +538,52 @@ export function Users({ currentUserId, notify, onUnauthenticated }: Props): Reac
               onClick={() => void remove(deleting)}
             >
               {busy ? 'Siliniyor…' : 'Hesabı sil'}
+            </button>
+          </div>
+        </Win>
+      )}
+
+      {unenrolling !== null && (
+        <Win
+          title={`${unenrolling.username} için iki adımlı doğrulamayı sıfırla`}
+          glyph="🔐"
+          tone="warn"
+          onClose={() => setUnenrolling(null)}
+        >
+          <div className="notice" role="status">
+            <span className="ic" aria-hidden>
+              ⚠
+            </span>
+            <span className="tx">
+              <b>Hesap bundan sonra yalnız parolayla giriyor</b>
+              {unenrolling.username} kişisinin doğrulayıcı kaydı ve kalan kurtarma kodları
+              siliniyor, açık oturumları kapanıyor. Kişi girdikten sonra iki adımlı doğrulamayı
+              Hesabım ekranından yeniden kurmalı.
+            </span>
+          </div>
+          <p className="note">
+            Bu düğme, doğrulayıcı uygulamasını <b>ve</b> kurtarma kodlarını kaybetmiş biri içindir.
+            Kodlarından biri elindeyse onu kullanması daha güvenli.
+          </p>
+          <label htmlFor="mfa-confirm">Kendi parolanız</label>
+          <input
+            id="mfa-confirm"
+            type="password"
+            autoComplete="current-password"
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+          />
+          <div className="row">
+            <button type="button" className="no" onClick={() => setUnenrolling(null)}>
+              Vazgeç
+            </button>
+            <button
+              type="button"
+              className="yes"
+              disabled={busy || confirmPassword === ''}
+              onClick={() => void resetMfa(unenrolling)}
+            >
+              {busy ? 'Sıfırlanıyor…' : 'Sıfırla'}
             </button>
           </div>
         </Win>

@@ -52,10 +52,15 @@ function okubeni(label: string): string {
     '  Havuz adini bu diskteki disk.json dosyasinda bulabilirsiniz. Ikinci komut sifrenizi',
     '  soracak.',
     '',
+    // `DEPSIS-YEDEK/gunluk/` DİYE BİR DEFTER YOK, ve satır bu yüzden kaldırıldı: diskini bir
+    // başkasının bilgisayarına takan insan, olmayan bir klasörü arıyordu. Tur geçmişi
+    // veritabanındaki `backup_runs` tablosunda duruyor ve ekranda gösteriliyor. Diskin şifresiz
+    // yarısına yazılamaz da: oraya paylaşım adları yazmak, çalınan diski okuyan herkese
+    // kimlerin neyi sakladığını göstermek olurdu — bu metnin "içinde kimlik bilgisi yok"
+    // ilkesinin tam karşıtı.
     'ICERIDE NE VAR',
     '  Dosyalar/<paylasim>/...              yedeklenen dosyalariniz',
     '  DEPSIS-YEDEK/silinenler/<tarih>/...  sildikleriniz, silindikleri gune gore',
-    '  DEPSIS-YEDEK/gunluk/...              her yedekleme turunun ne yaptigi',
     '',
     'SIFRENIZI KAYBETTIYSENIZ bu diskteki hicbir dosya geri getirilemez. Bu bir kusur degil,',
     'diskin calinmasi durumunda dosyalarinizi koruyan seyin ta kendisi.',
@@ -324,12 +329,13 @@ export class BackupTargetService {
     // `BackupRunService.runOnce` kurtarma kipini görüp hiçbir şey yapmadan "bitti" dönüyor —
     // yani sahibinin gördüğü şey, çalışıyormuş gibi duran ve hiç yedek almayan bir anahtar.
     //
-    // Diski bu cihazın yedek diskine ÇEVİRMENİN bir yolu henüz yok; o adım geldiğinde bu
-    // refüzün yerini o alacak.
+    // Diski bu cihazın yedek diskine çevirmenin bir yolu ARTIK VAR (`claim`), ve cümle oraya
+    // yönlendiriyor: bu anahtarı kapalı bulan sahibinin sorusu "neden" değil "nasıl".
     if (row.recoveryOnly && input.enabled === true) {
       throw new BackupAgentRefusedError(
         'bu disk başka bir cihazın yedeği (kurtarma kipi) ve bu cihaz ona yazmıyor;' +
-          ' dosyalarınızı geri getirmek için yedek gezginini kullanın',
+          ' önce geri getirmek istediğiniz dosyaları alın, sonra "bu cihazın yedek diski olsun"' +
+          ' adımıyla diski devralın',
       );
     }
 
@@ -458,6 +464,84 @@ export class BackupTargetService {
       availableBytes: Number(status.available_bytes),
       usedBytes: Number(status.used_bytes),
       lastBackupAt: described?.sonYedek ?? null,
+    };
+  }
+
+  /**
+   * Kurtarma diskini BU CİHAZIN yedek diskine çevirir.
+   *
+   * ── NEDEN VAR ────────────────────────────────────────────────────────────────────────────
+   *
+   * 0044 bu adımı sözle vaat ediyordu — *"kullanıcı açıkça 'bu cihaz artık bu diski yedekliyor'
+   * diyene kadar"* — ama onu yazan hiçbir kod yoktu. Ev yanıyor, yeni bir DEPSIS alınıyor, disk
+   * tanıtılıyor, dosyalar geri getiriliyor; sonra sahibi diski yeni cihazın yedek diski yapmak
+   * istiyor ve karşısında iki kapı buluyordu: `enabled:true` kabul ediliyor ama tur kurtarma
+   * kipini görüp hiçbir şey yapmadan "bitti" diyor, ya da diski bırakıp yeniden kurmak — ki
+   * `prepare_backup_root` koşulsuz `zfs create` çalıştırdığı için dolu diskte hata veriyor.
+   * Kalan tek yol terminalde `zfs destroy`, yani YEDEĞİ SİLMEDEN devam edilemiyordu.
+   *
+   * ── KİLİDİ AÇIK OLMAYAN DİSK DEVRALINMIYOR ───────────────────────────────────────────────
+   *
+   * Bayrağı kilitli bir diskte düşürmek, sahibine "artık bu cihazın yedeği" diyen bir satır ve
+   * her turda `kilitli` yazan bir zincir bırakırdı. Kilit açıkken devralmak, ilk turun hemen
+   * koşabilmesi demek.
+   *
+   * ── İLK TUR YIKICI, VE BU SAHİBİNE SÖYLENMELİ ────────────────────────────────────────────
+   *
+   * Devralmadan sonraki ilk tur, yedekte olup BU cihazda olmayan her dosyayı
+   * `DEPSIS-YEDEK/silinenler/<bugün>/` altına taşıyor — çünkü tur için "canlıda yok" demek
+   * "silinmiş" demek. Dosyalar kaybolmuyor (saklama süresi boyunca duruyorlar) ama geri getirme
+   * işi devralmadan ÖNCE bitmiş olmalı. Uyarıyı ekranda gösteren taraf denetleyici.
+   *
+   * ── CİHAZ KİMLİĞİ SIFIRLANIYOR ───────────────────────────────────────────────────────────
+   *
+   * `device_id`, disk.json'dan okunan ÖLEN cihazın kimliğiydi. Bu diski devralan cihaz o değil,
+   * ve yerine yazılacak bir şey de yok: `prepare()` de bu sütunu doldurmuyor. Yanlış bir kimlik
+   * bırakmaktansa `prepare()` ile aynı hâle getiriliyor.
+   */
+  async claim(organizationId: string, correlationId: string): Promise<BackupTargetView> {
+    const row = await this.row(organizationId);
+    if (row === null) throw new NoBackupTargetError();
+    if (!row.recoveryOnly) {
+      throw new BackupAgentRefusedError('bu disk zaten bu cihazın yedek diski');
+    }
+
+    const response = await this.agent.call(
+      { op: 'backup_root_status', pool: row.pool },
+      `yedek diski devralınıyor (${row.pool})`,
+      correlationId,
+    );
+    const status = expectStatus(response, 'backup_root');
+    if (!status.prepared || !status.key_loaded || !status.mounted) {
+      throw new BackupAgentRefusedError(
+        'diskin kilidi açık değil; önce parolanızı girip diski açın, sonra devralın',
+      );
+    }
+
+    await this.db.withTenant(organizationId, (q) =>
+      q.query(
+        `UPDATE public.backup_targets
+            SET recovery_only = false, enabled = true, device_id = NULL, updated_at = now()
+          -- RLS zaten kiracıya daraltıyor; bu satır o daraltmanın YERİNE değil, YANINDA.
+          WHERE organization_id = $1`,
+        [organizationId],
+      ),
+    );
+    this.logger.log(`kurtarma diski devralındı; artık bu cihazın yedek diski: ${row.pool}`);
+
+    // disk.json BURADA TAZELENMİYOR. O dosyadaki `sonYedek`, diski başka bir bilgisayara takan
+    // insanın ekranda göreceği ilk şey; devralma anını oraya yazmak, bu cihazın henüz tek bayt
+    // yazmadığı bir diske bugünün tarihini koymak olurdu. İlk tur bittiğinde `runOnce` zaten
+    // tazeliyor.
+
+    const updated = await this.row(organizationId);
+    if (updated === null) throw new Error('yedek hedefi devralındı ama geri okunamadı');
+    return {
+      ...updated,
+      prepared: status.prepared,
+      unlocked: status.key_loaded && status.mounted,
+      availableBytes: Number(status.available_bytes),
+      usedBytes: Number(status.used_bytes),
     };
   }
 

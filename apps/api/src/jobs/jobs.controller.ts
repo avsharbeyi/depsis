@@ -155,6 +155,12 @@ function toResponse(job: Job): JobResponse {
     // `error` is present only when there is one. The queue stores a single string, so it is
     // carried as the title; inventing a `type`, `status` and `code` for a failure that happened
     // inside a worker would be dressing a message up as a classified problem it never was.
+    //
+    // KOD KAPALI KÜMEDEN. Burada `'job_failed'` yazıyordu ve öyle bir kod yoktu: sözleşme
+    // `ProblemDetails.code`u düz `string` diye anlattığı sürece derleyici bunu göremedi, ve
+    // istemci tarafındaki her `switch` bu değeri sessizce hiçbir dala düşürmedi. Küme belgeye
+    // taşınınca ortaya çıktı. `internal-error` uydurma değil: bir işçinin içinde olan ve
+    // sınıflandırılmamış bir hata tam olarak odur (packages/contracts/src/errors.ts).
     ...(job.lastError === null
       ? {}
       : {
@@ -162,7 +168,7 @@ function toResponse(job: Job): JobResponse {
             type: 'about:blank',
             title: job.lastError,
             status: 500,
-            code: 'job_failed',
+            code: 'internal-error' as const,
             correlationId: job.id,
           },
         }),

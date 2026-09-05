@@ -21,8 +21,11 @@ const CLASSES: ReadonlyArray<[string, string]> = [
   ['share', 'Paylaşımlar'],
   ['files', 'Dosyalar'],
   ['storage', 'Depolama'],
+  ['backup', 'Yedekleme'],
   ['remote', 'Uzaktan erişim'],
   ['console', 'Konsol'],
+  ['apps', 'Uygulamalar'],
+  ['system', 'Sistem'],
   ['setup', 'Kurulum'],
 ];
 

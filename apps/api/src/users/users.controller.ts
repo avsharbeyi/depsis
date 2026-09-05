@@ -336,8 +336,9 @@ export class UsersController {
       action: 'user.deleted',
       target: { kind: 'user', id, label: removed.username },
       summary:
-        `'${removed.username}' hesabı KALICI olarak silindi; oturumları, SMB erişimi ve ` +
-        `sistem hesabı kaldırıldı. Dosyaları yerinde duruyor.`,
+        `'${removed.username}' hesabı KALICI olarak silindi; oturumları, SMB kaydı ve sistem ` +
+        `hesabı kaldırıldı. Kurulu bir SMB bağlantısı varsa yeniden bağlanana kadar sürebilir. ` +
+        `Dosyaları yerinde duruyor.`,
     });
     this.logger.warn(`user '${removed.username}' deleted by '${session.userId}'`);
   }
@@ -460,6 +461,17 @@ export class UsersController {
       // İlk hâli 503 atıyordu ve e2e onu yakaladı — ajan düştüğünde yönetici hesabı
       // kapatamıyordu, ki bu düzeltilmeye çalışılan hatadan kötü. Kapatma her zaman
       // tamamlanmalı; değişen tek şey kesmenin ne zaman olduğu.
+      //
+      // ── VE ÖZET, KESMENİN GERÇEKTE NE KADAR OLDUĞUNU SÖYLÜYOR ─────────────────────────
+      //
+      // Ajanın yaptığı `pdbedit -x`, yani Samba'nın parola veritabanından kaydı silmek. Bu
+      // YENİ kimlik doğrulamayı engelliyor; o an kurulu olan bir smbd oturumu ise kendi
+      // sürecinde çalışmaya devam ediyor ve Windows onu saatlerce ayakta tutuyor. Özet
+      // "erişimi kesildi" derken işten çıkarılan kişi açık penceresinden okumaya devam
+      // edebiliyordu — yalnızca çalışıyormuş gibi görünen bir kontrol, ki bu üründe hiç
+      // kontrol olmamasından kötü. Kurulu oturumu da düşürmek ajan tarafında bir iş
+      // (`smbstatus` ile oturumun pid'ini bulup SIGTERM); o gelene kadar denetim kaydı ne
+      // olduğunu OLDUĞU GİBİ yazıyor.
       let smbCut = true;
       if (parsed.data.disabled === true) {
         await this.sessions.revokeAllForUser(session.organizationId, id);
@@ -474,8 +486,8 @@ export class UsersController {
           target: { kind: 'user', id: row.id, label: row.username },
           summary: parsed.data.disabled
             ? smbCut
-              ? `'${row.username}' hesabı kapatıldı; oturumları sonlandırıldı ve ağ paylaşımı erişimi kesildi.`
-              : `'${row.username}' hesabı kapatıldı ve oturumları sonlandırıldı; ağ paylaşımı erişimi ajana ulaşılamadığı için KUYRUĞA ALINDI.`
+              ? `'${row.username}' hesabı kapatıldı; oturumları sonlandırıldı ve ağ paylaşımı parolası düşürüldü. Kurulu bir SMB bağlantısı varsa yeniden bağlanana kadar sürebilir.`
+              : `'${row.username}' hesabı kapatıldı ve oturumları sonlandırıldı; ağ paylaşımı parolasının düşürülmesi ajana ulaşılamadığı için KUYRUĞA ALINDI.`
             : `'${row.username}' hesabı yeniden açıldı.`,
         });
       }

@@ -4,7 +4,13 @@ import { Injectable, Logger } from '@nestjs/common';
 import { AgentService } from '../agent/agent.service.js';
 import { DbService } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
-import { FilesService, permissionsOf, type Caller, type ShareRef } from './files.service.js';
+import {
+  assertWritable,
+  FilesService,
+  permissionsOf,
+  type Caller,
+  type ShareRef,
+} from './files.service.js';
 
 /** What one `files.copy` job was asked to do. */
 export interface CopyPayload {
@@ -201,6 +207,10 @@ export class CopyService {
     reason: string,
   ): Promise<CopyProgress> {
     const share = await this.files.shareFor(organizationId, payload.shareId);
+    // İş kuyruğa girdikten SONRA paylaşım salt okunura çevrilmiş olabilir. Uç zaten reddediyor;
+    // burası o pencereyi kapatıyor ve iş sessizce yarım bir ağaç bırakmak yerine açıklamalı
+    // düşüyor.
+    assertWritable(share);
     const ref: ShareRef = { id: share.id, name: share.name };
     const caller = await this.caller(organizationId, payload.actorId);
     const ownerUid = await this.posix.posixUidFor(organizationId, payload.actorId);
@@ -228,7 +238,21 @@ export class CopyService {
         break;
       }
 
-      if (!allowed.has(node.id)) {
+      // REDDEDİLEN BİR KLASÖRÜN ALTI DA REDDEDİLİR, ve bunu söyleyen şey `placed`: plan
+      // genişlik-öncelikli olduğu için bir düğüme sıra geldiğinde ebeveyninin kopyası ya
+      // yapılmıştır ya da ebeveyn reddedilip hiç yapılmamıştır. İkinci durumda `destinationParent`
+      // "klasörün kopyası çocuğundan önce yapılmadı" diye hata fırlatıyordu: hata işi ORTASINDA
+      // öldürüyor, beş deneme de aynı yerde düşüyor ve kullanıcı yarım bir kopyayla açıklamasız
+      // bir `dead` iş görüyordu.
+      //
+      // Ulaşılabilir bir durum: ADR-0021 daraltmasıyla bir klasörde `list`i olmayan birinin
+      // içindeki dosyada `download`u olabiliyor — o zaman klasör reddedilir, dosya izinlidir.
+      // Doğru cevap alt ağacı hedef köküne taşımak değil, onu da reddedilenlere saymak.
+      const parentRefused =
+        !payload.sourceIds.includes(node.id) &&
+        node.parent_id !== null &&
+        !placed.has(node.parent_id);
+      if (!allowed.has(node.id) || parentRefused) {
         // Skipped, not fatal. A tree with one unreadable file in it should still copy the rest, and
         // the count comes back so the job's log says how many were left behind.
         refused += 1;
@@ -367,6 +391,8 @@ export class CopyService {
     reason: string,
   ): Promise<{ bytes: number }> {
     const share = await this.files.shareFor(organizationId, payload.shareId);
+    // Aynı pencere geri yükleme için de var: anlık görüntüden canlı veri kümesine yazılıyor.
+    assertWritable(share);
     const ownerUid = await this.posix.posixUidFor(organizationId, payload.actorId);
 
     const parentComponents =
@@ -471,9 +497,10 @@ export class CopyService {
    * selecting it means. A descendant goes under the copy of its parent, read from `placed`.
    *
    * A descendant whose parent is not in `placed` cannot happen: the plan is breadth-first, so by
-   * the time a child is reached its parent has either been created or been found by `copyOf`.
-   * Throwing rather than falling back to the destination root, because that fallback silently
-   * lifted subtrees out of the tree they belonged to.
+   * the time a child is reached its parent has either been created or been found by `copyOf` — ve
+   * ebeveyni reddedilmiş olan düğümler buraya hiç gelmiyor, `copy()` onları da reddedilenlere
+   * sayıyor. Throwing rather than falling back to the destination root, because that fallback
+   * silently lifted subtrees out of the tree they belonged to.
    */
   private destinationParent(
     node: Node,

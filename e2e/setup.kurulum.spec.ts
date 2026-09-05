@@ -68,25 +68,16 @@ async function formuDoldur(page: Page): Promise<void> {
 }
 
 test.describe('kurulum sihirbazı', () => {
-  test.beforeEach(async ({ page, consoleWatch }) => {
-    // A REAL DEFECT, tolerated here because this branch may not touch apps/ — reported rather than
-    // hidden, and see the `test.fixme` at the bottom of this file.
+  test.beforeEach(async ({ page }) => {
+    // NO TOLERANCE HERE, deliberately. This hook used to carry one for "Pattern attribute value
+    // ... is not a valid regular expression", raised by an unescaped `-` in the "Kısa ad"
+    // pattern. That attribute was fixed in apps/web/src/SetupWizard.tsx (the dash is escaped and
+    // the comment above it explains why), so the message can no longer be produced — and a
+    // tolerance for an impossible error is not harmless: it stays armed, and the day the
+    // attribute breaks again the console watch swallows the browser saying so.
     //
-    // `SetupWizard.tsx` gives the "Kısa ad" input `pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"`.
-    // Chrome compiles `pattern` in `v` mode, where a bare `-` at the end of a character class is a
-    // syntax error, so the expression does not compile — and the HTML spec says an uncompilable
-    // pattern is simply IGNORED. Measured on this stack: with "ge cer siz!!" in the field,
-    // `validity.patternMismatch` is false and the form posts. The constraint the attribute claims
-    // to impose does not exist.
-    //
-    // Narrow on purpose. It matches this one message, so any other console error in these tests
-    // still fails them.
-    consoleWatch.tolerate(
-      /Pattern attribute value .* is not a valid regular expression/,
-      'apps/web/src/SetupWizard.tsx: the "Kısa ad" pattern does not compile under Chrome\'s v-mode ' +
-        'regex, so the browser drops it. Not fixable from this branch.',
-    );
-
+    // The whole point of `consoleWatch` is that it is an `auto` fixture: it watches these tests
+    // without being named here.
     await page.goto('/');
     await expect(page.getByRole('heading', { name: 'Cihazı kur' })).toBeVisible();
   });
@@ -126,29 +117,20 @@ test.describe('kurulum sihirbazı', () => {
   });
 
   /**
-   * FIXME — fails today, and the fix is in apps/web/src/SetupWizard.tsx, which this branch owns
-   * none of. Written out rather than left as a sentence in a report so it is carried with the
-   * suite and turns green by itself the day the attribute is corrected.
+   * A regression test, and it was once a failing one.
    *
-   * `pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"` does not compile in Chrome, because `pattern`
-   * is compiled with the `v` flag and a bare `-` at the end of `[a-z0-9-]` is a syntax error
-   * there. An uncompilable pattern is ignored, so the field has NO client-side constraint at all:
-   * "ge cer siz!!" passes `checkValidity()` and posts.
+   * `pattern` is compiled with the `v` flag, where a bare `-` at the end of `[a-z0-9-]` is a
+   * syntax error — and an uncompilable pattern is IGNORED rather than reported, so the field had
+   * NO client-side constraint at all: "ge cer siz!!" passed `checkValidity()` and posted. The
+   * attribute now escapes the dash and this passes; what it guards is the silence of that
+   * failure mode, because there is nothing to see when a constraint quietly stops existing.
    *
-   * Escaping it — `[a-z0-9\-]` — compiles under `v` and restores the check.
+   * The consequence was not cosmetic. The slug is the tenant's address; the server rejects a bad
+   * one, but only after the form has been filled in once, and it answers with a message the
+   * wizard shows verbatim instead of the field going red under the box that is wrong.
    *
-   * The consequence is not cosmetic. The slug is the tenant's address; the server rejects a bad
-   * one, but it does so after the form has been filled in once and it answers with a message the
-   * wizard shows verbatim, instead of the field going red under the box that is wrong.
-   *
-   * Measured, not deduced: in the same Chromium this suite drives, `new RegExp('^(?:' + attr +
-   * ')$', 'v')` throws "Invalid character class" for the attribute as written, `patternMismatch`
-   * stays false for "ge cer siz!!", and both come right with the `-` escaped.
-   *
-   * DECLARED BEFORE THE CLAIM TEST, and that is load-bearing rather than tidy: the wizard
-   * only exists while the appliance is unclaimed, so this has to run while that is still
-   * true. Measured — placed after the claim it fails, because there is no wizard to read a
-   * field off.
+   * DECLARED BEFORE THE CLAIM TEST, and that is load-bearing rather than tidy: the wizard only
+   * exists while the appliance is unclaimed, so this has to run while that is still true.
    */
   test('kısa ad alanı geçersiz bir kısa adı tarayıcıda reddediyor', async ({ page }) => {
     const kisaAd = alan(page, 'Kısa ad');

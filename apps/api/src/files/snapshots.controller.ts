@@ -21,8 +21,8 @@ import { ProblemException } from '../common/problem.filter.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { BackupsService } from '../system/backups.service.js';
 import { CopyService, RESTORE_KIND, type RestorePayload } from './copy.service.js';
-import { FilesService, permissionsOf, type Caller } from './files.service.js';
-import { requireSession, requireUuid } from './files.controller.js';
+import { FilesService, permissionsOf, type Caller, type ShareRow } from './files.service.js';
+import { requireSession, requireUuid, requireWritableShare } from './files.controller.js';
 
 type Schemas = OpenApi.components['schemas'];
 
@@ -196,6 +196,9 @@ export class SnapshotBrowseController {
     if (!destination.has('create')) {
       throw new ProblemException('forbidden', 'Hedef klasöre yazma yetkiniz yok.');
     }
+    // Geri yükleme anlık görüntüden CANLI veri kümesine yazıyor: salt okunur bir arşivin içine
+    // eski bir sürüm bırakmak da yazmak.
+    requireWritableShare(share);
 
     // A free name, decided HERE and returned, so the user sees where the file will land before it
     // lands. The agent refuses to publish over a taken name as well; two doors, because the whole
@@ -237,10 +240,8 @@ export class SnapshotBrowseController {
   }
 
   /** The share, if this caller may read all of it. See the class comment for why all of it. */
-  private async requireReadableShare(
-    caller: Caller,
-    shareId: string,
-  ): Promise<{ id: string; name: string; dataset: string }> {
+  // Tam SATIR: geri yükleme yolunun `read_only` bayrağını da okuması gerekiyor.
+  private async requireReadableShare(caller: Caller, shareId: string): Promise<ShareRow> {
     const share = await this.files.shareFor(caller.organizationId, shareId).catch((): never => {
       throw new ProblemException('not-found', 'Paylaşım bulunamadı.');
     });
@@ -256,7 +257,7 @@ export class SnapshotBrowseController {
         'Geçmiş sürümlere bakmak için paylaşımın tamamını indirme yetkisi gerekir.',
       );
     }
-    return { id: share.id, name: share.name, dataset: share.dataset };
+    return share;
   }
 
   private requireSnapshotName(raw: string): string {

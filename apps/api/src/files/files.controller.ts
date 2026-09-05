@@ -41,6 +41,7 @@ import {
 } from '../identity/posix.service.js';
 import {
   ArchiveTooLargeError,
+  assertWritable,
   CrossShareMoveError,
   DirectoryNotEmptyError,
   EntryMissingOnDiskError,
@@ -54,6 +55,7 @@ import {
   NameTakenOnDiskError,
   NotTrashedError,
   permissionsOf,
+  ShareReadOnlyError,
   SubtreeForbiddenError,
   TrashedParentError,
   type Caller,
@@ -264,6 +266,7 @@ export class FilesController {
             await this.load(caller.organizationId, parentId),
           );
     await this.permit(caller, share.id, parentId, 'create');
+    requireWritableShare(share);
 
     if (!this.files.agentAvailable()) {
       throw new ServiceUnavailableException(
@@ -421,6 +424,9 @@ export class FilesController {
       if (name !== undefined && !move.source.has('modify')) {
         throw new ForbiddenException("renaming needs 'modify'");
       }
+      // Taşımanın iki ucu da aynı paylaşımda (`accessForMove` başkasını reddediyor), yani tek bir
+      // denetim iki ucu birden kapatıyor.
+      requireWritableShare(share);
       // Checked before anything is read or written. A move that discovers the agent is gone
       // halfway through would already have answered the caller's question with a side effect.
       if (!this.files.agentAvailable()) {
@@ -464,6 +470,7 @@ export class FilesController {
       await this.load(caller.organizationId, id),
     );
     const effective = await this.permit(caller, share.id, id, 'modify');
+    requireWritableShare(share);
     try {
       return toEntry(
         await this.files.rename(
@@ -515,6 +522,9 @@ export class FilesController {
     if (!permissionsOf(access, entry.parent_id).has('create')) {
       throw new ForbiddenException("restoring needs 'create' in the folder it goes back into");
     }
+    // Geri yükleme de bir yazma: ad klasörde yeniden görünür oluyor ve dosya ağ sürücüsünde
+    // yeniden listeleniyor.
+    requireWritableShare(share);
 
     try {
       return toEntry(await this.files.restore(caller.organizationId, id), effective);
@@ -543,6 +553,9 @@ export class FilesController {
       await this.load(caller.organizationId, id),
     );
     const effective = await this.permit(caller, share.id, id, 'delete');
+    // Çöpe atmak da yazma sayılıyor: satır listeden kalkıyor, ve salt okunur bir paylaşımda aynı
+    // dosya ağ sürücüsünden silinemiyor — iki istemcinin aynı cevabı vermesi gerekiyor.
+    requireWritableShare(share);
     // AND on everything under it. Trashing a folder sets one flag on one row, but `list` filters on
     // `trashed_at IS NULL`, so every descendant vanishes from every listing for everybody —
     // including descendants somebody narrowed this caller out of with a grant of their own. One
@@ -586,6 +599,7 @@ export class FilesController {
     // fourth §6.2 permission the contract does not have — and the trash is already the gate
     // between a user and permanent loss, which is the protection this operation needs.
     await this.permit(caller, share.id, id, 'delete');
+    requireWritableShare(share);
     // And on every descendant that carries a grant of its own, BEFORE the first `RemoveEntry`.
     // `FilesService.purge` walks the subtree and unlinks the bytes node by node; a check on the
     // named entry alone would let a caller who was deliberately narrowed out of one subfolder
@@ -985,10 +999,9 @@ export class FilesController {
    * client did before shares could be created and what keeps those clients working. A share id
    * that is not this tenant's is a 404, identical to one that does not exist.
    */
-  private async share(
-    request: AuthenticatedRequest,
-    shareId?: string,
-  ): Promise<{ id: string; name: string }> {
+  // Tam SATIR, daraltılmış bir alt küme değil: `read_only` bayrağı da buradan okunuyor, ve dönüş
+  // tipini daraltmak onu `createFolder`ın kök dalından gizliyordu.
+  private async share(request: AuthenticatedRequest, shareId?: string): Promise<ShareRow> {
     const session = requireSession(request);
     if (shareId !== undefined) requireUuid(shareId);
     try {
@@ -1021,6 +1034,21 @@ export function requirePermission(
   if (concealable && !effective.has('list')) throw new NotFoundException();
   if (!effective.has(permission)) {
     throw new ForbiddenException(`this needs '${permission}', which you do not have here`);
+  }
+}
+
+/**
+ * Salt okunur bir paylaşıma yazan her uç bunu çağırıyor.
+ *
+ * İZİNDEN SONRA sorulur, ondan önce değil: paylaşımın yazılabilir olup olmadığı, onu hiç
+ * göremeyen birine söylenecek bir şey değil — önce 404/403 çıksın, salt okunurluk ancak kapıdan
+ * geçenlere anlatılsın. `translate` üzerinden geçiyor ki cümle her rotada aynı olsun.
+ */
+export function requireWritableShare(share: { name: string; read_only: boolean }): void {
+  try {
+    assertWritable(share);
+  } catch (error) {
+    throw translate(error);
   }
 }
 
@@ -1333,6 +1361,15 @@ export function translate(error: unknown): Error {
   // ÜRETİLMEDEN önce geliyor; yer bittikten sonra gelen bir hata, havuzu zaten doldurmuş olurdu.
   if (error instanceof ArchiveTooLargeError) {
     return new ProblemException('insufficient-storage', error.message);
+  }
+  // 403, ve YENİ BİR PROBLEM KODU AÇILMIYOR: `forbidden` zaten 403 ve sözleşme değişmiyor. Cümle
+  // eksik bir yetkiden değil, paylaşımın kendisinin yazmaya kapalı olmasından söz ediyor — çünkü
+  // kullanıcının yapacağı şey bir yetki istemek değil, paylaşımı yazılabilir açtırmak.
+  if (error instanceof ShareReadOnlyError) {
+    return new ProblemException(
+      'forbidden',
+      `'${error.shareName}' salt okunur bir paylaşım; içine yazılamaz.`,
+    );
   }
   if (error instanceof TrashedParentError) return new ConflictException(error.message);
   // 403 and not 404: the caller can see the entry they named — they hold `delete` on it, which is

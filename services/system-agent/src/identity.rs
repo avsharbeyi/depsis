@@ -91,8 +91,41 @@ pub enum IdentityError {
         found: String,
     },
 
+    /// `userdel` reddetti çünkü o uid'i taşıyan bir süreç var.
+    ///
+    /// GEÇİCİ BİR HÂL, bir arıza değil — ve cümlesi ekranda okunacağı için öyle yazılmış. shadow'un
+    /// `userdel`i `/proc/*/status`taki Uid satırlarını tarıyor ve hesabı kullanan bir süreç bulunca
+    /// 8 ile çıkıyor; bu kutuda o süreç neredeyse her zaman bağlı bir istemciye hizmet veren bir
+    /// `smbd` çocuğu, çünkü smbd oturum başına etkin uid'i o kullanıcıya çeviriyor. Bir satır önce
+    /// koşan `pdbedit -x` YENİ girişleri kesiyor ama açık oturumu düşürmüyor.
+    ///
+    /// Eski hâli `Io("userdel alice (300100): ... is currently used by process 4711")` idi ve
+    /// ekranda bir süreç numarası görünüyordu. Kullanıcının yapabileceği şey bir pid değil: ağ
+    /// sürücüsünü kapatmak, ya da beklemek.
+    #[error(
+        "'{login}' hesabı hâlâ bir paylaşıma bağlı görünüyor; bağlantı kapandıktan sonra silmeyi \
+         yeniden deneyin"
+    )]
+    StillInUse { login: String },
+
     #[error("samba is not installed: {0} is not present")]
     SambaMissing(String),
+}
+
+/// `userdel` "bu hesap kullanılıyor" mu dedi?
+///
+/// Metne bakmak normalde kimsenin ilan etmediği bir sözleşmedir; burada mevcut olan tek sözleşme o.
+/// `userdel` her başarısızlıkta 1 değil, HÂLE GÖRE farklı çıkıyor ama gerekçeyi yalnız düz metinde
+/// söylüyor. İki şey bunu yeterince güvenli kılıyor: `ExecRunner` `LC_ALL=C` kuruyor, yani dize
+/// çevrilmemiş olanı (`acl::is_not_supported` aynı gerekçeye dayanıyor); ve ıskalamanın bedeli
+/// okunabilir bir cümle yerine ham hata, hiçbir zaman bir başarı değil.
+fn user_is_in_use(error: &crate::seams::SeamError) -> bool {
+    let crate::seams::SeamError::Command { stderr, .. } = error else {
+        return false;
+    };
+    // shadow 4.13: "user 'alice' is currently used by process 4711". Eski sürümler aynı hâli
+    // "currently logged in" diye yazıyordu.
+    stderr.contains("currently used by process") || stderr.contains("currently logged in")
 }
 
 impl IdentityError {
@@ -283,10 +316,21 @@ pub fn remove<R: CommandRunner>(
     // `-r` YOK, ve bilerek: ev dizini silmek bu kutuda kullanıcının DOSYALARINI silmek olurdu.
     // Hesaplar `-M` ile açılıyor, yani ev dizini hiç yok; ama `-r`nin olmaması, bir gün olsa bile
     // paylaşımdaki verinin bir hesap silme isteğiyle gitmemesini garanti ediyor.
+    //
+    // `-f` de YOK, ve o bir ölçüm sorusu: `-f` hesabı süreçleri dururken siler, arkasında hâlâ o
+    // uid'le koşan bir smbd çocuğu bırakır — ve numara `retired_posix_ids`e yazılmadan yeniden
+    // dağıtılırsa o süreç yeni kullanıcının hakları içinde kalır. Bağlantının kapanmasını beklemek
+    // ucuz; bunu tersine çevirmek için önce cihaz üzerinde ölçüm gerekiyor.
     if uid_of(runner, name).is_some() {
-        runner
-            .run(USERDEL, &["--", name])
-            .map_err(|e| IdentityError::Io(format!("userdel {name} ({}): {e}", uid.get())))?;
+        runner.run(USERDEL, &["--", name]).map_err(|e| {
+            if user_is_in_use(&e) {
+                IdentityError::StillInUse {
+                    login: name.to_string(),
+                }
+            } else {
+                IdentityError::Io(format!("userdel {name} ({}): {e}", uid.get()))
+            }
+        })?;
     }
 
     // Özel grup, hesaptan SONRA: bir kullanıcının birincil grubu, kullanıcı dururken silinemiyor.
@@ -646,6 +690,91 @@ mod tests {
             login: PosixName::parse(login).expect("valid login"),
             nt_hash: None,
         }
+    }
+
+    /// `Scripted`in düşebilen kardeşi: bir programı verilen stderr'le reddediyor.
+    ///
+    /// `Scripted` her zaman başarılı, yani `remove`un hata eşlemesinin tek satırına bile
+    /// varamıyor — ve bir kullanıcının ekranda okuyacağı cümleyi üreten yer tam da orası.
+    struct FailingOn {
+        program: &'static str,
+        stderr: &'static str,
+        answers: HashMap<String, String>,
+    }
+
+    impl CommandRunner for FailingOn {
+        fn run(&self, program: &str, args: &[&str]) -> Result<String, SeamError> {
+            if program == self.program {
+                return Err(SeamError::Command {
+                    program: program.to_string(),
+                    status: 8,
+                    stderr: self.stderr.to_string(),
+                });
+            }
+            let mut argv = vec![program.to_string()];
+            argv.extend(args.iter().map(|a| (*a).to_string()));
+            Ok(self
+                .answers
+                .get(&argv.join(" "))
+                .cloned()
+                .unwrap_or_default())
+        }
+    }
+
+    #[test]
+    fn an_account_still_connected_over_smb_is_refused_in_words_a_person_can_act_on() {
+        // ARIZA: Ayşe'nin Windows'unda paylaşım ağ sürücüsü olarak bağlıyken hesabı silinemiyordu
+        // ve ekranda görünen şey bir süreç numarasıydı. Bir satır önce koşan `pdbedit -x` yeni
+        // girişleri kesiyor ama açık oturumu düşürmüyor; smbd'nin o oturuma hizmet veren çocuğu
+        // kullanıcının uid'ini taşıdığı için `userdel` "currently used by process" ile çıkıyor.
+        let line = "ayse:x:300100:300100:::\n".to_string();
+        let runner = FailingOn {
+            program: USERDEL,
+            stderr: "userdel: user 'ayse' is currently used by process 4711",
+            answers: [
+                (format!("{GETENT} passwd ayse"), line.clone()),
+                (format!("{GETENT} passwd 300100"), line),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let doomed = PosixName::parse("ayse").expect("valid login");
+        let err = remove(&runner, uid(300100), &doomed).expect_err("the session is still open");
+        assert!(matches!(err, IdentityError::StillInUse { .. }), "got {err}");
+
+        let sentence = err.to_string();
+        assert!(
+            !sentence.contains("4711"),
+            "a pid is not something a person can act on: {sentence}"
+        );
+        assert!(
+            sentence.contains("yeniden deneyin"),
+            "the sentence has to name the way out: {sentence}"
+        );
+    }
+
+    #[test]
+    fn a_userdel_that_failed_for_another_reason_keeps_the_raw_words() {
+        // Metne bakan kısım ancak "kullanılıyor" hâlini tanıdığında yardımcı. Tanımadığı her
+        // başarısızlık ham hâliyle günlüğe gitmeli, yoksa okunabilir bir cümle uğruna gerçek
+        // sebep kaybolur.
+        let line = "ayse:x:300100:300100:::\n".to_string();
+        let runner = FailingOn {
+            program: USERDEL,
+            stderr: "userdel: cannot lock /etc/passwd; try again later",
+            answers: [
+                (format!("{GETENT} passwd ayse"), line.clone()),
+                (format!("{GETENT} passwd 300100"), line),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let doomed = PosixName::parse("ayse").expect("valid login");
+        let err = remove(&runner, uid(300100), &doomed).expect_err("userdel failed");
+        assert!(matches!(err, IdentityError::Io(_)), "got {err}");
+        assert!(err.to_string().contains("cannot lock /etc/passwd"), "{err}");
     }
 
     #[test]
