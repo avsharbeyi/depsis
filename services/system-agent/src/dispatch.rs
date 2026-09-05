@@ -720,7 +720,30 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         let staging_dir = [share, STAGING_DIR[0], STAGING_DIR[1]];
 
         // Rename and directory fsync in one call, so step 5 cannot be left out here.
-        paths.publish(&staging_dir, staging_name, &dest_dir, file_name)?;
+        //
+        // ── ADI DOLU OLMASI AYRI BİR CEVAP ──────────────────────────────────────────────────
+        //
+        // `?` ile yukarı verildiğinde bu hata sıradan bir redde dönüşüyordu ve API onu düz bir
+        // 409 `conflict` olarak cevaplıyordu. İstemci tarafında o kodun anlamı "ofseti yeniden
+        // hizala": yükleme döngüsü ofseti dosyanın tam boyutuna çekip sessizce bitiyor, kullanıcıya
+        // "yüklendi" deniyor ve çakışma sorusu HİÇ SORULMUYORDU. Sahada 235 dosya bu yüzden asılı
+        // kaldı — hepsinin baytları burada, hiçbiri yayımlanmamış, ve sahibinin gördüğü tek şey
+        // "yüklendi" oldu.
+        //
+        // `Conflict`, `move_entry`ın (yukarıda) zaten kullandığı cevap ve tam olarak bunun için
+        // var: hedef ad dolu. Yeni bir varyant değil, yeni bir şema sürümü de gerekmiyor.
+        //
+        // KAYNAK YERİNDE DURUYOR: `RENAME_NOREPLACE` ya hepsi ya hiç, yani reddedilen bir yayım
+        // hiçbir şeyi değiştirmedi ve ara alandaki dosya çağıranın kararını bekleyebilir.
+        match paths.publish(&staging_dir, staging_name, &dest_dir, file_name) {
+            Ok(()) => {}
+            Err(SeamError::AlreadyExists(what)) => {
+                return Ok(Response::Conflict {
+                    reason: format!("{what}: something is already there"),
+                });
+            }
+            Err(other) => return Err(other),
+        }
 
         Ok(Response::Publish { bytes: size })
     }
@@ -7693,6 +7716,43 @@ mod tests {
             other => panic!("expected a refusal, got {other:?}"),
         }
         assert!(!h.share_path(&["alice", "full.txt"]).exists());
+    }
+
+    #[test]
+    fn publishing_over_a_taken_name_answers_conflict_not_a_bare_refusal() {
+        // SESSİZ "YÜKLENDİ"NİN KÖKÜ. Bu ret düz bir `Refused` olarak dönüyordu ve API onu düz bir
+        // 409 `conflict` yapıyordu; istemcide o kodun anlamı ise "ofseti yeniden hizala", yani
+        // yükleme döngüsü sessizce bitip kullanıcıya "yüklendi" diyordu. Sahada 235 dosya bu
+        // yüzden asılı kaldı. `Conflict` ayrı bir cevap, ve ayrı olması istemcinin çakışmayı
+        // hizalamadan ayırabilmesinin tek yolu.
+        let h = Harness::with_share("alice");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        std::fs::write(h.share_path(&["alice", "dolu.txt"]), b"onceki").expect("existing");
+        std::fs::write(
+            h.share_path(&["alice", ".depsis", "staging", "yeni.part"]),
+            b"yeni",
+        )
+        .expect("stage");
+
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"yeni.part","destination":["dolu.txt"],"expected_bytes":4,"owner_uid":300100,"owner_gid":300100}"#;
+        match h
+            .agent(&r, &s)
+            .handle(raw, peer(API_UID), "c-taken", "publish")
+        {
+            Response::Conflict { reason } => assert!(reason.contains("dolu.txt"), "{reason}"),
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+
+        // KAYNAK YERİNDE: `RENAME_NOREPLACE` ya hepsi ya hiç, yani reddedilen yayım hiçbir şeyi
+        // değiştirmedi ve kullanıcının kararı hâlâ sorulabilir.
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "dolu.txt"])).expect("read"),
+            b"onceki"
+        );
+        assert!(h
+            .share_path(&["alice", ".depsis", "staging", "yeni.part"])
+            .exists());
     }
 
     #[test]
