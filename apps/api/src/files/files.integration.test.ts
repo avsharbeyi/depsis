@@ -368,6 +368,32 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     ).rejects.toBeInstanceOf(NameTakenOnDiskError);
   });
 
+  it('YAYIM da adın dolu olduğunu söylüyor, düz bir çakışma değil', async () => {
+    // SESSİZ "YÜKLENDİ"NİN KÖKÜ, ve `createFolder`ın bir kapı ötesinde doğru yaptığı şeyin
+    // yayımda eksik kalmış hâli. Ajan `RENAME_NOREPLACE` ile reddedip `conflict` diyor;
+    // `publish` bunu tipli bir hataya çevirmediği için `translate` düz bir 409 `conflict`
+    // üretiyordu. İstemcide o kodun anlamı BAŞKA: "ofseti yeniden hizala". Yükleme döngüsü
+    // ofseti dosyanın tam boyutuna çekip sessizce bitiyor ve kullanıcıya "yüklendi" deniyordu —
+    // sahada 235 dosya böyle asılı kaldı, baytların hepsi sunucuda, hiçbiri yayımlanmamış.
+    const taken = withAgent(() => ({
+      status: 'conflict',
+      reason: 'files-a/foto.jpg: something is already there',
+    }));
+
+    await expect(
+      taken.files.publish(
+        'files-a',
+        'yeni.part',
+        ['foto.jpg'],
+        4,
+        300100,
+        300100,
+        'cid-pub',
+        'test',
+      ),
+    ).rejects.toBeInstanceOf(NameTakenOnDiskError);
+  });
+
   it('names the BIN when a rename collides with a trashed sibling on disk', async () => {
     // The same root cause through the other door. `rename` is delegated to `move`, so renaming
     // onto a binned sibling's name passes `requireNameFree` (which excludes trashed rows) and is

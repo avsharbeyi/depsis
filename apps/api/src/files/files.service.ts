@@ -2640,7 +2640,36 @@ export class FilesService {
       owner_gid: ownerGid,
     } as const;
 
+    /**
+     * Hedef ad dolu — ve bu, çağıranın SORABİLECEĞİ bir soru.
+     *
+     * ── SESSİZ "YÜKLENDİ" ───────────────────────────────────────────────────────────────────
+     *
+     * Ajan `RENAME_NOREPLACE` ile reddediyor ve o ret buraya `conflict` olarak geliyordu; ama
+     * `expectStatus` onu sıradan bir "beklenmeyen durum" sayıyor, `translate` düz bir 409
+     * `conflict` üretiyordu. İstemcide o kodun anlamı BAŞKA: "ofseti yeniden hizala". Yükleme
+     * döngüsü ofseti dosyanın tam boyutuna çekip sessizce bitiyor, kullanıcıya "yüklendi"
+     * deniyor ve çakışma penceresi hiç açılmıyordu. Sahada 235 dosya tam olarak böyle asılı
+     * kaldı: baytların hepsi sunucuda, hiçbiri yayımlanmamış, ve sahibinin gördüğü tek şey
+     * "yüklendi".
+     *
+     * Tipli hata `translate`de `name-taken` koduna dönüşüyor, ve istemcinin çakışmayı
+     * hizalamadan ayırdığı tek işaret o kod — bir cümle olsaydı, cümlenin her düzeltilişi bu
+     * dalı sessizce bozardı.
+     *
+     * DİZİNDE KARŞILIĞI OLAN AD BURADA ARANMIYOR: bu servis dosya adını biliyor ama hangi satırın
+     * tuttuğunu bilmiyor, ve ikisini ayırmak çağıranın işi. `NameTakenOnDiskError` her iki hâli
+     * de doğru anlatıyor — ad diskte dolu — ve ekrandaki cümle çöp ihtimalini zaten söylüyor.
+     */
+    const taken = (status: { status: string; reason?: string }): never => {
+      throw new NameTakenOnDiskError(
+        destination[destination.length - 1] ?? '',
+        status.reason ?? 'the name is already taken on disk',
+      );
+    };
+
     const response = await this.agent.call(request, reason, correlationId);
+    if (response.status === 'conflict') taken(response);
     if (response.status !== 'not_found' || destination.length < 2) {
       return expectStatus(response, 'publish').bytes;
     }
@@ -2655,6 +2684,7 @@ export class FilesService {
     if (!materialised) throw new FolderNotOnDiskError(response.reason);
 
     const retried = await this.agent.call(request, reason, correlationId);
+    if (retried.status === 'conflict') taken(retried);
     if (retried.status === 'not_found') throw new FolderNotOnDiskError(retried.reason);
     return expectStatus(retried, 'publish').bytes;
   }
