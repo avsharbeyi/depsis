@@ -31,7 +31,12 @@ import { DbService } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 import { CopyService } from './copy.service.js';
 import { formatBytes } from './file-operations.controller.js';
-import { assertValidName, FilesService, type ShareRow } from './files.service.js';
+import {
+  assertValidName,
+  FilesService,
+  StagedBytesGoneError,
+  type ShareRow,
+} from './files.service.js';
 import {
   requirePermission,
   requireSession,
@@ -204,6 +209,22 @@ export class UploadsController {
         // Yayım düştü ve "değiştir" seçilmişti: eski dosya şu anda çöpte, üstelik başka bir adla.
         // Geri alınmazsa kullanıcının klasöründe hiçbir şey kalmıyor.
         await this.unpark(session, upload, share, parked, correlationId);
+        // ── ÇIKIŞI OLMAYAN SATIR SİLİNİYOR ────────────────────────────────────────────────
+        // Baytlar ara alanda yoksa bu oturum için yapılabilecek hiçbir şey kalmamış demektir.
+        // Satırı bırakmak, kullanıcıya sonsuza kadar "cevabınızı bekliyor" diyen ve her cevabı
+        // "yayımlanamadı" ile karşılayan bir liste bırakmak olurdu — sahada 12 dosya tam olarak
+        // öyle duruyordu. Silinen şey yalnız oturum kaydı; silinecek bir bayt zaten yok.
+        if (error instanceof StagedBytesGoneError) {
+          await this.db.withTenant(session.organizationId, (db) =>
+            db.query(`DELETE FROM public.upload_sessions WHERE organization_id = $1 AND id = $2`, [
+              session.organizationId,
+              upload.id,
+            ]),
+          );
+          this.logger.warn(
+            `yükleme ${upload.id} kapatıldı: ara alandaki baytlar yok (${upload.filename})`,
+          );
+        }
         throw translate(error);
       });
 

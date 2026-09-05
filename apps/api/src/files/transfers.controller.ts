@@ -37,8 +37,13 @@ export class TransfersController {
     // The role is read from the session the guard resolved, never from the request (ADR-0015 §6).
     const restrictToUserId = request.depsis?.role === 'admin' ? null : session.userId;
 
-    const rows = await this.transfers.list(session.organizationId, restrictToUserId);
-    return { items: rows.map(toTransfer) };
+    // İki sorgu, ve ikincisi bir lüks değil: liste bir tavana takılabiliyor, sayı takılmıyor.
+    // Sahada 235 bekleyen yüklemenin 75'i listeye giriyordu, ve ekran o 75'i "hepsi" sanıyordu.
+    const [rows, awaitingTotal] = await Promise.all([
+      this.transfers.list(session.organizationId, restrictToUserId),
+      this.transfers.awaitingCount(session.organizationId, restrictToUserId),
+    ]);
+    return { items: rows.map(toTransfer), awaitingTotal };
   }
 }
 

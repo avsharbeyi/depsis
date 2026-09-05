@@ -55,6 +55,11 @@ export const ERROR_CODES = [
   // 410: the endpoint or the session is permanently over. Setup after a claim, a console session
   // past its idle limit. Distinct from 404 on purpose — it says the thing existed.
   'gone',
+  // 410, ve `gone`dan ayrı: yüklemenin ara alandaki baytları artık orada değil, yani bu oturum
+  // için yapılabilecek bir şey kalmadı. Sahada 12 yükleme tam bu hâldeydi — ekran onlara "karar
+  // bekliyor" diyordu ve her karar "yayımlanamadı" ile dönüyordu, çıkışı olmayan bir liste.
+  // Ayrı bir kod, çünkü ekranın söyleyeceği cümle başka: "yeniden yükleyin".
+  'staged-bytes-gone',
   'operation-in-progress',
   'internal-error',
 ] as const;
@@ -116,6 +121,7 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   'rate-limited': 429,
   'dependency-unavailable': 503,
   gone: 410,
+  'staged-bytes-gone': 410,
   'operation-in-progress': 409,
   'internal-error': 500,
 };
@@ -143,6 +149,7 @@ const TITLE_BY_CODE: Record<ErrorCode, string> = {
   'rate-limited': 'Çok fazla istek',
   'dependency-unavailable': 'Servis geçici olarak kullanılamıyor',
   gone: 'Bu adres kalıcı olarak kapandı',
+  'staged-bytes-gone': 'Yüklenen baytlar sunucuda kalmamış',
   'operation-in-progress': 'Bu kaynak üzerinde başka bir işlem sürüyor',
   'internal-error': 'Beklenmeyen bir hata oluştu',
 };

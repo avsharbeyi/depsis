@@ -423,6 +423,9 @@ export function Files({
 
     let done = 0;
     const failedNames: string[] = [];
+    /** Baytları sunucuda kalmamış olanlar: bunlar bir arıza değil, yeniden yüklenmesi gereken
+     *  dosyalar, ve aynı cümleye sıkıştırmak kullanıcıya ne yapacağını söylememek olurdu. */
+    const goneNames: string[] = [];
     for (const pending of queue) {
       const sent = await fetch(`${pending.location}/resolve`, {
         method: 'POST',
@@ -431,7 +434,11 @@ export function Files({
         body: JSON.stringify({ policy }),
       }).catch(() => null);
       if (sent === null || !sent.ok) {
-        failedNames.push(pending.filename);
+        if (sent !== null && (await problemCode(sent)) === 'staged-bytes-gone') {
+          goneNames.push(pending.filename);
+        } else {
+          failedNames.push(pending.filename);
+        }
         continue;
       }
       done += 1;
@@ -448,6 +455,14 @@ export function Files({
         done === 1 && first !== undefined
           ? `"${first.filename}" ${what}.`
           : `${done} dosya ${what}.`,
+      );
+    }
+    if (goneNames.length > 0) {
+      notify(
+        'error',
+        goneNames.length === 1
+          ? `"${goneNames[0] ?? ''}" için gönderilen baytlar sunucuda kalmamış; yeniden yükleyin.`
+          : `${goneNames.length} dosyanın baytları sunucuda kalmamış; yeniden yükleyin.`,
       );
     }
     if (failedNames.length > 0) {
@@ -3689,7 +3704,7 @@ export function conflict(code: string | null, offsetHeader: string | null): Conf
 
 /** Sunucunun RFC 9457 gövdesindeki `code`. Gövde okunamazsa `null` — ve o zaman bu bir tahmin
  *  değil, "bilmiyorum" olur. */
-async function problemCode(response: Response): Promise<string | null> {
+export async function problemCode(response: Response): Promise<string | null> {
   try {
     const body: unknown = await response.clone().json();
     const code = (body as { code?: unknown }).code;
