@@ -430,6 +430,10 @@ describeDb('the transfer list, against a real PostgreSQL', () => {
     // The window cuts on `updated_at`, not `created_at`, and these two rows are what that
     // difference means. A thirty-hour upload of a large file is still in flight; a session that
     // has not been touched in twenty-five hours is history.
+    //
+    // ESKİ SATIR YARIM KALMIŞ BİR YÜKLEME, tamamlanmış değil — ve fark ölçümün kendisi. Baytların
+    // hepsi gelmiş bir satır kullanıcının cevabını bekliyor demek, ve pencere ONU kesmiyor
+    // (aşağıdaki iki test bunu ölçüyor). Pencerenin kestiği şey, kimsenin beklemediği bir kayıt.
     const longRunning = `long-${randomUUID()}.bin`;
     const ancient = `ancient-${randomUUID()}.bin`;
 
@@ -449,7 +453,7 @@ describeDb('the transfer list, against a real PostgreSQL', () => {
       createdBy: memberA,
       filename: ancient,
       lengthBytes: 1000,
-      offsetBytes: 1000,
+      offsetBytes: 400,
       updatedSecondsAgo: 25 * 3600,
       createdSecondsAgo: 26 * 3600,
     });
