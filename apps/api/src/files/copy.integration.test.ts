@@ -281,6 +281,50 @@ describeDb('copying a tree', () => {
     expect(await rowsUnder(await idOfPath('/target/docs (2)'))).toEqual(['a.txt', 'inner']);
   });
 
+  /**
+   * ÇÖPTEKİ BİR SATIR ADI HÂLÂ TUTUYOR, ve sahada bunun bedeli ödendi.
+   *
+   * Çöpe atmak satıra bir bayrak yazıyor ama dosyayı diskte KENDİ ADIYLA bırakıyor; tekil indeks
+   * çöptekileri dışladığı için liste adı boş gösteriyor. `freeName` de onları görmediği için
+   * "boş" dediği ad diskte doluydu: cihazda 143 yükleme tam bu yüzden yayımlanamadı ve iki çıkış
+   * yolu da (değiştir, ikisini de tut) aynı duvara çarptı.
+   */
+  it('çöpteki bir dosyanın tuttuğu adı BOŞ saymıyor', async () => {
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO file_entries
+           (organization_id, share_id, parent_id, kind, name, path, size_bytes, trashed_at, trashed_by)
+         VALUES ($1, $2, $3, 'file', 'foto.jpg', '/target/foto.jpg', 4, now(), NULL)`,
+        [org, share, target],
+      ),
+    );
+
+    const { copies } = service();
+
+    // Ad çöpte duruyor: bir sonraki boş ad "foto (2).jpg".
+    expect(await copies.freeName(org, share, target, 'foto.jpg')).toBe('foto (2).jpg');
+
+    // Ve adı tutan satır BULUNUYOR, çöpte olduğu söylenerek — çağıran onu ikinci kez çöpe
+    // atmak yerine park etmeyi seçebilsin diye.
+    const holder = await copies.entryNamed(org, share, target, 'foto.jpg');
+    expect(holder).not.toBeNull();
+    expect(holder?.trashed).toBe(true);
+  });
+
+  it('canlı bir dosyanın tuttuğu ad, çöpte sayılmıyor', async () => {
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO file_entries (organization_id, share_id, parent_id, kind, name, path, size_bytes)
+         VALUES ($1, $2, $3, 'file', 'canli.jpg', '/target/canli.jpg', 4)`,
+        [org, share, target],
+      ),
+    );
+
+    const { copies } = service();
+    const holder = await copies.entryNamed(org, share, target, 'canli.jpg');
+    expect(holder?.trashed).toBe(false);
+  });
+
   it('duplicating a folder in place makes a copy instead of merging it into itself', async () => {
     // The same defect from the other direction: copying `docs` into the share root, where `docs`
     // already is. Name-shaped identity found `docs` itself, decided it was its own copy, and

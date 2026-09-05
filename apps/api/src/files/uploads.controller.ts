@@ -280,12 +280,21 @@ export class UploadsController {
         share,
         session.userId,
         correlationId,
-        `parking the replaced ${upload.filename}`,
+        existing.trashed
+          ? `parking the binned ${upload.filename} so the name is free`
+          : `parking the replaced ${upload.filename}`,
+        // Çöpteki bir satırı park etmek için: dosya diskte adı tutuyor ve onu bırakmasının tek
+        // yolu yeniden adlandırmak. Çöpten çıkmıyor, kurtarılabilir kalıyor.
+        existing.trashed,
       )
       .catch((error: unknown) => {
         throw translate(error);
       });
-    await this.files.trash(session.organizationId, existing.id, session.userId);
+    // ZATEN ÇÖPTEYSE İKİNCİ KEZ ÇÖPE ATILMIYOR: `trash` çöpteki bir satırı bulamaz ve bulsa da
+    // atacağı yer aynı yer. Kullanıcı onu zaten silmişti; burada değişen tek şey adı.
+    if (!existing.trashed) {
+      await this.files.trash(session.organizationId, existing.id, session.userId);
+    }
     return existing.id;
   }
 
