@@ -2267,7 +2267,7 @@ export function Files({
           Çöpte ve aramada çizilmiyor: ikisi de sıralanabilir bir klasör değil. Izgarada da yok —
           orada sütun diye bir şey yok. */}
       {!trashed && !searching && layout === 'list' && (
-        <div className="fhead" role="row">
+        <div className="fhead">
           <span className="pad" aria-hidden />
           <SortHead label="Tür" sort="type" active={order} dir={dir} onPick={pickSort} narrow />
           <SortHead label="Ad" sort="name" active={order} dir={dir} onPick={pickSort} grow />
@@ -3188,9 +3188,13 @@ const DEFAULT_DIRECTION: Readonly<Record<SortKey, 'asc' | 'desc'>> = {
 /**
  * Bir sütun başlığı.
  *
- * DÜĞME, BAŞLIK DEĞİL: basılabilir olduğu görünmeli ve klavyeyle sekmeyle ulaşılmalı. `aria-sort`
- * ekran okuyucuya hangi sütunun ve hangi yönde sıralandığını söylüyor — ok işareti görene ne
- * diyorsa o.
+ * DÜĞME, BAŞLIK DEĞİL: basılabilir olduğu görünmeli ve klavyeyle sekmeyle ulaşılmalı.
+ *
+ * `aria-sort` YOK, ve bu bir eksiklik değil bir düzeltme: o öznitelik yalnız `columnheader` ya da
+ * `rowheader` rolündeki bir öğede geçerli, ve bu liste bir tablo değil — satırlar `.frow`, sürükle
+ * bırak alan, ızgara görünümüne dönebilen kutular. Düğmeye `aria-sort` koymak erişilebilirlik
+ * kapısının (axe, `aria-allowed-attr`) haklı olarak reddettiği şey. Durum bunun yerine düğmenin
+ * ERİŞİLEBİLİR ADINDA: gören biri oku okuyor, okuyucu aynı cümleyi duyuyor.
  */
 function SortHead({
   label,
@@ -3218,12 +3222,13 @@ function SortHead({
   if (grow === true) classes.push('grow');
   if (narrow === true) classes.push('narrow');
   if (cell !== undefined) classes.push(cell);
+  const state = way === null ? '' : way === 'asc' ? ' (şu an artan)' : ' (şu an azalan)';
   return (
     <button
       type="button"
       className={classes.join(' ')}
-      aria-sort={way === null ? 'none' : way === 'asc' ? 'ascending' : 'descending'}
-      title={`${label} sütununa göre sırala`}
+      aria-label={`${label} sütununa göre sırala${state}`}
+      title={`${label} sütununa göre sırala${state}`}
       onClick={() => onPick(sort)}
     >
       {label}
