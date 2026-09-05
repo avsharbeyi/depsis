@@ -40,6 +40,31 @@ const consoleWatchFixture = async (
 ): Promise<void> => {
   const errors: string[] = [];
   const tolerated: { pattern: RegExp; why: string }[] = [];
+  /**
+   * Küçük resmi 404 ile cevaplanan istek sayısı — ve neden ayrı sayılıyor.
+   *
+   * ── PAYLAŞILAN SUNUCU, YARIŞAN İŞÇİLER ──────────────────────────────────────────────────
+   *
+   * Bütün Playwright işçileri TEK bir API'ye bakıyor, ve giriş yapan her sayfanın ana ekranı
+   * "son değişenler" listesini çekip her satır için gömülü küçük resmi soruyor. Bir işçinin o
+   * listede gördüğü dosyayı başka bir işçi iki saniye sonra silebiliyor: istek yola çıktığında
+   * satır vardı, ulaştığında yoktu, ve uç doğru cevabı veriyor — 404, "böyle bir girdi yok".
+   *
+   * Tarayıcı her 4xx'i konsola yazdığı için bu, hiçbir şeyle ilgisi olmayan bir testi düşürüyordu:
+   * işler panosunu ölçen bir test, başka bir testin sildiği bir fotoğraf yüzünden kırmızı oluyor.
+   *
+   * TOLERANS DESENLE YAZILAMIYOR, çünkü konsol satırının metninde adres yok — yalnız "status of
+   * 404". Desenle yazmak, o testteki BÜTÜN 404'leri hoş görmek olurdu. Bu yüzden cevabın kendisi
+   * dinleniyor: yalnız küçük resim ucundan gelmiş bir 404, ve her biri yalnız BİR konsol satırını
+   * karşılıyor.
+   *
+   * Ucun sözleşmesi bundan etkilenmiyor: küçük resmi olmayan bir dosya hâlâ 204 dönmek zorunda ve
+   * `thumbnails.spec.ts` bunu 204 cevabını AÇIKÇA bekleyerek ölçüyor.
+   */
+  let staleThumbnails = 0;
+  page.on('response', (answer) => {
+    if (answer.status() === 404 && answer.url().includes('/thumbnail')) staleThumbnails += 1;
+  });
 
   page.on('console', (message) => {
     if (message.type() !== 'error') return;
@@ -63,7 +88,14 @@ const consoleWatchFixture = async (
 
   await use(watch);
 
-  const unexplained = errors.filter((line) => !tolerated.some(({ pattern }) => pattern.test(line)));
+  const unexplained = errors.filter((line) => {
+    if (tolerated.some(({ pattern }) => pattern.test(line))) return false;
+    if (staleThumbnails > 0 && /status of 404/.test(line)) {
+      staleThumbnails -= 1;
+      return false;
+    }
+    return true;
+  });
   if (unexplained.length === 0) return;
 
   throw new Error(
