@@ -1172,6 +1172,13 @@ select.pill.bad {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* ── ADIN TABANI ────────────────────────────────────────────────────────────
+     `overflow: hidden` taşıyan bir esnek öğenin otomatik en küçük genişliği SIFIRDIR — flexbox'ın
+     kuralı bu, ve `flex: 1` onu korumuyor. Boyut sütununa hizalama için genişlik verildiğinde
+     dar bir pencerede ad sütunu tam olarak sıfıra iniyor: satır duruyor, adı görünmüyor, ve
+     üstüne tıklanamıyor. E2E bunu yakaladı — Playwright "element is not visible" dedi, çünkü
+     kutusu gerçekten boştu. Taban, sütunun kullanışlı kaldığı en dar hâl. */
+  min-width: 96px;
 }
 
 /* ─── ızgara görünümü ────────────────────────────────────────────────────────
