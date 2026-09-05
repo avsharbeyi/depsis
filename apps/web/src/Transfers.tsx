@@ -69,25 +69,42 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
 
-  async function decide(item: Transfer, policy: 'keep-both' | 'replace'): Promise<void> {
-    setDeciding(item.id);
-    const sent = await fetch(`${API_BASE_URL}/uploads/${item.id}/resolve`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ policy }),
-    }).catch(() => null);
-    setDeciding(null);
-    if (sent === null || !sent.ok) {
-      notify('error', `"${item.filename}" yayımlanamadı.`);
-      return;
+  /** Cevap bekleyenler: toplu karar bunlara uygulanıyor. */
+  const waiting = (items ?? []).filter(awaitingAnswer);
+
+  async function decide(batch: Transfer[], policy: 'keep-both' | 'replace'): Promise<void> {
+    if (batch.length === 0) return;
+    setDeciding(batch.length === 1 ? (batch[0]?.id ?? 'toplu') : 'toplu');
+    let done = 0;
+    const failedNames: string[] = [];
+    for (const item of batch) {
+      const sent = await fetch(`${API_BASE_URL}/uploads/${item.id}/resolve`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ policy }),
+      }).catch(() => null);
+      if (sent === null || !sent.ok) {
+        failedNames.push(item.filename);
+        continue;
+      }
+      done += 1;
     }
-    notify(
-      'ok',
-      policy === 'replace'
-        ? `"${item.filename}" değiştirildi; eskisi çöp kutusunda.`
-        : `"${item.filename}" ikinci bir adla kaydedildi.`,
-    );
+    setDeciding(null);
+
+    const what =
+      policy === 'replace' ? 'değiştirildi; eskisi çöp kutusunda' : 'ikinci bir adla kaydedildi';
+    const first = batch[0];
+    if (done === 1 && first !== undefined) notify('ok', `"${first.filename}" ${what}.`);
+    else if (done > 1) notify('ok', `${done} dosya ${what}.`);
+    if (failedNames.length > 0) {
+      notify(
+        'error',
+        failedNames.length === 1
+          ? `"${failedNames[0] ?? ''}" yayımlanamadı.`
+          : `${failedNames.length} dosya yayımlanamadı.`,
+      );
+    }
     reload();
   }
 
@@ -142,6 +159,36 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
         <Empty glyph="⇅" text="Süren aktarım yok." />
       ) : (
         <div>
+          {/* ── HEPSİ İÇİN TEK KARAR ────────────────────────────────────────────────────
+              Bir fotoğraf grubunu yeniden yükleyen biri iki yüz satırın her birine ayrı ayrı
+              basmaz. Sahada tam olarak bu oldu: 200 dosya cevap bekler hâlde durdu ve ekran
+              her biri için ayrı bir düğme gösteriyordu.
+
+              Şerit yalnız BİRDEN FAZLA bekleyen varken çiziliyor: tek dosyada satırın kendi
+              düğmeleri zaten oradadır ve ikinci bir kopyası kalabalıktan başka bir şey değil. */}
+          {waiting.length > 1 && (
+            <div className="trbulk">
+              <span>
+                <b>{waiting.length} dosya</b> cevabınızı bekliyor — baytların hepsi sunucuda.
+              </span>
+              <button
+                type="button"
+                className="b"
+                disabled={deciding !== null}
+                onClick={() => void decide(waiting, 'keep-both')}
+              >
+                Hepsini ikisini de tut
+              </button>
+              <button
+                type="button"
+                className="b"
+                disabled={deciding !== null}
+                onClick={() => void decide(waiting, 'replace')}
+              >
+                Hepsini değiştir
+              </button>
+            </div>
+          )}
           {items.map((item) => {
             const state = STATES[item.state];
             const ratio =
@@ -180,7 +227,7 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
                       type="button"
                       className="b"
                       disabled={deciding === item.id}
-                      onClick={() => void decide(item, 'keep-both')}
+                      onClick={() => void decide([item], 'keep-both')}
                     >
                       İkisini de tut
                     </button>
@@ -188,7 +235,7 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
                       type="button"
                       className="b"
                       disabled={deciding === item.id}
-                      onClick={() => void decide(item, 'replace')}
+                      onClick={() => void decide([item], 'replace')}
                     >
                       Değiştir (eskisi çöpe)
                     </button>
