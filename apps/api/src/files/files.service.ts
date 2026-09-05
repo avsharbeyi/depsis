@@ -218,6 +218,29 @@ export class EntryMissingOnDiskError extends Error {
  * is gone, a name that exists on disk as a FILE. Still its own state rather than
  * `EntryMissingOnDiskError`, because the database is not the thing that is wrong.
  */
+/**
+ * Yayımlanacak baytlar ara alanda YOK.
+ *
+ * ── NEDEN AYRI BİR HATA ─────────────────────────────────────────────────────────────────────
+ *
+ * Ajanın "bulunamadı" cevabı iki ayrı şeyi anlatabiliyor: hedef klasör diskte yok, ya da ara
+ * dosyanın kendisi yok. İlki onarılabiliyor — klasör yaratılıp yayım yeniden deneniyor. İkincisi
+ * onarılamıyor: gönderilen baytlar artık orada değil.
+ *
+ * Ayrımı bir metin karşılaştırması yapmıyor, sıra yapıyor: klasör YARATILDIKTAN sonra (ya da
+ * hedef zaten kökteyse) gelen bir "bulunamadı"nın geriye tek bir açıklaması kalıyor.
+ *
+ * Sahada 12 yükleme bu hâldeydi ve ekran onlara "cevabınızı bekliyor" diyordu; her karar
+ * "yayımlanamadı" ile dönüyor, satır listede kalıyordu. Çıkışı olmayan bir liste, olmayan bir
+ * dosyadan daha kötü: kullanıcı neyin yanlış gittiğini bilmiyor ve denemeyi bırakmıyor.
+ */
+export class StagedBytesGoneError extends Error {
+  constructor(readonly agentReason: string) {
+    super('the staged bytes are no longer on the server');
+    this.name = 'StagedBytesGoneError';
+  }
+}
+
 export class FolderNotOnDiskError extends Error {
   constructor(readonly agentReason: string) {
     super(
@@ -2670,7 +2693,12 @@ export class FilesService {
 
     const response = await this.agent.call(request, reason, correlationId);
     if (response.status === 'conflict') taken(response);
-    if (response.status !== 'not_found' || destination.length < 2) {
+    // KÖKE YAYIMDA "BULUNAMADI"NIN TEK ANLAMI VAR. Paylaşımın kökü her zaman duruyor, yani
+    // eksik olan şey ara dosyanın kendisi: gönderilen baytlar artık sunucuda değil.
+    if (response.status === 'not_found' && destination.length < 2) {
+      throw new StagedBytesGoneError(response.reason);
+    }
+    if (response.status !== 'not_found') {
       return expectStatus(response, 'publish').bytes;
     }
 
@@ -2685,7 +2713,10 @@ export class FilesService {
 
     const retried = await this.agent.call(request, reason, correlationId);
     if (retried.status === 'conflict') taken(retried);
-    if (retried.status === 'not_found') throw new FolderNotOnDiskError(retried.reason);
+    // Klasör AZ ÖNCE yaratıldı ve yayım hâlâ "bulunamadı" diyor: geriye eksik olabilecek tek şey
+    // ara dosya kalıyor. Sıraya dayanan bir ayrım, ajanın cümlesine dayanan bir ayrım değil —
+    // metin karşılaştırması, cümle her düzeltildiğinde sessizce bozulurdu.
+    if (retried.status === 'not_found') throw new StagedBytesGoneError(retried.reason);
     return expectStatus(retried, 'publish').bytes;
   }
 }

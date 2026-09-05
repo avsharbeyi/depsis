@@ -55,6 +55,26 @@ const WINDOW_HOURS = 24;
 const MAX_ROWS = 200;
 
 /**
+ * Kaç tane KARAR BEKLEYEN satır listelenebilir — ve neden ayrı bir tavan.
+ *
+ * ── SAHADA ÖLÇÜLDÜ ──────────────────────────────────────────────────────────────────────────
+ *
+ * Cihazda 235 yükleme cevap bekliyordu, ve bu ekran onların yalnız 75'ini gösteriyordu. İkisi de
+ * bu dosyanın kendi kurallarıydı: 12 satır 24 saatlik pencerenin dışında kalmıştı, 148 satır ise
+ * 200'lük tavana takılmıştı — çünkü tavanı yayımlanmış satırlarla PAYLAŞIYORLARDI ve bir günün
+ * tamamlanmış yüklemeleri listeyi doldurup bekleyenleri dışarı itiyordu.
+ *
+ * Aradaki fark şu: yayımlanmış bir satır bir KAYIT, bekleyen bir satır ise YAPILACAK BİR İŞ.
+ * Birincisini kesmek bilgi kaybı, ikincisini kesmek 663 MB'lık baytı arayüzden ulaşılamaz yapmak
+ * — ve bu ürün için kabul edilemez olan, kullanıcının çıkış yolunun bir terminal olması.
+ *
+ * Bu yüzden bekleyen satırlar pencereden de tavandan da MUAF, kendi tavanları var, ve o tavana
+ * gerçekten değildiyse `awaitingCount` doğruyu söylüyor: ekran "812 bekliyor, 500'ü listede"
+ * diyebiliyor. Sessizce kesmek, bu kusurun ta kendisiydi.
+ */
+const AWAITING_MAX = 500;
+
+/**
  * Recent and in-flight uploads, read from the table the uploads themselves write.
  *
  * There is deliberately no second record of a transfer. A separate progress table would have to be
@@ -91,29 +111,72 @@ export class TransfersService {
     // under a CHECK, so a non-null `completed_at` means an entry really exists.
     return this.db.withTenant(organizationId, (db) =>
       db.query<TransferRow>(
-        `SELECT id::text            AS id,
-                filename,
-                length_bytes::text  AS length_bytes,
-                offset_bytes::text  AS offset_bytes,
-                created_at,
-                updated_at,
-                CASE
-                  WHEN completed_at IS NOT NULL THEN 'completed'
-                  WHEN updated_at < now() - make_interval(secs => $2::double precision)
-                    THEN 'stalled'
-                  ELSE 'active'
-                END AS state
-           FROM public.upload_sessions
-          WHERE organization_id = $1
-            AND updated_at >= now() - make_interval(hours => $3::int)
-            AND ($4::uuid IS NULL OR created_by = $4::uuid)
-          ORDER BY updated_at DESC
-          LIMIT $5`,
-        [organizationId, STALLED_AFTER_SECONDS, WINDOW_HOURS, restrictToUserId, MAX_ROWS],
+        `WITH oturum AS (
+           SELECT id::text            AS id,
+                  filename,
+                  length_bytes::text  AS length_bytes,
+                  offset_bytes::text  AS offset_bytes,
+                  created_at,
+                  updated_at,
+                  CASE
+                    WHEN completed_at IS NOT NULL THEN 'completed'
+                    WHEN updated_at < now() - make_interval(secs => $2::double precision)
+                      THEN 'stalled'
+                    ELSE 'active'
+                  END AS state,
+                  -- Karar bekleyen: baytların hepsi geldi, hiçbiri yayımlanmadı. Yayım damgası
+                  -- ile ofset AYNI şeyi söylemiyor, ve bu ekranın tamamı o farkın üstünde duruyor.
+                  (completed_at IS NULL AND length_bytes > 0 AND offset_bytes >= length_bytes)
+                    AS bekliyor
+             FROM public.upload_sessions
+            WHERE organization_id = $1
+              AND ($4::uuid IS NULL OR created_by = $4::uuid)
+         )
+         SELECT id, filename, length_bytes, offset_bytes, created_at, updated_at, state
+           FROM (
+                  (SELECT * FROM oturum WHERE bekliyor ORDER BY updated_at DESC LIMIT $6)
+                  UNION
+                  (SELECT * FROM oturum
+                    WHERE updated_at >= now() - make_interval(hours => $3::int)
+                    ORDER BY updated_at DESC LIMIT $5)
+                ) AS birlesim
+          ORDER BY updated_at DESC`,
+        [
+          organizationId,
+          STALLED_AFTER_SECONDS,
+          WINDOW_HOURS,
+          restrictToUserId,
+          MAX_ROWS,
+          AWAITING_MAX,
+        ],
       ),
     );
+  }
+
+  /**
+   * Kaç yükleme kararı bekliyor — listelenenler değil, HEPSİ.
+   *
+   * Ayrı bir sorgu, çünkü listedeki sayı tavana takıldığında yanlış olurdu: ekran "75 dosya
+   * bekliyor" derken doğrusu 235 ise, kullanıcı geri kalanının varlığını hiç öğrenemez. Kesme
+   * kararını vermek bu servisin işi; kestiğini söylememek değil.
+   */
+  async awaitingCount(organizationId: string, restrictToUserId: string | null): Promise<number> {
+    const rows = await this.db.withTenant(organizationId, (db) =>
+      db.query<{ n: string }>(
+        `SELECT count(*)::text AS n
+           FROM public.upload_sessions
+          WHERE organization_id = $1
+            AND ($2::uuid IS NULL OR created_by = $2::uuid)
+            AND completed_at IS NULL
+            AND length_bytes > 0
+            AND offset_bytes >= length_bytes`,
+        [organizationId, restrictToUserId],
+      ),
+    );
+    return Number(rows[0]?.n ?? '0');
   }
 }
 
 export const TRANSFER_STALLED_AFTER_SECONDS = STALLED_AFTER_SECONDS;
 export const TRANSFER_WINDOW_HOURS = WINDOW_HOURS;
+export const TRANSFER_AWAITING_MAX = AWAITING_MAX;

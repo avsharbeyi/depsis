@@ -8,7 +8,7 @@ import { ProblemException } from '../common/problem.filter.js';
 import type { DbService } from '../db/db.service.js';
 import type { PosixIdentityService } from '../identity/posix.service.js';
 import type { CopyService } from './copy.service.js';
-import { NameTakenOnDiskError, type FilesService } from './files.service.js';
+import { NameTakenOnDiskError, StagedBytesGoneError, type FilesService } from './files.service.js';
 import { UploadsController } from './uploads.controller.js';
 
 /**
@@ -58,17 +58,28 @@ type Step =
   | { op: 'publish' }
   | { op: 'record' };
 
-function controller(publishFails: boolean): {
+function controller(
+  publishFails: boolean,
+  /** Yayımın hangi hatayla düştüğü. Verilmezse "ad dolu" — bu dosyanın çoğu testinin durumu. */
+  failWith?: Error,
+): {
   route: UploadsController;
   steps: Step[];
+  /** Çalıştırılan SQL: bir satırın SİLİNDİĞİNİ ölçmenin buradaki tek yolu. */
+  sql: string[];
 } {
   const steps: Step[] = [];
+  const sql: string[] = [];
 
   const db = {
     withTenant: <T>(_organizationId: string, run: (q: unknown) => Promise<T>): Promise<T> =>
       run({
-        query: (sql: string): Promise<unknown[]> =>
-          Promise.resolve(sql.includes('FROM public.upload_sessions') ? [SESSION] : []),
+        query: (statement: string): Promise<unknown[]> => {
+          sql.push(statement);
+          return Promise.resolve(
+            statement.includes('FROM public.upload_sessions') ? [SESSION] : [],
+          );
+        },
       }),
   } as unknown as DbService;
 
@@ -91,9 +102,10 @@ function controller(publishFails: boolean): {
     publish: () => {
       steps.push({ op: 'publish' });
       // Ara dosyayı süpürücü silmiş, ya da adı ağ sürücüsünden yazılmış bir dosya tutuyor.
-      return publishFails
-        ? Promise.reject(new NameTakenOnDiskError('rapor.pdf', 'the destination exists'))
-        : Promise.resolve(10);
+      if (!publishFails) return Promise.resolve(10);
+      return Promise.reject(
+        failWith ?? new NameTakenOnDiskError('rapor.pdf', 'the destination exists'),
+      );
     },
     recordPublishedFile: () => {
       steps.push({ op: 'record' });
@@ -122,7 +134,7 @@ function controller(publishFails: boolean): {
   const agent = { isAvailable: () => true } as unknown as AgentService;
   const data = { isAvailable: () => true } as unknown as AgentDataService;
 
-  return { route: new UploadsController(db, files, agent, data, posix, copies), steps };
+  return { route: new UploadsController(db, files, agent, data, posix, copies), steps, sql };
 }
 
 /** Yükleme oturumu, HENÜZ TEK BAYT ALMAMIŞ hâlde: parça yolunu sürmek için gereken şekil. */
@@ -299,6 +311,28 @@ describe('POST /uploads/{id}/resolve with policy "replace"', () => {
       { op: 'restore', id: EXISTING },
       { op: 'rename', id: EXISTING, name: 'rapor.pdf' },
     ]);
+  });
+
+  it('baytları kalmamış bir yüklemenin satırını KAPATIYOR', async () => {
+    // ── ÇIKIŞI OLMAYAN SATIR ──────────────────────────────────────────────────────────────
+    // Ara alandaki dosya yoksa bu oturum için yapılabilecek hiçbir şey yok: yayımlanacak bayt
+    // yok. Satır bırakılırsa ekran ona sonsuza kadar "cevabınızı bekliyor" der ve verilen her
+    // karar "yayımlanamadı" ile döner. Cihazda 12 dosya tam olarak öyle duruyordu.
+    //
+    // Kod da ayrı: 409 çözülebilir bir çakışma demek, bu ise çözülemez — kullanıcıya söylenecek
+    // tek cümle "yeniden yükleyin".
+    const { route, sql } = controller(true, new StagedBytesGoneError('staging: no such file'));
+
+    const error = await route
+      .resolve(request(), SESSION.id, { policy: 'keep-both' })
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ProblemException);
+    expect((error as ProblemException).code).toBe('staged-bytes-gone');
+    expect(sql.some((statement) => statement.includes('DELETE FROM public.upload_sessions'))).toBe(
+      true,
+    );
   });
 
   it('leaves the parked file in the bin when the publish succeeds', async () => {

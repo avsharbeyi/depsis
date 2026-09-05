@@ -430,6 +430,10 @@ describeDb('the transfer list, against a real PostgreSQL', () => {
     // The window cuts on `updated_at`, not `created_at`, and these two rows are what that
     // difference means. A thirty-hour upload of a large file is still in flight; a session that
     // has not been touched in twenty-five hours is history.
+    //
+    // ESKİ SATIR YARIM KALMIŞ BİR YÜKLEME, tamamlanmış değil — ve fark ölçümün kendisi. Baytların
+    // hepsi gelmiş bir satır kullanıcının cevabını bekliyor demek, ve pencere ONU kesmiyor
+    // (aşağıdaki iki test bunu ölçüyor). Pencerenin kestiği şey, kimsenin beklemediği bir kayıt.
     const longRunning = `long-${randomUUID()}.bin`;
     const ancient = `ancient-${randomUUID()}.bin`;
 
@@ -449,7 +453,7 @@ describeDb('the transfer list, against a real PostgreSQL', () => {
       createdBy: memberA,
       filename: ancient,
       lengthBytes: 1000,
-      offsetBytes: 1000,
+      offsetBytes: 400,
       updatedSecondsAgo: 25 * 3600,
       createdSecondsAgo: 26 * 3600,
     });
@@ -524,5 +528,75 @@ describeDb('the transfer list, against a real PostgreSQL', () => {
         updatedSecondsAgo: 1,
       }),
     ).rejects.toMatchObject({ code: '23514' });
+  });
+
+  /**
+   * ── CEVAP BEKLEYEN BİR YÜKLEME LİSTEDEN DÜŞMEZ ────────────────────────────────────────────
+   *
+   * Bu iki test sahada ölçülmüş bir kusurun karşılığı. Cihazda 235 yükleme kararı bekliyordu ve
+   * ekran onların yalnız 75'ini gösteriyordu: 12'si 24 saatlik pencerenin dışında kalmıştı, 148'i
+   * 200'lük tavana takılmıştı — çünkü tavanı yayımlanmış ve süren yüklemelerle paylaşıyorlardı.
+   *
+   * Kesilen satır bir kayıt değil, YAPILACAK BİR İŞTİ: 663 MB bayt sunucuda duruyordu ve onları
+   * yayımlatacak tek düğme o listedeydi. Kesmek, kullanıcının çıkış yolunu bir terminal yapıyordu.
+   */
+  it('bir günden eski bile olsa cevap bekleyen yüklemeyi listeden düşürmüyor', async () => {
+    const bekleyen = `bekleyen-eski-${randomUUID()}.jpeg`;
+    // Pencerenin İKİ KATI kadar eski, ve baytların hepsi gelmiş. Yayımlanmamış olması bir
+    // aksaklık değil: kullanıcıya sorulan soru henüz cevaplanmadı.
+    await seed({
+      organizationId: orgA,
+      shareId: shareA,
+      createdBy: memberA,
+      filename: bekleyen,
+      lengthBytes: 1000,
+      offsetBytes: 1000,
+      updatedSecondsAgo: 48 * 3600,
+      createdSecondsAgo: 49 * 3600,
+    });
+
+    const rows = await transfers.list(orgA, memberA);
+    expect(byName(rows, bekleyen)).toBeDefined();
+    // Ve hâlâ "tamamlandı" demiyor: baytlar geldi, dosya yayımlanmadı.
+    expect(byName(rows, bekleyen)?.state).not.toBe('completed');
+  });
+
+  it('tavanı dolduran yeni satırlar, cevap bekleyen bir yüklemeyi dışarı itmiyor', async () => {
+    const bekleyen = `bekleyen-tavan-${randomUUID()}.jpeg`;
+    await seed({
+      organizationId: orgA,
+      shareId: shareA,
+      createdBy: memberA,
+      filename: bekleyen,
+      lengthBytes: 1000,
+      offsetBytes: 1000,
+      updatedSecondsAgo: 5 * 3600,
+    });
+
+    // TAVANDAN FAZLASI, ve hepsi bekleyen satırdan DAHA YENİ: "en yenisi önce" sıralamasında
+    // bekleyen satır tavanın altında kalıyor, ve eski sorgu onu tam olarak burada kaybediyordu.
+    // Tek bir INSERT: iki yüz ayrı tur, ölçtüğü şeyden uzun sürerdi.
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(
+        `INSERT INTO public.upload_sessions
+           (organization_id, share_id, parent_id, created_by, filename, staging_name,
+            length_bytes, offset_bytes, created_at, updated_at)
+         SELECT $1, $2, NULL, $3, 'dolgu-' || $4 || '-' || i || '.bin', gen_random_uuid() || '.part',
+                1000, 10, now() - interval '1 hour', now() - make_interval(secs => i)
+           FROM generate_series(1, 220) AS i`,
+        [orgA, shareA, memberA, randomUUID()],
+      ),
+    );
+
+    const rows = await transfers.list(orgA, memberA);
+    expect(byName(rows, bekleyen)).toBeDefined();
+
+    // Ve sayı listeden değil tablodan geliyor: tavana takılan bir listenin uzunluğu, "kaç dosya
+    // bekliyor" sorusunun cevabı değil.
+    const total = await transfers.awaitingCount(orgA, memberA);
+    expect(total).toBeGreaterThanOrEqual(1);
+    // Dolgu satırlarının hiçbiri sayılmıyor: baytları eksik, yani kimse onlar için bir soruya
+    // cevap beklemiyor.
+    expect(total).toBeLessThan(220);
   });
 });

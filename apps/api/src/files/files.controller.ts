@@ -53,6 +53,7 @@ import {
   NameTakenByTrashedEntryError,
   NameTakenError,
   NameTakenOnDiskError,
+  StagedBytesGoneError,
   NotTrashedError,
   permissionsOf,
   ShareReadOnlyError,
@@ -1413,6 +1414,13 @@ export function translate(error: unknown): Error {
   if (error instanceof NotTrashedError) return new ConflictException(error.message);
   if (error instanceof FolderNotOnDiskError) {
     return new ConflictException(logged(error.message, error.agentReason));
+  }
+  // 410, ve 409 DEĞİL: bir çakışma çözülebilir, bu çözülemez. Gönderilen baytlar ara alanda yok,
+  // yani bu yükleme oturumu için yapılabilecek hiçbir şey kalmadı — ekranın söyleyeceği tek şey
+  // "yeniden yükleyin". 409 verilseydi istemci onu çözülebilir bir çakışma sanıp aynı satırı
+  // listede tutmaya devam ederdi, ki sahada tam olarak bu oluyordu.
+  if (error instanceof StagedBytesGoneError) {
+    return new ProblemException('staged-bytes-gone', logged(error.message, error.agentReason));
   }
   if (error instanceof EntryMissingOnDiskError) {
     return new ConflictException(logged(error.message, error.agentReason));

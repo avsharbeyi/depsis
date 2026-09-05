@@ -4365,6 +4365,7 @@ components:
             - rate-limited
             - dependency-unavailable
             - gone
+            - staged-bytes-gone
             - operation-in-progress
             - internal-error
         correlationId:
@@ -5624,11 +5625,21 @@ components:
 
     TransferPage:
       type: object
-      required: [items]
+      required: [items, awaitingTotal]
       properties:
         items:
           type: array
           items: { $ref: '#/components/schemas/Transfer' }
+        awaitingTotal:
+          type: integer
+          minimum: 0
+          description: |
+            Kac yukleme KARARI bekliyor — listelenenler degil, hepsi.
+
+            `items` bir tavana takilabiliyor; bu sayi takilmiyor. Ikisi ayrildi cunku sahada 235
+            bekleyen yuklemenin yalniz 75'i listeye giriyordu, ve ekran "75 dosya bekliyor" derken
+            kullanicinin geri kalanindan haberi olmuyordu. Bir tavani sessizce uygulamak, o
+            baytlara ulasmanin tek yolunu bir terminal yapmak demekti.
 
     ReplicateRequest:
       type: object

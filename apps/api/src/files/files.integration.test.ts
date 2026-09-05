@@ -35,6 +35,7 @@ import {
   type Caller,
   type FileEntryRow,
   type ShareRef,
+  StagedBytesGoneError,
 } from './files.service.js';
 import { SearchController } from './search.controller.js';
 import type { CopyService } from './copy.service.js';
@@ -1300,6 +1301,54 @@ describeDb('the file tree, against a real PostgreSQL', () => {
       'publish_transfer',
     ]);
     expect(script[1]).toMatchObject({ path: ['eski'] });
+  });
+
+  /**
+   * ── "BULUNAMADI"NIN İKİ ANLAMI ────────────────────────────────────────────────────────────
+   *
+   * Ajanın aynı cevabı iki ayrı şeyi anlatıyor: hedef klasör diskte yok (onarılabilir), ya da ara
+   * dosyanın kendisi yok (onarılamaz). Aşağıdaki iki test ayrımın METİNLE değil SIRAYLA
+   * yapıldığını sabitliyor — ajanın cümlesine bakan bir kural, cümlenin her düzeltilişinde
+   * sessizce bozulurdu.
+   *
+   * Sahada 12 yükleme baytları kalmamış hâlde asılı duruyordu ve ekran onlara "cevabınızı
+   * bekliyor" diyordu; verilen her karar "yayımlanamadı" ile dönüyor, satır listede kalıyordu.
+   */
+  it('köke yayımda bulunamadı, kayıp ara dosya demek — klasör değil', async () => {
+    // Paylaşımın kökü her zaman duruyor: eksik olabilecek tek şey ara dosya.
+    const gone = withAgent(() => ({ status: 'not_found', reason: 'staging-3: no such file' }));
+
+    await expect(
+      gone.files.publish('files-a', 'staging-3', ['kayip.txt'], 3, 300001, 300001, 'cid', 'test'),
+    ).rejects.toBeInstanceOf(StagedBytesGoneError);
+    // Ve klasör yaratmayı DENEMİYOR: yaratılacak bir klasör yok.
+    expect(gone.calls.map((c) => c['op'])).toEqual(['publish_transfer']);
+  });
+
+  it('klasör yaratıldıktan sonra gelen bulunamadı da kayıp ara dosya demek', async () => {
+    const gone = withAgent((request) => {
+      if (request['op'] === 'create_directory') return { status: 'directory_created' };
+      return { status: 'not_found', reason: 'staging-4: no such file' };
+    });
+
+    await expect(
+      gone.files.publish(
+        'files-a',
+        'staging-4',
+        ['eski2', 'kayip.txt'],
+        3,
+        300001,
+        300001,
+        'cid',
+        'test',
+      ),
+    ).rejects.toBeInstanceOf(StagedBytesGoneError);
+    // Klasör gerçekten yaratıldı, yani ikinci reddin açıklaması artık "klasör yok" olamaz.
+    expect(gone.calls.map((c) => c['op'])).toEqual([
+      'publish_transfer',
+      'create_directory',
+      'publish_transfer',
+    ]);
   });
 
   // ─── permanent deletion ─────────────────────────────────────────────────────

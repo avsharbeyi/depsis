@@ -6970,7 +6970,7 @@ export interface components {
              * @description Kapalı küme. Kaynak tanım packages/contracts/src/errors.ts.
              * @enum {string}
              */
-            code: "unauthenticated" | "invalid-credentials" | "mfa-required" | "mfa-invalid" | "session-expired" | "forbidden" | "not-found" | "validation-failed" | "unsupported-media-type" | "bad-request" | "range-not-satisfiable" | "conflict" | "name-taken" | "precondition-failed" | "idempotency-key-reused" | "quota-exceeded" | "insufficient-storage" | "upload-offset-mismatch" | "checksum-mismatch" | "rate-limited" | "dependency-unavailable" | "gone" | "operation-in-progress" | "internal-error";
+            code: "unauthenticated" | "invalid-credentials" | "mfa-required" | "mfa-invalid" | "session-expired" | "forbidden" | "not-found" | "validation-failed" | "unsupported-media-type" | "bad-request" | "range-not-satisfiable" | "conflict" | "name-taken" | "precondition-failed" | "idempotency-key-reused" | "quota-exceeded" | "insufficient-storage" | "upload-offset-mismatch" | "checksum-mismatch" | "rate-limited" | "dependency-unavailable" | "gone" | "staged-bytes-gone" | "operation-in-progress" | "internal-error";
             /** @description Her yanıtta ve aynı isteğin her log satırında bulunur (§14). */
             correlationId: string;
             errors?: components["schemas"]["ProblemFieldError"][];
@@ -7887,6 +7887,15 @@ export interface components {
         };
         TransferPage: {
             items: components["schemas"]["Transfer"][];
+            /**
+             * @description Kac yukleme KARARI bekliyor — listelenenler degil, hepsi.
+             *
+             *     `items` bir tavana takilabiliyor; bu sayi takilmiyor. Ikisi ayrildi cunku sahada 235
+             *     bekleyen yuklemenin yalniz 75'i listeye giriyordu, ve ekran "75 dosya bekliyor" derken
+             *     kullanicinin geri kalanindan haberi olmuyordu. Bir tavani sessizce uygulamak, o
+             *     baytlara ulasmanin tek yolunu bir terminal yapmak demekti.
+             */
+            awaitingTotal: number;
         };
         ReplicateRequest: {
             source: string;

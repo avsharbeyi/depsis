@@ -2,6 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api, API_BASE_URL } from './api.js';
+import { problemCode } from './Files.js';
 import { useEventRefresh } from './events.js';
 import { formatBytes, formatWhen, percent } from './Dashboard.js';
 import { Empty } from './ui.js';
@@ -51,6 +52,22 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
   const [failed, setFailed] = useState(false);
   /** Kararı gönderilmekte olan yükleme — düğmeler iki kez basılmasın diye. */
   const [deciding, setDeciding] = useState<string | null>(null);
+  /**
+   * Toplu kararın nerede olduğu.
+   *
+   * İki yüz dosya sırayla yayımlanıyor ve bu yarım dakika sürebiliyor. Sayaç olmadan ekranda
+   * hiçbir şey kıpırdamıyor: kullanıcı düğmeye bir daha basıyor, sonra sayfayı yeniliyor, ve
+   * yenilemek yarıda kalan bir işi geride bırakıyor.
+   */
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  /**
+   * Sunucunun bildirdiği TOPLAM bekleyen sayısı — listedeki değil.
+   *
+   * Liste bir tavana takılabiliyor; bu sayı takılmıyor. Cihazda 235 bekleyen yüklemenin yalnız
+   * 75'i listeye giriyordu, ve şerit "75 dosya bekliyor" diyordu: doğru olmayan bir cümle, ve geri
+   * kalan 160 dosyaya arayüzden ulaşmanın hiçbir yolu yoktu.
+   */
+  const [awaitingTotal, setAwaitingTotal] = useState(0);
 
   /**
    * Bekleyen bir yüklemeyi buradan yayımla.
@@ -75,8 +92,12 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
   async function decide(batch: Transfer[], policy: 'keep-both' | 'replace'): Promise<void> {
     if (batch.length === 0) return;
     setDeciding(batch.length === 1 ? (batch[0]?.id ?? 'toplu') : 'toplu');
+    if (batch.length > 1) setProgress({ done: 0, total: batch.length });
     let done = 0;
     const failedNames: string[] = [];
+    /** Baytları ara alanda kalmamış olanlar. Satırları sunucu kapatıyor, yani bir sonraki
+     *  yoklamada listeden düşüyorlar; kullanıcının bilmesi gereken tek şey yeniden yüklemek. */
+    const goneNames: string[] = [];
     for (const item of batch) {
       const sent = await fetch(`${API_BASE_URL}/uploads/${item.id}/resolve`, {
         method: 'POST',
@@ -85,18 +106,39 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
         body: JSON.stringify({ policy }),
       }).catch(() => null);
       if (sent === null || !sent.ok) {
-        failedNames.push(item.filename);
+        if (sent !== null && (await problemCode(sent)) === 'staged-bytes-gone') {
+          goneNames.push(item.filename);
+        } else {
+          failedNames.push(item.filename);
+        }
+        if (batch.length > 1)
+          setProgress({ done: done + failedNames.length + goneNames.length, total: batch.length });
         continue;
       }
       done += 1;
+      if (batch.length > 1) {
+        setProgress({
+          done: done + failedNames.length + goneNames.length,
+          total: batch.length,
+        });
+      }
     }
     setDeciding(null);
+    setProgress(null);
 
     const what =
       policy === 'replace' ? 'değiştirildi; eskisi çöp kutusunda' : 'ikinci bir adla kaydedildi';
     const first = batch[0];
     if (done === 1 && first !== undefined) notify('ok', `"${first.filename}" ${what}.`);
     else if (done > 1) notify('ok', `${done} dosya ${what}.`);
+    if (goneNames.length > 0) {
+      notify(
+        'error',
+        goneNames.length === 1
+          ? `"${goneNames[0] ?? ''}" için gönderilen baytlar sunucuda kalmamış; yeniden yükleyin.`
+          : `${goneNames.length} dosyanın baytları sunucuda kalmamış; yeniden yükleyin.`,
+      );
+    }
     if (failedNames.length > 0) {
       notify(
         'error',
@@ -139,6 +181,7 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
       everLoaded = true;
       setFailed(false);
       setItems(data.items);
+      setAwaitingTotal(data.awaitingTotal);
     };
 
     void load();
@@ -169,7 +212,13 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
           {waiting.length > 1 && (
             <div className="trbulk">
               <span>
-                <b>{waiting.length} dosya</b> cevabınızı bekliyor — baytların hepsi sunucuda.
+                <b>{Math.max(awaitingTotal, waiting.length)} dosya</b> cevabınızı bekliyor —
+                baytların hepsi sunucuda.
+                {/* KESİLDİYSE SÖYLENİYOR. Listenin bir tavanı var ve sessizce uygulanan bir tavan,
+                    kullanıcıya olmayan bir "hepsi bu kadar" gösteriyordu. Düğmeler yalnız burada
+                    listelenenlere basıyor; kalanı bir sonraki turda çıkıyor. */}
+                {awaitingTotal > waiting.length && ` Şu an ${waiting.length} tanesi listede.`}
+                {progress !== null && ` Yayımlanıyor: ${progress.done} / ${progress.total}…`}
               </span>
               <button
                 type="button"
