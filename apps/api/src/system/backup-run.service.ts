@@ -201,7 +201,20 @@ export class BackupRunService {
         movedFiles: 0,
         error: whyUnavailable(status),
       };
-      await this.record(organizationId, target.id, trigger, outcome);
+      // ── AYNI CÜMLE İKİNCİ KEZ YAZILMIYOR ───────────────────────────────────────────────────
+      //
+      // Sahibin kuralı: yedekleme yalnız yedek diski varsa çalışır. Fişi çekilmiş bir diskte tur
+      // yine de üç saatte bir koşuyor ve her turda AYNI satırı yazıyordu: sahada dört günde
+      // birbirinin kopyası otuz iki satır, ve tur geçmişi ekranı bunlarla doluyordu — yani
+      // yedekleme "çalışıyor" gibi görünüyordu, hem de hiçbir dosya kopyalamadan.
+      //
+      // İlki YAZILIYOR: sahibinin diskin ne zaman ve neden düştüğünü görmesi gerekiyor. Sonra
+      // sebep değişene ya da tur gerçekten koşana kadar sessizlik. Elle başlatılan tur bunun
+      // dışında: düğmeye basan biri her seferinde bir cevap hak ediyor.
+      const quiet =
+        trigger === 'zamanli' &&
+        (await this.lastRunSaidTheSame(organizationId, target.id, outcome));
+      if (!quiet) await this.record(organizationId, target.id, trigger, outcome);
       return outcome;
     }
     // KURTARMA KİPİ: disk başka bir cihazın yedeği. Yazmak, o cihazın yedeğini bu cihaza göre
@@ -1293,6 +1306,32 @@ export class BackupRunService {
       startedAt: row.started_at.toISOString(),
       finishedAt: row.finished_at?.toISOString() ?? null,
     }));
+  }
+
+  /**
+   * Son tur da AYNI durumu ve AYNI sebebi mi kaydetmişti?
+   *
+   * Yalnız kaydı sessizleştirmek için: turun kendisi yine koşuyor, zincir yine kendini
+   * zamanlıyor, ve disk geri takıldığı anda bir sonraki tur onu görüyor.
+   */
+  private async lastRunSaidTheSame(
+    organizationId: string,
+    targetId: string,
+    outcome: RunOutcome,
+  ): Promise<boolean> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ state: string; error: string | null }>(
+        `SELECT state, error
+           FROM public.backup_runs
+          WHERE organization_id = $1 AND target_id = $2::uuid
+          ORDER BY started_at DESC
+          LIMIT 1`,
+        [organizationId, targetId],
+      ),
+    );
+    const last = rows[0];
+    if (last === undefined) return false;
+    return last.state === outcome.state && last.error === (outcome.error ?? null);
   }
 
   private async record(

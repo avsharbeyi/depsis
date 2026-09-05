@@ -79,6 +79,8 @@ interface Harness {
   bases: Map<string, string | null>;
   /** Satıra yazılan doğrulama sonuçları: `null` = ölçüm YAPILMADI, `false` = yedek bozuk. */
   verifications: { ok: boolean | null; note: string }[];
+  /** `backup_runs`a gerçekten yazılan satırlar, yazıldıkları sırayla. */
+  recorded: { state: string; error: string | null }[];
 }
 
 function harness(behaviour: Behaviour = {}, base: string | null = null): Harness {
@@ -217,8 +219,19 @@ function harness(behaviour: Behaviour = {}, base: string | null = null): Harness
 
   const verifications: { ok: boolean | null; note: string }[] = [];
 
+  const recorded: { state: string; error: string | null }[] = [];
+
   const query = (text: string, params?: readonly unknown[]): Promise<unknown[]> => {
     if (text.includes('FROM public.shares')) return Promise.resolve(shares);
+    if (text.includes('INSERT INTO public.backup_runs')) {
+      recorded.push({ state: String(params?.[3]), error: (params?.[7] ?? null) as string | null });
+      return Promise.resolve([]);
+    }
+    // `lastRunSaidTheSame` bunu okuyor: tabloya yazılanın aynısı, en yenisi başta.
+    if (text.includes('FROM public.backup_runs')) {
+      const last = recorded[recorded.length - 1];
+      return Promise.resolve(last === undefined ? [] : [last]);
+    }
     if (text.includes('last_copied_share AS share')) {
       return Promise.resolve(
         behaviour.lastCopied === undefined
@@ -271,7 +284,14 @@ function harness(behaviour: Behaviour = {}, base: string | null = null): Harness
     writeDiskDescription: () => Promise.resolve(),
   } as unknown as BackupTargetService;
 
-  return { runs: new BackupRunService(db, agent, targets), calls, trace, bases, verifications };
+  return {
+    runs: new BackupRunService(db, agent, targets),
+    calls,
+    trace,
+    bases,
+    verifications,
+    recorded,
+  };
 }
 
 function row(name: string, directory: boolean): DirRow & { size: number; modified_unix: number } {
@@ -557,6 +577,41 @@ describe('yedek diski okunamadığında', () => {
 
     expect(outcome.state).toBe('kilitli');
     expect(outcome.error).toMatch(/takılı değil/u);
+  });
+
+  it('AYNI sebebi ikinci kez yazmıyor, ama elle başlatılan tura yine cevap veriyor', async () => {
+    // Sahibin kuralı: yedekleme yalnız yedek diski varsa çalışır. Fişi çekilmiş bir diskte tur
+    // yine üç saatte bir koşuyor ve her turda AYNI satırı yazıyordu — sahada dört günde
+    // birbirinin kopyası otuz iki satır, ve tur geçmişi ekranı yedekleme çalışıyormuş gibi
+    // görünüyordu, hem de tek bir dosya kopyalanmadan.
+    const { runs, recorded } = harness({
+      root: { prepared: false, key_loaded: false, mounted: false },
+    });
+
+    await runs.runOnce(ORG, 'zamanli');
+    await runs.runOnce(ORG, 'zamanli');
+    await runs.runOnce(ORG, 'zamanli');
+
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.error).toMatch(/takılı değil/u);
+
+    // Düğmeye basan biri her seferinde bir cevap hak ediyor.
+    await runs.runOnce(ORG, 'elle');
+    expect(recorded).toHaveLength(2);
+  });
+
+  it('sebep DEĞİŞTİĞİNDE yeniden yazıyor', async () => {
+    // Sessizlik "artık hiç yazma" demek değil: disk takılıp kilitli kaldığında cümle değişiyor
+    // ve sahibinin onu görmesi gerekiyor.
+    const behaviour = { root: { prepared: false, key_loaded: false, mounted: false } };
+    const { runs, recorded } = harness(behaviour);
+
+    await runs.runOnce(ORG, 'zamanli');
+    behaviour.root.prepared = true;
+    await runs.runOnce(ORG, 'zamanli');
+
+    expect(recorded).toHaveLength(2);
+    expect(recorded[1]?.error).toMatch(/parola/u);
   });
 
   it('disk gerçekten kilitliyken parolayı istiyor', async () => {

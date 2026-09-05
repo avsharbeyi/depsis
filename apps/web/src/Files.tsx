@@ -700,6 +700,20 @@ export function Files({
    * ekranın her açılışında düğme bir an yok olup sonra belirirdi.
    */
   const [restorable, setRestorable] = useState(true);
+  /**
+   * Yedek diski TANIMLI VE TAKILI mı — "Yedekler" düğmesinin var olma şartı.
+   *
+   * Sahibin kuralı: *"yedekleme kısmı ancak yedek tanımlı bir disk varsa çalışır olmalı; eğer
+   * yedek tanımlı bir disk yoksa yedekler butonunun da dosyalar kısmında görünmemesi gerekiyor."*
+   * Ürün bu kuralı zaten bir yerde uyguluyor — Yedekleme penceresi üye için hiç çizilmiyor,
+   * çünkü "pencereyi açıp 403 göstermek" bir yalan (App.tsx, `adminOnly`). Diskin yokluğu da
+   * aynı şey: düğmeyi çizip arkasında "disk takılı değil" demek, sahibini olmayan bir şeyi
+   * aramaya göndermek.
+   *
+   * VARSAYILAN GİZLİ. Öğrenene kadar çizilmiyor: bir okuma düşerse yanlış tarafa düşen şey
+   * "bir an için görünmeyen düğme" olsun, "arkasında disk olmayan düğme" değil.
+   */
+  const [backupDisk, setBackupDisk] = useState(false);
   const shareQuery = shareId === undefined ? {} : { shareId };
 
   /**
@@ -757,6 +771,24 @@ export function Files({
       cancelled = true;
     };
   }, [currentShare]);
+
+  /* ── yedek diski yerinde mi ──
+     ÜYEYE HİÇ SORULMUYOR: `BackupTargetController` sınıf düzeyinde yönetici kapılı, yani bir
+     üyenin bu soruyu sorması 403 demek — ve zaten Yedekleme penceresi de üyeye açılmıyor.
+     `prepared`, ajanın "iki veri kümesi de yerinde" cevabı; havuz içe alınmamışsa (fişi çekilmiş
+     bir disk) false geliyor ve tur da tam bu alana bakıp "disk takılı değil" diyor. */
+  useEffect(() => {
+    if (!isAdmin) return undefined;
+    let cancelled = false;
+    void (async () => {
+      const { data } = await api.GET('/backups/target', {});
+      if (cancelled || data === undefined) return;
+      setBackupDisk(data.configured && data.target != null && data.target.prepared);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin]);
 
   /**
    * Listenin bir sayfası: `from` yoksa ilk sayfa, varsa imleçten devamı.
@@ -1993,11 +2025,11 @@ export function Files({
           <span className="l">Çöp</span>
           <span className="c">{counts.trash ?? '—'}</span>
         </button>
-        {/* GERİ DÖNÜLECEK BİR NOKTA YOKKEN HİÇ ÇİZİLMİYOR — kapalı bir düğme olarak değil, hiç.
-            Kapalı bir düğme "bir gün burada bir şey olacak" diyor ve kullanıcıyı onu açmanın
-            yolunu aramaya gönderiyor; olmayan bir düğme hiçbir şey vaat etmiyor. İlk anlık
-            görüntü alındığında kendiliğinden beliriyor. */}
-        {restorable && (
+        {/* YEDEK DİSKİ YOKSA VE GERİ DÖNÜLECEK NOKTA YOKSA HİÇ ÇİZİLMİYOR — kapalı bir düğme
+            olarak değil, hiç. Kapalı bir düğme "bir gün burada bir şey olacak" diyor ve
+            kullanıcıyı onu açmanın yolunu aramaya gönderiyor; olmayan bir düğme hiçbir şey vaat
+            etmiyor. Disk takıldığında ve ilk anlık görüntü alındığında kendiliğinden beliriyor. */}
+        {backupDisk && restorable && (
           <button
             type="button"
             className="qf sm"
