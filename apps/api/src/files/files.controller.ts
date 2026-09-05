@@ -62,6 +62,7 @@ import {
   type FileEntryPage,
   type FileEntryRow,
   type ShareRow,
+  type SortDirection,
   type SortOrder,
 } from './files.service.js';
 
@@ -167,6 +168,7 @@ export class FilesController {
     @Query('trashed') trashed?: string,
     @Query('shareId') shareId?: string,
     @Query('sort') sort?: string,
+    @Query('direction') direction?: string,
   ): Promise<Schemas['FileEntryPage']> {
     const caller = requireSession(request);
     const after = cleanCursor(cursor);
@@ -174,6 +176,7 @@ export class FilesController {
     // listelemesi bunu kullanıyor; `parentId` verildiğinde aşağıda satırın paylaşımıyla değişiyor.
     let share = await this.share(request, shareId);
     const order = cleanSort(sort);
+    const way = cleanDirection(direction);
 
     if (isTrue(trashed)) {
       // The policy comes with the page: without it every row would show no expiry, which is what
@@ -210,6 +213,7 @@ export class FilesController {
         after,
         clampLimit(limit),
         order,
+        way,
       ),
     );
   }
@@ -1252,6 +1256,20 @@ export function isTrue(raw: string | undefined): boolean {
  */
 function cleanSort(raw: string | undefined): SortOrder {
   return raw === 'type' || raw === 'modified' || raw === 'size' ? raw : 'name';
+}
+
+/**
+ * İstenen yön, ya da anahtarın kendi varsayılanı.
+ *
+ * `undefined` DÖNÜYOR, `'asc'` değil: yön verilmediğinde karar servise ait ve orada anahtara göre
+ * veriliyor (ada göre artan, tarihe göre azalan). Burada bir varsayılan uydurmak, `sort=modified`
+ * diyen eski bir yer imini en eski dosyayla açardı.
+ *
+ * Tanınmayan değer 400 DEĞİL, yok sayılıyor — `cleanSort`un gerekçesiyle aynı: bir yer imindeki
+ * yazım hatası, dosya gezginini bir tercih yüzünden kırmamalı.
+ */
+function cleanDirection(raw: string | undefined): SortDirection | undefined {
+  return raw === 'asc' || raw === 'desc' ? raw : undefined;
 }
 
 function clampLimit(raw: string | undefined): number {

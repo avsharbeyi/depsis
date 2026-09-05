@@ -218,3 +218,65 @@ describe('çoklu seçim', () => {
     expect([...only]).toEqual(['c']);
   });
 });
+
+/**
+ * Sıralamanın YÖNÜ.
+ *
+ * `merged` yalnız ada göre sıralamada listeyi kendi diziyor (öteki üçünde sunucunun sırası
+ * korunuyor), ve yön oraya ulaşmazsa ekran "Z'den A'ya" derken A'dan Z'ye bir liste gösterir.
+ * Klasörlerin yönle DÖNMEMESİ de burada ölçülüyor: sunucu `kind`i her sıralamada artan tutuyor
+ * ve ekran ondan ayrılırsa "daha fazla göster" satırları yanlış yere ekler.
+ */
+describe('ada göre sıralamanın yönü', () => {
+  const rows = (...names: { name: string; kind: 'file' | 'folder' }[]): FileEntry[] =>
+    names.map(
+      (row, index) =>
+        ({
+          id: `id-${index}`,
+          name: row.name,
+          kind: row.kind,
+          size: 0,
+          modifiedAt: '2026-01-01T00:00:00.000Z',
+          permissions: [],
+        }) as unknown as FileEntry,
+    );
+
+  it('artan yönde klasörler önce, adlar Türkçe sırayla', () => {
+    const out = merged(
+      [],
+      rows(
+        { name: 'zeytin.txt', kind: 'file' },
+        { name: 'Çilek', kind: 'folder' },
+        { name: 'armut.txt', kind: 'file' },
+        { name: 'Ağaç', kind: 'folder' },
+      ),
+      'name',
+      'asc',
+    );
+    expect(out.map((entry) => entry.name)).toEqual(['Ağaç', 'Çilek', 'armut.txt', 'zeytin.txt']);
+  });
+
+  it('azalan yönde adlar tersine dönüyor ama KLASÖRLER hâlâ önde', () => {
+    const out = merged(
+      [],
+      rows(
+        { name: 'zeytin.txt', kind: 'file' },
+        { name: 'Çilek', kind: 'folder' },
+        { name: 'armut.txt', kind: 'file' },
+        { name: 'Ağaç', kind: 'folder' },
+      ),
+      'name',
+      'desc',
+    );
+    expect(out.map((entry) => entry.name)).toEqual(['Çilek', 'Ağaç', 'zeytin.txt', 'armut.txt']);
+  });
+
+  it('yön verilmediğinde ada göre artan varsayılanı geçerli', () => {
+    const out = merged(
+      [],
+      rows({ name: 'b.txt', kind: 'file' }, { name: 'a.txt', kind: 'file' }),
+      'name',
+    );
+    expect(out.map((entry) => entry.name)).toEqual(['a.txt', 'b.txt']);
+  });
+});

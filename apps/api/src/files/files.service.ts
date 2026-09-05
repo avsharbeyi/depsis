@@ -527,33 +527,65 @@ export type SortOrder = 'name' | 'type' | 'modified' | 'size';
 const EXT = "coalesce(lower(substring(name from '.[.]([^.]+)$')), '')";
 const CUR_EXT = 'c_ext';
 
-const SORTS: Readonly<Record<SortOrder, { after: string; by: string }>> = {
-  name: {
-    // Every key ascends, so this one CAN be a single row-value comparison — and is, because it is
-    // both the clearest way to say it and the shape the planner turns into an index scan.
-    after: '(kind, name_fold, id) > (c_kind, c_name_fold, c_id)',
-    by: 'kind, name_fold, id',
-  },
-  /**
-   * Türe göre: aynı uzantılı dosyalar bir arada, her uzantının içinde alfabetik.
-   *
-   * Her anahtar ARTAN, o yüzden `name` gibi tek bir satır-değeri karşılaştırması olabiliyor. İkinci
-   * anahtarın `name_fold` olması bir tercih: bir klasörde otuz `.jpg` varken onları rastgele bir
-   * sırada göstermek, türe göre sıralamanın çözdüğü sorunu bir kat aşağıda yeniden yaratırdı.
-   */
-  type: {
-    after: `(kind, ${EXT}, name_fold, id) > (c_kind, ${CUR_EXT}, c_name_fold, c_id)`,
-    by: `kind, ${EXT}, name_fold, id`,
-  },
-  modified: {
-    after: 'kind > c_kind OR (kind = c_kind AND (updated_at, id) < (c_updated_at, c_id))',
-    by: 'kind, updated_at DESC, id DESC',
-  },
-  size: {
-    after: 'kind > c_kind OR (kind = c_kind AND (size_bytes, id) < (c_size_bytes, c_id))',
-    by: 'kind, size_bytes DESC, id DESC',
-  },
+/**
+ * Sıralamanın YÖNÜ, ve varsayılanı anahtara göre.
+ *
+ * Varsayılanlar bugünkü davranışın aynısı: ada ve türe göre artan, tarihe ve boyuta göre azalan.
+ * Tarihe göre sıralayan biri en son ne değiştiğini soruyor, boyuta göre sıralayan biri diski
+ * neyin doldurduğunu — artan sıra ikisine de klasörün en ilgisiz satırıyla cevap verirdi. `sort`
+ * verilip `direction` verilmediğinde eskiden ne geliyorsa o geliyor.
+ */
+export type SortDirection = 'asc' | 'desc';
+
+const DEFAULT_DIRECTION: Readonly<Record<SortOrder, SortDirection>> = {
+  name: 'asc',
+  type: 'asc',
+  modified: 'desc',
+  size: 'desc',
 };
+
+/**
+ * Bir sıralamanın iki parçası: `by` sırayı üretir, `after` imleçten sonrasını seçer.
+ *
+ * ── KİND HER ZAMAN ARTAN, YÖN NE OLURSA OLSUN ───────────────────────────────────────────────
+ *
+ * Klasörler ve dosyalar hiçbir sırada birbirine karışmıyor, ve bu yönle birlikte dönmüyor: "tersten
+ * sırala" diyen biri klasörlerin listenin ortasına dağılmasını istemiyor, adların tersten
+ * dizilmesini istiyor. Bu yüzden `kind` daima ilk anahtar ve daima artan.
+ *
+ * ── TEK BİÇİM, İKİ YÖN ──────────────────────────────────────────────────────────────────────
+ *
+ * `after` her zaman "önce kind, sonra geri kalanı tek bir satır-değeri karşılaştırması" biçiminde
+ * yazılıyor. Artan sıralamalar eskiden `kind`i de tuple'ın içine alıyordu ve o hâl doğruydu —
+ * ama yalnız her anahtar aynı yöne gittiği sürece. Yön bir seçenek olunca o kısayol iki koda
+ * bölünürdü, ve `after` ile `by`nin ayrı yerlerde yazılması tam olarak imlecin kendi sırasıyla
+ * uyumsuz kalma biçimi. Tek biçim, iki yön: karşılaştırma operatörü dışında hiçbir şey değişmiyor.
+ *
+ * `id` her üçünü de kapatıyor: aynı milisaniyede değişen ya da aynı sayıda bayt taşıyan iki dosya
+ * sıradan, ve eşitlik bozulmadığında imleç bir grubun ortasına düşüp sonraki sayfayı rastgele
+ * yapar.
+ */
+function sortFragments(sort: SortOrder, direction: SortDirection): { after: string; by: string } {
+  const keys: Readonly<Record<SortOrder, { cols: string[]; cursor: string[] }>> = {
+    name: { cols: ['name_fold'], cursor: ['c_name_fold'] },
+    // Aynı uzantılı dosyalar bir arada, her uzantının içinde alfabetik: bir klasörde otuz `.jpg`
+    // varken onları rastgele bir sırada göstermek, türe göre sıralamanın çözdüğü sorunu bir kat
+    // aşağıda yeniden yaratırdı.
+    type: { cols: [EXT, 'name_fold'], cursor: [CUR_EXT, 'c_name_fold'] },
+    modified: { cols: ['updated_at'], cursor: ['c_updated_at'] },
+    size: { cols: ['size_bytes'], cursor: ['c_size_bytes'] },
+  };
+  const { cols, cursor } = keys[sort];
+  const descending = direction === 'desc';
+  const operator = descending ? '<' : '>';
+  const suffix = descending ? ' DESC' : '';
+  const tuple = `(${[...cols, 'id'].join(', ')})`;
+  const cursorTuple = `(${[...cursor, 'c_id'].join(', ')})`;
+  return {
+    after: `kind > c_kind OR (kind = c_kind AND ${tuple} ${operator} ${cursorTuple})`,
+    by: `kind, ${cols.map((c) => c + suffix).join(', ')}, id${suffix}`,
+  };
+}
 
 /**
  * The share this entry lives in, as the caller resolved it from the session.
@@ -1003,8 +1035,9 @@ export class FilesService {
     cursor: string | null,
     limit: number,
     sort: SortOrder = 'name',
+    direction?: SortDirection,
   ): Promise<FileEntryPage> {
-    const order = SORTS[sort];
+    const order = sortFragments(sort, direction ?? DEFAULT_DIRECTION[sort]);
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<FileEntryRow>(
         `WITH cur AS (

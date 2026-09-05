@@ -38,11 +38,27 @@ interface ResolveRow {
 @Injectable()
 export class SessionService {
   /**
-   * ADR-0009 asks for short-lived sessions with refresh rotation. Rotation is not built yet, so
-   * this is the whole lifetime of a session rather than of an access token — twelve hours, which is
-   * a working day and not a month.
+   * Bir oturumun ömrü: BİR HAFTA.
+   *
+   * ── NEDEN ON İKİ SAAT DEĞİL ─────────────────────────────────────────────────────────────
+   *
+   * On iki saat "bir iş günü, bir ay değil" diye seçilmişti ve ADR-0009'un yenileme dönüşümünü
+   * bekliyordu. Ama bu bir ofis uygulaması değil, evdeki bir cihaz: sahibi duvardaki dokunmatik
+   * ekrandan, telefondan ve masaüstünden aynı kutuya bakıyor, ve on iki saat her sabah yeniden
+   * parola girmek demekti. Sahibinin sözü: *"beni hatırla bütün oturumlarda çok kısa çalışıyor,
+   * uzun süre hatırlayacak, 1 hafta falan."*
+   *
+   * ── BUNUN BEDELİ, VE NEDEN KABUL EDİLEBİLİR ─────────────────────────────────────────────
+   *
+   * Çalınan bir çerez artık on iki saat değil bir hafta yaşıyor. Karşılığında duran şeyler:
+   * çerez `HttpOnly`, `Secure` ve `SameSite`; her satır iptal edilebiliyor ve kullanıcı kendi
+   * cihazlarını `GET /me/sessions` ile görüp tek tek kapatabiliyor; parola değişimi bütün
+   * oturumları düşürüyor. Yani "hatırla" uzun, ama unutturmanın yolu terminalsiz ve elde.
+   *
+   * MUTLAK, KAYAN DEĞİL. Kullanımla uzamıyor: bir hafta sonra herkes yeniden giriyor. Kayan bir
+   * pencere, günde bir kez açılan bir tarayıcıda çalınmış bir çerezi sonsuza kadar yaşatırdı.
    */
-  private static readonly LIFETIME_HOURS = 12;
+  private static readonly LIFETIME_HOURS = 24 * 7;
 
   constructor(private readonly db: DbService) {}
 
