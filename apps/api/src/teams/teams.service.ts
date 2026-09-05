@@ -10,7 +10,6 @@ import {
   type Subject,
 } from '@depsis/authz';
 
-import { AgentService } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
 import { IdentitySyncService } from '../identity/identity-sync.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
@@ -197,7 +196,6 @@ export class TeamsService {
   constructor(
     private readonly db: DbService,
     private readonly jobs: JobsService,
-    private readonly agent: AgentService,
     /** For the Unix side of a membership change. See `syncIdentity`. */
     private readonly identity: IdentitySyncService,
   ) {}

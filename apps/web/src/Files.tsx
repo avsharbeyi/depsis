@@ -455,6 +455,18 @@ export function Files({
   const [query, setQuery] = useState('');
   const [term, setTerm] = useState('');
   const [picking, setPicking] = useState(false);
+  /**
+   * Liste mi ızgara mı.
+   *
+   * §5.1 ızgara görünümünü istiyordu ve ekranda tek bir satır düzeni vardı: bir klasör dolusu
+   * fotoğrafın hangisi olduğu ancak adından okunabiliyordu. İki düzen AYNI SATIRI çiziyor, yalnız
+   * yerleşimi değişiyor (`.flist.gridview`) — ikinci bir satır bileşeni, zamanla ayrışan iki
+   * davranış demek olurdu.
+   *
+   * Kip bu pencerede yaşıyor, tercihlerde değil: `Preferences` şemasında bir alan yok ve
+   * sözleşmeyi bu ekran sahiplenmiyor. Kalıcı olması istendiğinde eklenecek yer `prefs`.
+   */
+  const [layout, setLayout] = useState<'list' | 'grid'>('list');
   /** Yedek gezgini açık mı. Kapı burada, pencere History.tsx'te — "çöp ve yedek" ikilisinin
       yedek yarısı. Sahibi bunu Dosyalar'ın içinde arıyor; ayrı ekran kafa karıştırıyordu. */
   const [backups, setBackups] = useState(false);
@@ -1708,6 +1720,18 @@ export function Files({
         >
           ☑ Seç
         </button>
+        {/* Izgara/liste. Tek düğme, iki durum: iki ayrı düğme çizmek, hangisinin AÇIK olduğunu
+            renk farkına bırakırdı — düğmenin üstündeki simge zaten basıldığında ne olacağını
+            söylüyor. */}
+        <button
+          type="button"
+          className={layout === 'grid' ? 'mk act' : 'mk'}
+          aria-pressed={layout === 'grid'}
+          title={layout === 'grid' ? 'Liste görünümü' : 'Izgara görünümü'}
+          onClick={() => setLayout((current) => (current === 'grid' ? 'list' : 'grid'))}
+        >
+          {layout === 'grid' ? '☰ Liste' : '▦ Izgara'}
+        </button>
         {/* ── "TÜMÜNÜ SEÇ", VE SÖZÜ EKRANDAKİ KADAR ────────────────────────────────────────
             Yalnız seçim kipinde çiziliyor: kutular görünmezken "tümü" neyin tümü olduğunu
             söylemiyor. Kapsadığı şey EKRANDAKİ satırlar — klasör iki yüzden kalabalıksa devamı
@@ -2153,7 +2177,13 @@ export function Files({
         </div>
       )}
 
-      <div className="flist">
+      {/* Izgara sınıfı yalnız ÇİZİLECEK SATIR VARKEN: boş hâl ve hata kutusu da bu kabın çocuğu,
+          ve bir ızgara hücresine sıkışmış "Bu klasör boş" kutusu, düzeltmeden kötü. */}
+      <div
+        className={
+          layout === 'grid' && entries !== null && entries.length > 0 ? 'flist gridview' : 'flist'
+        }
+      >
         {listFailed ? (
           <Empty
             glyph="⚠"
@@ -2456,7 +2486,10 @@ export function Files({
             yenilenirken (`entries === null`) de yok: bir önceki klasörden kalan `hasMore`,
             "Yükleniyor…" yazısının altında bir düğme bırakırdı. */}
         {more && cursor !== undefined && entries !== null && entries.length > 0 && (
-          <div style={{ display: 'flex', justifyContent: 'center', padding: '10px 0 14px' }}>
+          <div
+            className="fmore"
+            style={{ display: 'flex', justifyContent: 'center', padding: '10px 0 14px' }}
+          >
             <button type="button" className="mk" disabled={paging} onClick={() => void loadMore()}>
               {paging ? 'Yükleniyor…' : 'Daha fazla göster'}
             </button>
@@ -2590,6 +2623,8 @@ export function Files({
               : `${modal.entries.length} öğe nereye taşınsın?`
           }
           {...moveExclude}
+          {...(shareId === undefined ? {} : { shareId })}
+          {...(currentShare === null ? {} : { shareName: currentShare.name })}
           confirmLabel="Buraya taşı"
           onPick={(destination, where) => void move(modal.entries, destination, where)}
           onCancel={() => setModal({ kind: 'none' })}
@@ -2603,6 +2638,8 @@ export function Files({
               : `${modal.entries.length} öğe nereye kopyalansın?`
           }
           {...copyExclude}
+          {...(shareId === undefined ? {} : { shareId })}
+          {...(currentShare === null ? {} : { shareName: currentShare.name })}
           confirmLabel="Buraya kopyala"
           onPick={(destination, where) => void copy(modal.entries, destination, where)}
           onCancel={() => setModal({ kind: 'none' })}

@@ -11,6 +11,7 @@ import { formatBytes } from './Dashboard.js';
 import { Files } from './Files.js';
 import { Notes } from './Notes.js';
 import { Notifications } from './Notifications.js';
+import { Photos } from './Photos.js';
 import { usePrefs, type Prefs } from './prefs.js';
 import { Remote } from './Remote.js';
 import { SetupWizard } from './SetupWizard.js';
@@ -68,6 +69,7 @@ type Notify = (kind: 'ok' | 'error', text: string) => void;
 
 export type PaneId =
   | 'files'
+  | 'photos'
   | 'notes'
   | 'tasks'
   | 'users'
@@ -108,6 +110,17 @@ const PANES: Record<PaneId, PaneMeta> = {
     label: 'Dosyalar',
     glyph: '🗂',
     tone: 'iris',
+    wide: true,
+    adminOnly: false,
+  },
+  photos: {
+    // §4'ün ana gezinme listesindeki üçüncü modül, ve depoda karşılığı yoktu: telefondan
+    // yüklenmiş binlerce fotoğraf yalnız dosya listesi içinde, AD sırasına göre görülebiliyordu.
+    // Geniş, çünkü çizdiği şey bir ızgara.
+    slug: 'fotograflar',
+    label: 'Fotoğraflar',
+    glyph: '📷',
+    tone: 'live',
     wide: true,
     adminOnly: false,
   },
@@ -272,6 +285,7 @@ const PANES: Record<PaneId, PaneMeta> = {
  *  and it is a design decision rather than whatever order the object literal happens to have. */
 const DOCK_ORDER: PaneId[] = [
   'files',
+  'photos',
   'shares',
   'disks',
   'notes',
@@ -1159,6 +1173,8 @@ function PaneBody({
           savePrefs={save}
         />
       );
+    case 'photos':
+      return <Photos onUnauthenticated={onUnauthenticated} />;
     case 'notes':
       return <Notes notify={notify} />;
     case 'tasks':

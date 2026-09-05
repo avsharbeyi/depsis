@@ -38,13 +38,21 @@ ExecStart=/usr/local/lib/depsis/depsis-console --serve
 # Its own account, in no interesting group. Its access to the shares is exactly the shares' own
 # POSIX permissions, and nothing here grants it more.
 #
-# TO GIVE ADMINISTRATORS A ROOT CONSOLE, two lines change together: set `User=root` below and
-# `DEPSIS_CONSOLE_PRIVILEGED=1` in the Environment= line. Both, or the service refuses to start
+# TO GIVE ADMINISTRATORS A ROOT CONSOLE, edit ONE line — `DEPSIS_CONSOLE_PRIVILEGED=1` in
+# /etc/depsis/console.env — and re-run tools/install/install.sh. The installer then writes the
+# other half of the pair, `User=root`, as a drop-in at
+# /etc/systemd/system/depsis-console.service.d/privileged.conf, and removes that drop-in when the
+# flag goes back to 0. Both halves or neither, because the service refuses to start on a mismatch
 # — a console that runs as root while telling the API `privileged: false` would put the wrong
 # label above a root prompt in the browser, and a flag flipped without changing User= would
-# advertise a root shell that is not one. ADR-0018 wants this to be a deliberate file edit and
-# not a checkbox: a root shell that can be switched on from a web page is a root shell that gets
-# switched on by accident.
+# advertise a root shell that is not one.
+#
+# EDITING THIS FILE IS NOT THE WAY, and that is what the instruction used to say. Every update
+# reinstalls this unit from the repository, so a hand-edited `User=root` was silently reverted
+# while console.env kept the flag — a mismatch, and a console that stopped opening with no screen
+# saying why. ADR-0018 still wants a deliberate edit on the box rather than a checkbox in the
+# browser: a root shell that can be switched on from a web page is one that gets switched on by
+# accident. console.env is that deliberate edit, and it is the file the installer preserves.
 User=depsis-console
 Group=depsis-console
 Environment=DEPSIS_CONSOLE_PRIVILEGED=0

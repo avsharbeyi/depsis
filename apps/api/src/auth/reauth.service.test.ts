@@ -2,6 +2,7 @@ import { UnauthorizedException } from '@nestjs/common';
 import type { Request } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 
+import { ProblemException } from '../common/problem.filter.js';
 import type { DbService } from '../db/db.service.js';
 import type { LoginThrottleService } from './login-throttle.service.js';
 import type { PasswordService } from './password.service.js';
@@ -30,7 +31,12 @@ function harness(options: {
   verify: ReturnType<typeof vi.fn>;
 } {
   const record = vi.fn().mockResolvedValue(undefined);
-  const gate = vi.fn().mockResolvedValue(options.gate ?? true);
+  // `gate` artık bir karar nesnesi döndürüyor: reddederken kilidin kalan süresini de taşıyor.
+  // 754 saniye rastgele değil — yukarı yuvarlandığında 13 dakika eder, yani aşağıdaki testin
+  // ölçtüğü cümle sabit bir metin değil, bu sayıdan türetilmiş olmak zorunda.
+  const allowed = options.gate ?? true;
+  const decision = allowed ? { allowed: true } : { allowed: false, retryAfterSeconds: 754 };
+  const gate = vi.fn().mockResolvedValue(decision);
   const verify = vi.fn().mockResolvedValue(options.passwordOk ?? true);
 
   const rows =
@@ -81,22 +87,35 @@ describe('re-authentication', () => {
     // verification: a caller who can make the server hash on demand has a denial of service.
     const { service, verify, record } = harness({ gate: false });
     await expect(service.require('o-1', 'u-1', 'anything', request)).rejects.toBeInstanceOf(
-      UnauthorizedException,
+      ProblemException,
     );
     expect(verify).not.toHaveBeenCalled();
     expect(record).not.toHaveBeenCalled();
   });
 
-  it('gives a throttled caller the same answer as a wrong password', async () => {
-    // A distinct "you are being throttled" would confirm to an attacker that their guesses are
-    // landing on a real account.
-    const wrong = harness({ passwordOk: false });
+  it('tells a throttled caller how long the lock lasts, instead of "wrong password"', async () => {
+    // Bu test eskiden bunun TERSİNİ ölçüyordu: kısıtlanan çağıran parola yanlışıyla harfi harfine
+    // aynı cevabı almalı deniyordu. Gerekçe bu yol için tutmuyordu — çağıran `SessionGuard`'dan
+    // geçmiş, hesabın var olduğunu zaten biliyor — ve bedeli, doğru parolayla gelen sahibinin 15
+    // dakika boyunca "Parola hatalı." okuyup beklemesi gerektiğini hiçbir yerden öğrenememesiydi.
     const throttled = harness({ gate: false });
-    const [a, b] = await Promise.all([
-      wrong.service.require('o-1', 'u-1', 'x', request).catch((e: Error) => e.message),
-      throttled.service.require('o-1', 'u-1', 'x', request).catch((e: Error) => e.message),
-    ]);
-    expect(a).toBe(b);
+    const error = await throttled.service
+      .require('o-1', 'u-1', 'x', request)
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ProblemException);
+    const problem = error as ProblemException;
+    expect(problem.getStatus()).toBe(429);
+    // 754 saniye = 13 dakika (yukarı yuvarlanmış). Sabit bir metin değil, sayacın verdiği sayı.
+    expect(problem.detail).toContain('13 dakika');
+    expect(problem.retryAfter).toBe(754);
+
+    // Ve parola yanlışı hâlâ 401: ikisi ayrı cevap olmasaydı düzeltme bir işe yaramazdı.
+    const wrong = harness({ passwordOk: false });
+    await expect(wrong.service.require('o-1', 'u-1', 'x', request)).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
   });
 
   it('keys the throttle on the account name, not on the user id', async () => {

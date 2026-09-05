@@ -17,12 +17,42 @@ const STATE: Record<Status, { label: string; className: string }> = {
   dead: { label: 'vazgeçildi', className: 'st2 er' },
 };
 
-/** What each kind actually does, in the words of somebody who did not write it. */
-const KIND: Record<string, string> = {
-  'permissions.apply': 'İzinleri dosya sistemine yaz',
+/**
+ * What each kind actually does, in the words of somebody who did not write it.
+ *
+ * TABLODA KUYRUĞUN HER TÜRÜ VAR. Üç satırlık hâlinde on sekiz türün on beşi makine adıyla
+ * görünüyordu: "200 dosya kopyalanıyor, ilerlemesi Sistem işleri panosunda" denen kullanıcı
+ * panoda `files.copy · files.copy` okuyordu. Terminale hiç girmemesi beklenen bir cihazın iş
+ * panosunda ham tür adı, panoyu okunmaz kılıyor.
+ *
+ * `apps/worker/src/handlers/registry.ts` bu türlerin kaynağı; oraya bir tür eklendiğinde buraya
+ * da bir satır gerekiyor ve `Jobs.test.ts` o unutmayı yakalıyor.
+ */
+export const KIND: Record<string, string> = {
+  'files.copy': 'Dosyaları kopyala',
+  'files.index-drain': 'Dosya dizinini güncelle',
+  'files.reconcile': 'Dosya kayıtlarını diskle karşılaştır',
+  'files.restore-snapshot': 'Yedekten dosya geri getir',
+  'files.trash.purge': 'Çöpü kalıcı olarak temizle',
+  'identity.revoke-smb': 'SMB erişimini kapat',
   'identity.sync': 'Hesapları ve grupları eşitle',
+  'jobs.prune': 'Eski iş kayıtlarını temizle',
+  'permissions.apply': 'İzinleri dosya sistemine yaz',
+  'remote.authorize': 'Uzak cihazı ağa yetkilendir',
+  'storage.backup-tick': 'Zamanlanmış yedekleri denetle',
+  'storage.backup.purge': 'Süresi dolan yedekleri sil',
+  'storage.backup.run': 'Zamanlanmış yedeği al',
+  'storage.backup.run.now': 'Yedeği şimdi al',
+  'storage.backup.verify': 'Yedeği doğrula',
+  'storage.pool.create': 'Depolama havuzunu kur',
+  'storage.replicate': 'Yedeği ikinci havuza kopyala',
+  'storage.replicate-offsite': 'Yedeği cihaz dışına kopyala',
   'storage.snapshot': 'Anlık görüntü al',
+  'tasks.overdue-sweep': 'Geciken işleri bildir',
 };
+
+/** Yedek yoklama: akış kalıcı kapanırsa (429/401/502) pano donmasın diye. */
+const FALLBACK_MS = 30_000;
 
 /**
  * The work the appliance is doing, and the work it gave up on.
@@ -49,9 +79,24 @@ export function Jobs({ onUnauthenticated }: { onUnauthenticated: () => void }): 
   // the list, and a board with nothing happening makes no requests at all.
   useEventRefresh('job', reload);
 
+  // YEDEK YOKLAMA, akışın kalıcı kapandığı hâller için. `EventSource` yalnız ağ hatasında kendi
+  // yeniden bağlanıyor; 429, 401 ya da güncelleme sırasındaki 502'de bir daha denemiyor. Otuz
+  // saniyede bir okumak, ölen bir işin "çalışıyor" olarak asılı kalmasından ucuz — Transfers
+  // ekranı aynı gerekçeyle aynı şeyi yapıyor.
+  useEffect(() => {
+    const timer = window.setInterval(reload, FALLBACK_MS);
+    return () => window.clearInterval(timer);
+  }, [reload]);
+
+  // Liste yalnız SÜZGEÇ değiştiğinde boşalıyor. Her yenilemede boşaltmak, otuz saniyede bir
+  // satırları silip "Yükleniyor…" yazan — yani okunmaya çalışılırken yanıp sönen — bir pano
+  // demekti.
+  useEffect(() => {
+    setJobs(null);
+  }, [status]);
+
   useEffect(() => {
     let alive = true;
-    setJobs(null);
     setFailed(false);
     void (async () => {
       const { data, response } = await api.GET('/jobs', {
@@ -114,7 +159,11 @@ export function Jobs({ onUnauthenticated }: { onUnauthenticated: () => void }): 
         <div className="urow" key={job.id}>
           <span className="i">
             <b>{KIND[job.kind] ?? job.kind}</b>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{job.kind}</span>
+            {/* Ham tür adı yalnız bir Türkçe karşılığı VARKEN altta duruyor: eşleşme yoksa iki
+                satır da aynı dizgeyi yazıyordu. */}
+            {KIND[job.kind] !== undefined && (
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{job.kind}</span>
+            )}
           </span>
           <span className="val" style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
             {new Date(job.createdAt).toLocaleString('tr')}

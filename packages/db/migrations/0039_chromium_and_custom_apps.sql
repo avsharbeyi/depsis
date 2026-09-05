@@ -98,6 +98,20 @@ SELECT id, 'app', 0, true,
  WHERE slug = 'chromium';
 
 -- Down Migration
+--
+-- ÖZEL UYGULAMALARIN KURULUMLARI ÖNCE GİDİYOR. Up, `app_instances.catalogue_id`in iki kaynağı
+-- birden gösterebilmesi için FK'yı düşürmüştü; o günden beri kurulan her özel uygulama o kolona
+-- bir `app_custom.id` yazdı. FK'yı önce geri koymak, bu satırlar için `app_catalogue`da karşılığı
+-- olmayan bir referans demek: `ADD CONSTRAINT` 23503 ile düşer ve geri alma ZİNCİRİN ORTASINDA
+-- durur — üstündeki göçler inmiş, bu yarım kalmış. Geri alınamayan bir geri alma, geri almamaktan
+-- kötü.
+--
+-- Satırları silmek doğru cevap, çünkü 0039 öncesinde özel uygulama diye bir şey yoktu: o
+-- kurulumların geri dönülen dünyada bir karşılığı yok. 0040'ın Up'ı katalogdan düşen Chromium için
+-- aynı şeyi yapıyor.
+
+DELETE FROM public.app_instances
+ WHERE catalogue_id IN (SELECT id FROM public.app_custom);
 
 ALTER TABLE public.app_instances
   ADD CONSTRAINT app_instances_catalogue_id_fkey

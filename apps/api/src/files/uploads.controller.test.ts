@@ -1,8 +1,10 @@
+import type { Response } from 'express';
 import { describe, expect, it } from 'vitest';
 
 import type { AgentDataService } from '../agent/agent-data.service.js';
 import type { AgentService } from '../agent/agent.service.js';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
+import { ProblemException } from '../common/problem.filter.js';
 import type { DbService } from '../db/db.service.js';
 import type { PosixIdentityService } from '../identity/posix.service.js';
 import type { CopyService } from './copy.service.js';
@@ -122,6 +124,165 @@ function controller(publishFails: boolean): {
 
   return { route: new UploadsController(db, files, agent, data, posix, copies), steps };
 }
+
+/** Yükleme oturumu, HENÜZ TEK BAYT ALMAMIŞ hâlde: parça yolunu sürmek için gereken şekil. */
+const FRESH = { ...SESSION, offset_bytes: '0' };
+
+/** tus `Upload-Metadata`: adı ve paylaşımı taşıyor — köke yüklemede paylaşımı çağıran söylüyor. */
+const metadata = (filename: string): string =>
+  `filename ${Buffer.from(filename, 'utf8').toString('base64')},` +
+  `shareId ${Buffer.from(SHARE.id, 'utf8').toString('base64')}`;
+
+interface ChunkHarness {
+  route: UploadsController;
+  agentCalls: Record<string, unknown>[];
+  offsets: number[];
+  response: Response;
+}
+
+/**
+ * Parça yolunun (`PATCH /uploads/{id}`) sürücüsü.
+ *
+ * Veritabanı yok: ölçülen şey bu denetleyicinin ajanla ve ofset önbelleğiyle ne yaptığı.
+ * `data.send` özeti GÜNCELLEMİYOR — gerçek veri kanalı güncelliyor — yani `Upload-Checksum` ile
+ * gönderilen her özet uyuşmaz sayılıyor; uyuşmazlık dalını sürmenin en ucuz yolu bu.
+ */
+function chunkController(
+  options: { agentUp?: boolean; discarded?: boolean; available?: number | null } = {},
+): ChunkHarness {
+  const agentCalls: Record<string, unknown>[] = [];
+  const offsets: number[] = [];
+
+  const db = {
+    withTenant: <T>(_organizationId: string, run: (q: unknown) => Promise<T>): Promise<T> =>
+      run({
+        query: (sql: string, values: unknown[]): Promise<unknown[]> => {
+          if (sql.includes('SET offset_bytes')) offsets.push(Number(values[2]));
+          if (sql.includes('INSERT INTO public.upload_sessions')) {
+            return Promise.resolve([{ id: FRESH.id }]);
+          }
+          return Promise.resolve(sql.includes('FROM public.upload_sessions') ? [FRESH] : []);
+        },
+      }),
+  } as unknown as DbService;
+
+  const files = {
+    shareFor: () => Promise.resolve(SHARE),
+    find: () => Promise.resolve({ share_id: SHARE.id, kind: 'folder', trashed_at: null }),
+    effectiveAt: () => Promise.resolve(new Set(['create', 'list', 'read'])),
+    componentsOf: () => Promise.resolve([]),
+  } as unknown as FilesService;
+
+  const agent = {
+    isAvailable: () => options.agentUp ?? true,
+    call: (call: Record<string, unknown>) => {
+      agentCalls.push(call);
+      switch (call['op']) {
+        case 'open_transfer':
+          return Promise.resolve({ status: 'transfer', token: 'tok', offset: 0 });
+        case 'discard_transfer':
+          return Promise.resolve({
+            status: (options.discarded ?? true) ? 'discarded' : 'refused',
+            reason: 'no',
+          });
+        default:
+          return Promise.reject(new Error(`no fixture answers '${String(call['op'])}'`));
+      }
+    },
+  } as unknown as AgentService;
+
+  const data = {
+    isAvailable: () => true,
+    send: (_token: string, _offset: number, length: number): Promise<number> =>
+      Promise.resolve(length),
+  } as unknown as AgentDataService;
+
+  const posix = { posixUidFor: () => Promise.resolve(20000) } as unknown as PosixIdentityService;
+  const copies = {
+    availableBytes: () => Promise.resolve(options.available ?? null),
+  } as unknown as CopyService;
+
+  return {
+    route: new UploadsController(db, files, agent, data, posix, copies),
+    agentCalls,
+    offsets,
+    response: {
+      setHeader: () => undefined,
+      status: () => undefined,
+      end: () => undefined,
+    } as unknown as Response,
+  };
+}
+
+describe('PATCH /uploads/{id} with a checksum that does not match', () => {
+  it('throws the staged file away instead of resuming past the corrupt region', async () => {
+    // ESKİDEN: yalnız kaydedilen ofset ilerletilmiyordu. Ama baytlar diske yazılıp `fsync`
+    // edilmişti ve bir sonraki PATCH'te `open_transfer` dosyayı `seek(End)` ile ölçüp istemciye
+    // bozuk parçanın SONRASINDAN devam etmesini söylüyordu — yükleme, ortasında bozuk bir bölgeyle,
+    // hatasız "tamamlanıyordu". Tek doğru cevap ara dosyayı atmak.
+    const { route, agentCalls, offsets, response } = chunkController();
+    const digest = Buffer.alloc(32, 7).toString('base64');
+
+    const error = await route
+      .sendChunk(request(), response, FRESH.id, '0', '10', `sha256 ${digest}`)
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ProblemException);
+    expect((error as ProblemException).code).toBe('checksum-mismatch');
+    expect(agentCalls.map((call) => call['op'])).toContain('discard_transfer');
+    // Ve önbellek SIFIRA çekiliyor: istemci baştan gönderiyor, bozuk bölgenin ötesinden değil.
+    expect(offsets.at(-1)).toBe(0);
+  });
+
+  it('says the staged file still holds the corrupt region when it cannot be discarded', async () => {
+    // Sessizce "checksum uyuşmadı" demek, istemciye devam etmesi için yeşil ışık olurdu.
+    const { route, response } = chunkController({ discarded: false });
+    const digest = Buffer.alloc(32, 7).toString('base64');
+
+    const error = await route
+      .sendChunk(request(), response, FRESH.id, '0', '10', `sha256 ${digest}`)
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect((error as ProblemException).code).toBe('dependency-unavailable');
+  });
+});
+
+describe('the agent availability latch', () => {
+  it('does not refuse an upload because the agent was slow at BOOT', async () => {
+    // `AgentService.available` yalnız `onModuleInit`te `true` oluyor ve bir daha
+    // değerlendirilmiyor. Açılışta ajan geç yetişirse bayrak kalıcı `false` kalıyor, ajan bir
+    // dakika sonra sağlıklı hâle gelse bile cihaza web'den hiçbir dosya yüklenemiyordu; tek çıkış
+    // API'yi yeniden başlatmaktı. Aynı mandal `shares`, `permissions` ve `teams` servislerinden
+    // aynı gerekçeyle kaldırılmıştı.
+    const { route, response } = chunkController({ agentUp: false });
+
+    await expect(
+      route.create(request(), response, '10', metadata('rapor.pdf')),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe('POST /uploads with more bytes than the pool has', () => {
+  it('refuses at the FIRST request instead of at the last byte', async () => {
+    // §5.4: sunucu kotayı ve boş alanı başlamadan denetler. Denetim yalnız yazma sırasındayken
+    // kullanıcı 40 GB'lık bir dosyayı sürükleyip saatler sonra %15'te 507 alıyordu.
+    const { route, response } = chunkController({ available: 6 });
+
+    const error = await route
+      .create(request(), response, '40', metadata('film.mkv'))
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ProblemException);
+    expect((error as ProblemException).code).toBe('insufficient-storage');
+    // Ve iki sayı da cümlede: "40 B gerekiyor, 6 B boş" bir kullanıcının ne yapacağını bilebileceği
+    // cümle; "yer yok" değil.
+    expect((error as ProblemException).detail).toContain('40 B');
+    expect((error as ProblemException).detail).toContain('6 B');
+  });
+});
 
 describe('POST /uploads/{id}/resolve with policy "replace"', () => {
   it('puts the parked file back when the publish fails', async () => {

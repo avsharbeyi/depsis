@@ -389,6 +389,15 @@ describeDb('remote access, against a real PostgreSQL', () => {
     // ADR-0020's verification list. Every one of these would otherwise be concatenated into a
     // request path on the privileged side.
     expect(NETWORK_ID.test(NET_OK)).toBe(true);
+    // NUL baytı kaynağa DÜZ yazılmıyor, üretiliyor. Düz yazılmış bir kontrol karakteri
+    // görünmezdir: bir düzenlemede ya da bir biçimlendiricide sessizce düşer, dize on beş
+    // karaktere iner ve kural onu artık NUL yüzünden değil UZUNLUKTAN reddeder — iddia yeşil
+    // kalır ama ölçtüğünü sandığı şeyi hiç ölçmez. Uzunluk burada doğrulanıyor ki bayt kaybolursa
+    // test kırmızıya dönsün. Aynı kayıp `packages/agent-protocol/src/index.test.ts`te bir kez
+    // yaşandı ve orada kayda geçirildi.
+    const nulId = '0123456789abcd' + String.fromCharCode(0) + 'f';
+    expect(nulId).toHaveLength(16);
+
     for (const bad of [
       '',
       '8056c2e21c00000', // fifteen
@@ -396,7 +405,7 @@ describeDb('remote access, against a real PostgreSQL', () => {
       '8056C2E21C000001', // uppercase
       '8056c2e21c00000g', // not hex
       '../../../etc/pas', // exactly sixteen bytes, and a path fragment
-      '0123456789abcd f',
+      nulId,
       '0123456789ab\r\ncd',
       '0123456789abc de',
     ]) {

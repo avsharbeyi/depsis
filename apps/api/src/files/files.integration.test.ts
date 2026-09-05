@@ -13,6 +13,7 @@ import {
 } from '../agent/agent.service.js';
 import type { AuthenticatedRequest } from '../auth/session.guard.js';
 import { AuditService } from '../audit/audit.service.js';
+import { ProblemException } from '../common/problem.filter.js';
 import { DbService } from '../db/db.service.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
@@ -1634,8 +1635,9 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
       stubUploadData,
       new PosixIdentityService(pdb),
       // Yalnız `freeName`/`entryNamed` için: bu süit çakışma çözümünü ölçmüyor, ama kurucu
-      // imzası eksiksiz olmalı.
-      {} as unknown as CopyService,
+      // imzası eksiksiz olmalı. `availableBytes` `null` diyor — "ajan söyleyemedi", yani
+      // yüklemenin başlangıçtaki yer denetimi bu süitte hiçbir şeyi reddetmiyor.
+      { availableBytes: () => Promise.resolve(null) } as unknown as CopyService,
     );
   });
 
@@ -1817,6 +1819,105 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
       await q.query(`DELETE FROM public.file_entries WHERE id = $1`, [folderId]);
       await q.query(`DELETE FROM public.folder_grants WHERE share_id = $1`, [secondId]);
       await q.query(`DELETE FROM public.shares WHERE id = $1`, [secondId]);
+    });
+  });
+
+  it('refuses every WRITE to a share opened read-only, and keeps the reads', async () => {
+    // "Salt okunur" anahtarı bugüne kadar yalnız smb.conf'a gidiyordu: ağ sürücüsünden yazamayan
+    // kullanıcı aynı paylaşımı web dosya yöneticisinde açıp klasör oluşturuyor, dosya yüklüyor,
+    // yeniden adlandırıyor, çöpe atıp çöpü kalıcı boşaltabiliyordu. Ekranda "salt okunur" yazan bir
+    // anahtarın yalnız bir istemcide gerçek olması, çalışıyormuş gibi görünen bir kontrol demek.
+    const rows = await pdb.withTenant(org, (q) =>
+      q.query<{ id: string }>(
+        `INSERT INTO public.shares (organization_id, name, dataset, read_only)
+         VALUES ($1, 'saltokunur', 'tank/depsis/saltokunur', true) RETURNING id::text AS id`,
+        [org],
+      ),
+    );
+    const roId = rows[0]?.id ?? '';
+    // Yetki TAM: reddin sebebi eksik bir grant değil, paylaşımın kendisi olmalı.
+    await pdb.withTenant(org, (q) =>
+      q.query(
+        `INSERT INTO public.folder_grants
+           (organization_id, share_id, entry_id, user_id, permissions)
+         VALUES ($1,$2,NULL,$3,'{list,read,download,create,modify,move,delete}')`,
+        [org, roId, alice],
+      ),
+    );
+    const seeded = await pdb.withTenant(org, (q) =>
+      q.query<{ id: string }>(
+        `INSERT INTO public.file_entries (organization_id, share_id, parent_id, kind, name, path)
+         VALUES ($1,$2,NULL,'file','eski.txt','/eski.txt') RETURNING id::text AS id`,
+        [org, roId],
+      ),
+    );
+    const fileId = seeded[0]?.id ?? '';
+    const binned = await pdb.withTenant(org, (q) =>
+      q.query<{ id: string }>(
+        `INSERT INTO public.file_entries
+           (organization_id, share_id, parent_id, kind, name, path, trashed_at)
+         VALUES ($1,$2,NULL,'file','copte.txt','/copte.txt', now()) RETURNING id::text AS id`,
+        [org, roId],
+      ),
+    );
+    const binnedId = binned[0]?.id ?? '';
+
+    // OKUMA SÜRÜYOR: salt okunur bir paylaşım okunabilir bir paylaşımdır.
+    const page = await controller.list(as(alice), undefined, undefined, '100', undefined, roId);
+    expect(page.items.map((item) => item.name)).toContain('eski.txt');
+
+    const write = async (run: () => Promise<unknown>): Promise<string> => {
+      try {
+        await run();
+      } catch (error) {
+        return error instanceof ProblemException
+          ? `${error.code}/${error.getStatus()}`
+          : `beklenmeyen: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      return 'hiçbir hata atılmadı';
+    };
+
+    const refusal = 'forbidden/403';
+    expect(
+      await write(() =>
+        controller.createFolder(as(alice), { parentId: null, name: 'yeni', shareId: roId }),
+      ),
+    ).toBe(refusal);
+    expect(
+      await write(() => controller.update(as(alice), stubResponse(), fileId, { name: 'yeni.txt' })),
+    ).toBe(refusal);
+    expect(await write(() => controller.trash(as(alice), fileId))).toBe(refusal);
+    expect(await write(() => controller.restore(as(alice), binnedId))).toBe(refusal);
+    expect(await write(() => controller.purge(as(alice), binnedId))).toBe(refusal);
+    expect(
+      await write(() =>
+        uploads.create(
+          as(alice),
+          stubResponse(),
+          '10',
+          `filename ${b64('yeni.bin')},shareId ${b64(roId)}`,
+        ),
+      ),
+    ).toBe(refusal);
+
+    // VE KONTROL: reddin sebebi gerçekten bu bayrak. Paylaşım yazılabilir açılınca aynı çağrılar
+    // geçiyor — yoksa yukarıdaki altı satır bambaşka bir 403'ü ölçüyor olabilirdi.
+    await pdb.withTenant(org, (q) =>
+      q.query(`UPDATE public.shares SET read_only = false WHERE id = $1`, [roId]),
+    );
+    const made = await controller.createFolder(as(alice), {
+      parentId: null,
+      name: 'yeni',
+      shareId: roId,
+    });
+    expect(made.name).toBe('yeni');
+    expect((await controller.trash(as(alice), fileId)).id).toBe(fileId);
+
+    await pdb.withTenant(org, async (q) => {
+      await q.query(`DELETE FROM public.file_entries WHERE share_id = $1`, [roId]);
+      await q.query(`DELETE FROM public.upload_sessions WHERE share_id = $1`, [roId]);
+      await q.query(`DELETE FROM public.folder_grants WHERE share_id = $1`, [roId]);
+      await q.query(`DELETE FROM public.shares WHERE id = $1`, [roId]);
     });
   });
 

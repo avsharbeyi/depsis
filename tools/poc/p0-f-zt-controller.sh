@@ -45,11 +45,13 @@ TOKEN_FILE="$ZT_HOME/authtoken.secret"
 section 'P0-F — zerotier-one is itself the controller'
 
 if ! command -v zerotier-cli >/dev/null 2>&1; then
-  # ADR-0020: DEPSIS neither packages nor installs ZeroTier. Absent is an ordinary state of a
-  # machine, so it is a NOTE and a non-zero exit rather than a failed assertion — a red gate for
-  # "not installed" would train people to ignore this script.
+  # ADR-0020, as revised: an appliance built from the ISO installs zerotier-one from the signed
+  # repository (tools/install/install.sh, driven by /etc/depsis/zerotier.wanted), but a developer
+  # box is an ordinary machine where absent is an ordinary state. So it is a NOTE and a non-zero
+  # exit rather than a failed assertion — a red gate for "not installed" would train people to
+  # ignore this script.
   note 'zerotier-one is not installed; P0-F cannot run here' \
-       'apt install zerotier-one, then re-run. ADR-0020: DEPSIS does not install it.'
+       'bash tools/dev/provision-vm.sh installs it from the signed repository, then re-run.'
   poc_summary
   exit 0
 fi

@@ -58,6 +58,11 @@ STATE="$STATE_DIR/state.json"
 LOG="$STATE_DIR/log"
 ARGS_FILE=/etc/depsis/install.args
 
+# Guncelleme oncesi veritabani yedegi. Dizin ajanin gecelik dokumleriyle AYNI, cunku arayuzdeki
+# "Veritabani yedekleri" listesi orayi okuyor: gorunmeyen bir yedek, olmayan bir yedektir.
+DB_URL_OWNER=/etc/depsis/db-url-owner
+DB_BACKUP_DIR=/var/lib/depsis/db-backups
+
 # Kaynağın adresi BURADA sabit. Bir istekten gelmemesi, bu betiğin güvenlik iddiasının tamamı.
 # `/etc/depsis/update.env` ile değiştirilebilir olması bir çelişki değil: o dosyayı yazabilen
 # birinin kutuda zaten kök yetkisi vardır.
@@ -233,6 +238,75 @@ verify_signature() {
     -sigfile "$signature" -in "$file" >/dev/null 2>&1
 }
 
+# ── guncelleme oncesi veritabani yedegi ──────────────────────────────────────
+#
+# NEDEN VAR. `install.sh` migration'lari DERLEMEDEN ONCE kosuyor (akis: accounts → secrets →
+# database → payload), yani bir guncelleme derleme adiminda dustugunde sema coktan yeni surumde
+# olur. Asagidaki geri alma ise yalniz KAYNAK AGACINI eskiye donduruyor. Sonuc, ekranda hicbir
+# yerde gorunmeyen bir uyusmazlik: eski API yeni semaya bakiyor, /health geciyor ve migration'in
+# dokundugu her uc 500 veriyor.
+#
+# NEDEN OTOMATIK `migrate down` DEGIL. ADR-0014 geri alinamayan down'lara izin veriyor; kendi
+# karariyla down kosturan bir guncelleyici, veri kaybini kimsenin sormadigi bir karara cevirir.
+# Ayrica kurulum `pnpm install`dan once dustuyse node-pg-migrate kutuda henuz yoktur. Dogru
+# cevap, geri donulebilecek bir noktayi ONCEDEN birakmak.
+#
+# EN IYI CABA: yedek alinamiyorsa guncelleme DURMUYOR — durdurulan bir guncelleyici, guvenlik
+# duzeltmesini kutuya hic goturmez. Alinip alinmadigi durum dosyasina yaziliyor ve geri alma
+# mesaji ona gore degisiyor.
+DB_BACKUP_NAME=''
+
+backup_database() {
+  DB_BACKUP_NAME=''
+  printf '{"db_backup":null}\n' | state_merge
+
+  if ! command -v pg_dump >/dev/null 2>&1; then
+    log 'UYARI: pg_dump yok; guncelleme oncesi veritabani yedegi ALINAMADI'
+    return 0
+  fi
+  if [ ! -r "$DB_URL_OWNER" ]; then
+    log "UYARI: $DB_URL_OWNER okunamiyor; guncelleme oncesi veritabani yedegi ALINAMADI"
+    return 0
+  fi
+
+  local url pass name out
+  url="$(cat "$DB_URL_OWNER")"
+  # PAROLA ARGV'YE GIRMIYOR: `/proc/<pid>/cmdline` bu kutudaki her kullaniciya okunabilir, ve
+  # ajanin kendi dokum yolu (dbdump.rs `split_password`) ayni gerekceyle ayni seyi yapiyor.
+  pass="$(printf '%s' "$url" | sed -n 's|^postgresql://[^:]*:\([^@]*\)@.*|\1|p')"
+  url="$(printf '%s' "$url" | sed 's|^\(postgresql://[^:]*\):[^@]*@|\1@|')"
+
+  # Ad, ajanin dokumleriyle ayni uzantiyi tasiyor (`.dump`): listeyi de budamayi da o uzanti
+  # belirliyor, yani baska bir uzanti secmek yedegi ekranda gorunmez VE hic temizlenmez yapardi.
+  name="depsis-guncelleme-oncesi-$(date -u +%Y%m%dT%H%M%SZ).dump"
+  out="$DB_BACKUP_DIR/$name"
+  # `|| true`: dizin acilamiyorsa da guncelleme DURMUYOR — asagidaki pg_dump duser, uyari yazilir
+  # ve akis devam eder. `set -e` altinda ciplak birakilsaydi ERR tuzagi guncellemeyi burada
+  # oldururdu, yani yedek alma denemesi guncellemenin kendisinden daha buyuk bir risk olurdu.
+  [ -d "$DB_BACKUP_DIR" ] || install -d -m 0700 "$DB_BACKUP_DIR" 2>/dev/null || true
+
+  # `--no-owner --no-privileges`: dbdump.rs ile ayni gerekce — geri yukleme, dokumu alan kutudaki
+  # rol adlarina bagli olmasin. Dosya once bos ve 0600 yaratiliyor; pg_dump kendi umask'iyla
+  # yaratsaydi "dosya var ama henuz kapali degil" diye bir pencere olurdu.
+  local saved_umask
+  saved_umask="$(umask)"
+  umask 077
+  : > "$out" || true
+  umask "$saved_umask"
+
+  if PGPASSWORD="$pass" pg_dump --format=custom --no-owner --no-privileges \
+       --file "$out" --dbname "$url" >>"$LOG" 2>&1; then
+    DB_BACKUP_NAME="$name"
+    printf '{"db_backup":%s}\n' "$(json_string "$name")" | state_merge
+    log "guncelleme oncesi veritabani yedegi alindi: $out"
+  else
+    # Bos bir `.dump` dosyasi, hic dosya olmamasindan kotudur: bir sonraki listede yedek gibi
+    # gorunur. Ajanin dokum yolu da ayni sebeple siliyor.
+    rm -f "$out"
+    log 'UYARI: pg_dump dustu; guncelleme oncesi veritabani yedegi ALINAMADI'
+  fi
+}
+
 # ── kurulum ──────────────────────────────────────────────────────────────────
 
 # İmzalı bir sürümü indirir, DOĞRULAR, ve kurar.
@@ -280,6 +354,10 @@ apply_release() {
 install_tree() {
   local work="$1" top="$2" version="$3"
 
+  # AGACI DEGISTIRMEDEN ONCE. Kurulum semayi derlemeden once tasiyor, ve geri alma semayi geri
+  # getirmiyor; geri donulebilecek tek nokta bu.
+  backup_database
+
   rm -rf "$SRC_TREE.previous"
   if [ -d "$SRC_TREE" ]; then mv "$SRC_TREE" "$SRC_TREE.previous"; fi
   mv "$work/$top" "$SRC_TREE"
@@ -303,7 +381,16 @@ install_tree() {
     rm -rf "$SRC_TREE"
     mv "$SRC_TREE.previous" "$SRC_TREE"
     if bash "$SRC_TREE/tools/install/install.sh" "${args[@]}" >>"$LOG" 2>&1; then
-      fail 'guncelleme kurulamadi; cihaz eski surume geri alindi ve calisir durumda'
+      # "CALISIR DURUMDA" DENMIYOR, ve bu cumlenin kaldirilmasi bir duzeltmedir: kaynak agaci
+      # eskiye dondu ama SEMA donmedi — kurulum migration'lari derlemeden once kosturdugu icin
+      # yeni surumun semasi coktan uygulanmis olabilir. Eski API yeni semaya bakarsa /health
+      # gecer ve yalniz bazi uclar 500 verir; "calisir durumda" tam olarak o hali gizliyordu.
+      local donuldu='guncelleme kurulamadi; cihaz eski surume donduruldu ANCAK veritabani'
+      donuldu="$donuldu semasi yeni surumde kalmis olabilir"
+      if [ -n "$DB_BACKUP_NAME" ]; then
+        fail "$donuldu. Guncellemeden once alinan yedek: $DB_BACKUP_NAME (Veritabani yedekleri)"
+      fi
+      fail "$donuldu ve guncelleme oncesi yedek ALINAMADI"
     fi
     fail 'guncelleme kurulamadi VE geri alma da dustu; gunluge bakin'
   fi

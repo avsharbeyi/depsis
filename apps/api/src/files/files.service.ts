@@ -83,6 +83,35 @@ export class ArchiveTooLargeError extends Error {
   }
 }
 
+/**
+ * Paylaşım salt okunur açılmış; içine yazılamaz.
+ *
+ * ANAHTAR BUGÜNE KADAR YALNIZ smb.conf'A GİDİYORDU. `shares.read_only` sütununun tek tüketicisi
+ * ajanın Samba yapılandırması (`samba.rs`) idi: ağ sürücüsünden yazamayan kullanıcı aynı paylaşımı
+ * web dosya yöneticisinde açıp klasör oluşturuyor, dosya yüklüyor, yeniden adlandırıyor, çöpe atıp
+ * çöpü boşaltabiliyordu. Ekranda "salt okunur" yazan bir anahtarın yalnız bir istemcide gerçek
+ * olması, çalışıyormuş gibi görünen bir kontrol demek — ki bu, hiç olmamasından daha kötü.
+ *
+ * ZFS'e `readonly=on` verilmiyor ve bu bilinçli: ajanın kendi ACL ve indeksleme yazmaları da o
+ * veri kümesine düşüyor. Kapı API katmanında, yani yazan her yolun geçtiği yerde.
+ */
+export class ShareReadOnlyError extends Error {
+  constructor(readonly shareName: string) {
+    super(`'${shareName}' salt okunur bir paylaşım`);
+    this.name = 'ShareReadOnlyError';
+  }
+}
+
+/**
+ * Salt okunur bir paylaşıma yazmayı reddeder.
+ *
+ * Tek kapı: yazan her uç ve kopyalama işi bunu çağırıyor, böylece "hangi rotalar denetliyor"
+ * sorusunun cevabı bu fonksiyonun çağrı listesi oluyor.
+ */
+export function assertWritable(share: { name: string; read_only: boolean }): void {
+  if (share.read_only) throw new ShareReadOnlyError(share.name);
+}
+
 /** A name the caller supplied that the filesystem or the schema will not accept. */
 export class InvalidNameError extends Error {
   constructor(reason: string) {

@@ -9,7 +9,7 @@ import { ProblemException } from '../common/problem.filter.js';
 import { JobsService } from '../jobs/jobs.service.js';
 import { COPY_KIND, COPY_MAX_ATTEMPTS, CopyService, type CopyPayload } from './copy.service.js';
 import { FilesService, permissionsOf, type Caller } from './files.service.js';
-import { requireSession, requireUuid } from './files.controller.js';
+import { requireSession, requireUuid, requireWritableShare } from './files.controller.js';
 
 type Schemas = OpenApi.components['schemas'];
 
@@ -108,6 +108,12 @@ export class FileOperationsController {
       if (source.share_id !== shareId || source.trashed_at !== null) missing();
     }
 
+    // SALT OKUNUR PAYLAŞIM BURADA BİTİYOR, alt ağaç yürüyüşünden ÖNCE: aşağıdaki `size` ve boş alan
+    // ölçümü reddedilecek bir istek için binlerce satır okuyordu. Kopyalama hedefi hep kaynakla aynı
+    // paylaşım, yani tek denetim iki ucu birden kapatıyor.
+    const share = await this.files.shareFor(caller.organizationId, shareId);
+    requireWritableShare(share);
+
     if (destinationId !== null) {
       const destination = await this.files
         .find(caller.organizationId, destinationId)
@@ -156,7 +162,6 @@ export class FileOperationsController {
     // converts is the common case: a copy is one of two operations in the product that can multiply
     // stored bytes without a single upload, and being told the two numbers on the click beats
     // watching a job fail an hour later with half a tree copied.
-    const share = await this.files.shareFor(caller.organizationId, shareId);
     const available = await this.copies.availableBytes(
       share.dataset,
       `space check before copying ${bytes} bytes`,
@@ -221,8 +226,14 @@ export class FileOperationsController {
 /** Re-exported so the job's kind has one spelling. */
 export { COPY_KIND };
 
-/** Bytes, as a person reads them. Base 10, matching what a disk's label claims. */
-function formatBytes(value: number): string {
+/**
+ * Bytes, as a person reads them. Base 10, matching what a disk's label claims.
+ *
+ * Dışa açık, çünkü yükleme yolu da başlamadan önce boş alanı ölçüyor ve kullanıcıya aynı biçimde
+ * iki sayı söylüyor; ikinci bir kopyası, aynı cihazın iki ekranda iki farklı birim kullanması
+ * demek olurdu.
+ */
+export function formatBytes(value: number): string {
   const units = ['B', 'kB', 'MB', 'GB', 'TB', 'PB'];
   let n = value;
   let unit = 0;

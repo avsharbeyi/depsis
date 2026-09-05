@@ -141,30 +141,49 @@ export class WorkerService implements OnApplicationShutdown {
         continue;
       }
 
-      // `execute` kendi hatalarını yutuyor — TEK BİR TANESİ hariç: sonucu yazan `finish` çağrısı
-      // catch bloğunun İÇİNDE, yani oradan gelen bir veritabanı hatasının gidecek yeri yok. Sahada
-      // görüleni buydu: ardılını çoktan kuyruğa almış bir zincir işi düşünce `finish_job`ın
-      // yeniden deneme yolu 23505 veriyor, reddetme buraya kadar çıkıyor, ve `this.loop` hiçbir
-      // yerde beklenmediği için süreç yakalanmamış bir reddetmeyle ölüyordu.
+      // `execute` artık kendi hatalarını yutuyor, ama bu try/catch yine de duruyor. Sahada görülen
+      // şuydu: sonucu yazan `finish` çağrısı bir catch bloğunun İÇİNDEydi, yani oradan gelen bir
+      // veritabanı hatasının gidecek yeri yoktu — ardılını çoktan kuyruğa almış bir zincir işi
+      // düşünce `finish_job`ın yeniden deneme yolu 23505 veriyor, reddetme buraya kadar çıkıyor,
+      // ve `this.loop` hiçbir yerde beklenmediği için süreç yakalanmamış bir reddetmeyle ölüyordu.
       //
       // Bu try/catch bir yara bandı değil, döngünün sözleşmesi: TEK BİR SATIR kuyruğun tamamını
       // durduramamalı. İşin kendisi kaybolmuyor — kirası dolunca yeniden alınabilir hâle geliyor.
       const job = claimed;
+      let recorded = false;
       try {
-        await this.execute(job);
+        recorded = await this.execute(job);
       } catch (error) {
         this.logger.error(`job ${job.id} (${job.kind}) could not be completed: ${describe(error)}`);
+      }
+      if (!recorded) {
+        // SONUÇ YAZILAMADIYSA BEKLE. Buraya gelinmesinin tek yolu `finish`in kendisinin düşmesi —
+        // veritabanı o an kilitli, kopmuş ya da kısmi tekil indeks yüzünden yazmayı reddediyor.
+        // Beklemeden devam etmek sıkı bir döngü olurdu: kuyruktaki her satır sırayla kiralanır,
+        // hiçbiri bitmez, kira dolunca aynısı baştan başlar, ve işlemci veritabanı geri gelene
+        // kadar boşuna yanar. Olağan yolda buraya hiç gelinmiyor, dolayısıyla bu bekleme hiçbir
+        // işi geciktirmiyor.
+        await sleep(this.idleMs);
       }
     }
   }
 
-  private async execute(job: ClaimedJob): Promise<void> {
+  /** İşi koştur, ve SONUCUN YAZILIP YAZILMADIĞINI söyle: döngünün beklemesi buna bakıyor. */
+  private async execute(job: ClaimedJob): Promise<boolean> {
     const handler = this.handlers.get(job.kind);
     if (handler === undefined) {
       // Only reachable if the registry changed after the claim. Failing it is better than holding
       // a lease on work this process cannot do.
-      await this.jobs.finish(job.id, 'failed', `no handler for '${job.kind}'`);
-      return;
+      //
+      // KENDİ TRY'INDA, aşağıdaki `finish` gibi: bu çağrı `run`un catch'ine kadar çıkabilirdi ve
+      // orada da yalnız günlüğe düşerdi, ama o zaman döngü beklemesi gerektiğini bilemezdi.
+      try {
+        await this.jobs.finish(job.id, 'failed', `no handler for '${job.kind}'`);
+      } catch (error) {
+        this.logger.error(`job ${job.id} has no handler and stays running: ${describe(error)}`);
+        return false;
+      }
+      return true;
     }
 
     let held = true;
@@ -194,6 +213,7 @@ export class WorkerService implements OnApplicationShutdown {
         stopping: () => this.stopRequested,
       });
       if (held) await this.jobs.finish(job.id, 'succeeded');
+      return true;
     } catch (error) {
       // The message is the handler's, and §16 applies to it: this string is written to durable
       // storage, so a handler must not put a secret in the error it throws.
@@ -204,10 +224,15 @@ export class WorkerService implements OnApplicationShutdown {
       // yazamamak işi KAYBETTİRMİYOR (kira dolunca satır yeniden alınabilir), ama buradan
       // fırlatmak işçinin tamamını düşürürdü.
       let ending = ' — and the lease was already lost';
+      // Kira zaten elden gitmişse yazılacak bir şey yok, ve bu bir veritabanı arızası değil:
+      // döngünün beklemesi gerekmiyor.
+      let recorded = true;
       if (held) {
+        recorded = false;
         try {
           const outcome = await this.jobs.finish(job.id, 'failed', describe(error));
           ending = outcome === null ? ' — and the lease was already lost' : ` → ${outcome}`;
+          recorded = true;
         } catch (finishError) {
           ending = ` — and the outcome could not be recorded: ${describe(finishError)}`;
         }
@@ -216,6 +241,7 @@ export class WorkerService implements OnApplicationShutdown {
         `job ${job.id} (${job.kind}) failed on attempt ${job.attempt}/${job.maxAttempts}: ` +
           `${describe(error)}${ending}`,
       );
+      return recorded;
     } finally {
       clearInterval(beat);
       this.processed += 1;

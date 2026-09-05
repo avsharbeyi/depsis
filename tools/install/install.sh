@@ -278,17 +278,31 @@ preflight() {
 
   # ── ZeroTier ──
   #
-  # ADR-0020 REVİZE EDİLDİ: kurulumu ilk açılış yapıyor (`deploy/iso/firstboot.sh`), çünkü sahibi
-  # uzaktan erişimi açmak isteyince karşısına terminal çıkması bir eksikti. `zerotier-one`ın
-  # kendisi controller — ayrı bir servis yok.
+  # ADR-0020 REVİZE EDİLDİ: cihaz uzaktan erişim yeteneğiyle geliyor, çünkü sahibi onu açmak
+  # isteyince karşısına terminal çıkması bir eksikti. `zerotier-one`ın kendisi controller —
+  # ayrı bir servis yok.
   #
-  # Burası yine de KURMUYOR: bu betik var olan bir Debian'a DEPSIS'i kuruyor, ve ağ katmanı
-  # ekleme kararı ISO'nun kararı. Eksikse söylenen şey artık "DEPSIS onu kurmaz" değil, nerede
-  # kurulduğu.
+  # Kararı ISO veriyor ve kararını `$ETC/zerotier.wanted` ile söylüyor; kuran taraf aşağıdaki
+  # `zerotier()`. Kendi Debian'ına DEPSIS kuran birinin kutusuna ağ katmanı EKLENMİYOR.
   if command -v zerotier-cli >/dev/null 2>&1; then
     ok 'zerotier-one kurulu — uzaktan erişim ve kendi ağını kurma açılabilir'
+  elif [ -f "$ETC/zerotier.wanted" ]; then
+    same 'zerotier-one yok — bu kutu onu istiyor, kurulum aşağıda deneyecek'
   else
-    same 'zerotier-one yok — uzaktan erişim uçları 503 döner (DEPSIS ISO ile kurulduğunda ilk açılış onu kurar)'
+    same 'zerotier-one yok — uzaktan erişim uçları 503 döner (DEPSIS ISO ile kurulan kutularda kurulum onu kurar)'
+  fi
+
+  # ── işletim sistemi güvenlik güncellemeleri ──
+  #
+  # Bu kutu 443'ü ve 445'i dinliyor, ve dinleyen yazılım DEPSIS'in değil Debian'ın: nginx, smbd,
+  # openssl. `update.sh` yalnız DEPSIS'in kendi kaynağını yeniliyor, Debian paketlerine hiç
+  # dokunmuyor. ISO'nun ilk açılışı bunun için `unattended-upgrades` kuruyor; elle kurulan bir
+  # kutuda o adım YOK, ve söylenmezse kimse fark etmez. Kurulumu durduran bir eksik değil —
+  # kurulum sahibinin kendi Debian'ına dokunmuyor — ama bilinmesi gereken bir eksik.
+  if systemctl is-enabled apt-daily-upgrade.timer >/dev/null 2>&1; then
+    ok 'işletim sistemi güvenlik yamaları kendiliğinden uygulanıyor (unattended-upgrades)'
+  else
+    same 'unattended-upgrades kapalı — Debian güvenlik yamaları uygulanmıyor (DEPSIS ISO onu kurar)'
   fi
 
   [ "$fatal" -eq 0 ] || die 'ön kontroller geçmedi; yukarıdaki ✗ satırlarını giderip yeniden çalıştırın'
@@ -851,6 +865,57 @@ samba_conf() {
   ok 'smbd, nmbd açık'
 }
 
+# ─── 8c. ZeroTier ─────────────────────────────────────────────────────────────
+#
+# Uzaktan erişimin altındaki ağ katmanı. `zerotier-one`ın kendisi controller, yani bir ağa
+# katılmak da kendi ağını kurmak da bu tek daemon ile oluyor (ADR-0020, revize).
+#
+# KİM İSTİYOR: `$ETC/zerotier.wanted`. Dosyayı ISO'nun ilk açılışı yazıyor; kendi Debian'ına
+# DEPSIS kuran birinin kutusunda o dosya olmadığı için buradan hiçbir paket kurulmuyor.
+#
+# NEDEN BURADA, ilk açılışta değil: `deploy/iso/firstboot.sh` bir kez çalışıp kendini devre dışı
+# bırakıyor. Kurulum o gün düşerse — ağ, depo, imza anahtarı — kutu bir daha hiç denemez ve
+# uzaktan erişim uçları sonsuza kadar 503 döner; terminalsiz çıkış yolu da kalmaz. Bu betik her
+# güncellemede yeniden koşuyor, yani adım kendiliğinden yeniden deniyor.
+#
+# NEDEN İMZALI DEPO: ilk hâli ZeroTier'ın ön sayfasındaki gibi `curl … | bash` idi, yani her
+# cihaz ilk açılışında doğrulanmamış bir betiği kök kabuğunda koşturuyordu. apt yolunda anahtar
+# tek kaynağa sabitleniyor ve bundan sonraki her yükseltme imza doğrulamasından geçiyor.
+zerotier() {
+  [ -f "$ETC/zerotier.wanted" ] || return 0
+  step 'ZeroTier (uzaktan erişim)'
+
+  if ! command -v zerotier-cli >/dev/null 2>&1; then
+    local codename
+    codename="$( (. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_CODENAME:-trixie}") \
+      || printf 'trixie' )"
+    install -d -m 0755 /usr/share/keyrings
+    if curl -fsSL 'https://download.zerotier.com/contact%40zerotier.com.gpg' \
+         -o /usr/share/keyrings/zerotier.gpg; then
+      printf 'deb [signed-by=/usr/share/keyrings/zerotier.gpg] https://download.zerotier.com/debian/%s %s main\n' \
+        "$codename" "$codename" > /etc/apt/sources.list.d/zerotier.list
+      apt-get update -qq >/dev/null 2>&1 || true
+      if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zerotier-one >/dev/null 2>&1; then
+        ok 'zerotier-one imzalı depodan kuruldu'
+      else
+        warn 'zerotier-one kurulamadı; uzaktan erişim uçları 503 döner, bir sonraki güncellemede yeniden denenir'
+      fi
+    else
+      # Anahtar inmediyse depo YAZILMIYOR — hatta varsa siliniyor. İmzasız bir apt kaynağı
+      # eklemek, borulanmış bir betikten daha iyi değil; bu adımın var olma sebebi tam olarak o.
+      rm -f /etc/apt/sources.list.d/zerotier.list
+      warn 'ZeroTier imza anahtarı indirilemedi; kurulum yapılmadı (uzaktan erişim uçları 503 döner)'
+    fi
+  fi
+
+  # Daemon kimliğini ve yerel API jetonunu İLK ÇALIŞTIĞINDA üretiyor; o ana kadar ne ajan ne de
+  # API onunla konuşabiliyor, yani "kurulu ama hiç koşmamış" hâli kurulu olmamakla aynı.
+  if command -v zerotier-cli >/dev/null 2>&1; then
+    systemctl enable --now zerotier-one >/dev/null 2>&1 || true
+    ok 'zerotier-one çalışıyor'
+  fi
+}
+
 # ─── 9. systemd ───────────────────────────────────────────────────────────────
 
 units() {
@@ -907,7 +972,45 @@ units() {
   for f in "$REPO"/deploy/systemd/*; do
     install -m 0644 "$f" "/etc/systemd/system/$(basename "$f")"
   done
+
+  # ── YETKİLİ KONSOL: OPERATÖRÜN KARARI, DEPONUN DOSYASINDA DEĞİL ─────────────
+  #
+  # Yukarıdaki döngü birimleri KOŞULSUZ üzerine yazıyor, ve yazmalı: birim dosyaları ürünün
+  # parçası. Ama yetkili konsolun tek yolu uzun süre "depsis-console.service'te User=root yap"
+  # diye BELGELENMİŞTİ — yani operatörün elle düzenlediği dosya, her güncellemede depodaki hâline
+  # dönüyordu. Sonucu sessiz ve tam olarak yanlış yönde: console.env'deki
+  # DEPSIS_CONSOLE_PRIVILEGED=1 yerinde kalıyor, birim yeniden depsis-console kullanıcısına
+  # dönüyor, ve session.rs uyuşmazlığı görüp başlamayı reddediyor — arayüzde yalnız "Konsol
+  # servisi çalışmıyor" yazıyor, sebebi hiçbir ekranda görünmüyor.
+  #
+  # Karar artık TEK YERDE, console.env'de; User= satırını buradaki drop-in yazıyor. Drop-in
+  # ana birimi ezer ve güncelleme onu silmez, çünkü ayrı bir dosya.
+  #
+  # YALNIZ privileged.conf siliniyor, `.service.d` dizini değil: operatörün kendi drop-in'leri
+  # olabilir ve dizini toptan silmek onları da götürürdü.
+  local console_dropin=/etc/systemd/system/depsis-console.service.d
+  if grep -qE '^DEPSIS_CONSOLE_PRIVILEGED=1[[:space:]]*$' "$ETC/console.env" 2>/dev/null; then
+    install -d -m 0755 "$console_dropin"
+    cat > "$console_dropin/privileged.conf" <<'DROPIN'
+# DEPSIS kurulumu tarafından yazıldı — elle düzenlemeyin.
+#
+# /etc/depsis/console.env içinde DEPSIS_CONSOLE_PRIVILEGED=1 olduğu için var. O satırı 0 yapıp
+# kurulumu yeniden çalıştırmak bu dosyayı siler; konsol yetkisiz hesabına döner.
+[Service]
+User=root
+Group=root
+DROPIN
+    chmod 0644 "$console_dropin/privileged.conf"
+    warn 'yetkili konsol AÇIK (console.env): kabuk root olarak koşacak'
+  elif [ -f "$console_dropin/privileged.conf" ]; then
+    rm -f "$console_dropin/privileged.conf"
+    rmdir "$console_dropin" 2>/dev/null || true
+    ok 'yetkili konsol kapatıldı; konsol kendi hesabına döndü'
+  fi
+
   systemctl daemon-reload
+  # Çalışan konsol süreci aşağıda ZATEN durduruluyor (soket etkinlemeli servislerin eski süreci
+  # ikili değişince yenilenmiyor), yani drop-in bir sonraki bağlantıda yürürlüğe giriyor.
   ok 'birimler kuruldu'
 
   # Soketler önce: ajan soket etkinlemeli, ve API kalkarken soketin orada olması gerekiyor.
@@ -1165,6 +1268,7 @@ configuration
 tls
 reverse_proxy
 samba_conf
+zerotier
 units
 version_and_args
 verify

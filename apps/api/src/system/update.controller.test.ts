@@ -57,16 +57,20 @@ function controller(options: { free: number | null; pools?: Telemetry['pools'] }
   controller: UpdateController;
   reauth: ReturnType<typeof vi.fn>;
   agent: ReturnType<typeof vi.fn>;
+  telemetry: ReturnType<typeof vi.fn>;
+  audit: ReturnType<typeof vi.fn>;
 } {
+  const telemetry = vi.fn((_correlationId: string, _organizationId: string) =>
+    Promise.resolve({
+      pools: options.pools ?? [pool('tank', 'ONLINE')],
+      disks: [],
+      cpu: {},
+      memory: {},
+    } as unknown as Telemetry),
+  );
   const system = {
     isSystemAdministrator: () => Promise.resolve(true),
-    telemetry: () =>
-      Promise.resolve({
-        pools: options.pools ?? [pool('tank', 'ONLINE')],
-        disks: [],
-        cpu: {},
-        memory: {},
-      } as unknown as Telemetry),
+    telemetry,
   } as unknown as SystemService;
 
   const agent = vi.fn(() =>
@@ -81,17 +85,20 @@ function controller(options: { free: number | null; pools?: Telemetry['pools'] }
     } as unknown as AgentResponse),
   );
   const reauth = vi.fn().mockResolvedValue(undefined);
+  const audit = vi.fn().mockResolvedValue(undefined);
 
   return {
     controller: new Probed(
       system,
       { call: agent } as unknown as AgentService,
       { require: reauth } as unknown as ReauthService,
-      { record: () => Promise.resolve() } as unknown as AuditService,
+      { record: audit } as unknown as AuditService,
       options.free,
     ),
     reauth,
     agent,
+    telemetry,
+    audit,
   };
 }
 
@@ -158,5 +165,21 @@ describe('POST /system/update/apply, ön kontrol', () => {
     expect(reauth).toHaveBeenCalledTimes(1);
     expect(agent).toHaveBeenCalledTimes(1);
     expect(answer.installed).toBe('abc1234');
+  });
+
+  it('ön kontrol, ajan çağrısı ve denetim kaydı TEK bir kimlik taşıyor', async () => {
+    // İki ayrı `randomUUID()` üretiliyordu: ön kontrolün havuz sağlığı sorgusu bir kimlikle,
+    // güncellemeyi başlatan çağrı bambaşka bir kimlikle gidiyordu. §16'nın vaadi, ajanın denetim
+    // izinden isteğe geri okunabilmek — iki kimlik o izi ortadan ikiye bölüyor.
+    const { controller: c, agent, telemetry, audit } = controller({ free: ENOUGH });
+
+    await c.apply(request(), BODY);
+
+    const [precheckId] = telemetry.mock.calls[0] as [string, string];
+    const [, , applyId] = agent.mock.calls[0] as [unknown, string, string];
+    const [, entry] = audit.mock.calls[0] as [string, { correlationId: string }];
+
+    expect(precheckId).toBe(applyId);
+    expect(entry.correlationId).toBe(applyId);
   });
 });

@@ -123,11 +123,27 @@ export PATH="/root/.cargo/bin:$PATH"
 # ADR-0020 "DEPSIS onu kurmaz" diyordu; sahibi ilk gerçek kurulumda uzaktan erişimi açmak
 # isteyince karşısına terminal çıktı, ve bu ürünün ilkesine aykırı: cihaz sahibi terminale
 # girmez. Karar değişti — cihaz uzaktan erişim YETENEĞİYLE gelir; bir ağa katılmak yine
-# arayüzden, yine sahibinin kararıyla olur. Kurulamazsa uyarı: uçlar 503 döner, cihaz çalışır.
-if ! command -v zerotier-cli >/dev/null 2>&1; then
-  say 'ZeroTier'
-  curl -fsSL https://install.zerotier.com | bash ||     echo 'UYARI: ZeroTier kurulamadı; uzaktan erişim uçları 503 döner.'
-fi
+# arayüzden, yine sahibinin kararıyla olur.
+#
+# BURASI YALNIZ KARARI YAZIYOR; kuran taraf install.sh, ve imzalı apt deposundan kuruyor. İlk
+# hâli burada `curl -fsSL https://install.zerotier.com | bash` idi: her cihaz, ilk açılışında,
+# internetten indirdiği doğrulanmamış bir betiği kök kabuğunda koşturuyordu — oysa aynı iş için
+# yayımlanmış normal bir apt deposu var ve tools/dev/provision-vm.sh o yolu zaten yazmıştı.
+#
+# Adımın YERİ de kasıtlı: bu betik bir kez çalışıp kendini devre dışı bırakıyor, yani o gün ağ
+# ya da depo düşerse kutu bir daha HİÇ denemez ve uzaktan erişim sonsuza kadar 503 döner.
+# install.sh her güncellemede yeniden koşuyor; oraya konan adım kendiliğinden yeniden deniyor.
+# Kendi Debian'ına DEPSIS kuran birinin kutusunda bu dosya olmuyor ve ağ katmanı eklenmiyor —
+# "ağ katmanı ekleme kararı ISO'nun kararı" cümlesi artık bir yorum değil, bir dosya.
+say 'ZeroTier (kararı yazılıyor; kurulumu install.sh yapar)'
+install -d -m 0755 /etc/depsis
+cat > /etc/depsis/zerotier.wanted <<'ZTWANTED'
+# DEPSIS ISO'sunun kararı: bu kutu uzaktan erişim yeteneğiyle gelir.
+#
+# tools/install/install.sh bu dosyayı görünce zerotier-one'ı imzalı apt deposundan kurar ve
+# kurulum düşerse her güncellemede yeniden dener. Dosya silinirse kurulum ZeroTier'a hiç
+# dokunmaz; kurulu olanı da kaldırmaz.
+ZTWANTED
 
 # ── 5c. Uygulama kataloğu: podman, KÖKSÜZ ────────────────────────────────────
 #

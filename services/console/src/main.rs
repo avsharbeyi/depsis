@@ -62,7 +62,7 @@ mod unix {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::PathBuf;
     use std::process::ExitCode;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -351,6 +351,54 @@ mod unix {
 
     // ─── accept ───────────────────────────────────────────────────────────────
 
+    /// Bir oturumun [`MAX_SESSIONS`] kotasındaki yeri.
+    ///
+    /// ── NEDEN AYRI BİR TİP, VE NEDEN YER ERKEN GERİ VERİLİYOR ────────────────────────────
+    ///
+    /// Yer, oturum iş parçacığı BİTTİĞİNDE geri veriliyordu. Çıktı pompası ise pty'nin kullanıcı
+    /// tarafındaki son tanıtıcı kapanana kadar `read` üzerinde bekliyor, ve o tarafı kabuğun
+    /// süreç grubunun DIŞINDAKİ bir süreç — `setsid ... &` ile başlatılmış bir iş — açık
+    /// tutabiliyor. `terminate()` yalnız kabuğun grubunu sinyallediği için o durumda `join` hiç
+    /// dönmüyor: iş parçacığı da, kotadaki yer de kalıcı olarak gidiyor. Sekiz kez tekrarlanınca
+    /// konsol HERKES için kapanıyor ve tek çare birimi yeniden başlatmak — yani terminale inmek,
+    /// ürünün kabul etmediği çözüm.
+    ///
+    /// Bu yüzden yer, KABUK ÖLDÜĞÜNDE geri veriliyor; pompanın kapanması beklenmeden. `Drop` aynı
+    /// çağrıyı yapıyor ve `released` iki kez düşmeyi imkânsız kılıyor, yani iş parçacığı olağan
+    /// yoldan bittiğinde sayaç ikinci kez azalmıyor.
+    ///
+    /// Geride kalan pompa iş parçacığının kendisi hâlâ bir kaçak, ve bilerek öyle bırakılıyor:
+    /// bloke bir `read`i uyandırmanın tek yolu ya tanıtıcıyı kapatmak (başka bir iş parçacığı
+    /// onun üzerinde okurken tanıtıcı numarası yeniden kullanılabilir) ya da `poll` — ikisi de bu
+    /// kusurun bedelinden büyük. Ölçülen bedel kotaydı ve kota artık sızmıyor.
+    pub struct Slot {
+        live: Arc<AtomicUsize>,
+        released: AtomicBool,
+    }
+
+    impl Slot {
+        fn take(live: &Arc<AtomicUsize>) -> Self {
+            live.fetch_add(1, Ordering::SeqCst);
+            Self {
+                live: Arc::clone(live),
+                released: AtomicBool::new(false),
+            }
+        }
+
+        /// Yeri geri ver. İkinci ve sonraki çağrılar hiçbir şey yapmaz.
+        pub fn release(&self) {
+            if !self.released.swap(true, Ordering::SeqCst) {
+                self.live.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
     fn accept_loop(listener: &UnixListener, api_uid: u32, config: &Config) -> ExitCode {
         let live = Arc::new(AtomicUsize::new(0));
         loop {
@@ -406,20 +454,22 @@ mod unix {
                 continue;
             }
 
-            live.fetch_add(1, Ordering::SeqCst);
-            let counter = Arc::clone(&live);
+            let slot = Arc::new(Slot::take(&live));
+            let held = Arc::clone(&slot);
             let config = config.clone();
             let spawned = std::thread::Builder::new()
                 .name("console-session".into())
                 .spawn(move || {
-                    if let Err(why) = serve_connection(&stream, &config) {
+                    if let Err(why) = serve_connection(&stream, &config, Some(&*held)) {
                         eprintln!("depsis-console: session ended badly: {why}");
                     }
-                    counter.fetch_sub(1, Ordering::SeqCst);
+                    // Oturum yerini kabuk ölürken zaten geri vermiş olabilir; ikinci çağrı
+                    // sayacı bir daha azaltmıyor.
+                    held.release();
                 });
             if let Err(e) = spawned {
                 eprintln!("depsis-console: could not start a session thread: {e}");
-                live.fetch_sub(1, Ordering::SeqCst);
+                slot.release();
             }
         }
     }
@@ -467,7 +517,13 @@ mod unix {
         Protocol(String),
     }
 
-    pub fn serve_connection(stream: &UnixStream, config: &Config) -> Result<(), String> {
+    /// `slot`, bu oturumun kotadaki yeri — kabuk öldüğü anda geri verilebilmesi için buradan
+    /// aşağı taşınıyor. Testlerde `None`.
+    pub fn serve_connection(
+        stream: &UnixStream,
+        config: &Config,
+        slot: Option<&Slot>,
+    ) -> Result<(), String> {
         stream
             .set_write_timeout(Some(WRITE_TIMEOUT))
             .map_err(|e| format!("arm the write timeout: {e}"))?;
@@ -514,7 +570,7 @@ mod unix {
         // The same reader, not a fresh one. The API is free to pipeline — an `open` and the
         // first `in` can arrive in a single read — and a second reader would silently drop
         // whatever was already buffered behind the open message.
-        run_session(&wire, stream, config, &open, &mut reader)
+        run_session(&wire, stream, config, &open, &mut reader, slot)
     }
 
     fn refuse(wire: &Wire<'_>, message: &str) -> Result<(), String> {
@@ -531,6 +587,7 @@ mod unix {
         config: &Config,
         open: &Open,
         reader: &mut LineReader,
+        slot: Option<&Slot>,
     ) -> Result<(), String> {
         let mut pty = Pty::open(&config.shell, open.size, config.home.as_deref())
             .map_err(|e| format!("open a pty: {e}"))?;
@@ -559,7 +616,16 @@ mod unix {
             let end = command_loop(wire, stream, &pty, config.limits, reader);
             // Whatever ended it, the shell goes — and with it the background jobs holding the
             // user side of the pty open, which is what lets the pump below reach end-of-file.
+            // KABUĞUN SÜREÇ GRUBUNDAKİ işler, demek doğrusu: `setsid` ile gruptan çıkmış bir iş
+            // sinyali hiç almıyor ve terminali açık tutmaya devam ediyor, yani pompa o durumda
+            // dönmüyor. Altındaki `release` tam olarak bunun için var.
             pty.terminate();
+            // KOTADAKİ YER BURADA GERİ VERİLİYOR, `join`den ÖNCE. Kabuk öldü, oturum bitti;
+            // pompa ise pty'yi açık tutan yabancı bir sürecin peşinde sonsuza kadar bekleyebilir
+            // ve o bekleme kotadan bir yer götürmemeli. Gerekçenin tamamı [`Slot`]ta.
+            if let Some(slot) = slot {
+                slot.release();
+            }
             let _ = pump.join();
             end
         });
@@ -982,7 +1048,7 @@ mod unix {
                 return;
             };
             let (api, service) = UnixStream::pair().unwrap();
-            let session = std::thread::spawn(move || serve_connection(&service, &config));
+            let session = std::thread::spawn(move || serve_connection(&service, &config, None));
 
             let mut writer = &api;
             writer.write_all(open_line(80, 24).as_bytes()).unwrap();
@@ -1038,7 +1104,7 @@ mod unix {
                 return;
             };
             let (api, service) = UnixStream::pair().unwrap();
-            let session = std::thread::spawn(move || serve_connection(&service, &config));
+            let session = std::thread::spawn(move || serve_connection(&service, &config, None));
 
             let mut writer = &api;
             writer.write_all(open_line(80, 24).as_bytes()).unwrap();
@@ -1077,7 +1143,7 @@ mod unix {
                 return;
             };
             let (api, service) = UnixStream::pair().unwrap();
-            let session = std::thread::spawn(move || serve_connection(&service, &config));
+            let session = std::thread::spawn(move || serve_connection(&service, &config, None));
 
             let mut writer = &api;
             writer.write_all(open_line(80, 24).as_bytes()).unwrap();
@@ -1103,7 +1169,7 @@ mod unix {
                 return;
             };
             let (api, service) = UnixStream::pair().unwrap();
-            let session = std::thread::spawn(move || serve_connection(&service, &config));
+            let session = std::thread::spawn(move || serve_connection(&service, &config, None));
 
             let mut writer = &api;
             writer.write_all(open_line(80, 24).as_bytes()).unwrap();
@@ -1142,7 +1208,7 @@ mod unix {
                 return;
             };
             let (api, service) = UnixStream::pair().unwrap();
-            let session = std::thread::spawn(move || serve_connection(&service, &config));
+            let session = std::thread::spawn(move || serve_connection(&service, &config, None));
 
             let mut writer = &api;
             writer.write_all(open_line(132, 43).as_bytes()).unwrap();
@@ -1176,7 +1242,7 @@ mod unix {
                 return;
             };
             let (api, service) = UnixStream::pair().unwrap();
-            let session = std::thread::spawn(move || serve_connection(&service, &config));
+            let session = std::thread::spawn(move || serve_connection(&service, &config, None));
 
             let mut writer = &api;
             writer
@@ -1195,7 +1261,7 @@ mod unix {
                 return;
             };
             let (api, service) = UnixStream::pair().unwrap();
-            let session = std::thread::spawn(move || serve_connection(&service, &config));
+            let session = std::thread::spawn(move || serve_connection(&service, &config, None));
 
             let mut writer = &api;
             writer
@@ -1215,6 +1281,84 @@ mod unix {
                 "a root shell must not be silently downgraded, got {first}"
             );
             assert!(session.join().unwrap().is_err());
+        }
+
+        // ── the session quota ──
+
+        #[test]
+        fn a_slot_is_given_back_at_most_once() {
+            // `release` iki yerden çağrılıyor: kabuk ölürken ve iş parçacığı biterken. İki kez
+            // düşmek sayacı sarardı, yani kota GENİŞLERDİ — sekiz yerine sınırsız oturum.
+            let live = Arc::new(AtomicUsize::new(0));
+            let slot = Slot::take(&live);
+            assert_eq!(live.load(Ordering::SeqCst), 1);
+
+            slot.release();
+            slot.release();
+            assert_eq!(live.load(Ordering::SeqCst), 0);
+
+            drop(slot);
+            assert_eq!(live.load(Ordering::SeqCst), 0, "Drop ikinci kez düşürdü");
+        }
+
+        #[test]
+        fn a_place_comes_back_when_the_shell_dies_even_if_the_terminal_is_still_held() {
+            // KUSUR: pty'nin kullanıcı tarafını, kabuğun süreç grubunun DIŞINDAKİ bir süreç açık
+            // tutunca çıktı pompası `read` üzerinde kalıyor ve `join` hiç dönmüyordu; kotadaki
+            // yer kalıcı olarak gidiyordu. Sekiz kez tekrarlayınca konsol herkes için kapanır ve
+            // tek çare birimi yeniden başlatmaktı.
+            //
+            // `sleep` 30 saniye, ölçüm penceresi 5: kusur yerindeyken sayaç pencerenin içinde
+            // ASLA düşmez, düzeltmeyle milisaniyeler içinde düşer.
+            let (Some(config), Some(_)) = (test_config(Limits::default()), find_setsid()) else {
+                eprintln!("skipped: no shell or no setsid on this box");
+                return;
+            };
+            let live = Arc::new(AtomicUsize::new(0));
+            let slot = Arc::new(Slot::take(&live));
+            let held = Arc::clone(&slot);
+
+            let (api, service) = UnixStream::pair().unwrap();
+            // BİLEREK `join` EDİLMİYOR: pompa hâlâ `sleep`in tuttuğu terminali okuyor ve testin
+            // ölçtüğü şey tam olarak o beklemenin kotayı TUTMUYOR olması.
+            let _session =
+                std::thread::spawn(move || serve_connection(&service, &config, Some(&*held)));
+
+            let mut writer = &api;
+            writer.write_all(open_line(80, 24).as_bytes()).unwrap();
+            // `setsid`, işi kabuğun süreç grubundan ÇIKARIYOR ama pty'yi (stdin/stdout/stderr)
+            // açık tutuyor — `terminate()` ona ulaşamıyor. Peşindeki `echo`, satırın gerçekten
+            // koştuğunu görmek için: yankı artı çıktı, yani iki kez.
+            writer
+                .write_all(
+                    format!(
+                        "{{\"t\":\"in\",\"d\":\"{}\"}}\n",
+                        base64_encode(b"setsid sleep 30 & echo tutuldu\n")
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            api.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            let mut lines = std::io::BufReader::new(api.try_clone().unwrap()).lines();
+            let seen = until(&mut lines, Duration::from_secs(20), |s| {
+                s.screen.matches("tutuldu").count() >= 2
+            });
+            assert!(
+                seen.screen.contains("tutuldu"),
+                "iş hiç başlamadı, görülen {seen:#?}"
+            );
+
+            writer.write_all(b"{\"t\":\"close\"}\n").unwrap();
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while live.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(
+                live.load(Ordering::SeqCst),
+                0,
+                "kabuk öldüğü hâlde kotadaki yer geri verilmedi"
+            );
         }
     }
 }

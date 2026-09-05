@@ -376,15 +376,6 @@ pub fn members(network_id: &NetworkId, bound: usize) -> Result<Vec<MemberRecord>
     Ok(found)
 }
 
-/// One member, as stored.
-pub fn member(
-    network_id: &NetworkId,
-    member_id: &NodeAddress,
-) -> Result<MemberRecord, ZeroTierError> {
-    let body = call(Method::Get, &member_path(network_id, member_id), "")?;
-    parse_member(&body).map_err(ZeroTierError::Protocol)
-}
-
 /// Authorize or de-authorize a member, and VERIFY the flag came back the way it was sent.
 ///
 /// The status code is not the answer. A body the controller does not understand is discarded and

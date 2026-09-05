@@ -64,14 +64,13 @@ describeDb('teams and membership, against a real PostgreSQL', () => {
     db = new DbService(APP_URL as string);
     await db.onModuleInit();
     owner = new DbService(OWNER_URL as string);
-    // The agent, as far as this service is concerned: one question, asked once per bulk change.
-    // Available, so that the POSIX re-application these operations owe actually lands on the queue
-    // and the tests below can read it back.
+    // TeamsService'in ajanla işi yok — kalıntı bir kurucu parametresiydi ve kaldırıldı — ama
+    // `IdentitySyncService` onu hâlâ istiyor. Ulaşılabilir, ki bu işlemlerin borçlu olduğu POSIX
+    // yeniden uygulaması gerçekten kuyruğa düşsün ve aşağıdaki testler onu geri okuyabilsin.
     const agent = { isAvailable: () => true } as unknown as AgentService;
     teams = new TeamsService(
       db,
       new JobsService(db),
-      agent,
       // A real one. Membership changes enqueue an `identity.sync` now, and a stub that swallowed
       // it would let the enqueue silently stop happening — the `putMember` gap this closes was
       // invisible for exactly that reason. Its own agent is never reached from `enqueue`, which is

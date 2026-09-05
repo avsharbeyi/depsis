@@ -9,6 +9,7 @@ import {
   AgentUnavailableError,
   expectStatus,
   type AgentRequest,
+  type AgentResponse,
   type SmbPrincipal,
 } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
@@ -114,6 +115,33 @@ export class ShareListNotDeviceWideError extends Error {
   constructor() {
     super('the share list this publish would send is not the whole device');
     this.name = 'ShareListNotDeviceWideError';
+  }
+}
+
+/**
+ * Yayın, Samba'ya HİÇ GELMEDEN, bekleyen bir satırın veri kümesi açılamadığı için düştü.
+ *
+ * ── NEDEN AYRI BİR HATA ──────────────────────────────────────────────────────────────────────
+ *
+ * `publish` işe `adoptPendingShares` ile başlıyor: çıplak adlı satırlara havuzda bir veri kümesi
+ * açıyor. Orada bir ret çıktığında dışarı `AgentRefusedError` sızıyordu, ve denetleyici onu
+ * `describeRefusal`'a veriyordu — yani ekrana "Samba yeni yapılandırmayı kabul etmedi, eskisi
+ * geri kondu" yazılıyordu. `publish_samba_config` ise henüz çağrılmamıştı bile. Sahibi Samba'yı
+ * suçlayıp orada arıyor, gerçek sebep — yanlış havuz adı, dolu havuz, var olmayan ebeveyn — hiç
+ * görünmüyordu.
+ *
+ * Ajanın kendi cümlesi `agentReason`'da AYNEN taşınıyor: sahada düşen yayının sebebi
+ * `zfs get mountpoint ev: dataset does not exist` gibi ekranda gösterilebilecek kadar somut bir
+ * cümleydi, ve tam da gösterilmediği için kimse anlamadı.
+ */
+export class SharePendingAdoptionError extends Error {
+  constructor(
+    readonly shareName: string,
+    readonly dataset: string,
+    readonly agentReason: string,
+  ) {
+    super(`the pending share '${shareName}' could not be adopted onto ${dataset}: ${agentReason}`);
+    this.name = 'SharePendingAdoptionError';
   }
 }
 
@@ -312,7 +340,42 @@ export class SharesService {
     // the race is rare and the case it catches is not: the same name submitted twice. What makes
     // the race safe is `shares_name_unique`, which folds case the way SMB clients do and turns the
     // loser into a 409 rather than a second share nobody can address.
-    await this.db.withTenant(organizationId, (q) => assertShareNameFree(q, input.name));
+    //
+    // ── HİBELER DE BURADA, AJANDAN ÖNCE DOĞRULANIYOR ────────────────────────────────────────
+    //
+    // Eskiden `assertPrincipalsInOrganization` veri kümesi YARATILDIKTAN sonra çalışıyordu.
+    // Bilinmeyen bir kullanıcı/ekip id'si — yanlış yazılmış, başka kiracıdan, ya da istek
+    // uçarken silinmiş — 422 ile geri dönüyor, ama `tank/depsis/muhasebe` havuzda kalıyordu ve
+    // hiçbir satır yazılmıyordu. Yönetici doğru hibeyle tekrar denediğinde bu sefer 409 "bu adda
+    // bir veri kümesi zaten var" alıyordu: üründe veri kümesi silme yolu olmadığı için o ad
+    // arayüzden bir daha AÇILAMIYORDU, tek çıkış terminaldi.
+    //
+    // Doğrulama artık ajana dokunmadan önce; başarısız olursa havuzda hiçbir iz kalmıyor ve ad
+    // serbest kalıyor. `everyone_team()` de buraya taşındı, çünkü varsayılan hibe kümesi onun
+    // döndürdüğü id'yi taşıyor ve doğrulanacak liste tam olarak o.
+    const applied = await this.db.withTenant(organizationId, async (q) => {
+      await assertShareNameFree(q, input.name);
+      const resolved: readonly GrantInput[] =
+        grants ??
+        (await (async () => {
+          const everyone = await q.query<{ id: string }>(
+            `SELECT public.everyone_team($1)::text AS id`,
+            [organizationId],
+          );
+          const everyoneId = everyone[0]?.id;
+          if (everyoneId === undefined) throw new Error('everyone_team() returned no row');
+          return [
+            { userId: actorId, teamId: null, permissions: [...ALL_PERMISSIONS] },
+            {
+              userId: null,
+              teamId: everyoneId,
+              permissions: ['list', 'read', 'download'] as GrantInput['permissions'],
+            },
+          ];
+        })());
+      await assertPrincipalsInOrganization(q, organizationId, resolved);
+      return resolved;
+    });
 
     const created = await this.agent.call(
       {
@@ -337,26 +400,6 @@ export class SharesService {
     expectStatus(created, 'created');
 
     const row = await this.db.withTenant(organizationId, async (q) => {
-      const applied: readonly GrantInput[] =
-        grants ??
-        (await (async () => {
-          const everyone = await q.query<{ id: string }>(
-            `SELECT public.everyone_team($1)::text AS id`,
-            [organizationId],
-          );
-          const everyoneId = everyone[0]?.id;
-          if (everyoneId === undefined) throw new Error('everyone_team() returned no row');
-          return [
-            { userId: actorId, teamId: null, permissions: [...ALL_PERMISSIONS] },
-            {
-              userId: null,
-              teamId: everyoneId,
-              permissions: ['list', 'read', 'download'] as GrantInput['permissions'],
-            },
-          ];
-        })());
-      await assertPrincipalsInOrganization(q, organizationId, applied);
-
       const inserted = await q.query<ShareRow>(
         `INSERT INTO public.shares (organization_id, name, dataset, read_only)
               VALUES ($1, $2, $3, $4)
@@ -763,7 +806,16 @@ export class SharesService {
       );
       // `conflict` — veri kümesi zaten var. Satırın işaret etmesi gereken yer tam orası, yani
       // bu bir hata değil sahiplenmenin yarısının önceden yapılmış olması.
-      if (made.status !== 'conflict') expectStatus(made, 'created');
+      //
+      // BAŞKA HER ŞEY SAHİPLENME HATASI, ve öyle adlandırılmak zorunda. Burada `expectStatus`
+      // çağrılıyordu; o `refused`/`failed` için `AgentRefusedError`, kalan her şey için
+      // `AgentUnavailableError` atıyor, ve denetleyici ikisini de yayının kendisine ait sanıp
+      // "Samba kabul etmedi, eskisi geri kondu" ya da "ajana ulaşılamadı" diyordu — oysa
+      // `publish_samba_config` daha çağrılmamıştı. Durum koduna bakılıyor, hata sınıfına değil:
+      // yanlış anlatım iki ayrı sınıftan geliyordu, ve ikisi de buradan geçiyor.
+      if (made.status !== 'conflict' && made.status !== 'created') {
+        throw new SharePendingAdoptionError(row.name, dataset, agentReasonOf(made));
+      }
 
       await this.db.withTenant(organizationId, (q) =>
         q.query(`UPDATE public.shares SET dataset = $1, updated_at = now() WHERE id = $2::uuid`, [
@@ -847,6 +899,19 @@ async function assertPrincipalsInOrganization(
   }
 
   if (missing.length > 0) throw new UnknownGrantPrincipalError(missing);
+}
+
+/**
+ * Ajanın yanıtındaki gerekçe, varsa.
+ *
+ * `reason` her yanıt türünde yok — `not_found` gibi bazıları yalnız durum taşıyor — ve o durumda
+ * gösterilecek en dürüst şey durumun kendisi. Metne göre DALLANMIYOR: tek işi, ekrana konacak
+ * cümleyi bulmak.
+ */
+function agentReasonOf(response: AgentResponse): string {
+  return 'reason' in response && typeof response.reason === 'string'
+    ? response.reason
+    : response.status;
 }
 
 /**

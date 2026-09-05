@@ -122,4 +122,12 @@ async function bootstrap(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-void bootstrap();
+// `catch` ile, çıplak `void` ile değil. `abortOnError: false` Nest'in kendi kendine çıkmasını
+// engelliyor, yani bir bağımlılık hatası bu sözün REDDİ olarak geri geliyor; yakalayan olmadığında
+// Node onu ham bir yığın izi basıp çıkarak bildiriyordu — süreç yine ölüyor ama journalctl'de neyin
+// öldüğünü söyleyen bir satır olmuyordu. Kod yine 1: systemd `Restart=always` ile yeniden deniyor.
+void bootstrap().catch((error: unknown) => {
+  const detail = error instanceof Error ? error.stack : undefined;
+  new Logger('Worker').error(`işçi açılamadı: ${detail ?? String(error)}`);
+  process.exit(1);
+});

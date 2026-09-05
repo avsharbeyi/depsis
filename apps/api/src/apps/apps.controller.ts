@@ -355,8 +355,14 @@ function toPage(overview: AppsOverview): Schemas['AppPage'] {
   };
 }
 
-function toApp(view: AppView): Schemas['App'] {
+export function toApp(view: AppView): Schemas['App'] {
   const catalogue: Schemas['AppCatalogueEntry'] = {
+    // `custom` YALNIZCA true iken yazılıyor. Katalog satırlarına `custom: false` basmak sözleşmeyi
+    // gereksiz genişletirdi; alan opsiyonel ve `exactOptionalPropertyTypes` açık olduğu için
+    // `custom: view.catalogue.custom` (undefined olabilir) derlenmezdi. Arayüz "Özel" rozetini ve
+    // yöneticiye özel "Sil" düğmesini yalnız bu alandan çiziyor — burada düşerse özel uygulama
+    // katalog satırından ayırt edilemez ve arayüzden bir daha kaldırılamaz.
+    ...(view.catalogue.custom === true ? { custom: true } : {}),
     slug: view.catalogue.slug,
     name: view.catalogue.name,
     summary: view.catalogue.summary,

@@ -59,7 +59,20 @@ test('SMB parolası olmayan hesaba komutların çalışmayacağı söyleniyor', 
   const pane = await openPane(page, 'Paylaşımlar');
 
   const connect = pane.getByRole('button', { name: 'Bu bilgisayara bağla' }).first();
-  if ((await connect.count()) === 0) return;
+  // SESSİZ BİR `return` DEĞİL. Bu dal bir zamanlar hiçbir iddia kurmadan dönüyordu ve Playwright
+  // onu "passed" diye raporluyordu: yayımlanmış paylaşımı olmayan bir yığında bu test sıfır şey
+  // ölçüp yeşil yanıyordu, ve ci.yml'deki "her atlama sebebini söylesin" kapısı da göremiyordu
+  // çünkü atlama diye kaydedilmiş bir şey yoktu.
+  //
+  // Kardeş testteki `/yayımlanmam/` iddiası buraya kopyalanamaz: o not (Shares.tsx) yalnız
+  // `unpublished > 0 && smbAvailable` iken çiziliyor, yani ajan tamamen düşükse hiç görünmüyor
+  // ve iddia kırılırdı. Doğrusu, ölçülemediğini SÖYLEYEREK atlamak.
+  test.fixme(
+    (await connect.count()) === 0,
+    'Bu yığında yayımlanmış paylaşım yok: "Bu bilgisayara bağla" düğmesi hiç çizilmiyor, ' +
+      'yani SMB parolası uyarısının alana bağlı olduğu ölçülemiyor. CI bunu görmez — ' +
+      'ci.yml DEPSIS_E2E_REQUIRE_AGENT=1 ile koşuyor.',
+  );
   await connect.click();
 
   // `smbReady` /me'den geliyor ve `nt_hash IS NOT NULL` demek.

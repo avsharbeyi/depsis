@@ -8,7 +8,16 @@
  */
 
 export * from './errors.js';
-export * from './pagination.js';
+
+/*
+ * Sayfalama sabitleri BURADA DEĞİL, belgede.
+ *
+ * `pagination.ts` `MAX_PAGE_SIZE = 200` / `DEFAULT_PAGE_SIZE = 50` ilan ediyordu ve hiçbir yerden
+ * okunmuyordu — sunucu kendi tavanlarını uyguluyor (`/files` 100/500, `/search` ve `/audit`
+ * 50/200), yani iki gerçeklik sessizce yan yana yaşıyordu. Sözleşmede sayılan tek yer
+ * `openapi/depsis.yaml`in `Limit` ve `FilesLimit` parametreleri; kullanılmayan ikinci bir liste,
+ * gün gelip ayrıştığında kimsenin fark etmeyeceği bir liste demekti.
+ */
 
 /**
  * The generated view of `openapi/depsis.yaml`.

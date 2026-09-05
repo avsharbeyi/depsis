@@ -7,7 +7,7 @@ import {
   type Permission,
 } from '@depsis/authz';
 
-import { AgentService, expectStatus } from '../agent/agent.service.js';
+import { AgentService, AgentUnavailableError, expectStatus } from '../agent/agent.service.js';
 import { DbService, type TenantQuery } from '../db/db.service.js';
 import { PosixIdentityService } from '../identity/posix.service.js';
 
@@ -332,13 +332,33 @@ export class AclApplyService {
       entries.push({ gid, read: entry.read, write: entry.write, execute: entry.execute });
     }
 
-    expectStatus(
-      // No correlation id of the request that caused this — by the time the job runs, that
-      // request is long over, so `AgentService` mints one and the job's `reason` is what ties the
-      // agent's audit line back to who asked.
-      await this.agent.call({ op: 'apply_folder_acl', share, path: [...path], entries }, reason),
-      'acl_applied',
+    // No correlation id of the request that caused this — by the time the job runs, that request
+    // is long over, so `AgentService` mints one and the job's `reason` is what ties the agent's
+    // audit line back to who asked.
+    const response = await this.agent.call(
+      { op: 'apply_folder_acl', share, path: [...path], entries },
+      reason,
     );
+
+    // ── `acl_unavailable`: KUTUDA `setfacl` YOK ──────────────────────────────────────────────
+    //
+    // Ajan bu cevabı özellikle üretiyor ve gerekçesinde EKSİK PROGRAMIN ADINI veriyor — Rust
+    // tarafında bunun kendi testi var. Buraya kadar geliyor, ve burada düşüyordu: `expectStatus`
+    // bu durumu ne `refused` ne `failed` saydığı için "expected 'acl_applied', the agent answered
+    // 'acl_unavailable'" diye genel bir ulaşılamazlık hatasına çeviriyor ve ajanın cümlesini
+    // ATIYORDU. Sonuç: izin satırı veritabanına yazılmış, ekranda "verildi" görünüyor, paylaşım
+    // kökü 0750 root:root kaldığı için kimse klasöre giremiyor, ve ne yapılacağını söyleyen tek
+    // cümle (`apt install acl`) hiçbir yere ulaşmıyor.
+    //
+    // Hata tipi bilerek DEĞİŞMİYOR: yeniden denenebilir kalması doğru davranış — paket kurulup
+    // ajan toparlandığında iş kendiliğinden tamamlanıyor (bütçe 20 deneme, ~1 saat). Değişen tek
+    // şey, ajanın gerekçesinin işin `last_error`'ına geçmesi, yani sistem işleri kartında
+    // okunabilir olması.
+    if (response.status === 'acl_unavailable') {
+      throw new AgentUnavailableError(response.reason);
+    }
+
+    expectStatus(response, 'acl_applied');
   }
 
   /**

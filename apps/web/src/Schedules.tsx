@@ -57,6 +57,8 @@ export function Schedules({ notify }: { notify: Notify }): ReactElement {
   const [atMinute, setAtMinute] = useState('0');
   const [weekday, setWeekday] = useState('0');
   const [keep, setKeep] = useState('7');
+  /** Paylaşımların veri kümeleri — "Veri kümesi" alanının öneri listesi. */
+  const [shareDatasets, setShareDatasets] = useState<string[]>([]);
 
   const load = useCallback(async (): Promise<void> => {
     const { data, error, response } = await api.GET('/storage/backup-schedules', {});
@@ -78,6 +80,28 @@ export function Schedules({ notify }: { notify: Notify }): ReactElement {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // ÖNERİ LİSTESİ, "Yedek al" formundakiyle aynı gerekçeyle: alan ham bir ZFS adı istiyor ve o adı
+  // bilmeyen sahibi terminale iner. `GET /shares` yöneticiye her paylaşımın `dataset` alanını
+  // veriyor; sözleşmede isteğe bağlı olduğu (ve yönetici olmayana hiç dönmediği) için süzülüyor.
+  // Liste boş kalırsa alan serbest metin olarak duruyor — öneriyi tek yol yapmak, paylaşım dışı
+  // veri kümelerine zamanlama kurmayı imkânsız kılardı.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const { data } = await api.GET('/shares', {});
+      if (!alive || data === undefined) return;
+      setShareDatasets(
+        data.items
+          .map((item) => item.dataset)
+          .filter((value): value is string => value !== undefined && value !== '')
+          .sort((a, b) => a.localeCompare(b, 'tr')),
+      );
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   async function submit(event: React.FormEvent): Promise<void> {
     event.preventDefault();
@@ -271,9 +295,18 @@ export function Schedules({ notify }: { notify: Notify }): ReactElement {
               onChange={(event) => setDataset(event.target.value)}
               placeholder="tank/depsis"
               maxLength={255}
+              list="depsis-schedule-datasets"
+              autoComplete="off"
+              spellCheck={false}
               required
             />
+            <small>Paylaşımlarınızın veri kümeleri listeden seçilebilir.</small>
           </label>
+          <datalist id="depsis-schedule-datasets">
+            {shareDatasets.map((item) => (
+              <option value={item} key={item} />
+            ))}
+          </datalist>
 
           <label className="fld">
             <span className="lbl">Ritim</span>

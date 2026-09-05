@@ -36,7 +36,9 @@ export type LoginResult =
   // challenge token is not a session and cannot be used as one.
   | { outcome: 'mfa-required'; challenge: PendingChallenge }
   | { outcome: 'rejected' }
-  | { outcome: 'throttled' };
+  // `retryAfterSeconds` denetleyiciye kadar taşınıyor: kilit süresini bilen tek yer sayacın
+  // kendisi, ve o sayı ekrana ulaşmadığı sürece kullanıcı "bir dakika bekle" deyip erken deniyor.
+  | { outcome: 'throttled'; retryAfterSeconds: number };
 
 export interface SecondFactorRequest {
   challengeToken: string;
@@ -91,8 +93,9 @@ export class AuthService {
     // it rather than reimplementing it in TypeScript is what keeps the two from drifting.
     const usernameFolded = await this.fold(request.username);
 
-    if (!(await this.throttle.gate(usernameFolded, request.ip))) {
-      return { outcome: 'throttled' };
+    const decision = await this.throttle.gate(usernameFolded, request.ip);
+    if (!decision.allowed) {
+      return { outcome: 'throttled', retryAfterSeconds: decision.retryAfterSeconds };
     }
 
     // The box's own organisation unless the caller named one. See `resolveSoleId`.

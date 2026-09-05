@@ -65,6 +65,11 @@ export function Account({
         ? `Parola değişti. Diğer ${data.otherSessionsRevoked} oturum kapatıldı.`
         : 'Parola değişti. Başka açık oturumunuz yoktu.',
     );
+    // Parola değişimi aynı anda SMB parolasını da yazıyor, yani `me.smbReady` artık doğru. Bunu
+    // yeniden okumazsak Paylaşımlar ekranındaki "Bu hesabın SMB parolası yok" uyarısı — ki
+    // kullanıcıyı tam buraya gönderen cümle odur — sayfa yenilenene kadar ekranda kalıyor ve
+    // yapılan işin işe yaramadığını söylüyor.
+    onChanged();
   }
 
   return (

@@ -480,11 +480,20 @@ impl SafePath for Openat2SafePath {
                 // 0600 while it is being written: a staging file readable by everyone on the box
                 // is a cross-tenant read of data that has not even landed yet.
                 //
-                // It stays 0600 after publish too, and that is the intent rather than an oversight.
-                // The file becomes the uploader's by OWNERSHIP, not by a wider mode —
+                // The MODE stays 0600 after publish too, and that is the intent rather than an
+                // oversight. The file becomes the uploader's by OWNERSHIP, not by a wider mode —
                 // `SafePath::set_owner` runs on the held descriptor before the rename. Widening the
                 // mode instead would be the obvious-looking fix and the wrong one: it would make
                 // every uploaded file readable by every other tenant on the box.
+                //
+                // WHAT THE MODE CANNOT DO is let the uploader's TEAM read the file, and that is
+                // not the mode's job: team access is a POSIX ACL (ADR-0004), and the kernel stamps
+                // one onto a new file from the DIRECTORY IT IS CREATED IN. This file is created in
+                // staging, which has no default ACL, so the inheritance the kernel would have done
+                // is completed by hand on the publish path — see
+                // `dispatch::Agent::inherit_destination_acl`. Without it a web upload was readable
+                // over SMB by nobody but its owner while the same file created over SMB was not,
+                // and the difference was invisible from the browser.
                 //
                 // This comment has been wrong once already. An earlier version said ownership "is
                 // fixed up at publish" when nothing did that, so P1-D now asserts the owner of a

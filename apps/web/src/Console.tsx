@@ -104,13 +104,69 @@ interface OpenFailure {
   fatal: boolean;
 }
 
+/**
+ * Oturumun NEDEN bittiği.
+ *
+ * Ekran bir zamanlar her kapanışa "boşta kalma süresi" diyordu: `exit` yazıp kabuğu kendi kapatan
+ * yönetici de, konsol servisi bir hata bildirdiğinde de aynı cümleyi okuyordu. Sunucu üç ayrı şey
+ * söylüyor (adlı `exit` olayı, adlı `error` olayı, ve sessizce sona eren akış); ekranın yalnız
+ * sonuncusunu bilip hepsine onun adını vermesi, kullanıcının kendi yaptığı şeyi bir zaman aşımı
+ * sanması demekti.
+ */
+export type ConsoleEnd =
+  | { reason: 'exit'; code: number | null }
+  | { reason: 'error'; message: string }
+  | { reason: 'lost' };
+
+/**
+ * Sunucunun adlı `exit` / `error` olayının gövdesini sebebe çevirir.
+ *
+ * Gövde SSE üzerinde JSON metni olarak geliyor; okunamayan bir gövde sebebi silmez, yalnız
+ * ayrıntısını düşürür — "kabuk kapandı" bilgisi, çıkış kodundan çok daha önemli olan yarısı.
+ */
+export function endOfEvent(type: 'exit' | 'error', raw: unknown): ConsoleEnd {
+  let body: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = null;
+    }
+  }
+  const field = (name: string): unknown =>
+    typeof body === 'object' && body !== null ? (body as Record<string, unknown>)[name] : undefined;
+  if (type === 'exit') {
+    const code = field('code');
+    return { reason: 'exit', code: typeof code === 'number' ? code : null };
+  }
+  const message = field('message');
+  return {
+    reason: 'error',
+    message:
+      typeof message === 'string' && message !== ''
+        ? message
+        : 'Konsol servisi oturumu sonlandırdı.',
+  };
+}
+
+/** Bitiş rozetinin başlığı. Sebep bilinmiyorsa boşta kalma süresi hâlâ en olası açıklama. */
+export function endedTitle(end: ConsoleEnd): string {
+  if (end.reason === 'exit') {
+    return end.code === null || end.code === 0
+      ? 'Kabuk kapandı'
+      : `Kabuk kapandı (çıkış kodu ${end.code})`;
+  }
+  if (end.reason === 'error') return 'Oturum kesildi';
+  return 'Oturum kapandı (boşta kalma süresi)';
+}
+
 export function Console({ notify }: { notify: Notify }): React.JSX.Element {
   const [session, setSession] = useState<ConsoleSession | null>(null);
   const [password, setPassword] = useState('');
   const [opening, setOpening] = useState(false);
   const [failure, setFailure] = useState<OpenFailure | null>(null);
   /** Set when the server has told us this session is gone; the terminal stays, frozen. */
-  const [ended, setEnded] = useState(false);
+  const [ended, setEnded] = useState<ConsoleEnd | null>(null);
   /** How many shells were already open when this screen loaded. An admin should know. */
   const [others, setOthers] = useState(0);
 
@@ -171,7 +227,7 @@ export function Console({ notify }: { notify: Notify }): React.JSX.Element {
         // girişteki hızda kilitlenmeli). Kullanıcıya düşen tek şey beklemek — ve bunun bir
         // servis arızası OLMADIĞINI bilmek; ilk hâli buraya düşünce systemctl komutu öneriyordu.
         setFailure({
-          text: 'Çok fazla yanlış deneme. Birkaç dakika bekleyip yeniden deneyin — bu sayaç oturum açmayla ortaktır.',
+          text: 'Çok fazla yanlış deneme. En çok on beş dakika bekleyip yeniden deneyin — bu sayaç oturum açmayla ortaktır.',
           fatal: false,
         });
       } else if (response.status === 403) {
@@ -188,7 +244,7 @@ export function Console({ notify }: { notify: Notify }): React.JSX.Element {
       return;
     }
 
-    setEnded(false);
+    setEnded(null);
     setSession(data);
   }
 
@@ -217,10 +273,12 @@ export function Console({ notify }: { notify: Notify }): React.JSX.Element {
     term.focus();
 
     /** The session is gone. Freeze the terminal rather than clearing it — the last screen of a shell is often the reason someone opened it. */
-    const finish = (): void => {
+    const finish = (end: ConsoleEnd): void => {
       term.options.disableStdin = true;
       term.blur();
-      setEnded(true);
+      // İlk sebep kazanır: kabuk `exit` dedikten sonra akış da kapanıyor, ve o kapanışın
+      // "boşta kalma süresi" diye üstüne yazması gerçek sebebi silerdi.
+      setEnded((current) => current ?? end);
     };
 
     let reported = { cols: term.cols, rows: term.rows };
@@ -255,10 +313,25 @@ export function Console({ notify }: { notify: Notify }): React.JSX.Element {
       const bytes = decodeFrame(raw);
       if (bytes !== null) term.write(bytes);
     });
-    source.addEventListener('error', () => {
+    // KABUĞUN KENDİ ÇIKIŞI. Bu olay dinlenmediği sürece `exit` yazan yönetici, akışın ardından
+    // gelen kapanışı okuyup "boşta kalma süresi" cümlesini görüyordu. Akışı burada kapatmak,
+    // artık var olmayan bir oturum için tarayıcının yeniden bağlanıp 404 almasını da bitiriyor.
+    source.addEventListener('exit', (event) => {
+      finish(endOfEvent('exit', event.data));
+      source.close();
+    });
+    source.addEventListener('error', (event) => {
+      // Bu dinleyiciye İKİ ayrı şey düşüyor: tarayıcının gövdesiz taşıma hatası, ve sunucunun
+      // adlı `error` olayı (gövdeli bir `MessageEvent`). Ayırmazsak kopan bir bağlantıyı "sunucu
+      // hatası" diye gösterir, sunucunun yazdığı mesajı ise hiç göstermezdik.
+      if ('data' in event) {
+        finish(endOfEvent('error', (event as MessageEvent).data));
+        source.close();
+        return;
+      }
       // EventSource reconnects by itself after a network hiccup and only closes for good when the
       // server refuses the request — which, for this path, means the session no longer exists.
-      if (source.readyState === EventSource.CLOSED) finish();
+      if (source.readyState === EventSource.CLOSED) finish({ reason: 'lost' });
     });
 
     const input = term.onData((data) => {
@@ -267,7 +340,7 @@ export function Console({ notify }: { notify: Notify }): React.JSX.Element {
           params: { path: { id } },
           body: { data: encodeInput(data) },
         });
-        if (response.status === 410) finish();
+        if (response.status === 410) finish({ reason: 'lost' });
       })();
     });
 
@@ -368,13 +441,14 @@ export function Console({ notify }: { notify: Notify }): React.JSX.Element {
         <div className="note">Konsol ayrıcalıksız bir kullanıcı olarak çalışıyor — root değil.</div>
       )}
 
-      {ended && (
+      {ended !== null && (
         <div className="notice error" role="alert">
           <span className="ic" aria-hidden>
             !
           </span>
           <div className="tx">
-            <b>Oturum kapandı (boşta kalma süresi)</b>
+            <b>{endedTitle(ended)}</b>
+            {ended.reason === 'error' && <>{ended.message} </>}
             Ekrandaki çıktı duruyor ama artık yazamazsınız. Yeni bir konsol için parolanızı tekrar
             girin.
           </div>
@@ -405,11 +479,11 @@ export function Console({ notify }: { notify: Notify }): React.JSX.Element {
           className="b danger"
           onClick={() => {
             setSession(null);
-            setEnded(false);
-            notify('ok', ended ? 'Konsol kapatıldı.' : 'Konsol oturumu kapatıldı.');
+            setEnded(null);
+            notify('ok', ended !== null ? 'Konsol kapatıldı.' : 'Konsol oturumu kapatıldı.');
           }}
         >
-          {ended ? 'Yeni oturum' : 'Oturumu kapat'}
+          {ended !== null ? 'Yeni oturum' : 'Oturumu kapat'}
         </button>
       </div>
     </>

@@ -222,6 +222,134 @@ select.pill.bad {
   row-gap: 6px;
 }
 
+/* ─── görev takvimi ──────────────────────────────────────────────────────────
+   §7'nin istediği takvim görünümü: yedi eşit sütun, çünkü haftanın günleri eşit ve içeriğe göre
+   genişleyen bir sütun "hangi gün yoğun" sorusunu genişlikle yanıtlayıp göze yalan söylerdi.
+   Bugünün sütunu kenarından okunuyor — takvim açıldığında aranan ilk şey o. */
+.cal {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+  margin: 8px 0;
+}
+.calday {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-height: 120px;
+  padding: 7px;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.calday.now {
+  border-color: rgba(79, 227, 168, 0.42);
+  background: rgba(79, 227, 168, 0.08);
+}
+.calhd {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--ink2);
+}
+.calhd .s {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--mut);
+}
+.calit {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 6px;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.24);
+  font-size: 11.5px;
+  color: var(--ink);
+}
+.calit .tx {
+  overflow-wrap: anywhere;
+}
+.calit .s {
+  font-size: 10px;
+  color: var(--mut);
+}
+.calnone {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+/* ─── fotoğraflar ────────────────────────────────────────────────────────────
+   Zaman çizelgesi: ay başlığı, altında kareler. Kare SABİT ORANLI (1:1) ve `object-fit: cover` —
+   dikey ve yatay fotoğrafların karıştığı bir ızgarada satır yüksekliğinin fotoğraftan fotoğrafa
+   zıplaması, taramayı okunmaz yapıyor. `auto-fill` ile sütun sayısını pencere belirliyor. */
+.phhd {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 14px 0 7px;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink2);
+}
+.phhd .s {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--mut);
+}
+.phgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 6px;
+}
+.phcell {
+  aspect-ratio: 1;
+  padding: 0;
+  border: 1px solid var(--edge);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.phcell:hover {
+  border-color: var(--edge2);
+}
+.phcell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.phnone {
+  font-size: 22px;
+  opacity: 0.4;
+}
+.phbig {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid var(--edge);
+  border-radius: 11px;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+.phbig img {
+  max-width: 100%;
+  max-height: 62vh;
+  object-fit: contain;
+}
+
 /* İşin yönergesi — tartışma panelindeki açıklama kutusu. Yorumdan BÜYÜK ve önde durur:
    "sanki önemsizmiş gibi duruyor" şikâyetinin cevabı biçimin kendisi. */
 .jdesc {
@@ -351,29 +479,6 @@ select.pill.bad {
   color: var(--mut);
   font-variant-numeric: tabular-nums;
 }
-.ch .cx {
-  width: 23px;
-  height: 23px;
-  border-radius: 7px;
-  border: 1px solid var(--edge);
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--mut);
-  cursor: pointer;
-  font-size: 11px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  flex: none;
-}
-.ch .cx:hover {
-  background: rgba(91, 200, 245, 0.2);
-  color: #dbf2fe;
-  border-color: rgba(91, 200, 245, 0.44);
-}
-.ch .cx.q {
-  margin-left: auto;
-}
-
 /* ─── tiles ────────────────────────────────────────────────────────────────── */
 
 /* Fixed height on purpose: the tiles summarise, the file manager below them is the work surface,
@@ -985,6 +1090,57 @@ select.pill.bad {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ─── ızgara görünümü ────────────────────────────────────────────────────────
+   §5.1'in istediği ikinci düzen, ve AYNI SATIRI çiziyor: burada değişen tek şey yerleşim.
+   İkinci bir satır bileşeni yazmak, sürükleme, seçim ve eylem düğmelerinin iki yerde ayrışması
+   demek olurdu. Kare sabit yükseklikte, çünkü küçük resimlerin oranı dosyadan dosyaya değişiyor
+   ve zıplayan bir ızgara taranamıyor. */
+.flist.gridview {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 8px;
+  align-content: start;
+  padding-bottom: 8px;
+}
+.flist.gridview .frow {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--edge);
+  text-align: center;
+}
+.flist.gridview .frow .g {
+  width: 100%;
+  height: 92px;
+  border-radius: 8px;
+  font-size: 30px;
+  flex: none;
+}
+.flist.gridview .frow .n {
+  flex: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  /* İki satır, sonra kırpma: uzun bir dosya adının kareyi kendi boyuna çekmesi ızgarayı bozar. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Tarih ızgarada YOK: kare dar, ve üç satır meta veriden feda edilecek olan ad değil. Boyut
+   kalıyor — bir klasörde "boş" ile "dolu" arasındaki fark hâlâ okunabilir olmalı. */
+.flist.gridview .frow .dt {
+  display: none;
+}
+.flist.gridview .fact {
+  justify-content: center;
+  flex-wrap: wrap;
+}
+/* "Daha fazla göster" bir hücre değil, listenin sonu: bütün sütunları kaplıyor. */
+.flist.gridview .fmore {
+  grid-column: 1 / -1;
 }
 .frow .sz {
   font-family: var(--mono);
@@ -1721,7 +1877,11 @@ canvas.spark {
 
 /* Parça satırı OKUNUR, düzenlenmez: her parça panoda kendi satırı olarak duruyor, atananının
    sütununda, bütün kontrolleriyle. Aynı işi iki yerde yapmak, iki yerde ayrışan iki davranış. */
-.sub {
+/* `.thread` ile SINIRLI, ve olması gerekiyordu: seçicisiz hâli, `.um .sub` (yükleme menüsünün
+   altyazıları) ve `label .sub` (form ipuçları) üzerine de düşüyordu. O iki kural yalnız dört
+   özelliği geri alıyor, buradaki padding, border-radius ve soldaki 2px'lik şerit onlarda kalıyordu
+   — oysa o şerit tasarımda "bu bir alt görev satırı" demek. */
+.thread .sub {
   display: flex;
   align-items: baseline;
   gap: 8px;
@@ -1731,17 +1891,17 @@ canvas.spark {
   color: var(--ink2);
   box-shadow: inset 2px 0 0 var(--edge2);
 }
-.sub .tx {
+.thread .sub .tx {
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.sub .s {
+.thread .sub .s {
   font-family: var(--mono);
   font-size: 10px;
   color: var(--dim);
 }
-.sub.done .tx {
+.thread .sub.done .tx {
   text-decoration: line-through;
   color: var(--dim);
 }
@@ -1760,15 +1920,6 @@ canvas.spark {
 .cadd input:focus-visible {
   border-color: var(--edge2);
   outline: none;
-}
-
-/* ─── bağlantı tanılaması ───────────────────────────────────────────────────── */
-
-.diag {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 0 2px;
 }
 
 /* ─── bu bilgisayara bağla ──────────────────────────────────────────────────── */
@@ -1838,19 +1989,6 @@ canvas.spark {
   border-color: var(--edge2);
   outline: none;
 }
-.b.danger {
-  border-color: rgba(255, 126, 138, 0.5);
-  color: #ffd9dd;
-  background: rgba(255, 126, 138, 0.18);
-}
-.b.danger:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.b.danger:not(:disabled):hover {
-  background: rgba(255, 126, 138, 0.3);
-}
-
 /* ─── etiketler ─────────────────────────────────────────────────────────────── */
 
 .tagbar {
@@ -2272,30 +2410,6 @@ canvas.spark {
   color: var(--ink2);
 }
 
-/* Ending something that is running: a console session, an app. Kept visually quieter than
-   .b.danger — it sits inside rows, where a full-weight red button would shout on every line. */
-.kill {
-  padding: 4px 9px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 126, 138, 0.4);
-  background: rgba(255, 126, 138, 0.14);
-  color: #ffd9dd;
-  font-size: 10.5px;
-  cursor: pointer;
-  font-family: var(--sans);
-}
-.kill:hover:not(:disabled) {
-  background: rgba(255, 126, 138, 0.26);
-  border-color: rgba(255, 126, 138, 0.5);
-  color: #ffd9dd;
-}
-.kill:disabled {
-  border-color: var(--edge);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--mut);
-  cursor: default;
-  opacity: 1;
-}
 /* ─── users ────────────────────────────────────────────────────────────────── */
 
 .urow {
@@ -2357,25 +2471,6 @@ canvas.spark {
 .revoke:disabled {
   opacity: 0.45;
   cursor: default;
-}
-.unick {
-  width: 126px;
-  flex: none;
-  background: rgba(0, 0, 0, 0.26);
-  border: 1px solid var(--edge);
-  border-radius: 7px;
-  padding: 6px 9px;
-  color: var(--ink);
-  font-family: var(--sans);
-  font-size: 11.5px;
-  outline: none;
-  margin: 0;
-}
-.unick:focus {
-  border-color: var(--edge2);
-}
-.unick::placeholder {
-  color: var(--dim);
 }
 .admin {
   font-size: 10.5px;
@@ -2442,12 +2537,18 @@ button:disabled,
   border-color: rgba(255, 126, 138, 0.5);
   color: #ffd9dd;
 }
+/* Bu kural bir zamanlar `.repl` bölümündeki İKİNCİ bir `.b.danger` bloğuyla birlikte duruyordu;
+   aynı özgüllükte iki tanım, farklı değerlerle. Sonraki kazandığı için ilkinden yalnız bu satır
+   yaşıyordu ve okuyan hangisinin geçerli olduğunu bilemiyordu. */
+.b.danger:disabled {
+  cursor: not-allowed;
+}
 
 /* ─── forms ────────────────────────────────────────────────────────────────── */
 
-/* The reference had exactly two text fields (.search, .unick) and no labels at all. Real screens
-   need the full set, so they are built from those two: a recessed near-black well, a hairline
-   edge that brightens on focus. */
+/* The reference had exactly two text fields (.search and a bare user-name box, since removed) and
+   no labels at all. Real screens need the full set, so they are built from those two: a recessed
+   near-black well, a hairline edge that brightens on focus. */
 label {
   display: block;
   font-size: 11.5px;
@@ -2826,8 +2927,11 @@ label textarea,
   color: var(--mut);
 }
 /* The start/stop control. It is deliberately full width and neutral until hovered: the tint is
-   the consequence of pressing it, so a card full of running apps is not a wall of red. */
-.tg {
+   the consequence of pressing it, so a card full of running apps is not a wall of red.
+   Adı `.apptg`, `.tg` DEĞİL: `.tg` yukarıda (1824) etiket hapının adı ve aynı özgüllükteki bu
+   blok daha sonra geldiği için etiketlerin rengini, yuvarlağını ve genişliğini eziyordu —
+   görünmeyen bir etiket, olmayan bir etiket demek. */
+.apptg {
   padding: 6px 0;
   border-radius: 7px;
   border: 1px solid var(--edge);
@@ -2837,13 +2941,15 @@ label textarea,
   cursor: pointer;
   font-family: var(--sans);
   width: 100%;
+  display: block;
+  text-align: center;
 }
-.tg.stop:hover:not(:disabled) {
+.apptg.stop:hover:not(:disabled) {
   background: rgba(255, 126, 138, 0.2);
   border-color: rgba(255, 126, 138, 0.42);
   color: #ffd9dd;
 }
-.tg.start:hover:not(:disabled) {
+.apptg.start:hover:not(:disabled) {
   background: rgba(79, 227, 168, 0.2);
   border-color: rgba(79, 227, 168, 0.42);
   color: #c6f6e4;
@@ -2873,10 +2979,6 @@ label textarea,
    of the well above, which is a shade lighter — the seam is visible. */
 .term .xterm .xterm-viewport {
   background-color: transparent;
-}
-/* Used by the plain-text fallback the component shows before a session is attached. */
-.term .p {
-  color: var(--cool);
 }
 
 /* güncelleme günlüğü — KENDİ SINIFI, ve ayrı olması bir düzeltme.
@@ -3239,9 +3341,6 @@ label textarea,
   background: rgba(255, 126, 138, 0.2);
   color: var(--rose);
 }
-.toast.out {
-  animation: tout 0.32s var(--e) forwards;
-}
 @keyframes tin {
   from {
     opacity: 0;
@@ -3250,12 +3349,6 @@ label textarea,
   to {
     opacity: 1;
     transform: none;
-  }
-}
-@keyframes tout {
-  to {
-    opacity: 0;
-    transform: translateY(10px);
   }
 }
 
@@ -3544,22 +3637,8 @@ label textarea,
     flex-wrap: wrap;
     gap: 9px;
   }
-  .unick {
-    width: 100%;
-    order: 3;
-  }
   .revoke {
     order: 4;
-  }
-  .tabs {
-    flex-wrap: wrap;
-  }
-  .tmtop {
-    flex-wrap: wrap;
-  }
-  .errbox {
-    width: 100%;
-    justify-content: center;
   }
   .apps {
     grid-template-columns: 1fr;
@@ -3651,22 +3730,16 @@ select option {
   }
 }
 
-/* ─── mobil notlar — yazma alanı büyür, liste kısalır ────────────────────────
-   "Not yazma ekranı minicikken not seçme kocaman": dar ekranda öncelik metnin. Liste kaydırılır
-   kısa bir şerit olur, düzenleyici kalan yüksekliğin tamamını alır. */
+/* ─── mobil notlar — liste kısalır ──────────────────────────────────────────
+   "Not yazma ekranı minicikken not seçme kocaman": dar ekranda öncelik metnin, ve liste
+   kaydırılır kısa bir şerit oluyor. Düzenleyicinin kalan yüksekliği almasını bu blok DEĞİL,
+   aşağıdaki 680px bloğundaki `.nmain` / `.nbig` kuralları yapıyor; burada bir zamanlar
+   `.nedit`, `.neditor`, `.notebody` gibi hiçbir öğeye karşılık gelmeyen adlar duruyordu. */
 @media (max-width: 680px) {
-  .notelist,
   .nlist {
     max-height: 150px;
     overflow-y: auto;
     flex: 0 0 auto;
-  }
-  .nedit,
-  .neditor,
-  .notebody,
-  .notes textarea {
-    flex: 1 1 auto;
-    min-height: 46vh;
   }
 }
 
@@ -3775,6 +3848,14 @@ select option {
   }
   .jviews .mk {
     flex: 1;
+  }
+  /* Dar ekranda yedi sütun okunmuyor: takvim güne göre alt alta iniyor ve boş günler yer
+     kaplamıyor. */
+  .cal {
+    grid-template-columns: 1fr;
+  }
+  .calday {
+    min-height: 0;
   }
 
   .nsplit {

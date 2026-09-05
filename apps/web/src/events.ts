@@ -2,24 +2,10 @@ import { useEffect, useRef } from 'react';
 
 import { API_BASE_URL } from './api.js';
 
-/** A job, as the stream reports it. Mirrors the contract's `JobEvent`. */
-export interface JobEvent {
-  id: string;
-  kind: string;
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'dead';
-  progress: number;
-  createdAt: string;
-  error?: { title: string };
-}
-
-/** An upload, as the stream reports it. Mirrors the contract's `TransferEvent`. */
-export interface TransferEvent {
-  id: string;
-  filename: string;
-  lengthBytes: number;
-  offsetBytes: number;
-  completed: boolean;
-}
+// `JobEvent` ve `TransferEvent` burada elle yazılmış birer kopya olarak duruyordu ve hiçbir yerde
+// kullanılmıyordu: yük aşağıda `unknown` olarak taşınıyor, tipi gerekense sözleşmeden üretilen
+// `OpenApi.components['schemas']['JobEvent']` var. Derleyicinin denetlemediği bir kopya, sözleşme
+// değiştiği gün sessizce yanlış hâle gelir — ve "Mirrors the contract" yorumu bunu gizlerdi.
 
 type Handler = (payload: unknown) => void;
 
@@ -37,18 +23,56 @@ type Handler = (payload: unknown) => void;
  * which on this endpoint means a fresh watermark each time. Reference counting outside React means
  * the second mount finds the first one's connection.
  *
- * RECONNECTION IS THE BROWSER'S JOB. `EventSource` retries on its own and resends the last event's
- * id in `Last-Event-ID`, which is exactly what §14 asks for — so there is no retry loop here, and
- * writing one would fight the built-in backoff.
+ * RECONNECTION IS THE BROWSER'S JOB — YALNIZ AĞ HATASINDA. `EventSource` düşen bir bağlantıyı
+ * kendi kuruyor ve son olayın kimliğini `Last-Event-ID` ile geri gönderiyor, ki §14'ün istediği
+ * budur. Ama 200 DIŞI bir yanıtta akışı KALICI olarak kapatıyor ve bir daha denemiyor: uç akış
+ * sınırına ulaştığında 429, güncelleme sırasında nginx 502, oturum bittiğinde 401. O noktadan
+ * sonra Sistem işleri panosu sessizce donuyor — ölen bir iş "çalışıyor" olarak kalıyor ve
+ * kullanıcı elle "Yenile"ye basmadıkça hiçbir şey değişmiyordu. Aşağıdaki yeniden açma yalnız o
+ * kalıcı kapanış içindir ve tarayıcının kendi geri çekilmesiyle yarışmaz.
  */
 const handlers = new Map<string, Set<Handler>>();
 let source: EventSource | null = null;
 let holders = 0;
+/** Kaçıncı yeniden açma denemesindeyiz. Başarılı bir bağlantı sıfırlıyor. */
+let attempts = 0;
+let reopenTimer: number | null = null;
+
+/**
+ * Yeniden açmadan önceki bekleme.
+ *
+ * ARTAN, çünkü kapanışın sebebi çoğu zaman sürüyor: 429 ya da 401 varken sabit beş saniye,
+ * sunucuya dakikada on iki gereksiz istek atmak ve sayacı canlı tutmak olurdu.
+ */
+export function reopenDelayMs(attempt: number): number {
+  const steps = [5_000, 10_000, 30_000];
+  return steps[Math.min(attempt, steps.length - 1)] ?? 30_000;
+}
 
 function open(): void {
   if (source !== null) return;
   const stream = new EventSource(`${API_BASE_URL}/events`);
   source = stream;
+
+  stream.addEventListener('open', () => {
+    attempts = 0;
+  });
+
+  stream.addEventListener('error', () => {
+    // Tarayıcı hâlâ deniyorsa (CONNECTING) karışma: iki geri çekilme birbirini yer.
+    if (stream.readyState !== EventSource.CLOSED) return;
+    // Arada `close()` çağrılmış olabilir; o zaman bu akış artık kimsenin değil ve yerine yenisini
+    // açmak, kapatılmış bir bağlantıyı diriltmek olurdu.
+    if (source !== stream) return;
+    source = null;
+    if (holders <= 0) return;
+    const wait = reopenDelayMs(attempts);
+    attempts += 1;
+    reopenTimer = window.setTimeout(() => {
+      reopenTimer = null;
+      if (holders > 0) open();
+    }, wait);
+  });
 
   for (const type of ['job', 'transfer'] as const) {
     stream.addEventListener(type, (event: MessageEvent<string>) => {
@@ -69,6 +93,11 @@ function open(): void {
 }
 
 function close(): void {
+  if (reopenTimer !== null) {
+    window.clearTimeout(reopenTimer);
+    reopenTimer = null;
+  }
+  attempts = 0;
   source?.close();
   source = null;
 }

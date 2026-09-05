@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AuditService } from '../audit/audit.service.js';
 import { DbService } from '../db/db.service.js';
 import { OrganizationsService } from '../organizations/organizations.service.js';
-import { AuthService } from './auth.service.js';
+import { AuthService, type LoginResult } from './auth.service.js';
 import { LoginThrottleService } from './login-throttle.service.js';
 import { MfaService } from './mfa.service.js';
 import { generateKey, SecretBox } from './secret-box.js';
@@ -207,7 +207,7 @@ describeDb('login, against a real PostgreSQL', () => {
 
   it('refuses outright once a pair has failed too many times', async () => {
     const ip = from(40);
-    const fail = (): Promise<{ outcome: string }> =>
+    const fail = (): Promise<LoginResult> =>
       auth.login({
         username: 'ada',
         organizationSlug: SLUG,
@@ -222,7 +222,18 @@ describeDb('login, against a real PostgreSQL', () => {
     // boundary moves.
     for (let i = 0; i < 9; i += 1) await fail();
     expect((await fail()).outcome, 'the tenth attempt').toBe('rejected');
-    expect((await fail()).outcome, 'the eleventh attempt').toBe('throttled');
+
+    // VE KİLİDİN SÜRESİNİ SÖYLÜYOR. Reddedilen deneme kaydedilmediği için sayaç kendiliğinden
+    // azalmaz: bekleme, sayılan hataların onuncusunun 15 dakikalık pencereden çıkmasına kadar
+    // sürer. Bu sayı denetleyiciye ve oradan `Retry-After` başlığına gidiyor; taşınmadığı sürece
+    // giriş ekranı ancak sabit bir cümle uydurabiliyordu ("bir dakika bekleyin", ki yanlıştı).
+    const refused = await fail();
+    expect(refused.outcome, 'the eleventh attempt').toBe('throttled');
+    if (refused.outcome !== 'throttled') throw new Error('unreachable');
+    // Denemeler az önce yapıldı, yani en yeni onuncu hata neredeyse taze: kalan süre tam pencereye
+    // yakın olmalı. Sabit bir sayı değil, alt ve üst sınırı olan gerçek bir geri sayım.
+    expect(refused.retryAfterSeconds).toBeGreaterThan(14 * 60);
+    expect(refused.retryAfterSeconds).toBeLessThanOrEqual(15 * 60);
 
     // And the victim is NOT locked out: the same account from a different address still works.
     // This is the property ADR-0009 asks for by name — a throttle that locks the account globally

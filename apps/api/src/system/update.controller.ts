@@ -106,10 +106,10 @@ export class UpdateController {
 
   @Get()
   async status(@Req() request: AuthenticatedRequest): Promise<Schemas['UpdateStatus']> {
-    const session = await this.requireAdministrator(request, false);
+    await this.requireAdministrator(request, false);
+    const correlationId = randomUUID();
     return this.present(
-      await this.callAgent({ op: 'update_status' }, 'reading update status', randomUUID()),
-      session.correlationId,
+      await this.callAgent({ op: 'update_status' }, 'reading update status', correlationId),
     );
   }
 
@@ -133,7 +133,7 @@ export class UpdateController {
       summary: 'Yeni sürüm var mı diye bakıldı.',
       correlationId,
     });
-    return this.present(response, correlationId);
+    return this.present(response);
   }
 
   @Post('apply')
@@ -146,13 +146,17 @@ export class UpdateController {
     const parsed = applySchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('parola gerekli');
 
+    // İSTEK BAŞINA TEK KİMLİK, ve ön kontrolün ajana sorduğu havuz sağlığı da bu kimliği taşıyor:
+    // ajanın denetim izi, güncellemeyi başlatan isteğe geri okunabilsin (§16).
+    const correlationId = randomUUID();
+
     // ── ÖN KONTROL, PAROLADAN ÖNCE (§12) ────────────────────────────────────────────────────
     //
     // Havuz sihirbazındaki kalıbın aynısı: güncellemenin ZATEN başlayamayacağını öğrenecek olan
     // kişi, bunu öğrenmek için parolasını vermek zorunda kalmasın. Kontrol edilen iki şey de
     // güncellemeyi YARIDA bırakan türden — ve yarıda kalan bir güncelleme, geri alma yolu da
     // aynı diski kullandığı için kendini geri de alamıyor.
-    await this.precheck(session.organizationId, session.correlationId);
+    await this.precheck(session.organizationId, correlationId);
 
     await this.reauth.require(
       session.organizationId,
@@ -161,7 +165,6 @@ export class UpdateController {
       request,
     );
 
-    const correlationId = randomUUID();
     const response = await this.callAgent(
       { op: 'apply_update' },
       'applying the update',
@@ -179,7 +182,7 @@ export class UpdateController {
       correlationId,
     });
 
-    return this.present(response, correlationId);
+    return this.present(response);
   }
 
   /**
@@ -191,16 +194,12 @@ export class UpdateController {
   private async requireAdministrator(
     request: AuthenticatedRequest,
     write: boolean,
-  ): Promise<{ organizationId: string; userId: string; correlationId: string }> {
+  ): Promise<{ organizationId: string; userId: string }> {
     if (write) requireSameOrigin(request);
     const session = request.depsis;
     if (session === undefined) throw new UnauthorizedException();
     if (!(await this.system.isSystemAdministrator(session.userId))) throw new ForbiddenException();
-    return {
-      organizationId: session.organizationId,
-      userId: session.userId,
-      correlationId: randomUUID(),
-    };
+    return { organizationId: session.organizationId, userId: session.userId };
   }
 
   /**
@@ -300,7 +299,7 @@ export class UpdateController {
    * gerekiyor. `inProgress` bu yüzden `true`ya düşüyor — bilinmezlikte doğru davranış, ikinci bir
    * güncellemeye izin vermemek.
    */
-  private present(response: AgentUpdate, _correlationId: string): Schemas['UpdateStatus'] {
+  private present(response: AgentUpdate): Schemas['UpdateStatus'] {
     const available = response.available ?? null;
     return {
       installed: response.installed ?? null,

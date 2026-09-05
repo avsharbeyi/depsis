@@ -213,4 +213,29 @@ describeDb('the POSIX identity DEPSIS asks for, against a real PostgreSQL', () =
     // Enqueuing must not have talked to the agent. It is an INSERT.
     expect(calls).toHaveLength(0);
   });
+
+  it('adsız bir SMB düşürmesini kuyruğa hiç yazmaz', async () => {
+    // SESSİZ BAŞARININ KAYNAĞI BUYDU. Ad yerine `undefined` gelince payload `{}` olarak
+    // yazılıyor, worker "düşürülecek ad yok" deyip işi BAŞARILI bitiriyor, ve kuyruk hiçbir şey
+    // yapmadan yeşil kalıyordu: kapatılan hesabın Samba parolası çalışmaya devam ederken hiçbir
+    // yerde arıza görünmüyordu. Satırın hiç yazılmaması, o yanlış yeşili ortadan kaldırıyor.
+    await owner.withoutTenant('migration-status', (q) =>
+      q.query(`DELETE FROM job_queue WHERE organization_id = $1`, [org]),
+    );
+
+    await identity.enqueueRevokeSmb(org, undefined as unknown as string);
+    await identity.enqueueRevokeSmb(org, '');
+
+    const queued = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ kind: string }>(`SELECT kind FROM job_queue WHERE organization_id = $1`, [org]),
+    );
+    expect(queued).toHaveLength(0);
+
+    // Ve gerçek bir ad hâlâ kuyruğa giriyor — gardın işi yalnız adsız satırı durdurmak.
+    await identity.enqueueRevokeSmb(org, 'kapali');
+    const after = await owner.withoutTenant('migration-status', (q) =>
+      q.query<{ kind: string }>(`SELECT kind FROM job_queue WHERE organization_id = $1`, [org]),
+    );
+    expect(after.map((r) => r.kind)).toEqual(['identity.revoke-smb']);
+  });
 });

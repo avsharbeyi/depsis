@@ -83,9 +83,12 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
       // 429 is the one refusal worth distinguishing. Everything else gets the same sentence,
       // because the server deliberately gives the same answer to a wrong password, an unknown
       // account and an unknown organisation — repeating that here rather than guessing.
+      // SÜRE GERÇEK OLMALI. Burada bir zamanlar "bir dakika" yazıyordu; sunucunun penceresi ise
+      // on beş dakika (`login-throttle.service.ts`). Bir dakika sonra dönüp yine reddedilen kişi
+      // cihazı bozuk sanıyor, ve ne kadar bekleyeceğini hiçbir yerde göremiyordu.
       setError(
         response.status === 429
-          ? 'Bu adresten çok fazla deneme yapıldı. Bir dakika bekleyip tekrar deneyin.'
+          ? 'Bu adresten çok fazla deneme yapıldı. En çok on beş dakika bekleyip tekrar deneyin.'
           : 'Kullanıcı adı veya parola hatalı.',
       );
       return;
@@ -110,7 +113,10 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
     setBusy(false);
 
     if (failure !== undefined || data === undefined) {
-      setError('Kod kabul edilmedi.');
+      // SÜRESİ DOLMUŞ SORGU DA BURAYA DÜŞÜYOR ve sunucu ikisini bilerek ayırmıyor. Doğru kodu
+      // yazan biri bu yüzden aynı cümleyi sonsuza kadar okuyabiliyor; çıkış yolunu cümlenin
+      // kendisi söylemezse ekranda başka söyleyen yok.
+      setError('Kod kabul edilmedi. Kod beş dakika geçerlidir; süre dolduysa girişe dönün.');
       setCode('');
       return;
     }
@@ -294,6 +300,21 @@ export function SignIn({ onSignedIn, note = null }: Props): React.JSX.Element {
 
               <button type="submit" className="b pri wide" disabled={busy}>
                 {busy ? 'Kontrol ediliyor…' : 'Devam'}
+              </button>
+              {/* SÜRESİ DOLAN SORGUNUN TEK ÇIKIŞI BUYDU: sayfayı yenilemek. Bekleyen giriş beş
+                  dakikada sona eriyor ve ondan sonra hangi kod yazılırsa yazılsın aynı ret
+                  geliyor; kullanıcı adı korunuyor çünkü parola zaten silindi, adı da sildirmek
+                  gereksiz bir yeniden yazım olurdu. */}
+              <button
+                type="button"
+                className="b wide"
+                onClick={() => {
+                  setError(null);
+                  setCode('');
+                  setStep('password');
+                }}
+              >
+                Girişe dön
               </button>
             </form>
           </main>
