@@ -1,7 +1,7 @@
 import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
-import { api } from './api.js';
+import { api, API_BASE_URL } from './api.js';
 import { useEventRefresh } from './events.js';
 import { formatBytes, formatWhen, percent } from './Dashboard.js';
 import { Empty } from './ui.js';
@@ -33,14 +33,63 @@ const STATES: Record<Transfer['state'], { label: string; pill: string; fill: str
   completed: { label: 'bitti', pill: 'st2 up', fill: 'var(--live)' },
 };
 
+/**
+ * Baytları TAM gelmiş ama yayımlanmamış bir yükleme: kararı bekliyor.
+ *
+ * `state` `completed_at`ten geliyor, ofsetten değil — ve aradaki fark tam olarak bu durum.
+ * Bütün baytlar sunucuda duruyor, hedefte aynı adda bir şey var, ve dosyanın yayımlanması için
+ * kullanıcının "değiştir mi, ikisini de tut mu" sorusuna cevap vermesi gerekiyor.
+ */
+export function awaitingAnswer(item: Transfer): boolean {
+  return item.state !== 'completed' && item.lengthBytes > 0 && item.offsetBytes >= item.lengthBytes;
+}
+
 export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
   const [items, setItems] = useState<Transfer[] | null>(null);
   /** Set only while the list has never been read. Once real rows have arrived, a dropped poll
    *  leaves the last known ones on screen rather than replacing them with a failure. */
   const [failed, setFailed] = useState(false);
+  /** Kararı gönderilmekte olan yükleme — düğmeler iki kez basılmasın diye. */
+  const [deciding, setDeciding] = useState<string | null>(null);
+
+  /**
+   * Bekleyen bir yüklemeyi buradan yayımla.
+   *
+   * ── NEDEN BU EKRANDA DA VAR ─────────────────────────────────────────────────────────────
+   *
+   * Soru normalde yükleme sırasında Dosyalar ekranında soruluyor. Ama o soru bir tarayıcı
+   * durumunda yaşıyor: sekme kapanırsa, sayfa yenilenirse ya da telefon uygulamayı arka planda
+   * öldürürse soru kayboluyor — baytlar sunucuda kalıyor ve onları yayımlatacak hiçbir yol
+   * kalmıyordu. Sahada bir turda 20 dosya bu hâlde asılı kaldı.
+   *
+   * Bu liste zaten o oturumları gösteriyordu; eksik olan tek şey karar düğmeleriydi. Baytlar
+   * yeniden GÖNDERİLMİYOR — uç yalnız ara alandaki dosyayı yayımlıyor.
+   */
   const [reloadKey, setReloadKey] = useState(0);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
+
+  async function decide(item: Transfer, policy: 'keep-both' | 'replace'): Promise<void> {
+    setDeciding(item.id);
+    const sent = await fetch(`${API_BASE_URL}/uploads/${item.id}/resolve`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ policy }),
+    }).catch(() => null);
+    setDeciding(null);
+    if (sent === null || !sent.ok) {
+      notify('error', `"${item.filename}" yayımlanamadı.`);
+      return;
+    }
+    notify(
+      'ok',
+      policy === 'replace'
+        ? `"${item.filename}" değiştirildi; eskisi çöp kutusunda.`
+        : `"${item.filename}" ikinci bir adla kaydedildi.`,
+    );
+    reload();
+  }
 
   // The stream replaces the poll. `reload` is stable, so subscribing here does not tear the
   // connection down on every render.
@@ -121,15 +170,40 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
                 >
                   <span style={{ width: `${ratio * 100}%`, background: state.fill }} />
                 </div>
-                {item.state === 'stalled' && (
+                {awaitingAnswer(item) ? (
                   <div className="l">
                     <span style={{ color: 'var(--warn)' }}>
-                      Bir dakikadan uzun süredir ilerlemiyor — son yazma{' '}
-                      {formatWhen(item.updatedAt)}. Yükleyen sekme kapanmış olabilir. Yüklemeyi
-                      başlatan TARAYICIDA aynı dosya yeniden seçilirse kaldığı yerden devam eder;
-                      başka bir tarayıcıda ya da temizlenmiş bir profilde baştan başlar.
+                      Dosyanın tamamı geldi ama hedefte aynı adda bir şey var. Listede
+                      göremiyorsanız ad çöp kutusundaki bir dosyada duruyor olabilir.
                     </span>
+                    <button
+                      type="button"
+                      className="b"
+                      disabled={deciding === item.id}
+                      onClick={() => void decide(item, 'keep-both')}
+                    >
+                      İkisini de tut
+                    </button>
+                    <button
+                      type="button"
+                      className="b"
+                      disabled={deciding === item.id}
+                      onClick={() => void decide(item, 'replace')}
+                    >
+                      Değiştir (eskisi çöpe)
+                    </button>
                   </div>
+                ) : (
+                  item.state === 'stalled' && (
+                    <div className="l">
+                      <span style={{ color: 'var(--warn)' }}>
+                        Bir dakikadan uzun süredir ilerlemiyor — son yazma{' '}
+                        {formatWhen(item.updatedAt)}. Yükleyen sekme kapanmış olabilir. Yüklemeyi
+                        başlatan TARAYICIDA aynı dosya yeniden seçilirse kaldığı yerden devam eder;
+                        başka bir tarayıcıda ya da temizlenmiş bir profilde baştan başlar.
+                      </span>
+                    </div>
+                  )
                 )}
               </div>
             );
