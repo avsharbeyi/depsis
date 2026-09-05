@@ -7461,6 +7461,12 @@ mod tests {
 
         // A second publish onto the same name must lose. Publishing is not allowed to destroy a
         // file the user already has, which is why the real implementation uses RENAME_NOREPLACE.
+        //
+        // CEVAP `Conflict`, `Failed` DEĞİL — ve bu test o farkı bilerek ölçüyor. `Failed` bir
+        // arıza demek; bu ise çağıranın SORABİLECEĞİ bir soru: ad dolu, karar kullanıcının.
+        // Düz bir arıza olarak döndüğü sürece API onu düz bir 409 `conflict` yapıyor, istemci de
+        // o kodu "ofseti yeniden hizala" diye okuyup yükleme döngüsünü sessizce bitiriyor ve
+        // kullanıcıya "yüklendi" diyordu. Sahada 235 dosya bu yüzden asılı kaldı.
         std::fs::write(
             h.share_path(&["alice", ".depsis", "staging", "again.part"]),
             b"different",
@@ -7471,8 +7477,8 @@ mod tests {
             .agent(&r, &s)
             .handle(raw2, peer(API_UID), "c-pub2", "publish")
         {
-            Response::Failed { reason } => assert!(reason.contains("already exists")),
-            other => panic!("expected a refusal to overwrite, got {other:?}"),
+            Response::Conflict { reason } => assert!(reason.contains("report.txt"), "{reason}"),
+            other => panic!("expected a conflict, got {other:?}"),
         }
         assert_eq!(
             std::fs::read(h.share_path(&["alice", "report.txt"])).expect("read"),
