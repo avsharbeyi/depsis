@@ -621,12 +621,30 @@ export class CopyService {
    * `rowAt`in dışa açık yüzü. Ayrı bir sorgu yazmak, "aynı ad" tanımının ikinci bir kopyası
    * demek olurdu: burada kat kıvrımı (`name_fold`) ve çöp süzgeci tek bir yerde duruyor.
    */
+  /**
+   * Bu klasörde bu adı tutan satır — ÇÖPTEKİLER DAHİL.
+   *
+   * ── ÇÖP ADI BIRAKMIYOR, VE BU SAHADA ÖLÇÜLDÜ ────────────────────────────────────────────
+   *
+   * Bir satırı çöpe atmak ona bir bayrak yazıyor ama dosyayı diskte KENDİ ADIYLA bırakıyor.
+   * Tekil indeks çöptekileri dışladığı için liste adı boş gösteriyor, ve kullanıcı haklı olarak
+   * "böyle bir dosya yok" diyor — ama ajan yayımı reddediyor, çünkü disk öyle demiyor.
+   *
+   * Cihazda cevap bekleyen 235 yüklemenin 143'ü tam olarak buydu. Daha kötüsü, iki çıkış yolu da
+   * kapalıydı: `replace` adı tutan satırı bulamıyor (çöptekini görmüyor) ve hiçbir şey yapmadan
+   * yayımı yeniden deniyor; `keep-both` ise "boş" bir ad ararken yine çöptekileri görmediği için
+   * DOLU bir adı boş sanıp aynı reddi alıyordu. Sahibi aynı fotoğrafları sekiz kez yükledi.
+   *
+   * `trashed` alanı çağıranın kararı için: canlı bir dosyanın adını almak onu çöpe atmak demek,
+   * çöptekinin adını almak ise yalnız onu park etmek — zaten silinmiş bir şeyi ikinci kez silmek
+   * anlamsız olurdu.
+   */
   async entryNamed(
     organizationId: string,
     shareId: string,
     parentId: string | null,
     name: string,
-  ): Promise<{ id: string } | null> {
+  ): Promise<{ id: string; trashed: boolean } | null> {
     return this.rowAt(organizationId, shareId, parentId, name);
   }
 
@@ -635,14 +653,18 @@ export class CopyService {
     shareId: string,
     parentId: string | null,
     name: string,
-  ): Promise<{ id: string } | null> {
+  ): Promise<{ id: string; trashed: boolean } | null> {
     const rows = await this.db.withTenant(organizationId, (q) =>
-      q.query<{ id: string }>(
-        `SELECT id::text AS id FROM public.file_entries
+      q.query<{ id: string; trashed: boolean }>(
+        `SELECT id::text AS id, trashed_at IS NOT NULL AS trashed
+           FROM public.file_entries
           WHERE organization_id = $1 AND share_id = $2
             AND parent_id IS NOT DISTINCT FROM $3
             AND public.fold_identity(name) = public.fold_identity($4)
-            AND trashed_at IS NULL`,
+          -- CANLI OLAN ÖNCE: iki satır aynı adı taşıyabiliyor (biri çöpte), ve çağıranın
+          -- ilgilendiği şey öncelikle görünen dosya.
+          ORDER BY trashed_at NULLS FIRST
+          LIMIT 1`,
         [organizationId, shareId, parentId, name],
       ),
     );

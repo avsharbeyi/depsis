@@ -1689,10 +1689,15 @@ export class FilesService {
     actorId: string,
     correlationId: string,
     reason: string,
+    allowTrashed = false,
   ): Promise<FileEntryRow> {
     assertValidName(name);
     const entry = await this.find(organizationId, id);
-    if (entry.trashed_at !== null) throw new EntryNotFoundError();
+    // ÇÖPTEKİ BİR SATIR YENİDEN ADLANDIRILABİLİR, ama yalnız çağıran bunu açıkça istediğinde.
+    // Kullanıcının çöpteki bir dosyayı yeniden adlandırması hâlâ yok — çöp bir klasör değil ve
+    // orada bir "yeniden adlandır" düğmesi yok. Buna izin veren tek yol, adı diskte tutan
+    // çöptekini PARK ETMEK: dosya çöpte kalıyor, kurtarılabilir kalıyor, yalnız adı boşalıyor.
+    if (entry.trashed_at !== null && !allowTrashed) throw new EntryNotFoundError();
 
     return this.move(
       organizationId,
