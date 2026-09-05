@@ -182,7 +182,20 @@ async function readNative(canvas: HTMLCanvasElement): Promise<string | null> {
   }
 }
 
-async function readZxing(data: ImageData): Promise<string | null> {
+/**
+ * ZXing ile bir kare oku.
+ *
+ * BİÇİMLER DIŞARIDAN, ve iki tur hâlinde: önce 2B (QR, DataMatrix, Aztec, PDF417), sonra 1B
+ * barkodlar. Sebebi ölçüldü: `RGBLuminanceSource` döndürmeyi desteklemiyor, `TRY_HARDER` altındaki
+ * 1B okuyucu kareyi döndürmeyi deniyor ve `MultiFormatReader`ın "non-ReaderException" dalına
+ * düşüp konsola bir yığın izi basıyor. Düğmenin adı QR; QR'ı önce denemek hem o gürültüyü
+ * kaldırıyor hem iyi bir karede merdiveni erken bitiriyor.
+ *
+ * HER ŞEY TRY'IN İÇİNDE, okuyucunun kurulması dahil. Dışarıda kurulduğunda kütüphanenin dışa
+ * açtığı adlardan biri değişse `decodeImage`ın TAMAMI reddediyor ve merdivenin kalan basamakları
+ * hiç denenmiyordu — bir basamağın düşmesi yalnız o basamağın düşmesi olmalı.
+ */
+async function readZxing(data: ImageData, twoDimensional: boolean): Promise<string | null> {
   const zx = await zxing();
   const lum = new Uint8ClampedArray(data.width * data.height);
   for (let i = 0, p = 0; i < lum.length; i += 1, p += 4) {
@@ -192,42 +205,57 @@ async function readZxing(data: ImageData): Promise<string | null> {
         1000) |
       0;
   }
-  const reader = new zx.MultiFormatReader();
-  const hints = new Map<unknown, unknown>();
-  hints.set(zx.DecodeHintType.TRY_HARDER, true);
-  hints.set(zx.DecodeHintType.POSSIBLE_FORMATS, [
-    zx.BarcodeFormat.QR_CODE,
-    zx.BarcodeFormat.EAN_13,
-    zx.BarcodeFormat.EAN_8,
-    zx.BarcodeFormat.UPC_A,
-    zx.BarcodeFormat.UPC_E,
-    zx.BarcodeFormat.CODE_128,
-    zx.BarcodeFormat.CODE_39,
-    zx.BarcodeFormat.CODE_93,
-    zx.BarcodeFormat.ITF,
-    zx.BarcodeFormat.CODABAR,
-    zx.BarcodeFormat.DATA_MATRIX,
-    zx.BarcodeFormat.AZTEC,
-    zx.BarcodeFormat.PDF_417,
-  ]);
-  reader.setHints(hints as never);
+  type Reader = InstanceType<Zxing['MultiFormatReader']>;
+  let reader: Reader | null = null;
   try {
+    reader = new zx.MultiFormatReader();
+    const hints = new Map<unknown, unknown>();
+    hints.set(zx.DecodeHintType.TRY_HARDER, true);
+    hints.set(
+      zx.DecodeHintType.POSSIBLE_FORMATS,
+      twoDimensional
+        ? [
+            zx.BarcodeFormat.QR_CODE,
+            zx.BarcodeFormat.DATA_MATRIX,
+            zx.BarcodeFormat.AZTEC,
+            zx.BarcodeFormat.PDF_417,
+          ]
+        : [
+            zx.BarcodeFormat.EAN_13,
+            zx.BarcodeFormat.EAN_8,
+            zx.BarcodeFormat.UPC_A,
+            zx.BarcodeFormat.UPC_E,
+            zx.BarcodeFormat.CODE_128,
+            zx.BarcodeFormat.CODE_39,
+            zx.BarcodeFormat.CODE_93,
+            zx.BarcodeFormat.ITF,
+            zx.BarcodeFormat.CODABAR,
+          ],
+    );
+    reader.setHints(hints as never);
     const source = new zx.RGBLuminanceSource(lum, data.width, data.height);
     return clean(reader.decode(new zx.BinaryBitmap(new zx.HybridBinarizer(source))).getText());
   } catch {
     return null;
   } finally {
-    reader.reset();
+    reader?.reset();
   }
 }
 
-/** Boş, yalnız boşluk ya da denetim karakteri taşıyan bir okuma, okuma sayılmaz. */
-function clean(raw: string | undefined): string | null {
+/**
+ * Okunan metni kullanılabilir hâle getir; boş kalırsa okuma sayılmaz.
+ *
+ * DENETİM KARAKTERİ OKUMAYI ÇÖPE ATMIYOR, AYIKLANIYOR. Eskiden içinde bir denetim karakteri geçen
+ * her okuma büsbütün atılıyordu ve bu, sessizce GEÇERLİ kodları yiyordu: GS1 kodları alanlarını
+ * U+001D (GS) ile ayırıyor, bazı QR yükleri U+001E taşıyor. Kullanıcının gördüğü cümle "kod
+ * okunamadı" oluyordu — oysa kod okunmuştu, biz beğenmemiştik. Kalan şey arama kutusuna yazılacak
+ * bir metin; ayıklamak doğru cevap, atmak değil.
+ */
+export function clean(raw: string | undefined): string | null {
   if (raw === undefined) return null;
-  const text = raw.trim();
-  if (text === '') return null;
   // eslint-disable-next-line no-control-regex
-  return /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/u.test(text) ? null : text;
+  const text = raw.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/gu, ' ').trim();
+  return text === '' ? null : text;
 }
 
 /**
@@ -237,6 +265,19 @@ function clean(raw: string | undefined): string | null {
  * durur. Basamaklar ucuzdan pahalıya, ve her biri farklı bir başarısızlık biçimini hedefliyor:
  * çözünürlük (küçük kod), kırpma (uzaktan çekilmiş kod), kontrast (loş ışık), tersleme (siyah
  * zeminli kod), döndürme (yan tutulmuş 1B barkod).
+ */
+/**
+ * Bir fotoğraftan kodu çöz — bulunca hemen döner.
+ *
+ * Merdivenin sırası ölçülmüş bir bahis: iyi kare ilk iki basamakta biter, kalanlar zor kare için
+ * durur. Basamaklar ucuzdan pahalıya, ve her biri farklı bir başarısızlık biçimini hedefliyor:
+ * çözünürlük (küçük kod), kırpma (uzaktan çekilmiş kod), kontrast (loş ışık), tersleme (siyah
+ * zeminli kod), döndürme (yan tutulmuş 1B barkod).
+ *
+ * HİÇBİR BASAMAK MERDİVENİ DEVİRMİYOR. Her deneme kendi `try`ının içinde: bir çözücü kurulamasa,
+ * bir tuval okunamasa ya da bir kütüphane çağrısı beklenmedik biçimde fırlatsa bile sıradaki
+ * basamak yine deneniyor. Eskiden tek bir fırlatma `decodeImage`ın tamamını reddediyordu ve
+ * kullanıcı, hangi basamakta ne olduğuna bakılmaksızın tek bir "kod okunamadı" görüyordu.
  */
 export async function decodeImage(file: File): Promise<string | null> {
   const source = await toImage(file);
@@ -251,35 +292,61 @@ export async function decodeImage(file: File): Promise<string | null> {
     { longest: 2600, crop: 0.55, rotate: 90 },
   ];
 
-  const rendered: Variant[] = [];
-  for (const plan of plans) {
-    const variant = render(source, plan.longest, plan);
-    if (variant === null) continue;
-    rendered.push(variant);
-    // ÖNCE YERLİ ÇÖZÜCÜ, her yeni ölçekte hemen: donanım hızlandırmalı, on milisaniyeler sürer,
-    // ve iyi bir karede merdiven burada biter.
-    const native = await readNative(variant.canvas);
-    if (native !== null) return native;
-  }
-
-  for (const variant of rendered) {
-    const text = await readZxing(variant.data);
-    if (text !== null) return text;
-  }
-
-  // Zor kare: kontrastı gerilmiş ve terslenmiş hâller. Pahalı olduğu için en sonda, ve yalnız
-  // buraya kadar hiçbir şey okuyamamışken.
-  for (const variant of rendered.slice(0, 4)) {
-    for (const invert of [false, true]) {
-      const boosted = enhance(variant, invert);
-      if (boosted === null) continue;
-      const native = await readNative(boosted.canvas);
-      if (native !== null) return native;
-      const text = await readZxing(boosted.data);
-      if (text !== null) return text;
+  const attempt = async (read: () => Promise<string | null>): Promise<string | null> => {
+    try {
+      return await read();
+    } catch {
+      return null;
     }
-  }
+  };
 
-  if ('close' in source && typeof source.close === 'function') source.close();
-  return null;
+  const rendered: Variant[] = [];
+  try {
+    for (const plan of plans) {
+      let variant: Variant | null = null;
+      try {
+        variant = render(source, plan.longest, plan);
+      } catch {
+        variant = null;
+      }
+      if (variant === null) continue;
+      rendered.push(variant);
+      // ÖNCE YERLİ ÇÖZÜCÜ, her yeni ölçekte hemen: donanım hızlandırmalı, on milisaniyeler sürer,
+      // ve iyi bir karede merdiven burada biter. Masaüstü Chromium'da ve iOS Safari'de yok — o
+      // yüzden aşağısı bir yedek değil, o cihazların asıl yolu.
+      const native = await attempt(() => readNative(variant.canvas));
+      if (native !== null) return native;
+    }
+
+    // 2B ÖNCE: düğmenin adı QR, ve 1B okuyucular bu kaynak üzerinde konsola gürültü basıyor.
+    for (const dimension of [true, false]) {
+      for (const variant of rendered) {
+        const text = await attempt(() => readZxing(variant.data, dimension));
+        if (text !== null) return text;
+      }
+    }
+
+    // Zor kare: kontrastı gerilmiş ve terslenmiş hâller. Pahalı olduğu için en sonda, ve yalnız
+    // buraya kadar hiçbir şey okuyamamışken.
+    for (const variant of rendered.slice(0, 4)) {
+      for (const invert of [false, true]) {
+        let boosted: Variant | null = null;
+        try {
+          boosted = enhance(variant, invert);
+        } catch {
+          boosted = null;
+        }
+        if (boosted === null) continue;
+        const native = await attempt(() => readNative(boosted.canvas));
+        if (native !== null) return native;
+        for (const dimension of [true, false]) {
+          const text = await attempt(() => readZxing(boosted.data, dimension));
+          if (text !== null) return text;
+        }
+      }
+    }
+    return null;
+  } finally {
+    if ('close' in source && typeof source.close === 'function') source.close();
+  }
 }

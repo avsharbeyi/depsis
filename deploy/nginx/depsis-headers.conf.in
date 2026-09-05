@@ -21,9 +21,24 @@ add_header Referrer-Policy no-referrer always;
 # için ikinci bir kilit ve clickjacking'e karşı tek satır.
 add_header X-Frame-Options DENY always;
 
-# Cihazın donanımına dokunan hiçbir tarayıcı özelliği bu sayfaya açık değil. DEPSIS'in kamerayla,
-# mikrofonla ya da konumla işi yok, ve olmadığını söylemek onları kapatmanın tek yolu.
-add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=()" always;
+# Cihazın donanımına dokunan tarayıcı özellikleri kapalı — KAMERA HARİÇ, ve o istisna ölçülerek
+# açıldı.
+#
+# ── NEDEN KAMERA AÇIK ────────────────────────────────────────────────────────────────────────
+#
+# Bu satır QR okuyucudan ÖNCE yazılmıştı ve "DEPSIS'in kamerayla işi yok" diyordu; artık var.
+# Dosyalar ekranındaki QR düğmesi `<input type="file" capture="environment">` kullanıyor, ve HTML
+# Media Capture şartnamesi `capture` niteliğini doğrudan `camera` ilkesine bağlıyor: belge o
+# özelliği kullanmaya yetkili değilse tarayıcı yakalama arayüzünü AÇMIYOR. `camera=()` ile,
+# düğmeye basan kişi kamera yerine bir dosya seçici görüyor (ya da hiçbir şey), ve elindeki
+# koda ne kadar yakından bakarsa baksın hiçbir şey okunmuyor.
+#
+# `(self)`, `*` DEĞİL: yalnız bu sayfa. Çerçeveye alınamadığımız için (`frame-ancestors 'none'`)
+# başka bir kaynağın bu izni devralması zaten mümkün değil, ama izni kaynak adıyla yazmak, bir
+# gün bir gömme kararı verilirse varsayılanın kapalı kalmasını sağlıyor.
+#
+# Mikrofon, konum, ödeme, USB ve seri port kapalı kalıyor: ürünün hiçbiri için bir işi yok.
+add_header Permissions-Policy "camera=(self), microphone=(), geolocation=(), payment=(), usb=(), serial=()" always;
 
 # Pencere yalıtımı: başka bir kökenin açtığı sekme bu belgeye `window.opener` üzerinden
 # ulaşamıyor, ve bu belgenin kaynaklarını başka bir köken gömemiyor.
