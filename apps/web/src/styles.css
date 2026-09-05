@@ -447,6 +447,15 @@ select.pill.bad {
   padding: 11px 13px 9px;
   flex: none;
 }
+/* Kartın başlığındaki öğe sayısı: başlığın yanında, düğmeden önce. Tek satır sayı, o yüzden
+   tabular rakamlar — sayı değişirken başlığın geri kalanı yerinden oynamıyor. */
+.ch .fct {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--mut);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 
 /* The coloured square badge. The reference sets the size per context and the tint inline, so the
    base here is the .ch size and every other context overrides it below. */
@@ -1014,6 +1023,79 @@ select.pill.bad {
   padding: 0 13px;
   min-height: 0;
 }
+/* ─── sütun başlıkları ───────────────────────────────────────────────────────
+   Windows dosya gezgininin yaptığı şey: listenin üstünde, satırın sütunlarıyla HİZALI, basınca
+   sıralayan başlıklar. Hizanın tek sebebi aynı sınıfları (`.sz`, `.dt`) taşımaları — genişlik
+   satırın kuralında tanımlı ve ikisi birlikte kayıyor.
+
+   Başlıklar `.frow` değil: satır gibi görünmemeliler (arka plan yok, imleç yok, seçilmiyorlar) ve
+   listenin kendisiyle birlikte kaymamalılar. */
+.fhead {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 2px 8px 6px;
+  border-bottom: 1px solid var(--edge);
+  margin-bottom: 4px;
+}
+/* Satırdaki seçim düğmesinin ve küçük resmin kapladığı yer: başlıklar onların sağından başlıyor.
+   Sayı satırın kendi ölçülerinden geliyor (24px düğme + 9px boşluk). */
+.fhead .pad {
+  width: 24px;
+  flex: none;
+}
+.fhead .sh {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 3px 4px;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  flex: none;
+}
+.fhead .sh:hover {
+  color: var(--ink2);
+  background: rgba(255, 255, 255, 0.06);
+}
+.fhead .sh.on {
+  color: var(--cool);
+}
+.fhead .sh.grow {
+  flex: 1;
+  justify-content: flex-start;
+}
+/* Tür sütunu satırdaki simgenin üstünde: genişliği o simgenin genişliği, metni ortada. */
+.fhead .sh.narrow {
+  width: 30px;
+  justify-content: center;
+  padding: 3px 0;
+}
+/* Sayı sütunları sağa dayalı, tıpkı satırdaki değerler gibi; ok metnin sağında kalıyor. */
+.fhead .sh.sz,
+.fhead .sh.dt {
+  justify-content: flex-end;
+}
+.fhead .sh .ar {
+  font-size: 8px;
+  line-height: 1;
+}
+/* Dar ekranda tarih sütunu satırda gizleniyor (aşağıda), başlığı da onunla gitmeli — yoksa
+   olmayan bir sütunu sıralayan bir düğme kalırdı. */
+@media (max-width: 560px) {
+  .fhead .sh.dt {
+    display: none;
+  }
+}
+
 .frow {
   display: flex;
   align-items: center;
@@ -1090,6 +1172,13 @@ select.pill.bad {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* ── ADIN TABANI ────────────────────────────────────────────────────────────
+     `overflow: hidden` taşıyan bir esnek öğenin otomatik en küçük genişliği SIFIRDIR — flexbox'ın
+     kuralı bu, ve `flex: 1` onu korumuyor. Boyut sütununa hizalama için genişlik verildiğinde
+     dar bir pencerede ad sütunu tam olarak sıfıra iniyor: satır duruyor, adı görünmüyor, ve
+     üstüne tıklanamıyor. E2E bunu yakaladı — Playwright "element is not visible" dedi, çünkü
+     kutusu gerçekten boştu. Taban, sütunun kullanışlı kaldığı en dar hâl. */
+  min-width: 96px;
 }
 
 /* ─── ızgara görünümü ────────────────────────────────────────────────────────
@@ -1149,6 +1238,10 @@ select.pill.bad {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   flex: none;
+  /* Başlıkla aynı genişlik: `.fhead .sz` bu kuralın kendisini kullanıyor, yani sütun tek bir
+     yerde tanımlı ve başlıkla satır birlikte kayıyor. */
+  min-width: 78px;
+  text-align: right;
 }
 .fact {
   display: flex;
@@ -3537,12 +3630,29 @@ label textarea,
      bir rozet, tam ekran değildir. */
   .mfm.full {
     position: fixed;
-    inset: 0;
+    /* ── TELEFONUN KENDİ TUŞLARININ ÜSTÜNE ÇIKMIYOR ─────────────────────────
+       Sahibin sözü: *"tam ekran kısmında yön tuşlarını kapatıyor."* `inset: 0` yerleşim
+       görünümüne oturuyor, ve o görünüm Android'in üç tuşlu gezinme çubuğunun ve iPhone'un
+       ana ekran çizgisinin ALTINA uzanıyor: listenin son satırı ile "Küçült" düğmesi
+       sistemin kendi çubuğunun arkasında kalıyordu. `env(safe-area-inset-*)` o çubukların
+       gerçek yüksekliği; desteklemeyen bir tarayıcıda yedek değer 0, yani eski davranış. */
+    top: env(safe-area-inset-top, 0px);
+    right: env(safe-area-inset-right, 0px);
+    bottom: env(safe-area-inset-bottom, 0px);
+    left: env(safe-area-inset-left, 0px);
     z-index: 50;
     height: auto;
     min-height: 0;
     border: none;
     border-radius: 0;
+  }
+  /* Başlık tam ekranda YAPIŞIK: liste kaydırılırken "Küçült" ve öğe sayısı ekranda kalıyor,
+     yoksa çıkmanın tek yolu listeyi başa kadar geri kaydırmak oluyordu. */
+  .mfm.full .ch {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--glass2);
   }
   .mfm .mfx {
     margin-left: auto;
@@ -3666,8 +3776,18 @@ label textarea,
     top: auto;
     bottom: 12px;
   }
-  .brandbox .nm {
+  /* ── DAR EKRANDA YALNIZ TOP ──────────────────────────────────────────────
+     Sahibin sözü: *"alt barı açan topun yanındaki oku kaldır, sadece o topçuk kalsın."* Ok bir
+     hap içinde ikinci bir daireydi ve dar ekranda hiçbir şey söylemiyordu: dokunulan şey zaten
+     tek bir yuvarlak, ve açılıp kapandığı da altından çıkan barın kendisinden belli. Yazı
+     zaten gizliydi; ok da gidince hap gerçekten bir top oluyor, o yüzden dolgu da eşitleniyor. */
+  .brandbox .nm,
+  .brandbox .ar {
     display: none;
+  }
+  .brandbox {
+    padding: 6px;
+    gap: 0;
   }
   .toasts {
     left: 12px;

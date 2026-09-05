@@ -31,6 +31,14 @@ interface Props {
    */
   prefs?: Prefs | undefined;
   savePrefs?: ((next: Prefs) => Promise<boolean>) | undefined;
+  /**
+   * Öğe sayısı, çizen kabın kullanabilmesi için.
+   *
+   * Mobilde kartın başlığında ("Dosyalar") görünüyor: tam ekranda alt çubuk ekranın epey altında
+   * kalıyor ve sahibi sayıyı orada arıyor. İsteğe bağlı — masaüstünde kimse dinlemiyor ve sayı
+   * zaten alt çubukta duruyor.
+   */
+  onMeta?: ((meta: string) => void) | undefined;
 }
 
 /** A step in the trail. Navigation is by id — never by a path string — because that is what the
@@ -368,6 +376,7 @@ export function Files({
   onUnauthenticated,
   prefs,
   savePrefs,
+  onMeta,
 }: Props): React.JSX.Element {
   // Back and forward are a real stack rather than a "previous folder" variable, because with one
   // variable going back twice returns to where you already were.
@@ -529,6 +538,16 @@ export function Files({
    * birlikte kuruluyor, yani ikinci sayfa birincinin gerçekten devamı.
    */
   const [order, setOrder] = useState<SortKey>('name');
+  /**
+   * Sıralamanın YÖNÜ, ve neden ayrı bir durum.
+   *
+   * Sahibin sözü: *"ada göre alfabetik ters ya da düz, tarihte geç ya da erken gibi
+   * seçilemiyor."* Doğruydu — anahtar seçilebiliyordu, yön seçilemiyordu ve her anahtarın yönü
+   * sunucuda sabitti. `null` "anahtarın kendi varsayılanı" demek: ada ve türe göre artan, tarihe
+   * ve boyuta göre azalan. Bir sütun başlığına ilk basış o varsayılanı seçiyor, ikincisi
+   * çeviriyor — Windows dosya gezgininin yaptığı şey.
+   */
+  const [dir, setDir] = useState<'asc' | 'desc' | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   /** Kaçıncı listeleme yürürlükte. Yalnız "daha fazla" için: gecikmiş bir sayfanın kendi
@@ -797,6 +816,25 @@ export function Files({
    * — sıralama ya da paylaşım biri düşseydi — sunucunun imleci başka bir sıranın ortasına
    * düşerdi: "daha fazla" ya satır atlar ya da aynı satırları yeniden getirirdi.
    */
+  /**
+   * Bir sütun başlığına basıldığında.
+   *
+   * AYNI SÜTUN İSE YÖNÜ ÇEVİR, başka sütun ise o sütunun kendi varsayılanıyla başla. İkincisi
+   * önemli: tarihe göre sıralamaya artan yönle başlamak, "en son ne değişti" diye soran birine
+   * klasörün en eski dosyasıyla cevap vermek olurdu.
+   */
+  function pickSort(key: SortKey): void {
+    if (key !== order) {
+      setOrder(key);
+      setDir(DEFAULT_DIRECTION[key]);
+      return;
+    }
+    setDir((current) => ((current ?? DEFAULT_DIRECTION[key]) === 'asc' ? 'desc' : 'asc'));
+  }
+
+  /** Yön sorguya yalnız SEÇİLDİĞİNDE giriyor; seçilmediyse kararı sunucu veriyor. */
+  const way = dir === null ? {} : { direction: dir };
+
   function fetchPage(from: string | undefined) {
     const q = trashed ? '' : term.trim();
     const at = from === undefined ? {} : { cursor: from };
@@ -807,8 +845,8 @@ export function Files({
             query: trashed
               ? { trashed: true, limit: PAGE, ...at, ...shareQuery }
               : parentId === undefined
-                ? { limit: PAGE, sort: order, ...at, ...shareQuery }
-                : { parentId, limit: PAGE, sort: order, ...at },
+                ? { limit: PAGE, sort: order, ...way, ...at, ...shareQuery }
+                : { parentId, limit: PAGE, sort: order, ...way, ...at },
           },
         });
   }
@@ -842,7 +880,7 @@ export function Files({
       return;
     }
     const page = result.data;
-    setEntries((current) => merged(current ?? [], page.items, order));
+    setEntries((current) => merged(current ?? [], page.items, order, dir));
     setMore(page.hasMore);
     setCursor(page.nextCursor);
   }
@@ -888,7 +926,7 @@ export function Files({
     };
     // `shareId` is a dependency: switching share has to re-read, and `parentId` is cleared by the
     // handler that sets it so a folder from the old share cannot survive the switch.
-  }, [parentId, trashed, term, reloadKey, shareId, order, notify, onUnauthenticated]);
+  }, [parentId, trashed, term, reloadKey, shareId, order, dir, notify, onUnauthenticated]);
 
   /* ── çöp sayacı ──
      Kendi isteği, ve öyle olmak zorunda: şeritteki sayı ekrandaki listeden bağımsız. Açık olan
@@ -1613,7 +1651,7 @@ export function Files({
   //
   // EKRANDAKİ SAYI DA YAZIYOR, ama yalnız devamı varken: "350 öğe" derken iki yüz satır çizmek,
   // sayfalama düğmesi eklendikten sonra bile okuyana neyin eksik olduğunu söylemiyordu.
-  const meta =
+  const meta: string =
     entries === null
       ? '—'
       : total !== undefined && !searching
@@ -1621,6 +1659,12 @@ export function Files({
           ? `${entries.length} / ${total} öğe`
           : `${total} öğe`
         : `${entries.length}${more ? '+' : ''} ${searching ? 'sonuç' : 'öğe'}`;
+
+  /* Öğe sayısı DIŞARIYA da veriliyor: mobilde kartın başlığında ("Dosyalar") görünüyor, çünkü
+     tam ekranda alt çubuk ekranın epey altında kalıyor ve sahibi sayıyı orada arıyor. */
+  useEffect(() => {
+    onMeta?.(meta);
+  }, [meta, onMeta]);
 
   /**
    * Every folder the move picker must refuse — all of them, not the first.
@@ -2209,6 +2253,43 @@ export function Files({
         </div>
       )}
 
+      {/* ── SÜTUN BAŞLIKLARI ────────────────────────────────────────────────────────────
+          Sahibin istediği şey: *"boyut kısmının üstünde bir buton boyuta göre sıralayacak,
+          tarihteki tarihe göre falan — tıpkı windows dosya gezgini gibi."*
+
+          BAŞLIKLAR SATIRIN KENDİ SÜTUNLARIYLA AYNI SINIFI TAŞIYOR (`.sz`, `.dt`), yani genişlik
+          tek bir yerde tanımlı ve ikisi birlikte kayıyor. Ayrı genişlikler yazmak, başlığın bir
+          gün satırın yarım santim solunda durması demekti.
+
+          "Tür" simgenin üstünde: satırdaki küçük resim/simge zaten türü gösteren sütun, ve ona
+          ayrı bir metin sütunu eklemek dar ekranda addan yer çalardı.
+
+          Çöpte ve aramada çizilmiyor: ikisi de sıralanabilir bir klasör değil. Izgarada da yok —
+          orada sütun diye bir şey yok. */}
+      {!trashed && !searching && layout === 'list' && (
+        <div className="fhead">
+          <span className="pad" aria-hidden />
+          <SortHead label="Tür" sort="type" active={order} dir={dir} onPick={pickSort} narrow />
+          <SortHead label="Ad" sort="name" active={order} dir={dir} onPick={pickSort} grow />
+          <SortHead
+            label="Boyut"
+            sort="size"
+            active={order}
+            dir={dir}
+            onPick={pickSort}
+            cell="sz"
+          />
+          <SortHead
+            label="Tarih"
+            sort="modified"
+            active={order}
+            dir={dir}
+            onPick={pickSort}
+            cell="dt"
+          />
+        </div>
+      )}
+
       {/* Izgara sınıfı yalnız ÇİZİLECEK SATIR VARKEN: boş hâl ve hata kutusu da bu kabın çocuğu,
           ve bir ızgara hücresine sıkışmış "Bu klasör boş" kutusu, düzeltmeden kötü. */}
       <div
@@ -2544,21 +2625,6 @@ export function Files({
 
             Çöpte ve aramada gizli: ikisi de sıralanabilir bir klasör değil, ve olmayan bir
             seçeneği kapalı göstermek de bir şey vaat etmek olurdu. */}
-        {!trashed && !searching && (
-          <select
-            className="srt"
-            aria-label="Sıralama"
-            title="Sıralama"
-            value={order}
-            onChange={(event) => setOrder(event.target.value as SortKey)}
-          >
-            {SORTS.map((item) => (
-              <option key={item.key} value={item.key}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        )}
         <span className="val">{meta}</span>
       </div>
 
@@ -3106,13 +3172,72 @@ function destroyList(entries: FileEntry[], counts: ReadonlyMap<string, ChildCoun
  */
 type SortKey = 'name' | 'type' | 'modified' | 'size';
 
-/** Sıralama düğmesinin seçenekleri, ekranda görünecek sırayla. */
-const SORTS: readonly { key: SortKey; label: string }[] = [
-  { key: 'name', label: 'Ad' },
-  { key: 'type', label: 'Tür' },
-  { key: 'size', label: 'Boyut' },
-  { key: 'modified', label: 'Tarih' },
-];
+/**
+ * Her anahtarın kendi varsayılan yönü — sunucudaki `DEFAULT_DIRECTION`ın ikizi.
+ *
+ * İkizi olması ŞART, çünkü ekran yön göstergesini (▲/▼) yön seçilmeden önce de çiziyor: burada
+ * yanlış bir varsayılan, sunucunun azalan verdiği bir listenin üstüne artan oku koyardı.
+ */
+const DEFAULT_DIRECTION: Readonly<Record<SortKey, 'asc' | 'desc'>> = {
+  name: 'asc',
+  type: 'asc',
+  size: 'desc',
+  modified: 'desc',
+};
+
+/**
+ * Bir sütun başlığı.
+ *
+ * DÜĞME, BAŞLIK DEĞİL: basılabilir olduğu görünmeli ve klavyeyle sekmeyle ulaşılmalı.
+ *
+ * `aria-sort` YOK, ve bu bir eksiklik değil bir düzeltme: o öznitelik yalnız `columnheader` ya da
+ * `rowheader` rolündeki bir öğede geçerli, ve bu liste bir tablo değil — satırlar `.frow`, sürükle
+ * bırak alan, ızgara görünümüne dönebilen kutular. Düğmeye `aria-sort` koymak erişilebilirlik
+ * kapısının (axe, `aria-allowed-attr`) haklı olarak reddettiği şey. Durum bunun yerine düğmenin
+ * ERİŞİLEBİLİR ADINDA: gören biri oku okuyor, okuyucu aynı cümleyi duyuyor.
+ */
+function SortHead({
+  label,
+  sort,
+  active,
+  dir,
+  onPick,
+  grow,
+  narrow,
+  cell,
+}: {
+  label: string;
+  sort: SortKey;
+  active: SortKey;
+  dir: 'asc' | 'desc' | null;
+  onPick: (key: SortKey) => void;
+  grow?: boolean;
+  narrow?: boolean;
+  cell?: 'sz' | 'dt';
+}): React.JSX.Element {
+  const on = active === sort;
+  const way = on ? (dir ?? DEFAULT_DIRECTION[sort]) : null;
+  const classes = ['sh'];
+  if (on) classes.push('on');
+  if (grow === true) classes.push('grow');
+  if (narrow === true) classes.push('narrow');
+  if (cell !== undefined) classes.push(cell);
+  const state = way === null ? '' : way === 'asc' ? ' (şu an artan)' : ' (şu an azalan)';
+  return (
+    <button
+      type="button"
+      className={classes.join(' ')}
+      aria-label={`${label} sütununa göre sırala${state}`}
+      title={`${label} sütununa göre sırala${state}`}
+      onClick={() => onPick(sort)}
+    >
+      {label}
+      <span className="ar" aria-hidden>
+        {way === null ? '' : way === 'asc' ? '▲' : '▼'}
+      </span>
+    </button>
+  );
+}
 
 /**
  * Gelen sayfayı ekrandakinin sonuna ekler.
@@ -3127,17 +3252,32 @@ const SORTS: readonly { key: SortKey; label: string }[] = [
  * Boyuta ya da tarihe göre dizilmiş bir listeyi yeniden dizmek, sunucunun cevabını silip ekranda
  * "en büyük önce" derken alfabetik bir liste göstermek olurdu.
  */
-export function merged(current: FileEntry[], page: FileEntry[], order: SortKey): FileEntry[] {
+export function merged(
+  current: FileEntry[],
+  page: FileEntry[],
+  order: SortKey,
+  direction: 'asc' | 'desc' | null = null,
+): FileEntry[] {
   const next = [...current, ...page];
-  return order === 'name' ? sorted(next) : next;
+  return order === 'name' ? sorted(next, (direction ?? DEFAULT_DIRECTION.name) === 'desc') : next;
 }
 
-function sorted(items: FileEntry[]): FileEntry[] {
+/**
+ * Ada göre sırala — istenirse tersten.
+ *
+ * KLASÖRLER YÖNLE DÖNMÜYOR, ve bu sunucudaki kuralın aynısı: `kind` her sıralamada artan, yani
+ * "tersten sırala" klasörleri listenin ortasına dağıtmıyor, yalnız adları çeviriyor. İkisi
+ * ayrışsaydı ekrandaki sıra sunucunun imlecinin sırasından farklı olurdu ve "daha fazla göster"
+ * satırları yanlış yere ekleyerek listeyi karıştırırdı.
+ */
+function sorted(items: FileEntry[], descending = false): FileEntry[] {
   return [...items].sort((a, b) => {
     // Folders first, then Turkish collation: `İ` sorts with `I` and `ş` after `s`, which a
     // locale-less `localeCompare` gets wrong on exactly the names this appliance is full of.
     const byKind = Number(a.kind === 'file') - Number(b.kind === 'file');
-    return byKind !== 0 ? byKind : a.name.localeCompare(b.name, 'tr');
+    if (byKind !== 0) return byKind;
+    const byName = a.name.localeCompare(b.name, 'tr');
+    return descending ? -byName : byName;
   });
 }
 

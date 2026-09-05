@@ -619,6 +619,8 @@ function Desktop({
   const [dockOpen, setDockOpen] = useState(false);
   const [rebootAsk, setRebootAsk] = useState(false);
   const [filesFull, setFilesFull] = useState(false);
+  /** Dosyalar kartının öğe sayısı — kartın başlığında gösterilmek üzere gezginden geliyor. */
+  const [filesMeta, setFilesMeta] = useState<string | null>(null);
   const mobile = useMobile();
 
   /**
@@ -817,80 +819,89 @@ function Desktop({
       <Sky {...skyProps(prefs)} />
       <div className="vig" />
 
-      <header className="top">
-        <div className="who">
-          <div className="n">
-            {greeting(new Date().getHours())}, {me.username}
-          </div>
-          <div className="s">{statusLine(snapshot)}</div>
-        </div>
-        <div className="sp" />
+      {/* ── TAM EKRANDA ÜST BAR YOK ──────────────────────────────────────────────────────────
+          Sahibin sözü: *"üst bilgi barı tam ekrana geçince iç içe geçiyor ve yukarı kaydırarak
+          kapatmak gerekiyor, onu kaldır."*
 
-        {/* The dot rides the FIRST pill, as it does in the reference: the header's whole job is
+          GİZLENMİYOR, ÇİZİLMİYOR. `display: none` ile saklanan bir başlık hâlâ zil sayısını
+          yokluyor ve hâlâ düzenin içinde yer tutuyor; tam ekran bir dosya gezgininin üstünde
+          duran bir selamlama satırı da tam ekran değildir. Küçültüldüğü anda geri geliyor. */}
+      {!(mobile && filesFull) && (
+        <header className="top">
+          <div className="who">
+            <div className="n">
+              {greeting(new Date().getHours())}, {me.username}
+            </div>
+            <div className="s">{statusLine(snapshot)}</div>
+          </div>
+          <div className="sp" />
+
+          {/* The dot rides the FIRST pill, as it does in the reference: the header's whole job is
             that a glance at its left edge is a heartbeat. It is tinted by the hottest disk rather
             than painted green unconditionally — a fixed green dot beside a reading of 61 °C is a
             claim about health that the number on the far right contradicts. */}
-        <div className="pill" title="İşlemci yükü (1 dk)">
-          <i
-            style={
-              temperature === null ? undefined : { background: tint(diskTone(temperature), 1) }
-            }
-          />
-          <span>{load === undefined ? '— yük' : `${load.toFixed(2).replace('.', ',')} yük`}</span>
-        </div>
-        <div className="pill" title="Bellek">
-          <span>
-            {memory?.usedBytes === undefined || memory.totalBytes === undefined
-              ? '— bellek'
-              : `${formatBytes(memory.usedBytes)} / ${formatBytes(memory.totalBytes)}`}
-          </span>
-        </div>
-        <div className="pill" title="En sıcak disk">
-          <span>{temperature === null ? '— °C' : `${temperature} °C`}</span>
-        </div>
+          <div className="pill" title="İşlemci yükü (1 dk)">
+            <i
+              style={
+                temperature === null ? undefined : { background: tint(diskTone(temperature), 1) }
+              }
+            />
+            <span>{load === undefined ? '— yük' : `${load.toFixed(2).replace('.', ',')} yük`}</span>
+          </div>
+          <div className="pill" title="Bellek">
+            <span>
+              {memory?.usedBytes === undefined || memory.totalBytes === undefined
+                ? '— bellek'
+                : `${formatBytes(memory.usedBytes)} / ${formatBytes(memory.totalBytes)}`}
+            </span>
+          </div>
+          <div className="pill" title="En sıcak disk">
+            <span>{temperature === null ? '— °C' : `${temperature} °C`}</span>
+          </div>
 
-        {/* Ses düğmesinin SOLUNDA ve güç düğmesinin solunda: sağdaki iki düğme her oturumda
+          {/* Ses düğmesinin SOLUNDA ve güç düğmesinin solunda: sağdaki iki düğme her oturumda
             aynı yerde duran şeyler, ve zil onların arasına girseydi her yeni bildirimde
             değişmeyen bir düzende gözün aradığı yer kayardı. */}
-        <Notifications onOpenPane={openPane} />
+          <Notifications onOpenPane={openPane} />
 
-        <button
-          type="button"
-          className="tbtn"
-          aria-pressed={soundOn}
-          // Disabled until the stored preference is known: the click writes the WHOLE document,
-          // and writing one built on placeholders would erase the desk this account arranged.
-          disabled={!prefsLoaded}
-          onClick={toggleSound}
-        >
-          <i />
-          <span>{soundOn ? 'Ses açık' : 'Ses'}</span>
-        </button>
-        <button
-          type="button"
-          className="tbtn pw"
-          aria-label="Oturum ve güç"
-          title="Oturum"
-          aria-expanded={powerOpen}
-          ref={powerRef}
-          onClick={() => {
-            sfx.click();
-            setPowerOpen((open) => !open);
-          }}
-        >
-          {/* SVG, ⏻ karakteri değil: U+23FB'nin yaygın Windows yazı tiplerinde karşılığı yok ve
+          <button
+            type="button"
+            className="tbtn"
+            aria-pressed={soundOn}
+            // Disabled until the stored preference is known: the click writes the WHOLE document,
+            // and writing one built on placeholders would erase the desk this account arranged.
+            disabled={!prefsLoaded}
+            onClick={toggleSound}
+          >
+            <i />
+            <span>{soundOn ? 'Ses açık' : 'Ses'}</span>
+          </button>
+          <button
+            type="button"
+            className="tbtn pw"
+            aria-label="Oturum ve güç"
+            title="Oturum"
+            aria-expanded={powerOpen}
+            ref={powerRef}
+            onClick={() => {
+              sfx.click();
+              setPowerOpen((open) => !open);
+            }}
+          >
+            {/* SVG, ⏻ karakteri değil: U+23FB'nin yaygın Windows yazı tiplerinde karşılığı yok ve
               düğme sahada BOŞ göründü — "oturum butonunun simgesi yok". Çizim fonta bakmaz. */}
-          <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M12 3v9M6.2 6.6a8 8 0 1 0 11.6 0"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.4"
-              strokeLinecap="round"
-            />
-          </svg>
-        </button>
-      </header>
+            <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 3v9M6.2 6.6a8 8 0 1 0 11.6 0"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        </header>
+      )}
 
       <div className="main">
         {snapshot === null ? (
@@ -921,6 +932,12 @@ function Desktop({
                   <div className="ch">
                     <Glyph tone="iris">🗂</Glyph>
                     <span className="tt">Dosyalar</span>
+                    {/* ── ÖĞE SAYISI BAŞLIKTA ──────────────────────────────────────────
+                        Sahibin sözü: *"öğe sayısı mobilde dosyalar yazan pencere barında
+                        görünsün."* Sayı alt çubukta da duruyor, ama tam ekranda o çubuk
+                        ekranın epey altında kalıyor ve sayıya bakmak için listeyi sonuna
+                        kadar kaydırmak gerekiyordu. */}
+                    {filesMeta !== null && <span className="fct">{filesMeta}</span>}
                     <button
                       type="button"
                       className="b mfx"
@@ -952,6 +969,7 @@ function Desktop({
                       onUnauthenticated={onUnauthenticated}
                       prefs={prefsLoaded ? prefs : undefined}
                       savePrefs={save}
+                      onMeta={setFilesMeta}
                     />
                   </div>
                 </section>

@@ -1486,7 +1486,20 @@ export interface paths {
          */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    /**
+                     * @description Siralamanin YONU. Verilmedigin de anahtarin kendi varsayilani gecerli: `name` ve `type`
+                     *     artan, `modified` ve `size` azalan � yani bu parametre eklenmeden once ne donuyorsa o.
+                     *
+                     *     `kind` YONLE DONMUYOR. Klasorler ve dosyalar hicbir siralamada birbirine karismiyor:
+                     *     "tersten sirala" diyen biri klasorlerin listenin ortasina dagilmasini degil, adlarin
+                     *     tersten dizilmesini istiyor.
+                     *
+                     *     Enum disinda bir deger 400 DEGIL, yok sayilir � `sort` ile ayni gerekce: bir yer
+                     *     imindeki yazim hatasi dosya gezginini kirmamali.
+                     */
+                    direction?: "asc" | "desc";
+                };
                 header?: {
                     Range?: string;
                     "If-Range"?: string;
