@@ -9137,7 +9137,9 @@ mod tests {
             "list",
         ) {
             Response::Listing { entries, .. } => assert!(
-                entries.iter().all(|e| e.name.as_str() != "DEPSIS Çöp Kutusu"),
+                entries
+                    .iter()
+                    .all(|e| e.name.as_str() != "DEPSIS Çöp Kutusu"),
                 "got {entries:?}"
             ),
             other => panic!("expected a listing, got {other:?}"),

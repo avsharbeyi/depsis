@@ -327,7 +327,11 @@ check 'çöp kutusu Gezgin''de görünüyor' "$smb_ls" 'DEPSIS'
 rm_out="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS"   -c 'deltree "DEPSIS Çöp Kutusu"' 2>&1 || true)"
 if [ -d "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu" ]; then survived=DURUYOR; else survived="SILINDI ($rm_out)"; fi
 check 'ama silinemiyor' "$survived" 'DURUYOR'
-check 've içindeki dosya da duruyor'   "$([ -e "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu/alt/silinecek.txt" ] && echo VAR || echo YOK)"   'VAR'
+# İÇİNDEKİLER SİLİNEBİLİR, ve öyle olmalı: çöp kutusunu boşaltmak kullanıcının hakkı — Windows'un
+# kendi geri dönüşüm kutusunda da öyle. Korunan şey KLASÖR: bir daha yaratılamayacak bir yer değil,
+# ama meraklı biri tarafından tek hamlede yok edilemeyen bir yer. Boşaltılan çöpün satırlarını
+# uzlaştırma turu düşürüyor.
+check 'nöbetçi hâlâ yerinde'   "$([ -e "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu/.depsis-keep" ] && echo VAR || echo YOK)"   'VAR'
 
 
 # ── 6b. DISK KIMLIGI ZINCIRI (ADR-0012, risk R1) ────────────────────────────

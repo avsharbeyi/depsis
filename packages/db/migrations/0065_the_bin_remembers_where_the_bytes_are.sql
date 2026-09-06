@@ -22,6 +22,10 @@
 -- Dosyanın çöp kutusundaki yeri kendi yolundan türetilebiliyor: `recycle:keeptree = yes` ağacı
 -- birebir kopyalıyor ve `versions = no` ada dokunmuyor. İkinci bir sütunda saklamak, satırın yolu
 -- her değiştiğinde ayrışabilecek ikinci bir gerçek yaratmak olurdu.
+-- Up Migration
+
+SELECT public.assert_rls_roles_sane();
+
 ALTER TABLE public.file_entries
   ADD COLUMN recycled boolean NOT NULL DEFAULT false;
 
@@ -33,3 +37,8 @@ COMMENT ON COLUMN public.file_entries.recycled IS
 CREATE INDEX file_entries_recycled_idx
     ON public.file_entries (organization_id, share_id)
  WHERE recycled AND trashed_at IS NOT NULL;
+
+-- Down Migration
+
+DROP INDEX IF EXISTS public.file_entries_recycled_idx;
+ALTER TABLE public.file_entries DROP COLUMN IF EXISTS recycled;
