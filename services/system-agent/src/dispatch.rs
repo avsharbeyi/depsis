@@ -9067,14 +9067,12 @@ mod tests {
         .expect("write");
 
         // Kökün listesinde YOK.
-        match h
-            .agent(&r, &s)
-            .handle(
-                r#"{"op":"list_directory","share":"alice","path":[]}"#,
-                peer(API_UID),
-                "c-bin0",
-                "list",
-            ) {
+        match h.agent(&r, &s).handle(
+            r#"{"op":"list_directory","share":"alice","path":[]}"#,
+            peer(API_UID),
+            "c-bin0",
+            "list",
+        ) {
             Response::Listing { entries, .. } => assert!(
                 entries.iter().all(|e| e.name.as_str() != ".depsis-cop"),
                 "got {entries:?}"
