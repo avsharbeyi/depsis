@@ -510,7 +510,8 @@ test.describe('Dosya yöneticisi', () => {
     });
 
     await birak(pane, name, 'depsis');
-    const kutu = page.getByRole('alertdialog', { name: 'Bu dosya klasörde zaten var' });
+    // Başlık KLASÖRÜ ADIYLA anıyor: kontrolün yalnız o klasöre baktığını söyleyen şey bu cümle.
+    const kutu = page.getByRole('alertdialog', { name: /klasöründe bu dosya zaten var/ });
     await expect(kutu).toBeVisible();
     expect(istek, 'soru sorulmadan önce hiçbir bayt yola çıkmamalı').toBe(0);
 

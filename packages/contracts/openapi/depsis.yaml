@@ -5623,7 +5623,8 @@ components:
 
     Transfer:
       type: object
-      required: [id, filename, lengthBytes, offsetBytes, state, createdAt, updatedAt, duplicate]
+      required:
+        [id, filename, lengthBytes, offsetBytes, state, createdAt, updatedAt, duplicate, folder]
       properties:
         id: { type: string, format: uuid }
         filename: { type: string }
@@ -5638,6 +5639,16 @@ components:
             aktarım listesinin en çok işe yaradığı an, bir aktarımın durduğu andır.
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        folder:
+          type: string
+          description: |
+            Yuklemenin GIDECEGI klasorun adi; kokteki bir yukleme icin paylasimin adi.
+
+            Cakisma sorusu her zaman TEK BIR KLASORU sormustur — ajan yayimi yalnizca hedef
+            dizinde ayni ad varsa reddediyor — ama ekran bunu soylemiyordu. Soru yukleme
+            bittikten sonra, kullanici baska bir klasore gecmisken sorulunca "bu klasorde zaten
+            var" cumlesi hangi klasoru kastettigini soylemiyor ve kontrol butun diske bakiyormus
+            gibi okunuyordu. Klasorun adi cumlede geciyor.
         duplicate:
           type: boolean
           description: |

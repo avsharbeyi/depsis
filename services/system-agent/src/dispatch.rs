@@ -7519,6 +7519,51 @@ mod tests {
     }
 
     #[test]
+    fn a_name_taken_in_another_folder_does_not_block_a_publish() {
+        // ── SAHİBİNİN İTİRAZI ───────────────────────────────────────────────────────────────
+        //
+        // *"Bütün diskte aynı dosya olunca değil ki, klasörde aynısı olunca uyarması gerekmiyor
+        // mu?"* Kontrol zaten klasör kapsamlı — `RENAME_NOREPLACE` yalnız HEDEF DİZİNDE aynı ad
+        // varsa reddediyor — ama bunu kanıtlayan bir test yoktu, ve kanıtlanmamış bir davranış
+        // bir sonraki değişiklikte sessizce kaybolabilecek bir davranış.
+        //
+        // Cihazda da ölçtüm: kökte duran `IMG_4236.jpeg` varken aynı ad başka bir klasöre
+        // sorunsuz yayımlandı.
+        let h = Harness::with_share("alice");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        // Aynı ad KÖKTE duruyor.
+        std::fs::write(h.share_path(&["alice", "foto.jpg"]), b"kokteki").expect("root file");
+        std::fs::create_dir(h.share_path(&["alice", "album"])).expect("mkdir");
+        std::fs::write(
+            h.share_path(&["alice", ".depsis", "staging", "foto.part"]),
+            b"yeni",
+        )
+        .expect("stage");
+
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"foto.part","destination":["album","foto.jpg"],"expected_bytes":4,"owner_uid":300100,"owner_gid":300100}"#;
+        match h
+            .agent(&r, &s)
+            .handle(raw, peer(API_UID), "c-pub5", "publish")
+        {
+            Response::Publish { bytes } => assert_eq!(bytes, 4),
+            other => panic!("expected a publish, got {other:?}"),
+        }
+
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "album", "foto.jpg"])).expect("read"),
+            b"yeni",
+            "the file must land in the folder that was asked for"
+        );
+        assert_eq!(
+            std::fs::read(h.share_path(&["alice", "foto.jpg"])).expect("read root"),
+            b"kokteki",
+            "and the same name in another folder must be untouched"
+        );
+    }
+
+    #[test]
     fn a_publish_with_no_staged_file_answers_not_found_not_a_bare_failure() {
         // ── SAHADA ÖLÇÜLDÜ ──────────────────────────────────────────────────────────────────
         //

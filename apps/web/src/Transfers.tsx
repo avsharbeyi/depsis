@@ -304,11 +304,14 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
                 {awaitingAnswer(item) ? (
                   <div className="l">
                     <span style={{ color: 'var(--warn)' }}>
+                      {/* KLASÖRÜN ADI CÜMLEDE. Soru her zaman tek bir klasörü sormuştu, ama
+                          "bu klasörde" diyen bir cümle, kullanıcı başka bir yere geçmişken
+                          kontrolün bütün diske baktığını düşündürüyordu. */}
                       {item.duplicate === true
-                        ? 'Bu dosya klasörde aynı adda ve aynı boyutta zaten duruyor — ' +
-                          'büyük olasılıkla ikinci bir kopyası. Atlamak hiçbir şeyi silmez.'
-                        : 'Dosyanın tamamı geldi ama hedefte aynı adda bir şey var. Listede ' +
-                          'göremiyorsanız ad çöp kutusundaki bir dosyada duruyor olabilir.'}
+                        ? `«${item.folder}» klasöründe aynı adda ve aynı boyutta bir dosya zaten ` +
+                          'duruyor — büyük olasılıkla ikinci bir kopyası. Atlamak hiçbir şeyi silmez.'
+                        : `Dosyanın tamamı geldi ama «${item.folder}» klasöründe aynı adda bir şey ` +
+                          'var. Listede göremiyorsanız ad çöp kutusundaki bir dosyada duruyor olabilir.'}
                     </span>
                     <button
                       type="button"

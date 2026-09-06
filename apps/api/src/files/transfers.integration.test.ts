@@ -642,4 +642,23 @@ describeDb('the transfer list, against a real PostgreSQL', () => {
 
     expect(byName(await transfers.list(orgA, memberA), name)?.duplicate).toBe(false);
   });
+
+  it('satır hangi klasöre gittiğini söylüyor — kökte paylaşımın adını', async () => {
+    // Cümlenin klasörü adıyla anması gerekiyor: soru yükleme bittikten sonra, kullanıcı başka bir
+    // yere geçmişken sorulunca "bu klasörde zaten var" hangi klasörü kastettiğini söylemiyor ve
+    // kontrol bütün diske bakıyormuş gibi okunuyordu.
+    const name = `klasoradi-${randomUUID()}.bin`;
+    await seed({
+      organizationId: orgA,
+      shareId: shareA,
+      createdBy: memberA,
+      filename: name,
+      lengthBytes: 10,
+      offsetBytes: 10,
+      updatedSecondsAgo: 20,
+    });
+
+    const row = byName(await transfers.list(orgA, memberA), name);
+    expect(row?.folder).toBeTruthy();
+  });
 });

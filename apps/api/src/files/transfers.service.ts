@@ -18,6 +18,8 @@ export interface TransferRow {
   updated_at: Date;
   /** Hedefte aynı adda VE aynı boyutta bir dosya var mı — yani bu, aynı dosyanın ikinci kopyası. */
   duplicate: boolean;
+  /** Yüklemenin gideceği klasörün adı; kökteki bir yükleme için paylaşımın adı. */
+  folder: string;
 }
 
 /**
@@ -147,13 +149,23 @@ export class TransfersService {
                        AND public.fold_identity(e.name)
                            = public.fold_identity(upload_sessions.filename)
                        AND e.size_bytes = upload_sessions.length_bytes
-                  ) AS duplicate
+                  ) AS duplicate,
+                  -- HANGİ KLASÖR. Çakışma her zaman tek bir klasörü sormuştu, ama ekran bunu
+                  -- söylemiyordu: soru yükleme bittikten sonra, kullanıcı başka bir yere geçmişken
+                  -- sorulunca "bu klasörde zaten var" cümlesi hangi klasörü kastettiğini
+                  -- söylemiyor ve kontrol bütün diske bakıyormuş gibi okunuyordu.
+                  COALESCE(
+                    (SELECT p.name FROM public.file_entries p
+                      WHERE p.id = upload_sessions.parent_id),
+                    (SELECT sh.name FROM public.shares sh
+                      WHERE sh.id = upload_sessions.share_id)
+                  ) AS folder
              FROM public.upload_sessions
             WHERE organization_id = $1
               AND ($4::uuid IS NULL OR created_by = $4::uuid)
          )
          SELECT id, filename, length_bytes, offset_bytes, created_at, updated_at, state,
-                duplicate
+                duplicate, folder
            FROM (
                   (SELECT * FROM oturum WHERE bekliyor ORDER BY updated_at DESC LIMIT $6)
                   UNION

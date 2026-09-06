@@ -395,7 +395,9 @@ export function Files({
    *
    * Kuyruk sırayla soruluyor, ve "hepsine uygula" ile yirmi dosya tek bir karara bakıyor.
    */
-  const [clashes, setClashes] = useState<{ location: string; filename: string }[]>([]);
+  const [clashes, setClashes] = useState<{ location: string; filename: string; folder: string }[]>(
+    [],
+  );
   /** Verilen kararın kuyruğun tamamına uygulanıp uygulanmayacağı. */
   const [clashAll, setClashAll] = useState(false);
   /**
@@ -417,6 +419,8 @@ export function Files({
    */
   const [preflight, setPreflight] = useState<{
     names: string[];
+    /** Hangi klasör: cümlede geçiyor, çünkü kontrol yalnız o klasöre bakıyor. */
+    folder: string;
     /** Kaçının boyutu da aynı: "aynı dosya" ile "aynı ad" arasındaki fark. */
     same: number;
     decide: (choice: Decision | 'cancel') => void;
@@ -464,10 +468,15 @@ export function Files({
   }
 
   /** Yüklemeden önce sor, ve cevabı bekle. */
-  function askBeforeUploading(names: string[], same: number): Promise<Decision | 'cancel'> {
+  function askBeforeUploading(
+    names: string[],
+    same: number,
+    folder: string,
+  ): Promise<Decision | 'cancel'> {
     return new Promise((resolve) => {
       setPreflight({
         names,
+        folder,
         same,
         decide: (choice) => {
           setPreflight(null);
@@ -1604,6 +1613,17 @@ export function Files({
     return listing.data?.items.find(here)?.id ?? null;
   }
 
+  /**
+   * Yüklemenin gideceği klasörün adı.
+   *
+   * Cümlede geçiyor, ve bu bir süs değil: çakışma kontrolü HER ZAMAN tek bir klasöre bakıyordu —
+   * ajan yayımı yalnız hedef dizinde aynı ad varsa reddediyor, cihazda ölçtüm — ama ekran bunu
+   * söylemiyordu. "Bu klasörde zaten var" cümlesi, yükleme bittikten sonra ve kullanıcı başka bir
+   * yere geçmişken sorulduğunda hangi klasörü kastettiğini söylemiyor, ve kontrol bütün diske
+   * bakıyormuş gibi okunuyor.
+   */
+  const folderNow = loc.trail[loc.trail.length - 1]?.name ?? currentShare?.name ?? 'Dosyalarım';
+
   async function runUploads(list: Upload[]): Promise<void> {
     if (trashed) {
       notify('error', 'Çöp kutusuna yükleme yapılamaz.');
@@ -1646,6 +1666,7 @@ export function Files({
       const choice = await askBeforeUploading(
         clashing.map((item) => item.file.name),
         same,
+        folderNow,
       );
       if (choice === 'cancel') return;
       if (choice === 'skip') {
@@ -1708,7 +1729,12 @@ export function Files({
           // toplu bir yüklemede yalnız son dosya sorulup gerisi sessizce kayboluyordu.
           setClashes((current) => [
             ...current,
-            { location: problem.location, filename: problem.filename },
+            {
+              location: problem.location,
+              filename: problem.filename,
+              // Bir klasör sürüklendiyse dosya o alt klasöre gidiyor; yoksa açık olan klasöre.
+              folder: segments[segments.length - 1] ?? folderNow,
+            },
           ]);
           continue;
         }
@@ -2827,8 +2853,8 @@ export function Files({
         <ConfirmBox
           title={
             preflight.names.length === 1
-              ? 'Bu dosya klasörde zaten var'
-              : `${preflight.names.length} dosya klasörde zaten var`
+              ? `«${preflight.folder}» klasöründe bu dosya zaten var`
+              : `«${preflight.folder}» klasöründe ${preflight.names.length} dosya zaten var`
           }
           body={
             (preflight.same === preflight.names.length
@@ -2838,8 +2864,9 @@ export function Files({
               : preflight.same > 0
                 ? `${preflight.same} tanesi aynı adda ve aynı boyutta, gerisi aynı adda ama farklı boyutta. `
                 : 'Aynı adda, ama boyutları farklı — başka bir dosya olabilir. ') +
-            '"Atla" seçerseniz hiçbir şey gönderilmez ve klasördeki dosyalara dokunulmaz. ' +
-            '"Değiştir" eskisini silmez, çöp kutusuna atar.'
+            `Kontrol yalnız «${preflight.folder}» klasörüne bakıyor; başka klasörlerdeki aynı adlı ` +
+            'dosyalar bu soruyu doğurmaz. "Atla" seçerseniz hiçbir şey gönderilmez ve klasördeki ' +
+            'dosyalara dokunulmaz. "Değiştir" eskisini silmez, çöp kutusuna atar.'
           }
           list={preflight.names.slice(0, 8)}
           yesLabel="Atla"
@@ -2865,9 +2892,9 @@ export function Files({
               : `Aynı adda dosyalar var (${clashes.length})`
           }
           body={
-            `"${clashes[0].filename}" adında bir dosya bu klasörde zaten duruyor. Yüklediğiniz ` +
-            'dosya sunucuda bekliyor, yeniden gönderilmeyecek. "Değiştir" eskisini silmez, çöp ' +
-            'kutusuna atar.' +
+            `"${clashes[0].filename}" adında bir dosya «${clashes[0].folder}» klasöründe zaten ` +
+            'duruyor — kontrol yalnız o klasöre bakıyor. Yüklediğiniz dosya sunucuda bekliyor, ' +
+            'yeniden gönderilmeyecek. "Değiştir" eskisini silmez, çöp kutusuna atar.' +
             (clashes.length > 1 ? ` Sırada ${clashes.length - 1} dosya daha var.` : '') +
             // ADI ÇÖPTEKİ BİR DOSYA DA TUTABİLİR, ve o hâl listede görünmüyor: satır çöpte ama
             // dosya diskte, adıyla. Kullanıcının "ama böyle bir dosya yok" demesinin sebebi bu,

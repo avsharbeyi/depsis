@@ -7917,6 +7917,16 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
             /**
+             * @description Yuklemenin GIDECEGI klasorun adi; kokteki bir yukleme icin paylasimin adi.
+             *
+             *     Cakisma sorusu her zaman TEK BIR KLASORU sormustur — ajan yayimi yalnizca hedef
+             *     dizinde ayni ad varsa reddediyor — ama ekran bunu soylemiyordu. Soru yukleme
+             *     bittikten sonra, kullanici baska bir klasore gecmisken sorulunca "bu klasorde zaten
+             *     var" cumlesi hangi klasoru kastettigini soylemiyor ve kontrol butun diske bakiyormus
+             *     gibi okunuyordu. Klasorun adi cumlede geciyor.
+             */
+            folder: string;
+            /**
              * @description Hedef klasorde AYNI ADDA ve AYNI BOYUTTA bir dosya duruyor mu.
              *
              *     Ayni dosyanin ikinci kez yuklenmesi ile gercekten farkli bir dosyanin ayni adi
