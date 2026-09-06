@@ -3723,6 +3723,15 @@ label textarea,
     bottom: auto;
     min-width: 0;
   }
+  /* Seçim şeridi dar ekranda SARIYOR: "Tümünü seç" ile toplu işlem düğmeleri yan yana
+     sığmıyor, ve sığmayan bir düğme olmayan bir düğmeyle aynı şey. Sayı kendi satırında
+     duruyor ki düğmeler tam genişlikten pay alabilsin. */
+  .selbar {
+    flex-wrap: wrap;
+  }
+  .selbar .n {
+    flex: 1 0 100%;
+  }
   .quick {
     flex-wrap: wrap;
   }

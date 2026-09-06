@@ -2025,30 +2025,11 @@ export function Files({
         >
           {layout === 'grid' ? '☰ Liste' : '▦ Izgara'}
         </button>
-        {/* ── "TÜMÜNÜ SEÇ", VE SÖZÜ EKRANDAKİ KADAR ────────────────────────────────────────
-            Yalnız seçim kipinde çiziliyor: kutular görünmezken "tümü" neyin tümü olduğunu
-            söylemiyor. Kapsadığı şey EKRANDAKİ satırlar — klasör iki yüzden kalabalıksa devamı
-            henüz getirilmemiş olabilir, ve o zaman düğme bunu `title`ında söylüyor. "Klasördeki
-            her şey" demek, kullanıcının hiç görmediği satırları da işleme sokmak olurdu. */}
-        {picking && (
-          <button
-            type="button"
-            className="mk"
-            disabled={entries === null || entries.length === 0}
-            aria-pressed={allPicked}
-            title={
-              more
-                ? 'Yüklenmiş satırların tümünü seçer; gerisi için önce "Daha fazla göster".'
-                : 'Bu klasördeki her şeyi seçer.'
-            }
-            onClick={() => {
-              setSel(allPicked ? new Set() : new Set((entries ?? []).map((row) => row.id)));
-              rangeAnchor.current = null;
-            }}
-          >
-            ☑ {allPicked ? 'Seçimi bırak' : 'Tümünü seç'}
-          </button>
-        )}
+        {/* "Tümünü seç" BURADA DEĞİL, seçim şeridinde — sahibinin sözü: *"seç tuşuna basınca
+            tümünü seç seçeneği de gelsin bi yerden ki toplu işlem yapabileyim."* Düğme buradaydı
+            ama telefonda görünmüyordu: bu satırdaki her `.mk` `flex: 1` ile eşit paya sıkışıyor,
+            360 pikselde altı düğme yan yana okunmaz hâle geliyordu. Toplu işlemin yapıldığı yer
+            zaten seçim şeridi; seçmenin de orada olması gerekiyordu. */}
         {trashed ? (
           <button
             type="button"
@@ -2346,8 +2327,36 @@ export function Files({
         </div>
       )}
 
-      <div className={sel.size > 0 ? 'selbar on' : 'selbar'}>
-        <span className="n">{sel.size} seçili</span>
+      {/* ── ŞERİT SEÇİM KİPİNİN KENDİSİYLE AÇILIYOR ─────────────────────────────────────
+          Eskiden yalnız EN AZ BİR satır seçilince beliriyordu, ve "Seç"e basan biri karşısında
+          kutulardan başka bir şey bulmuyordu: toplu işlemin nerede olduğunu da, hepsini birden
+          nasıl seçeceğini de söyleyen bir yer yoktu. Şerit artık kipin kendisiyle açılıyor ve ilk
+          söylediği şey ne yapılabileceği. */}
+      <div className={picking || sel.size > 0 ? 'selbar on' : 'selbar'}>
+        <span className="n">
+          {sel.size > 0 ? `${sel.size} seçili` : 'Seçmek için satırlara dokunun'}
+        </span>
+        {/* ── "TÜMÜNÜ SEÇ", VE SÖZÜ EKRANDAKİ KADAR ──────────────────────────────────────
+            Kapsadığı şey EKRANDAKİ satırlar — klasör iki yüzden kalabalıksa devamı henüz
+            getirilmemiş olabilir, ve o zaman düğme bunu `title`ında söylüyor. "Klasördeki her
+            şey" demek, kullanıcının hiç görmediği satırları da işleme sokmak olurdu. */}
+        <button
+          type="button"
+          className="sb"
+          disabled={entries === null || entries.length === 0}
+          aria-pressed={allPicked}
+          title={
+            more
+              ? 'Yüklenmiş satırların tümünü seçer; gerisi için önce "Daha fazla göster".'
+              : 'Bu klasördeki her şeyi seçer.'
+          }
+          onClick={() => {
+            setSel(allPicked ? new Set() : new Set((entries ?? []).map((row) => row.id)));
+            rangeAnchor.current = null;
+          }}
+        >
+          ☑ {allPicked ? 'Seçimi bırak' : 'Tümünü seç'}
+        </button>
         {/* Every one of these is gated on `selected.length` as well as on `busy`. The selection
             bar is driven by `sel`, which the listing effect clears only AFTER the response lands,
             while `entries` is emptied the moment the request goes out — so during any re-list the

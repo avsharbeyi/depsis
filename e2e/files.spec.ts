@@ -473,6 +473,30 @@ test.describe('Dosya yöneticisi', () => {
     await topla(pane, name, artiklar);
   });
 
+  test('"Seç" toplu işlemi ve "Tümünü seç"i aynı anda açar', async ({ page, consoleWatch }) => {
+    // ── SAHİBİNİN SÖZÜ ────────────────────────────────────────────────────────────────────
+    //
+    // *"Seç tuşuna basınca tümünü seç seçeneği de gelsin bi yerden ki toplu işlem yapabileyim."*
+    //
+    // Düğme vardı ama araç çubuğundaydı, ve o çubuktaki her düğme dar ekranda eşit paya sıkışıyor:
+    // 360 pikselde altı düğme yan yana okunmaz hâle geliyordu. Bulunamayan bir düğme, olmayan bir
+    // düğmedir. Bu test onun seçim kipiyle birlikte GÖRÜNDÜĞÜNÜ ölçüyor — hem masaüstünde hem
+    // mobil projede koştuğu için, sıkışmayı yeniden üretecek bir değişiklik burada düşer.
+    satirYaratanTestinGurultusu(consoleWatch);
+    const pane = await dosyalariAc(page);
+
+    const secAll = pane.getByRole('button', { name: /Tümünü seç/ });
+    await expect(secAll, 'seçim kipi kapalıyken görünmemeli').toHaveCount(0);
+
+    await pane.getByRole('button', { name: '☑ Seç' }).click();
+    await expect(secAll).toBeVisible();
+    // Ve şerit tek bir satır seçilmeden önce de orada: toplu işlemin nerede olduğunu söyleyen yer.
+    await expect(pane.locator('.selbar.on')).toBeVisible();
+
+    await pane.getByRole('button', { name: '☑ Seç' }).click();
+    await expect(secAll).toHaveCount(0);
+  });
+
   test('aynı adda bir dosya varken soru YÜKLEMEDEN ÖNCE soruluyor', async ({
     page,
     consoleWatch,
