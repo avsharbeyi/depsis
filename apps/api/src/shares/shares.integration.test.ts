@@ -275,6 +275,29 @@ describeDb('shares, against a real PostgreSQL', () => {
    * Onarımın koşulu bir veritabanı sorgusu değil, zaten elde olan satırlar; askıda bir satır
    * yoksa hiçbir ajan çağrısı olmuyor. Bu olmadan her liste okuması bir yazma yoluna dönerdi.
    */
+  it('açılışta paylaşımları yeniden yayımlıyor', async () => {
+    // ── SAHADA ÖLÇÜLDÜ ────────────────────────────────────────────────────────────────────
+    //
+    // `smb.conf` bölümünü ürün üretiyor ve içeriği sürümle değişiyor — ama dosya yalnız biri
+    // "Yeniden yayımla"ya bastığında yazılıyordu. v0.15.0 bunu görünür yaptı: ağdan silinenlerin
+    // çöp kutusuna gitmesi için gereken `recycle` modülü sürümle geldi, kurulum tamamlandı, ve
+    // cihazdaki smbd hâlâ eski satırı okuyordu. Özellik kutuda vardı ve çalışmıyordu, ve
+    // kullanıcının bunu bilip bir düğmeye basması gerekiyordu.
+    const { shares, calls } = service();
+
+    await shares.onModuleInit();
+
+    expect(calls.map((c) => c.request.op)).toContain('publish_samba_config');
+  });
+
+  it('açılışta yayım düşerse API yine de başlıyor', async () => {
+    // Havuz henüz bağlı olmayabilir, Samba kurulu olmayabilir, cihaz hiç sahiplenilmemiş olabilir.
+    // Üçü de olağan, ve hiçbiri API'nin başlamamasının sebebi değil — düğme yerinde duruyor.
+    const { shares } = service(() => Promise.reject(new Error('ajana ulaşılamıyor')));
+
+    await expect(shares.onModuleInit()).resolves.toBeUndefined();
+  });
+
   it('askıda satır yokken listelemek ajana hiç dokunmuyor', async () => {
     await owner.withoutTenant('migration-status', (q) =>
       q.query(`INSERT INTO shares (organization_id, name, dataset) VALUES ($1, 'ev', $2)`, [
