@@ -716,6 +716,11 @@ select.pill.bad {
   --col-sz: 78px;
   --col-dt: 74px;
   --acts: 178px;
+  /* Satırın kendi dolgusu ve sütun arası — BAŞLIK DA BUNLARI KULLANIYOR. Ayrı yazıldıkları
+     sürece dar ekranda satır 7/8 piksele inip başlık 8/9'da kalıyordu, ve iki piksellik bir
+     kayma da kaymadır. */
+  --row-pad: 8px;
+  --row-gap: 9px;
 }
 .fm.on {
   display: flex;
@@ -1035,13 +1040,29 @@ select.pill.bad {
 
    Başlıklar `.frow` değil: satır gibi görünmemeliler (arka plan yok, imleç yok, seçilmiyorlar) ve
    listenin kendisiyle birlikte kaymamalılar. */
+/* ── BAŞLIK LİSTENİN İÇİNDE, VE YAPIŞKAN ────────────────────────────────────────────────
+   Kardeş olarak çizildiği sürece hizalanması mümkün değildi: `.flist`in kendi 13 piksellik yan
+   dolgusu var, satır ona ek olarak 8 piksel taşıyor, başlık ise yalnız 8. Sütunlar tam 13 piksel
+   kayıyordu — sahibinin gördüğü şey buydu, ve e2e testi de aynı sayıyı ölçtü.
+
+   Aynı kabın içine girince ikisi de aynı dolgu kutusundan başlıyor. İkinci kazanç: dikey kaydırma
+   çubuğu belirdiğinde listenin genişliği daralıyor, ve dışarıda duran bir başlık o daralmayı
+   görmüyordu — sağa dayalı sütunlar bir kaydırma çubuğu kadar daha kayardı.
+
+   `sticky`, çünkü artık kaydırılan kabın içinde: başlığın yukarı kayıp gitmesi, sıralama
+   düğmelerini listenin ortasında kaybetmek olurdu. Arka plan SAYDAM DEĞİL — camın rengi tam
+   opaklıkta — yoksa altından geçen satırlar başlığın içinden okunurdu. */
 .fhead {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 2px 8px 6px;
+  gap: var(--row-gap);
+  padding: 6px var(--row-pad);
   border-bottom: 1px solid var(--edge);
   margin-bottom: 4px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgb(16, 26, 40);
 }
 /* ── BAŞLIK SATIRIN ÖLÇÜLERİNİ BİREBİR TAŞIYOR ──────────────────────────────────────────
    Sahibinin sözü: *"tür ad boyut tarih yerlerine denk gelmiyor."* Doğruydu, ve üç ayrı sebebi
@@ -1120,8 +1141,8 @@ select.pill.bad {
 .frow {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 8px;
+  gap: var(--row-gap);
+  padding: 7px var(--row-pad);
   border-radius: 9px;
   font-size: 12.5px;
   transition: background 0.14s;
@@ -3853,9 +3874,14 @@ label textarea,
   .fact .gap {
     width: 16px;
   }
+  /* Dar ekranda satır biraz daralıyor; başlık da aynı iki değişkeni okuduğu için onunla
+     birlikte daralıyor. */
+  .fm {
+    --row-pad: 7px;
+    --row-gap: 8px;
+  }
   .frow {
-    padding: 9px 7px;
-    gap: 8px;
+    padding: 9px var(--row-pad);
   }
   .addr {
     font-size: 11.5px;

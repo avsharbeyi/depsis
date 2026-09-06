@@ -2492,35 +2492,6 @@ export function Files({
 
           Çöpte ve aramada çizilmiyor: ikisi de sıralanabilir bir klasör değil. Izgarada da yok —
           orada sütun diye bir şey yok. */}
-      {!trashed && !searching && layout === 'list' && (
-        <div className="fhead">
-          {/* Boşluk kutusu YALNIZ SEÇİM KİPİNDE: satırdaki onay kutusu da yalnız o kipte var, ve
-              kipsizken burada duran 24 piksel bütün başlıkları sütunlarının sağına itiyordu. */}
-          {picking && <span className="pad" aria-hidden />}
-          <SortHead label="Tür" sort="type" active={order} dir={dir} onPick={pickSort} narrow />
-          <SortHead label="Ad" sort="name" active={order} dir={dir} onPick={pickSort} grow />
-          <SortHead
-            label="Boyut"
-            sort="size"
-            active={order}
-            dir={dir}
-            onPick={pickSort}
-            cell="sz"
-          />
-          <SortHead
-            label="Tarih"
-            sort="modified"
-            active={order}
-            dir={dir}
-            onPick={pickSort}
-            cell="dt"
-          />
-          {/* Satırın sonundaki eylem düğmelerinin kapladığı yer. Sabit genişlikte (`--acts`),
-              yani boyut ve tarih sütunları her satırda aynı yerde duruyor — ve başlık da onların
-              üstünde. */}
-          <span className="pad acts" aria-hidden />
-        </div>
-      )}
 
       {/* Izgara sınıfı yalnız ÇİZİLECEK SATIR VARKEN: boş hâl ve hata kutusu da bu kabın çocuğu,
           ve bir ızgara hücresine sıkışmış "Bu klasör boş" kutusu, düzeltmeden kötü. */}
@@ -2529,6 +2500,35 @@ export function Files({
           layout === 'grid' && entries !== null && entries.length > 0 ? 'flist gridview' : 'flist'
         }
       >
+        {!trashed && !searching && layout === 'list' && (
+          <div className="fhead">
+            {/* Boşluk kutusu YALNIZ SEÇİM KİPİNDE: satırdaki onay kutusu da yalnız o kipte var, ve
+                kipsizken burada duran 24 piksel bütün başlıkları sütunlarının sağına itiyordu. */}
+            {picking && <span className="pad" aria-hidden />}
+            <SortHead label="Tür" sort="type" active={order} dir={dir} onPick={pickSort} narrow />
+            <SortHead label="Ad" sort="name" active={order} dir={dir} onPick={pickSort} grow />
+            <SortHead
+              label="Boyut"
+              sort="size"
+              active={order}
+              dir={dir}
+              onPick={pickSort}
+              cell="sz"
+            />
+            <SortHead
+              label="Tarih"
+              sort="modified"
+              active={order}
+              dir={dir}
+              onPick={pickSort}
+              cell="dt"
+            />
+            {/* Satırın sonundaki eylem düğmelerinin kapladığı yer. Sabit genişlikte (`--acts`),
+                yani boyut ve tarih sütunları her satırda aynı yerde duruyor — ve başlık da onların
+                üstünde. */}
+            <span className="pad acts" aria-hidden />
+          </div>
+        )}
         {listFailed ? (
           <Empty
             glyph="⚠"
