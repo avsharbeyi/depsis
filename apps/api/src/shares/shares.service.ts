@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { PERMISSIONS as ALL_PERMISSIONS } from '@depsis/authz';
 
 import {
@@ -177,7 +177,7 @@ const RESERVED_SECTIONS: readonly string[] = ['global', 'homes', 'printers', 'pr
  * no way to tell whether they mistyped it or the appliance never configured it.
  */
 @Injectable()
-export class SharesService {
+export class SharesService implements OnModuleInit {
   private readonly logger = new Logger(SharesService.name);
 
   /**
@@ -574,6 +574,42 @@ export class SharesService {
    * because in the only state this method proceeds in, a collision cannot exist — and in the
    * states where it could, the method has already refused.
    */
+  /**
+   * Açılışta paylaşımları YENİDEN YAYIMLA.
+   *
+   * ── SAHADA ÖLÇÜLDÜ ──────────────────────────────────────────────────────────────────────
+   *
+   * `smb.conf` bölümünü ÜRÜN üretiyor, ve o üretimin içeriği sürümle birlikte değişiyor. Ama
+   * dosya yalnız biri "Yeniden yayımla"ya bastığında yazılıyordu: yeni bir sürüm kurulunca
+   * ayarlar depoda değişiyor, cihazdaki dosya eski hâlinde kalıyordu.
+   *
+   * v0.15.0 bunu görünür yaptı: ağdan silinenlerin çöp kutusuna gitmesi için gereken `recycle`
+   * modülü sürümle geldi, kurulum tamamlandı, ve smbd hâlâ `vfs objects = full_audit` okuyordu —
+   * yani özellik kutuda vardı ve çalışmıyordu. Kullanıcının bunu bilip bir düğmeye basması
+   * gerekiyordu; bilemez, ve bilmesi de gerekmez.
+   *
+   * SESSİZCE GEÇİYOR, açılışı durdurmuyor: havuz henüz bağlı olmayabilir, Samba kurulu
+   * olmayabilir, cihaz hiç sahiplenilmemiş olabilir. Üçü de olağan hâller, ve hiçbiri API'nin
+   * başlamamasının sebebi değil — düğme yerinde duruyor.
+   */
+  async onModuleInit(): Promise<void> {
+    const soleId = await this.organizations.resolveSoleId().catch(() => null);
+    if (soleId === null) return;
+    try {
+      const { shares, verified } = await this.publish(soleId, randomUUID());
+      if (shares > 0) {
+        this.logger.log(
+          `açılışta ${shares} paylaşım yeniden yayımlandı (doğrulandı: ${String(verified)})`,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        'açılışta paylaşımlar yeniden yayımlanamadı; Paylaşımlar ekranındaki "Yeniden yayımla" ' +
+          `düğmesi hâlâ çalışıyor: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async publish(
     organizationId: string,
     correlationId: string,
