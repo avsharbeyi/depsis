@@ -675,7 +675,29 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
 
         let staged = [share, STAGING_DIR[0], STAGING_DIR[1], staging_name];
-        let file = paths.open(&staged, OpenIntent::Read)?;
+        // ── ARA DOSYA YOKSA CEVAP `NotFound` ────────────────────────────────────────────────
+        //
+        // `?` ile yukarı verildiğinde bu `Failed` oluyordu, ve `Failed` çağıran için "beklenmeyen
+        // bir aksaklık" demek: API onu ne yorumlayabiliyor ne de üstünde bir karar verebiliyordu.
+        // Oysa söylenen şey kesin ve olağan — gönderilen baytlar artık ara alanda yok — ve API'nin
+        // buna verebileceği tek doğru cevap var: bu yükleme oturumunu kapatmak.
+        //
+        // Sahada ölçüldü: 235 asılı yüklemenin 12'sinin ara dosyası yoktu ve verilen her karar
+        // "yayımlanamadı" ile dönüyordu; satır listede kalıyor, kullanıcının çıkışı olmuyordu.
+        //
+        // Hedef klasörün eksikliği de `NotFound` — ikisini AYIRAN şey sıra, cümle değil: API önce
+        // klasörü yaratıp yayımı yeniden deniyor, ve klasör yaratıldıktan sonra gelen ikinci bir
+        // `NotFound`un geriye tek açıklaması kalıyor. Metne bakan bir kural, cümlenin her
+        // düzeltilişinde sessizce bozulurdu.
+        let file = match paths.open(&staged, OpenIntent::Read) {
+            Ok(file) => file,
+            Err(SeamError::NotFound(what)) => {
+                return Ok(Response::NotFound {
+                    reason: format!("{what}: the staged bytes are not there"),
+                });
+            }
+            Err(other) => return Err(other),
+        };
         let size = file
             .metadata()
             .map_err(|e| SeamError::Io(format!("stat staging file: {e}")))?
@@ -740,6 +762,15 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             Err(SeamError::AlreadyExists(what)) => {
                 return Ok(Response::Conflict {
                     reason: format!("{what}: something is already there"),
+                });
+            }
+            // Hedef klasör diskte yok — DEPSIS'ten önce var olan, dizinde satırı olup dizinde
+            // karşılığı olmayan bir klasöre yükleme yapılıyor. API bunu onarabiliyor: klasörü
+            // yaratıp yayımı bir kez daha deniyor. `Failed` olarak döndüğü sürece o onarım hiç
+            // koşmuyordu.
+            Err(SeamError::NotFound(what)) => {
+                return Ok(Response::NotFound {
+                    reason: format!("{what}: no such entry"),
                 });
             }
             Err(other) => return Err(other),
@@ -7484,6 +7515,66 @@ mod tests {
             std::fs::read(h.share_path(&["alice", "report.txt"])).expect("read"),
             b"final contents",
             "the original must be untouched"
+        );
+    }
+
+    #[test]
+    fn a_publish_with_no_staged_file_answers_not_found_not_a_bare_failure() {
+        // ── SAHADA ÖLÇÜLDÜ ──────────────────────────────────────────────────────────────────
+        //
+        // Cihazda asılı kalan 235 yüklemenin 12'sinin ara dosyası hiç yoktu. Ajan buna `Failed`
+        // diyordu, ve `Failed` çağıran için "beklenmeyen bir aksaklık" demek: API ne yorumlayabilir
+        // ne de üstünde bir karar verebilir. Kullanıcı her kararında "yayımlanamadı" görüyor, satır
+        // listede kalıyor, ve çıkış yolu kalmıyordu.
+        //
+        // `NotFound` ise API'nin okuyabildiği bir cevap: klasörü yaratıp bir kez daha dener, yine
+        // aynı cevabı alırsa geriye tek açıklama kalır ve oturumu kapatır.
+        let h = Harness::with_share("alice");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"yok.part","destination":["rapor.txt"],"expected_bytes":3,"owner_uid":300100,"owner_gid":300100}"#;
+        match h
+            .agent(&r, &s)
+            .handle(raw, peer(API_UID), "c-pub3", "publish")
+        {
+            Response::NotFound { reason } => assert!(reason.contains("yok.part"), "{reason}"),
+            other => panic!("expected not_found, got {other:?}"),
+        }
+        assert!(
+            !h.share_path(&["alice", "rapor.txt"]).exists(),
+            "and nothing was created in its place"
+        );
+    }
+
+    #[test]
+    fn a_publish_into_a_missing_folder_answers_not_found_so_the_api_can_create_it() {
+        // İkinci `NotFound` kaynağı, ve API'nin onarabildiği tek olan. DEPSIS'ten önce var olan bir
+        // klasör dizinde bir satır taşıyıp diskte karşılığı olmadan durabiliyor; API klasörü
+        // yaratıp yayımı yeniden deniyor. `Failed` olarak döndüğü sürece o onarım hiç koşmuyordu.
+        let h = Harness::with_share("alice");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        std::fs::write(
+            h.share_path(&["alice", ".depsis", "staging", "var.part"]),
+            b"abc",
+        )
+        .expect("stage");
+
+        let raw = r#"{"op":"publish_transfer","share":"alice","staging_name":"var.part","destination":["olmayan","rapor.txt"],"expected_bytes":3,"owner_uid":300100,"owner_gid":300100}"#;
+        match h
+            .agent(&r, &s)
+            .handle(raw, peer(API_UID), "c-pub4", "publish")
+        {
+            Response::NotFound { .. } => {}
+            other => panic!("expected not_found, got {other:?}"),
+        }
+        // VE ARA DOSYA YERİNDE: `RENAME_NOREPLACE` ya hepsi ya hiç, yani reddedilen bir yayımdan
+        // sonra baytlar hâlâ orada ve yeniden deneme mümkün.
+        assert!(
+            h.share_path(&["alice", ".depsis", "staging", "var.part"])
+                .exists(),
+            "the staged bytes must survive a refused publish"
         );
     }
 
