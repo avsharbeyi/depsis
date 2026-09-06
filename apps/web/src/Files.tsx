@@ -2843,19 +2843,13 @@ export function Files({
           }
           list={preflight.names.slice(0, 8)}
           yesLabel="Atla"
+          extras={[
+            { label: 'İkisini de tut', onClick: () => preflight.decide('keep-both') },
+            { label: 'Değiştir (eskisi çöpe)', onClick: () => preflight.decide('replace') },
+          ]}
           onYes={() => preflight.decide('skip')}
           onNo={() => preflight.decide('cancel')}
         />
-      )}
-      {preflight !== null && (
-        <div className="clashalt">
-          <button type="button" className="b" onClick={() => preflight.decide('keep-both')}>
-            İkisini de tut
-          </button>
-          <button type="button" className="b" onClick={() => preflight.decide('replace')}>
-            Değiştir (eskisi çöpe)
-          </button>
-        </div>
       )}
 
       {/* ── ÇAKIŞMA BİR SORU, BİR HATA DEĞİL ────────────────────────────────────────────
@@ -2881,37 +2875,33 @@ export function Files({
             ' Listede göremiyorsanız ad çöp kutusundaki bir dosyada duruyor olabilir.'
           }
           yesLabel="İkisini de tut"
+          extras={[
+            { label: 'Değiştir (eskisi çöpe)', onClick: () => void resolveClash('replace') },
+            // ÜÇÜNCÜ SEÇENEK: baytlar sunucuda ama kullanıcı onları istemiyor olabilir — aynı
+            // dosyanın ikinci kopyasıysa doğru cevap bu. Ara alandaki dosya siliniyor,
+            // klasördekine dokunulmuyor.
+            { label: 'Atla', onClick: () => void resolveClash('skip') },
+          ]}
+          footer={
+            // TEK KARAR, YİRMİ DOSYA. Bir fotoğraf grubunu yeniden yükleyen biri aynı soruyu
+            // yirmi kez cevaplamak istemiyor.
+            clashes.length > 1 ? (
+              <label className="clashall">
+                <input
+                  type="checkbox"
+                  checked={clashAll}
+                  onChange={(event) => setClashAll(event.target.checked)}
+                />
+                Kalan {clashes.length - 1} dosyaya da uygula
+              </label>
+            ) : undefined
+          }
           onYes={() => void resolveClash('keep-both')}
           onNo={() => {
             setClashes([]);
             setClashAll(false);
           }}
         />
-      )}
-      {clashes[0] !== undefined && (
-        <div className="clashalt">
-          <button type="button" className="b" onClick={() => void resolveClash('replace')}>
-            Değiştir (eskisi çöpe)
-          </button>
-          {/* ÜÇÜNCÜ SEÇENEK: baytlar sunucuda ama kullanıcı onları istemiyor olabilir — aynı
-              dosyanın ikinci kopyasıysa doğru cevap bu. Ara alandaki dosya siliniyor,
-              klasördekine dokunulmuyor. */}
-          <button type="button" className="b" onClick={() => void resolveClash('skip')}>
-            Atla
-          </button>
-          {/* TEK KARAR, YİRMİ DOSYA. Bir fotoğraf grubunu yeniden yükleyen biri aynı soruyu
-              yirmi kez cevaplamak istemiyor. */}
-          {clashes.length > 1 && (
-            <label className="clashall">
-              <input
-                type="checkbox"
-                checked={clashAll}
-                onChange={(event) => setClashAll(event.target.checked)}
-              />
-              Kalan {clashes.length - 1} dosyaya da uygula
-            </label>
-          )}
-        </div>
       )}
 
       {preview !== null && <Preview entry={preview} onClose={() => setPreview(null)} />}
