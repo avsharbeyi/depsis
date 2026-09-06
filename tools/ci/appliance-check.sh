@@ -279,22 +279,34 @@ id -u "$BIN_USER" >/dev/null 2>&1 || useradd -M -s /usr/sbin/nologin "$BIN_USER"
 printf '%s\n%s\n' "$BIN_PASS" "$BIN_PASS" | smbpasswd -s -a "$BIN_USER" >/dev/null
 smbpasswd -e "$BIN_USER" >/dev/null
 
-# Dosya paylaşımın kökünde ve silen kullanıcının silebileceği hâlde: bu kapı çöp kutusunu ölçüyor,
-# izinleri değil.
-printf 'silinecek' > "$SHARES_ROOT/belgeler/silinecek.txt"
-chown "$BIN_USER" "$SHARES_ROOT/belgeler/silinecek.txt"
-chmod 0666 "$SHARES_ROOT/belgeler/silinecek.txt"
-chmod 0777 "$SHARES_ROOT/belgeler"
-smb_out="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS" -c 'del silinecek.txt' 2>&1 || true)"
+# ── CİHAZIN HÂLİ BİREBİR KURULUYOR ──────────────────────────────────────────
+#
+# İlk hâlinde bu kapı yeşil yandı ve saha kırmızıydı; fark tek bir dizinde: `.depsis` CI'da hiç
+# yoktu, cihazda ise 0750 root:root duruyordu. Depo `.depsis/bin` iken `recycle` modülü —
+# smbd'nin içinde, BAĞLANAN KULLANICININ kimliğiyle koşuyor — o dizine giremiyor, deposunu
+# kuramıyor ve SESSİZCE sıradan bir silmeye düşüyordu. Kapı geçmişti ama ölçtüğü şey ürünün
+# sahadaki hâli değildi.
+#
+# Artık `.depsis` cihazdaki izinlerle önce yaratılıyor, ve dosya bir ALT KLASÖRDEN siliniyor —
+# `keeptree`nin ölçüldüğü yer de orası.
+mkdir -p "$SHARES_ROOT/belgeler/.depsis/staging"
+chown -R root:root "$SHARES_ROOT/belgeler/.depsis"
+chmod 0750 "$SHARES_ROOT/belgeler/.depsis" "$SHARES_ROOT/belgeler/.depsis/staging"
 
-if [ -e "$SHARES_ROOT/belgeler/silinecek.txt" ]; then gone=DURUYOR; else gone=GITTI; fi
+chmod 0777 "$SHARES_ROOT/belgeler"
+mkdir -p "$SHARES_ROOT/belgeler/alt"
+chmod 0777 "$SHARES_ROOT/belgeler/alt"
+printf 'silinecek' > "$SHARES_ROOT/belgeler/alt/silinecek.txt"
+chown "$BIN_USER" "$SHARES_ROOT/belgeler/alt/silinecek.txt"
+chmod 0666 "$SHARES_ROOT/belgeler/alt/silinecek.txt"
+smb_out="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS" -c 'cd alt; del silinecek.txt' 2>&1 || true)"
+
+if [ -e "$SHARES_ROOT/belgeler/alt/silinecek.txt" ]; then gone=DURUYOR; else gone=GITTI; fi
 check 'dosya paylaşımdan kalktı' "$gone" 'GITTI'
-# ASIL İDDİA: baytlar yok olmadı, çöp kutusunda.
-if [ -e "$SHARES_ROOT/belgeler/.depsis/bin/silinecek.txt" ]; then binned=VAR; else binned="YOK ($smb_out)"; fi
-check 've çöp kutusunda duruyor' "$binned" 'VAR'
-check 'içeriği bozulmadan' \
-  "$(cat "$SHARES_ROOT/belgeler/.depsis/bin/silinecek.txt" 2>/dev/null || echo OKUNAMADI)" \
-  'silinecek'
+# ASIL İDDİA: baytlar yok olmadı, çöp kutusunda — ve ağaç yapısı korunmuş.
+if [ -e "$SHARES_ROOT/belgeler/.depsis-cop/alt/silinecek.txt" ]; then binned=VAR; else binned="YOK ($smb_out)"; fi
+check 've çöp kutusunda, kendi klasör yolunda duruyor' "$binned" 'VAR'
+check 'içeriği bozulmadan'   "$(cat "$SHARES_ROOT/belgeler/.depsis-cop/alt/silinecek.txt" 2>/dev/null || echo OKUNAMADI)"   'silinecek'
 
 
 # ── 6b. DISK KIMLIGI ZINCIRI (ADR-0012, risk R1) ────────────────────────────
