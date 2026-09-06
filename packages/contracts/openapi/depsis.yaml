@@ -1134,6 +1134,22 @@ paths:
             Upload-Length:
               schema: { type: integer, format: int64 }
         '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [uploads]
+      summary: Yuklemeden vazgec
+      description: |
+        Ara alandaki baytlari siler ve oturumu kapatir. Yayimlanmis bir yukleme icin 409 —
+        vazgecilecek bir sey kalmamistir.
+
+        NEDEN VAR: ayni dosyayi yeniden yukleyen biri icin dogru cevap "ikisini de tut" degil.
+        Sahada olculdu — cevap bekleyen 233 yuklemenin 220'sinin adini AYNI BOYUTTA bir dosya
+        tutuyordu, yani hepsi ayni dosyanin ikinci kopyasiydi. Bu ucu olmadan tek cikis yol 220
+        tane "(2)" kopyasi uretmekti.
+      responses:
+        '204': { description: Vazgecildi }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
     patch:
       tags: [uploads]
       summary: Parça gönder (tus PATCH)
@@ -5607,7 +5623,7 @@ components:
 
     Transfer:
       type: object
-      required: [id, filename, lengthBytes, offsetBytes, state, createdAt, updatedAt]
+      required: [id, filename, lengthBytes, offsetBytes, state, createdAt, updatedAt, duplicate]
       properties:
         id: { type: string, format: uuid }
         filename: { type: string }
@@ -5622,6 +5638,18 @@ components:
             aktarım listesinin en çok işe yaradığı an, bir aktarımın durduğu andır.
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        duplicate:
+          type: boolean
+          description: |
+            Hedef klasorde AYNI ADDA ve AYNI BOYUTTA bir dosya duruyor mu.
+
+            Ayni dosyanin ikinci kez yuklenmesi ile gercekten farkli bir dosyanin ayni adi
+            istemesi, kullanicinin verecegi karari degistiriyor: birincisinde dogru cevap
+            "vazgec", ikincisinde "ikisini de tut". Ekranin bunu SOYLEMEDEN sormasi, sahada 220
+            gereksiz "(2)" kopyasi uretecek bir soru demekti.
+
+            Boyut esitligi bir kanit degil, bir isaret — ve cumle de oyle kuruluyor. Icerigi
+            karsilastirmak iki dosyayi bastan sona okumak olurdu.
 
     TransferPage:
       type: object

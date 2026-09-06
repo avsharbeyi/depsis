@@ -330,6 +330,24 @@ async function topla(pane: Locator, name: string, artiklar: Artiklar): Promise<v
   await kaliciSil(pane, name, artiklar);
 }
 
+/**
+ * Dosyayı listeye BIRAK.
+ *
+ * `⤒ Yükle` menüsü yerine sürükle-bırak, çünkü baytların tarayıcıdan çıktığı yol bu (kardeş
+ * testin açıkladığı gibi). `DataTransfer` sayfanın içinde kuruluyor: bir `File` köprüden geçemiyor.
+ */
+async function birak(pane: Locator, name: string, icerik: string): Promise<void> {
+  const birakilan = await pane.page().evaluateHandle(
+    ([filename, body]: [string, string]) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([body], filename, { type: 'text/plain' }));
+      return transfer;
+    },
+    [name, icerik] as [string, string],
+  );
+  await pane.locator('.fm').dispatchEvent('drop', { dataTransfer: birakilan });
+}
+
 /* ─── the suite ─────────────────────────────────────────────────────────────── */
 
 test.describe('Dosya yöneticisi', () => {
@@ -452,6 +470,56 @@ test.describe('Dosya yöneticisi', () => {
 
     artiklar.sahiplen(name);
     await expect(satir(pane, name)).toBeVisible();
+    await topla(pane, name, artiklar);
+  });
+
+  test('aynı adda bir dosya varken soru YÜKLEMEDEN ÖNCE soruluyor', async ({
+    page,
+    consoleWatch,
+    artiklar,
+  }) => {
+    satirYaratanTestinGurultusu(consoleWatch);
+    const pane = await dosyalariAc(page);
+
+    // ── SAHİBİNİN İTİRAZI ─────────────────────────────────────────────────────────────────
+    //
+    // *"Bu uyarılar niye pop up gibi gelmiyor da aktarımlar ekranında?"* Çünkü çakışmayı ilk
+    // gören yer yayım anıydı: soru ancak bütün baytlar sunucuya ulaştıktan SONRA sorulabiliyordu.
+    // Bir klasöre 660 MB fotoğraf gönderip sonunda "aynı adda dosya var" duymak, hem yavaş hem de
+    // yanlış sırada bir konuşma.
+    //
+    // Bu testin ölçtüğü şey pencerenin görünmesi DEĞİL yalnız: `POST /uploads` sayacının sıfır
+    // kalması. Soru doğru anda soruluyorsa tek bir bayt bile yola çıkmaz.
+    const name = `${isim('onsoru')}.txt`;
+    const yaratim = page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/v1/uploads') && response.request().method() === 'POST',
+    );
+    await birak(pane, name, 'depsis');
+    const durum = (await yaratim).status();
+    if (durum === 503) {
+      await expect(page.locator('.toasts .toast.error')).toContainText('Depolama ajanı çalışmıyor');
+      return;
+    }
+    artiklar.sahiplen(name);
+    await expect(satir(pane, name)).toBeVisible();
+
+    let istek = 0;
+    page.on('request', (request) => {
+      if (request.url().endsWith('/api/v1/uploads') && request.method() === 'POST') istek += 1;
+    });
+
+    await birak(pane, name, 'depsis');
+    const kutu = page.getByRole('alertdialog', { name: 'Bu dosya klasörde zaten var' });
+    await expect(kutu).toBeVisible();
+    expect(istek, 'soru sorulmadan önce hiçbir bayt yola çıkmamalı').toBe(0);
+
+    // "Atla": hiçbir şey gönderilmiyor, ve klasördeki dosyaya dokunulmuyor.
+    await kutu.getByRole('button', { name: 'Atla' }).click();
+    await expect(page.locator('.toasts .toast').last()).toContainText('atlandı');
+    expect(istek, 'atlamak bir yükleme başlatmamalı').toBe(0);
+    await expect(satir(pane, name)).toHaveCount(1);
+
     await topla(pane, name, artiklar);
   });
 

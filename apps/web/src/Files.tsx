@@ -398,6 +398,29 @@ export function Files({
   const [clashes, setClashes] = useState<{ location: string; filename: string }[]>([]);
   /** Verilen kararın kuyruğun tamamına uygulanıp uygulanmayacağı. */
   const [clashAll, setClashAll] = useState(false);
+  /**
+   * YÜKLEMEDEN ÖNCE sorulan soru.
+   *
+   * ── SAHİBİNİN İTİRAZI ───────────────────────────────────────────────────────────────────
+   *
+   * *"Bu uyarılar niye pop up gibi gelmiyor da aktarımlar ekranında?"* Haklıydı: soru ancak
+   * bütün baytlar sunucuya ulaştıktan SONRA sorulabiliyordu, çünkü çakışmayı ilk gören yer
+   * yayım anıydı. 660 MB fotoğraf gönderip sonunda "aynı adda dosya var" duymak, hem yavaş hem
+   * de yanlış sırada bir konuşma.
+   *
+   * Artık istemci klasörün zaten yüklü listesine bakıyor ve soruyu ilk bayttan önce soruyor.
+   * "Atla" seçilirse hiçbir şey gönderilmiyor.
+   *
+   * SUNUCU HÂLÂ SON SÖZÜ SÖYLÜYOR: liste sayfalı, yani ad yüklenmemiş bir sayfada olabilir, ve
+   * bir başkası aynı anda aynı adı yazmış olabilir. O durumda eski yol — yayımın 409'u ve
+   * kuyruk — yerinde duruyor. Bu bir kısayol, ikinci bir kural değil.
+   */
+  const [preflight, setPreflight] = useState<{
+    names: string[];
+    /** Kaçının boyutu da aynı: "aynı dosya" ile "aynı ad" arasındaki fark. */
+    same: number;
+    decide: (choice: Decision | 'cancel') => void;
+  } | null>(null);
   /** Klasörün kendi öğe sayısı; sunucudan geliyor ve sayfa sınırından bağımsız. */
   const [total, setTotal] = useState<number | undefined>(undefined);
 
@@ -414,7 +437,47 @@ export function Files({
    * Baytlar yeniden GÖNDERİLMİYOR: yükleme oturumu ara alandaki dosyayı hâlâ tutuyor ve bu uç
    * yalnız onu yayımlıyor. Bir gigabaytlık dosyada aradaki fark, bir saniye ile yarım saat.
    */
-  async function resolveClash(policy: 'keep-both' | 'replace'): Promise<void> {
+  /**
+   * Bir çakışmayı çöz, ve sonucu SÖYLE.
+   *
+   * Tek yerde, çünkü üç çağıranı var: kuyruktaki pencere, yüklemeden önce verilmiş bir karar, ve
+   * Aktarımlar ekranından gelen toplu karar. Üç kopya, üçüncüsü düzeltilmeyen bir hata demekti.
+   */
+  async function sendResolution(
+    target: { location: string; filename: string },
+    policy: Decision,
+  ): Promise<'ok' | 'gone' | 'fail'> {
+    const sent = await (
+      policy === 'skip'
+        ? // Vazgeçmenin döndüreceği bir dosya satırı yok: ayrı bir uç, 204.
+          fetch(target.location, { method: 'DELETE', credentials: 'same-origin' })
+        : fetch(`${target.location}/resolve`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ policy }),
+          })
+    ).catch(() => null);
+    if (sent === null) return 'fail';
+    if (sent.ok) return 'ok';
+    return (await problemCode(sent)) === 'staged-bytes-gone' ? 'gone' : 'fail';
+  }
+
+  /** Yüklemeden önce sor, ve cevabı bekle. */
+  function askBeforeUploading(names: string[], same: number): Promise<Decision | 'cancel'> {
+    return new Promise((resolve) => {
+      setPreflight({
+        names,
+        same,
+        decide: (choice) => {
+          setPreflight(null);
+          resolve(choice);
+        },
+      });
+    });
+  }
+
+  async function resolveClash(policy: Decision): Promise<void> {
     const queue = clashAll ? clashes : clashes.slice(0, 1);
     const rest = clashAll ? [] : clashes.slice(1);
     if (queue.length === 0) return;
@@ -427,28 +490,21 @@ export function Files({
      *  dosyalar, ve aynı cümleye sıkıştırmak kullanıcıya ne yapacağını söylememek olurdu. */
     const goneNames: string[] = [];
     for (const pending of queue) {
-      const sent = await fetch(`${pending.location}/resolve`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ policy }),
-      }).catch(() => null);
-      if (sent === null || !sent.ok) {
-        if (sent !== null && (await problemCode(sent)) === 'staged-bytes-gone') {
-          goneNames.push(pending.filename);
-        } else {
-          failedNames.push(pending.filename);
-        }
-        continue;
-      }
-      done += 1;
+      const outcome = await sendResolution(pending, policy);
+      if (outcome === 'gone') goneNames.push(pending.filename);
+      else if (outcome === 'fail') failedNames.push(pending.filename);
+      else done += 1;
     }
 
     // HER DOSYA SAYILIYOR. Tek bir "yayımlanamadı" bildirimi, on dokuz dosyanın ne olduğunu
     // söylemeyen bir cümleydi.
     if (done > 0) {
       const what =
-        policy === 'replace' ? 'değiştirildi; eskisi çöp kutusunda' : 'ikinci bir adla kaydedildi';
+        policy === 'replace'
+          ? 'değiştirildi; eskisi çöp kutusunda'
+          : policy === 'skip'
+            ? 'atlandı; klasördeki dosyaya dokunulmadı'
+            : 'ikinci bir adla kaydedildi';
       const first = queue[0];
       notify(
         'ok',
@@ -1555,10 +1611,60 @@ export function Files({
     }
     if (list.length === 0) return;
 
+    // ── ÖNCE SOR, SONRA GÖNDER ────────────────────────────────────────────────────────────
+    //
+    // Klasörün zaten ekranda duran listesine bakılıyor: aynı adda bir dosya varsa soru ilk
+    // bayttan önce soruluyor. Sahibinin sözü buydu — *"bu uyarılar niye pop up gibi gelmiyor da
+    // aktarımlar ekranında"* — ve doğruydu: soru ancak 660 MB gönderildikten sonra çıkıyordu.
+    //
+    // YALNIZ BU KLASÖRE GİDENLER: bir klasör sürüklendiğinde dosyalar henüz var olmayan bir alt
+    // klasöre gidiyor, ve orada çakışacak bir ad yok.
+    //
+    // ÇÖPTEKİLER SAYILMIYOR: kullanıcı onları listede görmüyor, ve "bu klasörde zaten var"
+    // cümlesi göremediği bir dosya için yanlış olurdu. Çöp adı diskte tutuyorsa sunucu yine de
+    // reddediyor, ve o hâl yükleme sonrası kuyruğa düşüyor — cümlesiyle birlikte.
+    const here = new Map<string, FileEntry>();
+    for (const entry of entries ?? []) {
+      if (entry.kind === 'file' && entry.trashedAt === undefined) {
+        here.set(foldName(entry.name), entry);
+      }
+    }
+    const clashing = list.filter(
+      (item) => item.segments.length === 0 && here.has(foldName(item.file.name)),
+    );
+
+    /** Yüklemeden önce verilmiş karar: aynı soru ikinci kez sorulmuyor. */
+    let decided: 'keep-both' | 'replace' | null = null;
+    const skipping = new Set<string>();
+    if (clashing.length > 0) {
+      // BOYUT EŞİTLİĞİ BİR KANIT DEĞİL, BİR İŞARET — ve cümle de öyle kuruluyor. İçeriği
+      // karşılaştırmak iki dosyayı baştan sona okumak olurdu; ad ve boyut, kullanıcının kararını
+      // vermesine yetiyor.
+      const same = clashing.filter(
+        (item) => here.get(foldName(item.file.name))?.size === item.file.size,
+      ).length;
+      const choice = await askBeforeUploading(
+        clashing.map((item) => item.file.name),
+        same,
+      );
+      if (choice === 'cancel') return;
+      if (choice === 'skip') {
+        for (const item of clashing) skipping.add(foldName(item.file.name));
+      } else {
+        decided = choice;
+      }
+    }
+
     const cache = new Map<string, string>();
     let failed = 0;
+    /** Kullanıcının "atla" dediği dosyalar: yüklenmedi, ve bir hata da değil. */
+    let skipped = 0;
 
     for (const [index, { file, segments }] of list.entries()) {
+      if (segments.length === 0 && skipping.has(foldName(file.name))) {
+        skipped += 1;
+        continue;
+      }
       const label = list.length === 1 ? file.name : `${index + 1}/${list.length} · ${file.name}`;
       setProgress({ label, percent: 0 });
 
@@ -1578,11 +1684,26 @@ export function Files({
           setProgress({ label, percent });
         }
       } catch (problem) {
-        failed += 1;
         // ── ÇAKIŞMA BİR HATA DEĞİL, BİR SORU ──────────────────────────────────────────
         // Baytlar karşı tarafta ve duruyor; eksik olan tek şey kullanıcının kararı. Bunu bir
         // bildirimle geçiştirmek, bir gigabaytı çöpe atıp "yüklenemedi" demek olurdu.
         if (problem instanceof UploadNameClash) {
+          // KARAR ZATEN VERİLDİYSE İKİNCİ KEZ SORULMUYOR. Ön kontrol adı listede bulamamış
+          // olabilir — sayfa yüklenmemiştir, ya da adı çöpteki bir dosya tutuyordur — ama
+          // kullanıcı bu yükleme turu için ne istediğini çoktan söyledi.
+          if (decided !== null) {
+            const outcome = await sendResolution(problem, decided);
+            if (outcome === 'ok') continue;
+            failed += 1;
+            notify(
+              'error',
+              outcome === 'gone'
+                ? `"${file.name}" için gönderilen baytlar sunucuda kalmamış; yeniden yükleyin.`
+                : `"${file.name}" yayımlanamadı.`,
+            );
+            continue;
+          }
+          failed += 1;
           // KUYRUĞA EKLENİYOR, ÜSTÜNE YAZILMIYOR. Eskiden her çakışma bir öncekini siliyordu ve
           // toplu bir yüklemede yalnız son dosya sorulup gerisi sessizce kayboluyordu.
           setClashes((current) => [
@@ -1591,18 +1712,29 @@ export function Files({
           ]);
           continue;
         }
+        failed += 1;
         notify('error', problem instanceof Error ? problem.message : `"${file.name}" yüklenemedi.`);
       }
     }
 
     setProgress(null);
-    const done = list.length - failed;
+    const done = list.length - failed - skipped;
     if (done > 0) {
       notify(
         'ok',
         done === 1 && list[0] !== undefined
           ? `"${list[0].file.name}" yüklendi.`
           : `${done} dosya yüklendi.`,
+      );
+    }
+    // ATLANANLAR AYRI SÖYLENİYOR, ve bir hata olarak değil: kullanıcı onları atlamayı KENDİ
+    // seçti, ve "3 dosya yüklendi" cümlesi 20 dosya seçmiş birine eksik bir cevap olurdu.
+    if (skipped > 0) {
+      notify(
+        'ok',
+        skipped === 1
+          ? 'Bir dosya atlandı; klasördeki aynı adlı dosyaya dokunulmadı.'
+          : `${skipped} dosya atlandı; klasördeki aynı adlı dosyalara dokunulmadı.`,
       );
     }
     reload();
@@ -2687,6 +2819,45 @@ export function Files({
         <span className="val">{meta}</span>
       </div>
 
+      {/* ── SORU YÜKLEMEDEN ÖNCE ────────────────────────────────────────────────────────
+          Aynısı yüklendikten sonra da sorulabiliyor (aşağıdaki kutu), ama o soru 660 MB
+          gönderdikten sonra geliyor. Buradaki, klasörün ekranda duran listesine bakıp ilk
+          bayttan önce soruyor — ve "Atla" seçilirse hiç bayt gitmiyor. */}
+      {preflight !== null && (
+        <ConfirmBox
+          title={
+            preflight.names.length === 1
+              ? 'Bu dosya klasörde zaten var'
+              : `${preflight.names.length} dosya klasörde zaten var`
+          }
+          body={
+            (preflight.same === preflight.names.length
+              ? preflight.names.length === 1
+                ? 'Aynı adda ve aynı boyutta — büyük olasılıkla aynı dosya. '
+                : 'Hepsi aynı adda ve aynı boyutta — büyük olasılıkla aynı dosyalar. '
+              : preflight.same > 0
+                ? `${preflight.same} tanesi aynı adda ve aynı boyutta, gerisi aynı adda ama farklı boyutta. `
+                : 'Aynı adda, ama boyutları farklı — başka bir dosya olabilir. ') +
+            '"Atla" seçerseniz hiçbir şey gönderilmez ve klasördeki dosyalara dokunulmaz. ' +
+            '"Değiştir" eskisini silmez, çöp kutusuna atar.'
+          }
+          list={preflight.names.slice(0, 8)}
+          yesLabel="Atla"
+          onYes={() => preflight.decide('skip')}
+          onNo={() => preflight.decide('cancel')}
+        />
+      )}
+      {preflight !== null && (
+        <div className="clashalt">
+          <button type="button" className="b" onClick={() => preflight.decide('keep-both')}>
+            İkisini de tut
+          </button>
+          <button type="button" className="b" onClick={() => preflight.decide('replace')}>
+            Değiştir (eskisi çöpe)
+          </button>
+        </div>
+      )}
+
       {/* ── ÇAKIŞMA BİR SORU, BİR HATA DEĞİL ────────────────────────────────────────────
           Baytlar sunucuda ve duruyor; eksik olan tek şey kullanıcının kararı. İki seçenek de
           veri kaybetmiyor: "değiştir" eskisini silmiyor, çöp kutusuna atıyor — üzerine yazmak
@@ -2721,6 +2892,12 @@ export function Files({
         <div className="clashalt">
           <button type="button" className="b" onClick={() => void resolveClash('replace')}>
             Değiştir (eskisi çöpe)
+          </button>
+          {/* ÜÇÜNCÜ SEÇENEK: baytlar sunucuda ama kullanıcı onları istemiyor olabilir — aynı
+              dosyanın ikinci kopyasıysa doğru cevap bu. Ara alandaki dosya siliniyor,
+              klasördekine dokunulmuyor. */}
+          <button type="button" className="b" onClick={() => void resolveClash('skip')}>
+            Atla
           </button>
           {/* TEK KARAR, YİRMİ DOSYA. Bir fotoğraf grubunu yeniden yükleyen biri aynı soruyu
               yirmi kez cevaplamak istemiyor. */}
@@ -3673,6 +3850,16 @@ async function* uploadFile(
  * `location` taşınıyor çünkü çözüm baytları yeniden göndermek değil: dosya ara alanda duruyor ve
  * aynı oturum üzerinden yayımlanacak.
  */
+/**
+ * Bir ad çakışmasına verilebilecek cevaplar.
+ *
+ * `skip` üçüncü seçenek ve sahada ölçülmüş bir sebeple var: cevap bekleyen 233 yüklemenin
+ * 220'sinin adını hedefte AYNI BOYUTTA bir dosya tutuyordu — hepsi aynı fotoğrafların ikinci
+ * (ve beşinci) kez yüklenmesiydi. Onlar için doğru cevap ne bir kopya üretmek ne de var olanı
+ * çöpe atmak; hiçbir şey yapmamak.
+ */
+export type Decision = 'keep-both' | 'replace' | 'skip';
+
 /** Bir 409'un hangi 409 olduğu. */
 export type Conflict =
   { kind: 'name-taken' } | { kind: 'realign'; offset: number } | { kind: 'other' };

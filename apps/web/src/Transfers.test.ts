@@ -13,6 +13,7 @@ const row = (over: Partial<Transfer>): Transfer => ({
   state: 'stalled',
   createdAt: '2026-09-05T13:00:00.000Z',
   updatedAt: '2026-09-05T13:00:00.000Z',
+  duplicate: false,
   ...over,
 });
 

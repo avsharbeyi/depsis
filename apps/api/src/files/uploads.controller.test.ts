@@ -67,6 +67,8 @@ function controller(
   steps: Step[];
   /** Çalıştırılan SQL: bir satırın SİLİNDİĞİNİ ölçmenin buradaki tek yolu. */
   sql: string[];
+  /** Ajana gönderilen işlemler: vazgeçmenin ara dosyayı gerçekten sildiğini ölçüyor. */
+  agentOps: string[];
 } {
   const steps: Step[] = [];
   const sql: string[] = [];
@@ -85,6 +87,7 @@ function controller(
 
   const files = {
     shareFor: () => Promise.resolve(SHARE),
+    find: () => Promise.resolve({ share_id: SHARE.id }),
     effectiveAt: () => Promise.resolve(new Set(['create', 'list', 'read'])),
     componentsOf: () => Promise.resolve([]),
     rename: (_org: string, id: string, name: string) => {
@@ -131,10 +134,24 @@ function controller(
   } as unknown as CopyService;
 
   const posix = { posixUidFor: () => Promise.resolve(20000) } as unknown as PosixIdentityService;
-  const agent = { isAvailable: () => true } as unknown as AgentService;
+  const agentOps: string[] = [];
+  const agent = {
+    isAvailable: () => true,
+    call: (call: Record<string, unknown>) => {
+      agentOps.push(String(call['op']));
+      // `existed: false` de bir başarı: süpürücü ara dosyayı çoktan almış olabilir, ve kapatılacak
+      // olan oturum kaydı.
+      return Promise.resolve({ status: 'discarded', existed: true });
+    },
+  } as unknown as AgentService;
   const data = { isAvailable: () => true } as unknown as AgentDataService;
 
-  return { route: new UploadsController(db, files, agent, data, posix, copies), steps, sql };
+  return {
+    route: new UploadsController(db, files, agent, data, posix, copies),
+    steps,
+    sql,
+    agentOps,
+  };
 }
 
 /** Yükleme oturumu, HENÜZ TEK BAYT ALMAMIŞ hâlde: parça yolunu sürmek için gereken şekil. */
@@ -293,6 +310,23 @@ describe('POST /uploads with more bytes than the pool has', () => {
     // cümle; "yer yok" değil.
     expect((error as ProblemException).detail).toContain('40 B');
     expect((error as ProblemException).detail).toContain('6 B');
+  });
+});
+
+describe('DELETE /uploads/{id}', () => {
+  it('ara dosyayı siliyor ve oturumu kapatıyor', async () => {
+    // ── ÜÇÜNCÜ SEÇENEK ──────────────────────────────────────────────────────────────────────
+    // Sahada ölçüldü: cevap bekleyen 233 yüklemenin 220'sinin adını hedefte AYNI BOYUTTA bir
+    // dosya tutuyordu, yani hepsi aynı fotoğrafların ikinci kez yüklenmesiydi. O 220 dosya için
+    // doğru cevap ne bir "(2)" kopyası üretmek ne de var olanı çöpe atmak.
+    const { route, sql, agentOps } = controller(false);
+
+    await expect(route.cancel(request(), SESSION.id)).resolves.toBeUndefined();
+
+    expect(agentOps).toContain('discard_transfer');
+    expect(sql.some((statement) => statement.includes('DELETE FROM public.upload_sessions'))).toBe(
+      true,
+    );
   });
 });
 

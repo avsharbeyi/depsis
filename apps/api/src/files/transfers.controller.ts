@@ -60,5 +60,6 @@ function toTransfer(row: TransferRow): Schemas['Transfer'] {
     state: row.state,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+    duplicate: row.duplicate,
   };
 }

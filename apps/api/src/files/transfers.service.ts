@@ -16,6 +16,8 @@ export interface TransferRow {
   state: 'active' | 'stalled' | 'completed';
   created_at: Date;
   updated_at: Date;
+  /** Hedefte aynı adda VE aynı boyutta bir dosya var mı — yani bu, aynı dosyanın ikinci kopyası. */
+  duplicate: boolean;
 }
 
 /**
@@ -127,12 +129,31 @@ export class TransfersService {
                   -- Karar bekleyen: baytların hepsi geldi, hiçbiri yayımlanmadı. Yayım damgası
                   -- ile ofset AYNI şeyi söylemiyor, ve bu ekranın tamamı o farkın üstünde duruyor.
                   (completed_at IS NULL AND length_bytes > 0 AND offset_bytes >= length_bytes)
-                    AS bekliyor
+                    AS bekliyor,
+                  -- AYNI DOSYA MI? Hedef klasörde aynı adda ve aynı boyutta bir satır varsa bu
+                  -- yükleme büyük olasılıkla ikinci bir kopya. Sahada ölçüldü: cevap bekleyen
+                  -- 233 yüklemenin 220'si böyleydi, ve ekran bunu söylemeden sorduğu için tek
+                  -- çıkış yolu 220 tane "(2)" kopyası üretmekti.
+                  --
+                  -- ÇÖPTEKİLER DE SAYILIYOR: adı diskte tutan şey bir çöp satırı da olabiliyor,
+                  -- ve kullanıcı için "bu dosya zaten burada" cümlesini yanlış yapan bir ayrım
+                  -- değil bu.
+                  EXISTS (
+                    SELECT 1 FROM public.file_entries e
+                     WHERE e.organization_id = upload_sessions.organization_id
+                       AND e.share_id = upload_sessions.share_id
+                       AND e.parent_id IS NOT DISTINCT FROM upload_sessions.parent_id
+                       AND e.kind = 'file'
+                       AND public.fold_identity(e.name)
+                           = public.fold_identity(upload_sessions.filename)
+                       AND e.size_bytes = upload_sessions.length_bytes
+                  ) AS duplicate
              FROM public.upload_sessions
             WHERE organization_id = $1
               AND ($4::uuid IS NULL OR created_by = $4::uuid)
          )
-         SELECT id, filename, length_bytes, offset_bytes, created_at, updated_at, state
+         SELECT id, filename, length_bytes, offset_bytes, created_at, updated_at, state,
+                duplicate
            FROM (
                   (SELECT * FROM oturum WHERE bekliyor ORDER BY updated_at DESC LIMIT $6)
                   UNION

@@ -111,14 +111,16 @@ describeDb('the transfer list, against a real PostgreSQL', () => {
     organizationId: string,
     shareId: string,
     name: string,
+    /** Boyut, çünkü "ikinci kopya" işareti tam olarak buna bakıyor. */
+    sizeBytes = 0,
   ): Promise<string> {
     const rows = await owner.withoutTenant('migration-status', (q) =>
       q.query<{ id: string }>(
         `INSERT INTO public.file_entries
            (organization_id, share_id, parent_id, kind, name, path, size_bytes)
-         VALUES ($1, $2, NULL, 'file', $3, '/' || $3, 0)
+         VALUES ($1, $2, NULL, 'file', $3, '/' || $3, $4)
          RETURNING id::text AS id`,
-        [organizationId, shareId, name],
+        [organizationId, shareId, name, sizeBytes],
       ),
     );
     const id = rows[0]?.id;
@@ -598,5 +600,46 @@ describeDb('the transfer list, against a real PostgreSQL', () => {
     // Dolgu satırlarının hiçbiri sayılmıyor: baytları eksik, yani kimse onlar için bir soruya
     // cevap beklemiyor.
     expect(total).toBeLessThan(220);
+  });
+
+  /**
+   * ── AYNI DOSYA MI, BAŞKA DOSYA MI ─────────────────────────────────────────────────────────
+   *
+   * Cihazda ölçüldü: cevap bekleyen 233 yüklemenin 220'sinin adını hedefte AYNI BOYUTTA bir
+   * dosya tutuyordu — hepsi aynı fotoğrafların ikinci (ve beşinci) kez yüklenmesiydi. Ekran bunu
+   * söylemeden sorduğu sürece tek çıkış yolu 220 tane "(2)" kopyası üretmekti.
+   *
+   * Boyut eşitliği bir kanıt değil bir işaret, ve ekrandaki cümle de öyle kuruluyor.
+   */
+  it('adı aynı boyutta bir dosya tutuyorsa satırı ikinci kopya diye işaretliyor', async () => {
+    const name = `kopya-${randomUUID()}.jpeg`;
+    await seedFileEntry(orgA, shareA, name, 4242);
+    await seed({
+      organizationId: orgA,
+      shareId: shareA,
+      createdBy: memberA,
+      filename: name,
+      lengthBytes: 4242,
+      offsetBytes: 4242,
+      updatedSecondsAgo: 30,
+    });
+
+    expect(byName(await transfers.list(orgA, memberA), name)?.duplicate).toBe(true);
+  });
+
+  it('boyutlar farklıysa ikinci kopya DEMİYOR — o başka bir dosya', async () => {
+    const name = `farkli-${randomUUID()}.jpeg`;
+    await seedFileEntry(orgA, shareA, name, 4242);
+    await seed({
+      organizationId: orgA,
+      shareId: shareA,
+      createdBy: memberA,
+      filename: name,
+      lengthBytes: 9999,
+      offsetBytes: 9999,
+      updatedSecondsAgo: 30,
+    });
+
+    expect(byName(await transfers.list(orgA, memberA), name)?.duplicate).toBe(false);
   });
 });

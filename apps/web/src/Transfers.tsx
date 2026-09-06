@@ -2,7 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api, API_BASE_URL } from './api.js';
-import { problemCode } from './Files.js';
+import { problemCode, type Decision } from './Files.js';
 import { useEventRefresh } from './events.js';
 import { formatBytes, formatWhen, percent } from './Dashboard.js';
 import { Empty } from './ui.js';
@@ -88,8 +88,10 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
 
   /** Cevap bekleyenler: toplu karar bunlara uygulanıyor. */
   const waiting = (items ?? []).filter(awaitingAnswer);
+  /** Bunlardan hedefte aynı adda VE aynı boyutta bir dosya bulunanlar. */
+  const duplicates = waiting.filter((item) => item.duplicate === true);
 
-  async function decide(batch: Transfer[], policy: 'keep-both' | 'replace'): Promise<void> {
+  async function decide(batch: Transfer[], policy: Decision): Promise<void> {
     if (batch.length === 0) return;
     setDeciding(batch.length === 1 ? (batch[0]?.id ?? 'toplu') : 'toplu');
     if (batch.length > 1) setProgress({ done: 0, total: batch.length });
@@ -99,12 +101,22 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
      *  yoklamada listeden düşüyorlar; kullanıcının bilmesi gereken tek şey yeniden yüklemek. */
     const goneNames: string[] = [];
     for (const item of batch) {
-      const sent = await fetch(`${API_BASE_URL}/uploads/${item.id}/resolve`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ policy }),
-      }).catch(() => null);
+      // ── VAZGEÇ AYRI BİR UÇ ────────────────────────────────────────────────────────────
+      // `resolve` bir dosya satırı döndürüyor; vazgeçmenin döndüreceği bir satır yok. Ara
+      // alandaki baytlar siliniyor, oturum kapanıyor, klasördeki dosyaya dokunulmuyor.
+      const sent = await (
+        policy === 'skip'
+          ? fetch(`${API_BASE_URL}/uploads/${item.id}`, {
+              method: 'DELETE',
+              credentials: 'same-origin',
+            })
+          : fetch(`${API_BASE_URL}/uploads/${item.id}/resolve`, {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ policy }),
+            })
+      ).catch(() => null);
       if (sent === null || !sent.ok) {
         if (sent !== null && (await problemCode(sent)) === 'staged-bytes-gone') {
           goneNames.push(item.filename);
@@ -127,7 +139,11 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
     setProgress(null);
 
     const what =
-      policy === 'replace' ? 'değiştirildi; eskisi çöp kutusunda' : 'ikinci bir adla kaydedildi';
+      policy === 'replace'
+        ? 'değiştirildi; eskisi çöp kutusunda'
+        : policy === 'skip'
+          ? 'atlandı; klasördeki dosyaya dokunulmadı'
+          : 'ikinci bir adla kaydedildi';
     const first = batch[0];
     if (done === 1 && first !== undefined) notify('ok', `"${first.filename}" ${what}.`);
     else if (done > 1) notify('ok', `${done} dosya ${what}.`);
@@ -214,12 +230,31 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
               <span>
                 <b>{Math.max(awaitingTotal, waiting.length)} dosya</b> cevabınızı bekliyor —
                 baytların hepsi sunucuda.
+                {/* ── AYNI DOSYA MI, BAŞKA DOSYA MI ────────────────────────────────────────
+                    Sahada ölçüldü: bekleyen 233 yüklemenin 220'sinin adını hedefte AYNI BOYUTTA
+                    bir dosya tutuyordu, yani hepsi aynı fotoğrafların ikinci (ve beşinci) kez
+                    yüklenmesiydi. Bunu söylemeden sormak, kullanıcıya 220 tane "(2)" kopyası
+                    ürettiren bir soru demekti. Boyut eşitliği bir kanıt değil bir işaret, ve
+                    cümle de tam olarak bunu söylüyor. */}
+                {duplicates.length > 0 &&
+                  ` ${duplicates.length} tanesi klasörde aynı adda ve aynı boyutta zaten duruyor` +
+                    ' — büyük olasılıkla aynı dosyanın ikinci kopyası.'}
                 {/* KESİLDİYSE SÖYLENİYOR. Listenin bir tavanı var ve sessizce uygulanan bir tavan,
                     kullanıcıya olmayan bir "hepsi bu kadar" gösteriyordu. Düğmeler yalnız burada
                     listelenenlere basıyor; kalanı bir sonraki turda çıkıyor. */}
                 {awaitingTotal > waiting.length && ` Şu an ${waiting.length} tanesi listede.`}
                 {progress !== null && ` Yayımlanıyor: ${progress.done} / ${progress.total}…`}
               </span>
+              {duplicates.length > 0 && (
+                <button
+                  type="button"
+                  className="b"
+                  disabled={deciding !== null}
+                  onClick={() => void decide(duplicates, 'skip')}
+                >
+                  Aynı olanları atla ({duplicates.length})
+                </button>
+              )}
               <button
                 type="button"
                 className="b"
@@ -269,9 +304,20 @@ export function Transfers({ notify }: { notify: Notify }): React.JSX.Element {
                 {awaitingAnswer(item) ? (
                   <div className="l">
                     <span style={{ color: 'var(--warn)' }}>
-                      Dosyanın tamamı geldi ama hedefte aynı adda bir şey var. Listede
-                      göremiyorsanız ad çöp kutusundaki bir dosyada duruyor olabilir.
+                      {item.duplicate === true
+                        ? 'Bu dosya klasörde aynı adda ve aynı boyutta zaten duruyor — ' +
+                          'büyük olasılıkla ikinci bir kopyası. Atlamak hiçbir şeyi silmez.'
+                        : 'Dosyanın tamamı geldi ama hedefte aynı adda bir şey var. Listede ' +
+                          'göremiyorsanız ad çöp kutusundaki bir dosyada duruyor olabilir.'}
                     </span>
+                    <button
+                      type="button"
+                      className="b"
+                      disabled={deciding === item.id}
+                      onClick={() => void decide([item], 'skip')}
+                    >
+                      Atla
+                    </button>
                     <button
                       type="button"
                       className="b"
