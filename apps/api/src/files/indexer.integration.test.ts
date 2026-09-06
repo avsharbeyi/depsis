@@ -644,7 +644,12 @@ describeDb('reconciling a share with the disk', () => {
     const files = new FilesService(db, agent, new PosixIdentityService(db), new JobsService(db));
     await new IndexerService(db, agent, files).reconcile(org, share, held, 'test');
 
-    expect(seen).toEqual(['list_directory']);
+    // HER ÇAĞRI BİR OKUMA — sabit bir liste değil, çünkü kaç okuma yapıldığı bu testin ölçtüğü
+    // şey değil. (Eksik bir satır görüldüğünde çöp kutusu da okunuyor: dosya oraya taşınmışsa
+    // satır silinmemeli.) Ölçülen tek şey, bu sınıftan yıkıcı bir işleme giden bir yol
+    // OLMADIĞI — bir zamanlayıcının gözetimsiz koşturduğu şeyi güvenli yapan da bu.
+    expect(seen).not.toHaveLength(0);
+    expect([...new Set(seen)]).toEqual(['list_directory']);
   });
 
   it('stops when the lease is gone and says there is more to do', async () => {

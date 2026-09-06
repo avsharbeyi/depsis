@@ -933,31 +933,25 @@ mod tests {
         // Zincirde ÖNCE: silme isteğini ilk `recycle` görüyor, `full_audit` de gerçekten olan şeyi
         // kaydediyor.
         assert!(
-            text.contains("	vfs objects = recycle full_audit
-"),
+            text.contains("\tvfs objects = recycle full_audit\n"),
             "got: {text}"
         );
         assert!(
-            text.contains("	recycle:repository = .depsis/bin
-"),
+            text.contains("\trecycle:repository = .depsis/bin\n"),
             "got: {text}"
         );
         // Ağaç korunuyor: çöpteki satırın diskteki karşılığı kendi yolundan TÜRETİLEBİLİR olmalı.
-        assert!(text.contains("	recycle:keeptree = yes
-"), "got: {text}");
+        assert!(text.contains("\trecycle:keeptree = yes\n"), "got: {text}");
         // Ve sürüm üretilmiyor — "Copy #1 of ..." o türetmeyi bozardı.
-        assert!(text.contains("	recycle:versions = no
-"), "got: {text}");
+        assert!(text.contains("\trecycle:versions = no\n"), "got: {text}");
         // Ajanın kendi ağacı dışarıda: yarım kalmış bir yükleme parçasını sonsuza kadar saklamak
         // kimsenin istediği bir şey değil.
         assert!(
-            text.contains("	recycle:exclude_dir = .depsis
-"),
+            text.contains("\trecycle:exclude_dir = .depsis\n"),
             "got: {text}"
         );
         // Tarihe dokunulmuyor: çöp kutusu ekranı dosyanın kendi tarihini gösteriyor.
-        assert!(text.contains("	recycle:touch = no
-"), "got: {text}");
+        assert!(text.contains("\trecycle:touch = no\n"), "got: {text}");
     }
 
     // ── full_audit (ADR-0011 Layer 1) ──
