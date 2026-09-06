@@ -61,7 +61,34 @@ interface AxeModule {
 }
 const AxeBuilder = (createRequire(import.meta.url)('@axe-core/playwright') as AxeModule).default;
 
+/**
+ * Taramadan önce HAREKETİ DURDUR.
+ *
+ * ── BU TESTİN KENDİ KUSURUYDU ───────────────────────────────────────────────────────────────
+ *
+ * Pencere açılırken soluyor (`.win` üzerinde `animation: wp 0.28s`), ve axe rengi EKRANDA OLUŞAN
+ * hâliyle ölçüyor. Tarama o solmanın ortasına denk geldiğinde hem yazı hem zemin olduğundan
+ * koyu çıkıyor, ve aynı kod bir koşumda 4.5'in üstünde bir koşumda altında ölçülüyordu: aynı
+ * sürümde bir kez geçip bir kez düşen bir kapı.
+ *
+ * Sahte kırmızı da sahte yeşil kadar zararlı: birincisi bakılacak yeri yanlış gösteriyor,
+ * ikincisi bakmayı gereksiz kılıyor. Animasyonlar kapatılınca ölçülen şey rengin kendisi oluyor.
+ *
+ * `prefers-reduced-motion` DEĞİL: o, uygulamanın o medya sorgusunu yazdığı yerlerde çalışır ve
+ * yazmadığı yerde sessizce hiçbir şey yapmaz. Bu stil her animasyonu ve geçişi bitiriyor.
+ */
+async function settle(page: Page): Promise<void> {
+  await page.addStyleTag({
+    content:
+      '*, *::before, *::after { animation-duration: 0s !important; animation-delay: 0s !important;' +
+      ' transition-duration: 0s !important; transition-delay: 0s !important; }',
+  });
+  // Bir kare: yukarıdaki stil uygulandıktan sonra tarayıcının bir kez daha boyaması gerekiyor.
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+}
+
 async function violations(page: Page): Promise<string[]> {
+  await settle(page);
   const result = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
     .analyze();

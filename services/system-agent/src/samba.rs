@@ -45,6 +45,9 @@ use crate::seams::CommandRunner;
 /// `/bin:/usr/bin` when `PATH` is unset, so a bare program name is a supply-chain question.
 pub const SMBCLIENT: &str = "/usr/bin/smbclient";
 
+/// Açık bağlantılara yeni yapılandırmayı uygulatan tek araç.
+pub const SMBCONTROL: &str = "/usr/bin/smbcontrol";
+
 /// The file DEPSIS owns. NOT `smb.conf` — see the module note.
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/samba/depsis.conf";
 
@@ -174,6 +177,27 @@ pub trait SambaHost {
 
     /// The share names smbd is ACTUALLY offering, from a live connection.
     fn offered_shares(&self) -> Result<Vec<String>, SambaError>;
+
+    /// ── AÇIK BAĞLANTILARI KAPAT, YOKSA YENİ YAPILANDIRMA ONLARA ULAŞMAZ ─────────────────────
+    ///
+    /// Sahada ölçüldü, ve sessiz kusurların en kötü cinsindendi. Cihaza `recycle` modülü geldi,
+    /// yapılandırma yazıldı, `testparm` geçti, canlı bağlantı doğruladı — ve sahibi Windows'tan
+    /// bir dosya sildiğinde dosya yine yok oldu. Sebep: smbd VFS zincirini BAĞLANTI KURULURKEN
+    /// kuruyor, ve sahibinin oturumları saat 18:46 ile 21:43'te açılmıştı; yapılandırma 23:26'da
+    /// yazıldı. Yeni ayar dosyada duruyordu, o oturumlar eski zinciri kullanmaya devam ediyordu.
+    ///
+    /// Görünürde her şey doğruydu: dosya doğru, günlük "doğrulandı" diyor, ekran bir şey
+    /// söylemiyor. Kullanıcının yapması gereken şey ağ sürücüsünü kesip yeniden bağlanmaktı —
+    /// bilemeyeceği bir şey.
+    ///
+    /// `close-share` istemcileri düşürüyor ve Windows bir sonraki işlemde kendiliğinden yeniden
+    /// bağlanıyor. Bedeli açık: o anda süren bir kopyalama kesilebilir. Karşılığı, yayımlanan
+    /// yapılandırmanın gerçekten yürürlüğe girmesi — ve alternatif, hiç girmemesi.
+    ///
+    /// EN İYİ ÇABA: başarısızlığı yayımı düşürmüyor. Yapılandırma zaten yazıldı ve yeni
+    /// bağlantılar onu okuyor; `smbcontrol` yoksa ya da cevap vermezse kaybedilen tek şey, açık
+    /// oturumların bir süre eski ayarla devam etmesi.
+    fn close_sessions(&self, shares: &[&str]);
 }
 
 /// The real machine.
@@ -213,6 +237,17 @@ impl<R: CommandRunner> SambaHost for Host<'_, R> {
             .run(TESTPARM, &["-s", "--suppress-prompt"])
             .map(|_| ())
             .map_err(|e| SambaError::RejectedRolledBack(format!("testparm: {e}")))
+    }
+
+    fn close_sessions(&self, shares: &[&str]) {
+        if !Path::new(SMBCONTROL).exists() {
+            return;
+        }
+        for name in shares {
+            // Sonuç YUTULUYOR: kapatılacak oturum olmaması da bir hata değil, ve yayım bu yüzden
+            // düşmemeli.
+            let _ = self.runner.run(SMBCONTROL, &["smbd", "close-share", name]);
+        }
     }
 
     fn offered_shares(&self) -> Result<Vec<String>, SambaError> {
@@ -559,6 +594,11 @@ pub fn publish<H: SambaHost>(
     // turning a proven publish into an error over a leftover file would be the worse answer.
     previous.discard();
 
+    // Ve yeni yapılandırma AÇIK oturumlara da ulaşsın: smbd VFS zincirini bağlantı kurulurken
+    // kuruyor, yani bu çağrı olmadan yayım yalnız bundan sonra bağlananlar için geçerli.
+    let names: Vec<&str> = sections.iter().map(|s| s.name.as_str()).collect();
+    host.close_sessions(&names);
+
     Ok(PublishOutcome {
         shares: sections.len(),
         verified: true,
@@ -749,6 +789,8 @@ mod tests {
         /// Deleted when `validate` runs, to make the restore itself fail.
         sabotage: Option<PathBuf>,
         validated: RefCell<u32>,
+        /// Yayımdan sonra hangi paylaşımların oturumları kapatıldı.
+        closed: RefCell<Vec<String>>,
     }
 
     impl FakeHost {
@@ -760,6 +802,7 @@ mod tests {
                 offers: Some(offers.iter().map(|s| (*s).to_string()).collect()),
                 sabotage: None,
                 validated: RefCell::new(0),
+                closed: RefCell::new(Vec::new()),
             }
         }
     }
@@ -789,6 +832,12 @@ mod tests {
                     "testparm: unknown parameter".to_string(),
                 ))
             }
+        }
+
+        fn close_sessions(&self, shares: &[&str]) {
+            self.closed
+                .borrow_mut()
+                .extend(shares.iter().map(|s| (*s).to_string()));
         }
 
         fn offered_shares(&self) -> Result<Vec<String>, SambaError> {
@@ -1245,6 +1294,35 @@ mod tests {
         assert!(
             written.contains("path = /srv/tank/belgeler"),
             "the mountpoint must come from the host, got: {written}"
+        );
+        // ── VE AÇIK OTURUMLAR KAPATILDI ──────────────────────────────────────────────────
+        //
+        // Sahada ölçüldü: smbd VFS zincirini BAĞLANTI KURULURKEN kuruyor. Cihaza `recycle`
+        // modülü geldi, dosya yazıldı, `testparm` geçti, canlı bağlantı doğruladı — ve sahibinin
+        // 18:46'da açılmış oturumu eski zinciri kullanmaya devam ettiği için Windows'tan silinen
+        // dosya yine yok oldu. Yapılandırma doğruydu; yürürlüğe girmemişti.
+        assert_eq!(
+            host.closed.borrow().as_slice(),
+            ["belgeler".to_string()],
+            "yayım açık oturumlara ulaşmalı, yoksa yalnız yeni bağlantılar için geçerli"
+        );
+    }
+
+    #[test]
+    fn a_failed_publish_does_not_close_anybodys_session() {
+        // Kapatmak istemciyi düşürüyor, ve düşürmenin karşılığı yeni yapılandırmanın yürürlüğe
+        // girmesi. Yayım geri alındıysa yürürlüğe girecek bir şey yok: kesinti bedava olmuyor ve
+        // karşılığında hiçbir şey alınmıyor.
+        let (_dir, config) = temp_config();
+        // `testparm` geçmeyen bir kutu: yayım geri alınıyor.
+        let mut host = FakeHost::healthy("/srv/{dataset}", &["belgeler"]);
+        host.validates = false;
+
+        let _ = publish(&config, &[spec("belgeler", "tank/belgeler", false)], &host);
+
+        assert!(
+            host.closed.borrow().is_empty(),
+            "geri alınan yayım kimseyi düşürmemeli"
         );
     }
 
