@@ -113,6 +113,65 @@ describe('a Samba full_audit line', () => {
   });
 });
 
+/**
+ * ── SAHADAKİ SATIRLARIN GERÇEK BİÇİMİ ─────────────────────────────────────────────────────────
+ *
+ * Bu testlerin kalıpları cihazın kendi günlüğünden alındı. Ayrıştırıcı "Samba paylaşıma göre bir
+ * yol bildirir" varsayımıyla yazılmıştı; gerçek satırlarda yol MUTLAK, ve kırpılmadığı için
+ * indeksleyici `/srv/depsis/<paylaşım>/ZTEST` diye bir klasör arıyor, bulamıyor ve olayı sessizce
+ * düşürüyordu. ADR-0011'in birinci katmanı sahada hiç çalışmamıştı: 65 bin kuyruk turu, sıfır
+ * satır değişikliği.
+ *
+ * Görünen sonucu, Windows'tan silinen dosyaların DEPSIS'te listelenmeye devam etmesiydi.
+ */
+describe('mutlak yollu satırlar', () => {
+  it('paylaşım kökünü kırpıp klasörü buluyor', () => {
+    const [event] = parseAuditLine(
+      '2026-09-06T18:47:47+03:00 depsis smbd_audit: dunundunyasi|10.147.165.103|dunundunyasi|' +
+        'unlinkat|ok|/srv/depsis/dunundunyasi/ZTEST/kayit.mp4',
+    );
+    expect(event?.directory).toBe('ZTEST');
+    expect(event?.share).toBe('dunundunyasi');
+  });
+
+  it('paylaşımın kökündeki dosya için kök veriyor', () => {
+    const [event] = parseAuditLine(
+      'x smbd_audit: ali|10.0.0.2|belgeler|close|ok|/srv/depsis/belgeler/rapor.pdf',
+    );
+    expect(event?.directory).toBe('');
+  });
+
+  it('paylaşıma göre yazılmış satırları da anlamaya devam ediyor', () => {
+    // Biçim Samba sürümüne göre değişiyor, ve ürün ikisinde de çalışmalı.
+    const [event] = parseAuditLine('x smbd_audit: ali|10.0.0.2|belgeler|close|ok|docs/rapor.pdf');
+    expect(event?.directory).toBe('docs');
+  });
+
+  it('ajanın kendi ağacı mutlak yolda da eleniyor', () => {
+    const [event] = parseAuditLine(
+      'x smbd_audit: ali|10.0.0.2|belgeler|close|ok|/srv/depsis/belgeler/.depsis/staging/a.part',
+    );
+    expect(event).toBeDefined();
+    expect(isIndexable(event as never)).toBe(false);
+  });
+
+  it('paylaşımın adı hiç geçmiyorsa satır düşüyor', () => {
+    // Uydurulmuş bir yol, bir alt ağacın satırlarını sildirebilirdi: günlüğe yazabilen her şey
+    // bu satırı üretebilir.
+    expect(
+      parseAuditLine('x smbd_audit: ali|10.0.0.2|belgeler|unlinkat|ok|/etc/passwd'),
+    ).toHaveLength(0);
+  });
+
+  it('iki ucu farklı klasörde olan bir taşımada ikisini de veriyor', () => {
+    const events = parseAuditLine(
+      'x smbd_audit: ali|10.0.0.2|belgeler|renameat|ok|' +
+        '/srv/depsis/belgeler/eski/a.txt|/srv/depsis/belgeler/yeni/a.txt',
+    );
+    expect(events.map((e) => e.directory).sort()).toEqual(['eski', 'yeni']);
+  });
+});
+
 describe('what is worth indexing', () => {
   it('refuses the agent’s own tree', () => {
     // Samba vetoes `.depsis/`, so a client cannot reach it — but the AGENT writes there constantly,

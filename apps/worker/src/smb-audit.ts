@@ -87,7 +87,9 @@ export function parseAuditLine(line: string): AuditEvent[] {
   const files = rest.filter((name) => name !== '');
   if (files.length === 0) return [];
 
-  const directories = new Set(files.map(parentOf));
+  const directories = new Set(
+    files.map((file) => parentOf(file, share)).filter((path): path is string => path !== null),
+  );
   return [...directories].map((directory) => ({
     share,
     directory,
@@ -99,17 +101,44 @@ export function parseAuditLine(line: string): AuditEvent[] {
 /**
  * The directory holding `file`, share-relative.
  *
- * Samba reports a SHARE-RELATIVE path — `docs/rapor.pdf`, not `/srv/depsis/belgeler/docs/...` —
- * which is why nothing here strips a prefix. A file at the top level yields the empty string,
- * meaning the share root.
+ * ── MUTLAK YOL DA GELİYOR, VE BU SAHADA ÖLÇÜLDÜ ─────────────────────────────────────────────
  *
- * `.` and `..` cannot appear: Samba resolves them before the VFS layer. A leading `./` can, and is
- * removed rather than being allowed to produce a component nothing will match.
+ * Buradaki eski yorum "Samba PAYLAŞIMA GÖRE bir yol bildiriyor — `docs/rapor.pdf`, `/srv/...`
+ * değil — bu yüzden hiçbir şey bir önek kırpmıyor" diyordu. Cihazdaki gerçek satırlar öyle değil:
+ *
+ *     dunundunyasi|10.147.165.103|dunundunyasi|unlinkat|ok|/srv/depsis/dunundunyasi/ZTEST/a.mp4
+ *
+ * Yol MUTLAK. Kırpılmadığı için olay `/srv/depsis/dunundunyasi/ZTEST` diye bir klasör arıyor,
+ * indeksleyici onu "dizinde yok" bulup sessizce dönüyor, ve ADR-0011'in birinci katmanı sahada
+ * HİÇ ÇALIŞMAMIŞ oluyordu: 65 bin kuyruk turu koştu, hiçbiri bir satır değiştirmedi.
+ *
+ * Görünen sonucu şuydu — sahibinin sözü: *"dosya gezgininden silinen öğeler çöp kutusuna
+ * gitmiyor, pcde silinmiş gibi görünüyor ama duruyor ve açılmıyor."* Windows'tan silinen 103
+ * dosya diskten gitmişti, DEPSIS onları listelemeye devam ediyordu, ve tek düzeltici on beş
+ * dakikalık tam ağaç yürüyüşüydü — yirmi bin klasörlük bir ağaçta saatler.
+ *
+ * İKİSİNİ DE KABUL EDİYOR, çünkü biçim Samba sürümüne göre değişiyor ve ürün her ikisinde de
+ * çalışmalı. Mutlak yolda paylaşımın adı kökün son parçası (`/srv/depsis/<paylaşım>`), yani
+ * ondan sonrası paylaşıma göre yoldur. Adı hiç geçmiyorsa satır bu paylaşımın değil: `null`,
+ * yani sessizce düşüyor — uydurulmuş bir yol, bir alt ağacın satırlarını sildirebilirdi.
+ *
+ * `.` ve `..` gelemiyor: Samba onları VFS katmanından önce çözüyor. Baştaki `./` gelebiliyor ve
+ * kırpılıyor.
  */
-function parentOf(file: string): string {
+function parentOf(file: string, share: string): string | null {
   const clean = file.replace(/^\.\//, '').replace(/\/+$/, '');
-  const slash = clean.lastIndexOf('/');
-  return slash < 0 ? '' : clean.slice(0, slash);
+  const relative = clean.startsWith('/') ? withoutShareRoot(clean, share) : clean;
+  if (relative === null) return null;
+  const slash = relative.lastIndexOf('/');
+  return slash < 0 ? '' : relative.slice(0, slash);
+}
+
+/** `/srv/depsis/alice/docs/a.txt` + `alice` → `docs/a.txt`; başka bir ağaçsa `null`. */
+function withoutShareRoot(absolute: string, share: string): string | null {
+  const parts = absolute.split('/').filter((part) => part !== '');
+  const at = parts.indexOf(share);
+  if (at < 0) return null;
+  return parts.slice(at + 1).join('/');
 }
 
 /**
