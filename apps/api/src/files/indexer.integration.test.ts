@@ -178,7 +178,7 @@ describeDb('reconciling a share with the disk', () => {
     //
     // *"Dosya gezgininden silinen öğeler çöp kutusuna gitmiyor?"* Gitmiyordu, ve iki ayrı sebebi
     // vardı. Birincisi Samba tarafındaydı: dosya gerçekten unlink ediliyordu (artık `recycle`
-    // modülü onu `.depsis-cop` altına taşıyor). İkincisi burada: uzlaştırma, diskte olmayan bir
+    // modülü onu `DEPSIS Çöp Kutusu` altına taşıyor). İkincisi burada: uzlaştırma, diskte olmayan bir
     // satırı SİLİYORDU — yani baytlar çöp kutusunda dursa bile DEPSIS onları bir daha
     // göstermezdi.
     //
@@ -193,7 +193,7 @@ describeDb('reconciling a share with the disk', () => {
     // Ağdan silindi: kendi yerinde yok, çöp kutusunda var.
     const after: Disk = new Map([
       ['', { entries: [] }],
-      ['.depsis-cop', { entries: [{ name: 'rapor.txt', directory: false, size: 9 }] }],
+      ['DEPSIS Çöp Kutusu', { entries: [{ name: 'rapor.txt', directory: false, size: 9 }] }],
     ]);
     const result = await indexer(after).reconcile(org, share, held, 'silmeden sonra');
 
@@ -223,7 +223,7 @@ describeDb('reconciling a share with the disk', () => {
 
     const after: Disk = new Map([
       ['', { entries: [] }],
-      ['.depsis-cop', { entries: [] }],
+      ['DEPSIS Çöp Kutusu', { entries: [] }],
     ]);
     const result = await indexer(after).reconcile(org, share, held, 'kalici silmeden sonra');
 

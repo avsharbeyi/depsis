@@ -304,9 +304,34 @@ smb_out="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS" -c 'cd alt;
 if [ -e "$SHARES_ROOT/belgeler/alt/silinecek.txt" ]; then gone=DURUYOR; else gone=GITTI; fi
 check 'dosya paylaşımdan kalktı' "$gone" 'GITTI'
 # ASIL İDDİA: baytlar yok olmadı, çöp kutusunda — ve ağaç yapısı korunmuş.
-if [ -e "$SHARES_ROOT/belgeler/.depsis-cop/alt/silinecek.txt" ]; then binned=VAR; else binned="YOK ($smb_out)"; fi
+if [ -e "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu/alt/silinecek.txt" ]; then binned=VAR; else binned="YOK ($smb_out)"; fi
 check 've çöp kutusunda, kendi klasör yolunda duruyor' "$binned" 'VAR'
-check 'içeriği bozulmadan'   "$(cat "$SHARES_ROOT/belgeler/.depsis-cop/alt/silinecek.txt" 2>/dev/null || echo OKUNAMADI)"   'silinecek'
+check 'içeriği bozulmadan'   "$(cat "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu/alt/silinecek.txt" 2>/dev/null || echo OKUNAMADI)"   'silinecek'
+
+# ── VE KLASÖRÜN KENDİSİ SİLİNEMİYOR ─────────────────────────────────────────
+#
+# Sahibinin sözü: *"silinmeyen bir klasör olsun ki meraklılar silmesin."* Samba'daki karşılığı
+# `veto files` artı `delete veto files = no`: veto'lu bir dosya taşıyan dizin silinemiyor.
+# Nöbetçiyi ajan koyuyor; burada ölçülen şey, onun gerçekten işe yaradığı.
+#
+# Klasör GÖRÜNÜR kalıyor — veto'lu olan nöbetçi dosya, klasör değil — yani kullanıcı içine girip
+# dosyalarını geri alabiliyor.
+# NÖBETÇİYİ AJAN KOYUYOR, ve yalnız klasör VARKEN: klasörü Samba ilk silmede kendisi kuruyor
+# (kullanıcının kimliğiyle, yoksa modül oraya yazamaz). Yayım bu yüzden ikinci kez çağrılıyor —
+# gerçek cihazda da her açılışta koşuyor.
+ask publish "{\"op\":\"publish_samba_config\",\"shares\":[{\"name\":\"belgeler\",\"dataset\":\"$POOL/depsis/belgeler\",\"read_only\":false,\"valid_users\":[]}]}" >/dev/null
+check 'nöbetçi dosya kondu'   "$([ -e "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu/.depsis-keep" ] && echo VAR || echo YOK)" 'VAR'
+
+smb_ls="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS" -c 'ls' 2>&1 || true)"
+check 'çöp kutusu Gezgin''de görünüyor' "$smb_ls" 'DEPSIS'
+rm_out="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS"   -c 'deltree "DEPSIS Çöp Kutusu"' 2>&1 || true)"
+if [ -d "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu" ]; then survived=DURUYOR; else survived="SILINDI ($rm_out)"; fi
+check 'ama silinemiyor' "$survived" 'DURUYOR'
+# İÇİNDEKİLER SİLİNEBİLİR, ve öyle olmalı: çöp kutusunu boşaltmak kullanıcının hakkı — Windows'un
+# kendi geri dönüşüm kutusunda da öyle. Korunan şey KLASÖR: bir daha yaratılamayacak bir yer değil,
+# ama meraklı biri tarafından tek hamlede yok edilemeyen bir yer. Boşaltılan çöpün satırlarını
+# uzlaştırma turu düşürüyor.
+check 'nöbetçi hâlâ yerinde'   "$([ -e "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu/.depsis-keep" ] && echo VAR || echo YOK)"   'VAR'
 
 
 # ── 6b. DISK KIMLIGI ZINCIRI (ADR-0012, risk R1) ────────────────────────────
