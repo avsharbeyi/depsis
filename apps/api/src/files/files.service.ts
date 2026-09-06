@@ -268,7 +268,7 @@ export class FolderNotOnDiskError extends Error {
  * Samba'nın `recycle` modülü ağacı koruyarak buraya taşıyor, yani çöpteki bir satırın diskteki
  * karşılığı kendi yolundan türetilebiliyor — ikinci bir sütun ve onun dizinle ayrışması yok.
  */
-const BIN = ['.depsis', 'bin'] as const;
+const BIN = ['.depsis-cop'] as const;
 
 export class NameTakenOnDiskError extends Error {
   constructor(
@@ -2105,7 +2105,7 @@ export class FilesService {
       // ── ÇÖP KUTUSUNDAKİ KOPYA ───────────────────────────────────────────────────────────
       //
       // Ağdan silinen bir dosya kendi yerinde durmuyor: Samba'nın `recycle` modülü onu
-      // `.depsis/bin` altına taşımış oluyor. Kalıcı silme kendi yolunda "böyle bir şey yok"
+      // `.depsis-cop` altına taşımış oluyor. Kalıcı silme kendi yolunda "böyle bir şey yok"
       // cevabını alıyor, ve orada durursa baytlar diskte kalır — kullanıcı "kalıcı olarak sil"
       // demişken, kotasından yiyerek ve kimsenin göremediği bir yerde.
       if (response.status === 'not_found') {

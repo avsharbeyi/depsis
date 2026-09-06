@@ -60,12 +60,23 @@ pub mod bin {
 /// dataset would mean writing every byte twice and doubling the user's quota mid-upload.
 pub const STAGING_DIR: [&str; 2] = [".depsis", "staging"];
 
-/// Ağdan silinen dosyaların indiği yer: `<paylaşım>/.depsis/bin/...`.
+/// Ağdan silinen dosyaların indiği yer: `<paylaşım>/.depsis-cop/...`.
 ///
-/// Samba'nın `recycle` modülü buraya taşıyor (ağaç yapısını koruyarak), ve DEPSIS'in çöp kutusu
-/// aynı dosyayı gösteriyor. `.depsis` altında, çünkü orası hem istemcilerden veto'lu hem de aynı
-/// veri kümesi — geri getirmek O(1) bir yeniden adlandırma, kopyalama değil.
-pub const BIN_DIR: &str = "bin";
+/// ── NEDEN `.depsis` ALTINDA DEĞİL ───────────────────────────────────────────────────────────
+///
+/// İlk hâli `.depsis/bin`di ve sahada ÇALIŞMADI. Sebebi izinler: `recycle` modülü smbd'nin içinde,
+/// BAĞLANAN KULLANICININ kimliğiyle koşuyor, ve `.depsis` 0750 root:root — kullanıcı oraya girip
+/// bir dizin yaratamıyor. Modül deposunu kuramayınca sessizce sıradan bir silmeye düşüyor: dosya
+/// yok oluyor, hiçbir yerde bir hata görünmüyor.
+///
+/// Cihazda ölçüldü: `sudo -u dunundunyasi mkdir .depsis/deneme` → "Erişim engellendi", ve aynı
+/// kullanıcı paylaşımın KÖKÜNE sorunsuz yazabiliyor. Depo da bu yüzden kökte: Samba onu
+/// kullanıcının kendi yarattığı herhangi bir klasör gibi kuruyor, ve izin mühendisliği gerekmiyor.
+///
+/// `.` ile başlıyor (Samba nokta dosyalarını gizli işaretliyor) ve ayrıca veto'lu, yani ağ
+/// sürücüsünde hiç görünmüyor; ajan da paylaşım kökünün listesinden çıkarıyor, yani DEPSIS'in
+/// dosya ağacında da yok. Görünen tek yer, olması gereken yer: çöp kutusu ekranı.
+pub const BIN_DIR: &str = ".depsis-cop";
 
 fn depsis_agent_max_pending() -> usize {
     MAX_PENDING_TRANSFERS
@@ -807,19 +818,12 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// yaptığı şey. Kapıyı tamamen kapalı tutmak, çöp kutusunu görüntüden ibaret bırakırdı —
     /// dosya listelenir, "geri al" düğmesi hiçbir şey yapmazdı.
     ///
-    /// Ayrımın dar tutulması önemli: yalnız `.depsis/bin` ve altı açık. `.depsis`in kendisi ve
-    /// `.depsis/staging` kapalı kalıyor.
-    ///
-    /// Çöp kutusunun KENDİSİ de açık, ve bunun sebebi kökteki dosyalar: paylaşımın kökünden
-    /// silinen bir dosya `.depsis/bin/<ad>` oluyor, yani dizini karşılaştırmak için o klasörü
-    /// LİSTELEMEK gerekiyor. Silinmesi ayrıca tehlikeli değil — `remove_entry` özyinelemeli
-    /// değil, yani dolu bir çöp kutusu zaten silinemiyor; boş bir tanesini silmek de kimseden bir
-    /// şey almıyor, Samba bir sonraki silmede yeniden yaratıyor.
+    /// Çöp kutusu (`.depsis-cop`) bu kapının DIŞINDA ve öyle olmalı: içinde duran şey
+    /// kullanıcının kendi dosyası, ağdan silindiği için Samba'nın taşıdığı hâli. Geri getirmek bir
+    /// taşıma, kalıcı silmek bir silme — ikisi de tam olarak bu iki işlemin yaptığı şey, ve kapı
+    /// ona kapalı olsaydı çöp kutusu görüntüden ibaret kalırdı.
     fn touches_agent_state(path: &[&str]) -> bool {
-        if path.first() != Some(&STAGING_DIR[0]) {
-            return false;
-        }
-        !(path.len() > 1 && path.get(1) == Some(&BIN_DIR))
+        path.first() == Some(&STAGING_DIR[0])
     }
 
     /// Which dataset DEPSIS serves shares from, for `ReplicateDataset`'s refusals.
@@ -2073,7 +2077,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 // `.depsis` is the agent's own tree and never part of what the API indexes. It is
                 // filtered here as well as refused above, because the share ROOT's listing would
                 // otherwise report it as an ordinary folder for DEPSIS to create a row for.
-                if path.is_empty() && entry.name == STAGING_DIR[0] {
+                //
+                // `.depsis-cop` aynı sebeple ve bir tane daha: içindekiler kullanıcının SİLDİĞİ
+                // dosyalar. Kökün listesinde görünseydi dizin onlara satır yazar, ve silinen her
+                // dosya dosya ağacında ikinci bir kopya olarak geri gelirdi.
+                if path.is_empty() && (entry.name == STAGING_DIR[0] || entry.name == BIN_DIR) {
                     return None;
                 }
                 Some(DirEntry {
@@ -9039,28 +9047,41 @@ mod tests {
     }
 
     #[test]
-    fn the_bin_is_reachable_but_the_rest_of_the_agents_tree_is_not() {
-        // ── ÇÖP KUTUSU KAPININ DIŞINDA ──────────────────────────────────────────────────────
+    fn the_bin_is_reachable_and_hidden_but_the_agents_tree_is_not() {
+        // ── ÇÖP KUTUSU KAPININ DIŞINDA, AMA LİSTEDE DE DEĞİL ────────────────────────────────
         //
-        // Ağdan silinen dosya Samba'nın `recycle` modülüyle `.depsis/bin` altına taşınıyor, ve
-        // DEPSIS'in çöp kutusu onu gösteriyor. "Geri al" bir taşıma, "kalıcı sil" bir silme —
-        // ikisi de tam olarak `MoveEntry` ve `RemoveEntry`. Kapı tamamen kapalı kalsaydı çöp
-        // kutusu görüntüden ibaret olurdu: dosya listelenir, düğme hiçbir şey yapmazdı.
+        // Ağdan silinen dosya Samba'nın `recycle` modülüyle `.depsis-cop` altına taşınıyor.
+        // "Geri al" bir taşıma, "kalıcı sil" bir silme — ikisi de tam olarak `MoveEntry` ve
+        // `RemoveEntry`, ve kapı kapalı olsaydı çöp kutusu görüntüden ibaret olurdu.
         //
-        // Ayrım DAR: yalnız `.depsis/bin` ALTI açık.
+        // Ama paylaşımın kökünde LİSTELENMİYOR: görünseydi dizin ona satır yazar ve silinen her
+        // dosya dosya ağacında ikinci bir kopya olarak geri gelirdi.
         let h = Harness::with_share("alice");
         let r = MockCommandRunner::default();
         let s = MemorySink::default();
-        std::fs::create_dir_all(h.share_path(&["alice", ".depsis", "bin", "belgeler"]))
-            .expect("bin");
+        std::fs::create_dir_all(h.share_path(&["alice", ".depsis-cop", "belgeler"])).expect("bin");
         std::fs::write(
-            h.share_path(&["alice", ".depsis", "bin", "belgeler", "rapor.txt"]),
+            h.share_path(&["alice", ".depsis-cop", "belgeler", "rapor.txt"]),
             b"silinmis",
         )
         .expect("write");
 
+        // Kökün listesinde YOK.
+        match h.agent(&r, &s).handle(
+            r#"{"op":"list_directory","share":"alice","path":[]}"#,
+            peer(API_UID),
+            "c-bin0",
+            "list",
+        ) {
+            Response::Listing { entries, .. } => assert!(
+                entries.iter().all(|e| e.name.as_str() != ".depsis-cop"),
+                "got {entries:?}"
+            ),
+            other => panic!("expected a listing, got {other:?}"),
+        }
+
         // Geri getirme: çöp kutusundan kendi yerine.
-        let back = r#"{"op":"move_entry","share":"alice","from":[".depsis","bin","belgeler","rapor.txt"],"to":["rapor.txt"]}"#;
+        let back = r#"{"op":"move_entry","share":"alice","from":[".depsis-cop","belgeler","rapor.txt"],"to":["rapor.txt"]}"#;
         match h
             .agent(&r, &s)
             .handle(back, peer(API_UID), "c-bin1", "restore")
@@ -9070,7 +9091,7 @@ mod tests {
         }
         assert!(h.share_path(&["alice", "rapor.txt"]).exists());
 
-        // Ama ara alan hâlâ kapalı, `.depsis`in kendisi de.
+        // Ajanın kendi ağacı hâlâ kapalı.
         for raw in [
             r#"{"op":"remove_entry","share":"alice","path":[".depsis","staging","a.part"],"directory":false}"#,
             r#"{"op":"remove_entry","share":"alice","path":[".depsis"],"directory":true}"#,
@@ -9083,10 +9104,6 @@ mod tests {
                 other => panic!("expected a refusal for {raw}, got {other:?}"),
             }
         }
-        assert!(
-            h.share_path(&["alice", ".depsis", "bin"]).exists(),
-            "the bin itself must survive"
-        );
     }
 
     #[test]

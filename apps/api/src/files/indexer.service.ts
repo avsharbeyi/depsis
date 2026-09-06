@@ -11,13 +11,13 @@ export interface ReconcilePayload {
 
 /** What a pass found. */
 /**
- * Ağdan silinen dosyaların indiği yer, paylaşıma göre: `.depsis/bin/<özgün yol>`.
+ * Ağdan silinen dosyaların indiği yer, paylaşıma göre: `.depsis-cop/<özgün yol>`.
  *
  * Samba'nın `recycle` modülü ağacı koruyarak taşıyor (`keeptree = yes`, `versions = no`), yani
  * çöpteki bir satırın diskteki karşılığı KENDİ YOLUNDAN türetilebiliyor — ikinci bir sütun, ikinci
  * bir kayıt ve ikisinin ayrışması yok.
  */
-const BIN = ['.depsis', 'bin'] as const;
+const BIN = ['.depsis-cop'] as const;
 
 export interface ReconcileResult {
   /** Rows written for things on disk that DEPSIS did not know about. */
@@ -312,7 +312,7 @@ export class IndexerService implements OnModuleInit {
         // The folder is in the database and not on disk. Its row goes — along with everything
         // under it, because a subtree whose root is absent is absent.
         //
-        // ÖNCE ÇÖP KUTUSUNA BAKILIYOR: ağdan silinen bir klasör yok olmuyor, `.depsis/bin` altına
+        // ÖNCE ÇÖP KUTUSUNA BAKILIYOR: ağdan silinen bir klasör yok olmuyor, `.depsis-cop` altına
         // taşınıyor. Satırı silmek, kullanıcının geri getirebileceği bir şeyi geri getirilemez
         // ilan etmek olurdu.
         if (folder.id !== null) {
@@ -508,7 +508,7 @@ export class IndexerService implements OnModuleInit {
         // ── ÇÖP KUTUSU ÖNCE ────────────────────────────────────────────────────────────────
         //
         // Ağ sürücüsünden silinen bir dosya artık yok olmuyor: Samba'nın `recycle` modülü onu
-        // `.depsis/bin` altına, aynı ağaç yapısıyla taşıyor. Satırı silmek, kullanıcının geri
+        // `.depsis-cop` altına, aynı ağaç yapısıyla taşıyor. Satırı silmek, kullanıcının geri
         // getirebileceği bir dosyayı "hiç olmamış" ilan etmek olurdu — ve sahibinin sorduğu şey
         // tam olarak buydu: *"dosya gezgininden silinen öğeler çöp kutusuna gitmiyor?"*
         if (await recycled(row.name)) {

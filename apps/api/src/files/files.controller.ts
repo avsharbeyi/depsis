@@ -533,7 +533,7 @@ export class FilesController {
 
     try {
       // ── ÖNCE BAYTLAR, SONRA DAMGA ─────────────────────────────────────────────────────
-      // Ağdan silinen dosya `.depsis/bin` altında duruyor; damgayı kaldırıp onu geri
+      // Ağdan silinen dosya `.depsis-cop` altında duruyor; damgayı kaldırıp onu geri
       // getirmemek, listede görünen ama açılmayan bir satır üretirdi. DEPSIS'ten silinmiş bir
       // dosya için bu çağrı bir şey yapmıyor — ajan "böyle bir şey yok" diyor.
       await this.files.bringBackFromTheBin(
