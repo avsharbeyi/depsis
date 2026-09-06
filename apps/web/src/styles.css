@@ -711,6 +711,16 @@ select.pill.bad {
   flex-direction: column;
   min-height: 0;
   flex: 1;
+  /* Dosya listesinin sütun ölçüleri TEK YERDE. Başlık, satır ve mobil geçersiz kılmalar aynı üç
+     sayıya bakıyor; ayrı ayrı yazıldıkları sürece hizalı kalmaları bir tesadüftü. */
+  --col-sz: 78px;
+  --col-dt: 74px;
+  --acts: 178px;
+  /* Satırın kendi dolgusu ve sütun arası — BAŞLIK DA BUNLARI KULLANIYOR. Ayrı yazıldıkları
+     sürece dar ekranda satır 7/8 piksele inip başlık 8/9'da kalıyordu, ve iki piksellik bir
+     kayma da kaymadır. */
+  --row-pad: 8px;
+  --row-gap: 9px;
 }
 .fm.on {
   display: flex;
@@ -1030,19 +1040,50 @@ select.pill.bad {
 
    Başlıklar `.frow` değil: satır gibi görünmemeliler (arka plan yok, imleç yok, seçilmiyorlar) ve
    listenin kendisiyle birlikte kaymamalılar. */
+/* ── BAŞLIK LİSTENİN İÇİNDE, VE YAPIŞKAN ────────────────────────────────────────────────
+   Kardeş olarak çizildiği sürece hizalanması mümkün değildi: `.flist`in kendi 13 piksellik yan
+   dolgusu var, satır ona ek olarak 8 piksel taşıyor, başlık ise yalnız 8. Sütunlar tam 13 piksel
+   kayıyordu — sahibinin gördüğü şey buydu, ve e2e testi de aynı sayıyı ölçtü.
+
+   Aynı kabın içine girince ikisi de aynı dolgu kutusundan başlıyor. İkinci kazanç: dikey kaydırma
+   çubuğu belirdiğinde listenin genişliği daralıyor, ve dışarıda duran bir başlık o daralmayı
+   görmüyordu — sağa dayalı sütunlar bir kaydırma çubuğu kadar daha kayardı.
+
+   `sticky`, çünkü artık kaydırılan kabın içinde: başlığın yukarı kayıp gitmesi, sıralama
+   düğmelerini listenin ortasında kaybetmek olurdu. Arka plan SAYDAM DEĞİL — camın rengi tam
+   opaklıkta — yoksa altından geçen satırlar başlığın içinden okunurdu. */
 .fhead {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 2px 8px 6px;
+  gap: var(--row-gap);
+  padding: 6px var(--row-pad);
   border-bottom: 1px solid var(--edge);
   margin-bottom: 4px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgb(16, 26, 40);
 }
-/* Satırdaki seçim düğmesinin ve küçük resmin kapladığı yer: başlıklar onların sağından başlıyor.
-   Sayı satırın kendi ölçülerinden geliyor (24px düğme + 9px boşluk). */
+/* ── BAŞLIK SATIRIN ÖLÇÜLERİNİ BİREBİR TAŞIYOR ──────────────────────────────────────────
+   Sahibinin sözü: *"tür ad boyut tarih yerlerine denk gelmiyor."* Doğruydu, ve üç ayrı sebebi
+   vardı — üçü de burada kapanıyor:
+
+   1. Başlıkta hem bir boşluk kutusu hem "Tür" düğmesi vardı (24 + 30 piksel), satırda ise tek
+      bir küçük resim karesi (27). Başlık, adın 36 piksel sağından başlıyordu. Artık "Tür"
+      düğmesinin genişliği KARENİN genişliği, ve boşluk kutusu yalnız seçim kipinde — çünkü
+      onay kutusu da yalnız o kipte var.
+   2. Boyut ve Tarih başlıkları satırdaki sütunlarla aynı genişliğe sahip değildi; eski yorum
+      "aynı kuralı kullanıyor" diyordu ama seçici (`.frow .sz`) başlığı hiç kapsamıyordu.
+      Kurallar artık iki seçiciyi birden taşıyor.
+   3. En büyüğü: satırın sonundaki eylem düğmeleri satırdan satıra DEĞİŞİYORDU (bir klasörde
+      beş, çöpte iki), yani boyut sütunu her satırda başka bir yerde duruyordu. Alan artık sabit
+      genişlikte (`--acts`), ve başlığın sonundaki boşluk kutusu da aynı genişlikte. */
 .fhead .pad {
-  width: 24px;
+  width: 16px;
   flex: none;
+}
+.fhead .pad.acts {
+  width: var(--acts);
 }
 .fhead .sh {
   appearance: none;
@@ -1054,7 +1095,11 @@ select.pill.bad {
   font-size: 10.5px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--dim);
+  /* `--dim` DEĞİL, ve sebebi ölçülmüş: başlık artık opak bir zemin üstünde duruyor (yapışkan
+     olması için), ve o zeminde `--dim` 3.27:1 veriyor — WCAG'ın istediği 4.5'in altında. Erişim
+     denetimi bunu ilk kez şimdi görebildi, çünkü yarı saydam bir zeminde arka planı hiç
+     hesaplayamıyordu. Sayı 10.5 pikselde okunmuyorsa başlık da tıklanmıyor. */
+  color: var(--mut);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1073,9 +1118,10 @@ select.pill.bad {
   flex: 1;
   justify-content: flex-start;
 }
-/* Tür sütunu satırdaki simgenin üstünde: genişliği o simgenin genişliği, metni ortada. */
+/* Tür sütunu satırdaki simgenin ÜSTÜNDE, ve genişliği tam olarak o karenin genişliği. */
 .fhead .sh.narrow {
-  width: 30px;
+  width: 27px;
+  flex: none;
   justify-content: center;
   padding: 3px 0;
 }
@@ -1099,8 +1145,8 @@ select.pill.bad {
 .frow {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 8px;
+  gap: var(--row-gap);
+  padding: 7px var(--row-pad);
   border-radius: 9px;
   font-size: 12.5px;
   transition: background 0.14s;
@@ -1223,31 +1269,57 @@ select.pill.bad {
 .flist.gridview .frow .dt {
   display: none;
 }
+/* ── IZGARADA DÜĞMELER TEK SIRA ─────────────────────────────────────────────────────────
+   Sahibinin sözü: *"ızgara modunda altındaki tuşlar düzenli görünmüyor, onu mümkünse tek sıra
+   değilse ortala."* Sarma açıktı: altı düğme 148 piksellik kareye sığmayınca ikiye bölünüyor ve
+   her kare kendi düğme sayısına göre başka bir yükseklikte duruyordu.
+
+   Sabit genişlik burada YOK (`width: auto`): kare zaten dar, ve sağa dayalı sabit bir alan
+   ortalamayı imkânsız kılardı. Düğmeler biraz küçülüyor ve mesafe düğmesi düşüyor — altı düğme
+   22 pikselden 142 eder, yani en dar karede bile tek sıra. */
 .flist.gridview .fact {
+  width: auto;
   justify-content: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  gap: 2px;
+}
+.flist.gridview .fact button {
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
+}
+.flist.gridview .fact .gap {
+  display: none;
 }
 /* "Daha fazla göster" bir hücre değil, listenin sonu: bütün sütunları kaplıyor. */
 .flist.gridview .fmore {
   grid-column: 1 / -1;
 }
+.frow .sz,
+.fhead .sh.sz {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: none;
+  /* SÜTUN TEK BİR YERDE: kural iki seçiciyi birden taşıyor, yani başlık ile satır birlikte
+     kayıyor. Ayrı yazıldıkları sürece hizalı kalmaları bir tesadüftü, ve tesadüf bozuldu. */
+  min-width: var(--col-sz);
+  text-align: right;
+}
 .frow .sz {
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--mut);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  flex: none;
-  /* Başlıkla aynı genişlik: `.fhead .sz` bu kuralın kendisini kullanıyor, yani sütun tek bir
-     yerde tanımlı ve başlıkla satır birlikte kayıyor. */
-  min-width: 78px;
-  text-align: right;
 }
 .fact {
   display: flex;
   gap: 3px;
   flex: none;
   align-items: center;
+  /* SABİT GENİŞLİK, ve sebebi hizalama: bir klasör satırında beş düğme, çöpte iki düğme var, ve
+     alan düğme sayısınca büyüdüğü sürece boyut sütunu her satırda başka bir yerde duruyordu.
+     Sağa dayalı, çünkü silme düğmesinin satır sonunda sabit bir yeri olmalı. */
+  width: var(--acts);
+  justify-content: flex-end;
 }
 /* One button's width of nothing before the delete button, so the pointer has to travel. */
 .fact .gap {
@@ -3261,15 +3333,18 @@ label textarea,
    eden onlar oldu.
    Dar ekranda gizleniyor: 360 pikselde ad, boyut ve tarih yan yana durmuyor ve üçünden feda
    edilecek olan ad değil. */
+.frow .dt,
+.fhead .sh.dt {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: none;
+  min-width: var(--col-dt);
+  text-align: right;
+}
 .frow .dt {
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--mut);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  flex: none;
-  min-width: 74px;
-  text-align: right;
 }
 @media (max-width: 560px) {
   .frow .dt {
@@ -3284,6 +3359,22 @@ label textarea,
 /* Kutunun düğme satırının altına giren serbest içerik — "kalan N dosyaya da uygula" gibi.
    Kutunun İÇİNDE, çünkü ekrana sabitlenmiş ayrı bir şerit kutu bir satır uzayınca onun kendi
    düğmelerinin üstüne biniyordu. */
+/* ── ÜÇ CEVAPLI SORUDA DÜĞMELER ALT ALTA ────────────────────────────────────────────────
+   Sahibinin sözü: *"değiştir, ikisini de tut ve vazgeç alt alta olmalı aynı adda dosya var
+   kısmında."* Yan yana dizildiklerinde dar ekranda üç düğme birbirine giriyor ve hangisinin ne
+   yaptığı okunmadan basılıyordu; bir soruda yanlış düğmeye basmak, sorunun kendisinden pahalı.
+
+   Sıra da bilerek: önce yapılacak şeyler, en altta vazgeçmek. Düğmeler tam genişlik, yani her
+   birinin dokunma alanı aynı ve satır sonuna sıkışan bir şey yok. */
+.cf .row.stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+}
+.cf .row.stack button {
+  width: 100%;
+}
+
 .cffoot {
   display: flex;
   justify-content: flex-end;
@@ -3726,6 +3817,42 @@ label textarea,
   /* Seçim şeridi dar ekranda SARIYOR: "Tümünü seç" ile toplu işlem düğmeleri yan yana
      sığmıyor, ve sığmayan bir düğme olmayan bir düğmeyle aynı şey. Sayı kendi satırında
      duruyor ki düğmeler tam genişlikten pay alabilsin. */
+  /* ── DAR EKRAN YANA KAYMIYOR ──────────────────────────────────────────────────────────
+     Sahibinin sözü: *"mobilde sağa kaydırıyor ve ekran oynuyor, sabit olması lazım."* Satırın
+     genişliği sabit parçaların toplamıydı ve 360 pikseli aşıyordu: 27 kare + 96 ad + 78 boyut +
+     178 eylem alanı + boşluklar. Ölçüler burada küçülüyor ve toplam 360'ın altında kalıyor:
+     16 + 27 + 9 + 64 + 9 + 58 + 9 + 128 = 320.
+
+     `overflow-x: hidden` bir emniyet ağı, çözüm değil: bir gün bir sütun yeniden büyürse yatay
+     kaydırma yerine kırpma olur — ekranın altından kayması, sayfanın yana kayması kadar kötü
+     değil. */
+  .fm {
+    --col-sz: 58px;
+    --acts: 128px;
+    overflow-x: hidden;
+  }
+  .flist {
+    overflow-x: hidden;
+  }
+  .frow {
+    min-width: 0;
+  }
+  .frow .n {
+    min-width: 64px;
+  }
+  .fact {
+    gap: 2px;
+  }
+  .fact button {
+    width: 24px;
+    height: 24px;
+    font-size: 10px;
+  }
+  /* Mesafe düğmesi masaüstünde yanlış tıklamaya karşı; dokunmatikte 30 pikseli sütunlardan
+     çalıyor, ve silmenin kendi onay kutusu zaten var. */
+  .fact .gap {
+    display: none;
+  }
   .selbar {
     flex-wrap: wrap;
   }
@@ -3751,9 +3878,14 @@ label textarea,
   .fact .gap {
     width: 16px;
   }
+  /* Dar ekranda satır biraz daralıyor; başlık da aynı iki değişkeni okuduğu için onunla
+     birlikte daralıyor. */
+  .fm {
+    --row-pad: 7px;
+    --row-gap: 8px;
+  }
   .frow {
-    padding: 9px 7px;
-    gap: 8px;
+    padding: 9px var(--row-pad);
   }
   .addr {
     font-size: 11.5px;

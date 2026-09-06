@@ -473,6 +473,46 @@ test.describe('Dosya yöneticisi', () => {
     await topla(pane, name, artiklar);
   });
 
+  test('sütun başlıkları satırdaki sütunlarla aynı hizada, ve sayfa yana kaymıyor', async ({
+    page,
+    consoleWatch,
+    artiklar,
+  }) => {
+    // ── SAHİBİNİN İKİ İTİRAZI ─────────────────────────────────────────────────────────────
+    //
+    // *"Tür ad boyut tarih yerlerine denk gelmiyor"* ve *"mobilde sağa kaydırıyor ve ekran
+    // oynuyor, sabit olması lazım."*
+    //
+    // İkisi de ölçülebilir şeyler, ve ölçülmedikleri sürece bir sonraki değişiklikte sessizce geri
+    // gelirler. Hizayı piksel olarak karşılaştırmak, "aynı sınıfı taşıyorlar" demekten farklı: eski
+    // hâlde de aynı sınıfı taşıyorlardı ama genişlik kuralı başlığı hiç kapsamıyordu.
+    satirYaratanTestinGurultusu(consoleWatch);
+    const pane = await dosyalariAc(page);
+    const ad = isim('hiza');
+    await klasorGerek(pane, ad, artiklar);
+
+    const basSz = await pane.locator('.fhead .sh.sz').boundingBox();
+    const satirSz = await pane.locator('.frow .sz').first().boundingBox();
+    expect(basSz, 'boyut başlığı çizilmeli').not.toBeNull();
+    expect(satirSz, 'boyut sütunu çizilmeli').not.toBeNull();
+    // Aynı sol kenar VE aynı genişlik: ikisinden biri tutmazsa sütun kayar.
+    expect(Math.abs((basSz?.x ?? 0) - (satirSz?.x ?? 0))).toBeLessThanOrEqual(1.5);
+    expect(Math.abs((basSz?.width ?? 0) - (satirSz?.width ?? 0))).toBeLessThanOrEqual(1.5);
+
+    // "Ad" başlığı da adın üstünde: aradaki kare ve onay kutusu iki tarafta da aynı yeri kaplıyor.
+    const basAd = await pane.locator('.fhead .sh.grow').boundingBox();
+    const satirAd = await pane.locator('.frow .n').first().boundingBox();
+    expect(Math.abs((basAd?.x ?? 0) - (satirAd?.x ?? 0))).toBeLessThanOrEqual(1.5);
+
+    // VE SAYFA YANA KAYMIYOR. Bu, mobile-360 projesinde asıl ölçülen şey.
+    const tasma = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(tasma, 'belge yatayda taşmamalı').toBeLessThanOrEqual(0);
+
+    await topla(pane, ad, artiklar);
+  });
+
   test('"Seç" toplu işlemi ve "Tümünü seç"i aynı anda açar', async ({ page, consoleWatch }) => {
     // ── SAHİBİNİN SÖZÜ ────────────────────────────────────────────────────────────────────
     //
