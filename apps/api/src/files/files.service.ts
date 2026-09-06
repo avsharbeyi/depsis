@@ -262,6 +262,14 @@ export class FolderNotOnDiskError extends Error {
  * it is also the honest description of the state: the API cannot see what is there, only that the
  * kernel refused to make another.
  */
+/**
+ * Ağdan silinen dosyaların indiği yer, paylaşıma göre.
+ *
+ * Samba'nın `recycle` modülü ağacı koruyarak buraya taşıyor, yani çöpteki bir satırın diskteki
+ * karşılığı kendi yolundan türetilebiliyor — ikinci bir sütun ve onun dizinle ayrışması yok.
+ */
+const BIN = ['.depsis', 'bin'] as const;
+
 export class NameTakenOnDiskError extends Error {
   constructor(
     readonly takenName: string,
@@ -2047,7 +2055,7 @@ export class FilesService {
     );
 
     for (const node of nodes) {
-      const response = await this.agent.call(
+      let response = await this.agent.call(
         {
           op: 'remove_entry',
           share: share.name,
@@ -2057,6 +2065,27 @@ export class FilesService {
         reason,
         correlationId,
       );
+      // ── ÇÖP KUTUSUNDAKİ KOPYA ───────────────────────────────────────────────────────────
+      //
+      // Ağdan silinen bir dosya kendi yerinde durmuyor: Samba'nın `recycle` modülü onu
+      // `.depsis/bin` altına taşımış oluyor. Kalıcı silme kendi yolunda "böyle bir şey yok"
+      // cevabını alıyor, ve orada durursa baytlar diskte kalır — kullanıcı "kalıcı olarak sil"
+      // demişken, kotasından yiyerek ve kimsenin göremediği bir yerde.
+      if (response.status === 'not_found') {
+        const inBin = await this.agent.call(
+          {
+            op: 'remove_entry',
+            share: share.name,
+            path: [...BIN, ...node.parts],
+            directory: node.kind === 'folder',
+          },
+          reason,
+          correlationId,
+        );
+        // Çöp kutusunda da yoksa ilk cevabın kendisi geçerli: aşağıdaki dal onu zaten
+        // "silinmiş sayılır" diye ele alıyor.
+        if (inBin.status === 'removed') response = inBin;
+      }
       // ── DOLU BİR KLASÖR ARTIK ÇIKMAZ SOKAK DEĞİL ────────────────────────────────────────
       //
       // Ajan boş olmayan bir dizini silmiyor (`rmdir`, özyinelemeli değil ve öyle kalmalı), ve bu
@@ -2325,6 +2354,52 @@ export class FilesService {
    * Restoring something already out of the trash is a no-op rather than an error, so a client that
    * retries a request whose response it never saw gets the same answer the first attempt gave.
    */
+  /**
+   * Çöp kutusundaki dosyayı kendi yerine geri taşı.
+   *
+   * ── NEDEN AYRI BİR ADIM ─────────────────────────────────────────────────────────────────
+   *
+   * DEPSIS'in kendi çöp kutusu diskte hiçbir şeyi taşımıyor — satıra bir damga yazıyor — ve o
+   * dosyalar için burada yapılacak bir şey yok: ajan "böyle bir şey yok" diyor ve geçiliyor.
+   *
+   * Ağdan silinen dosya ise gerçekten taşınmış oluyor. Damgayı kaldırıp baytları geri
+   * getirmemek, listede görünen ama açılmayan bir dosya üretirdi — kullanıcının bu üründe zaten
+   * bir kez gördüğü ve şikâyet ettiği şey.
+   *
+   * ÖNCE TAŞIMA, SONRA DAMGA: ters sırada, taşıma düşerse satır çöpten çıkmış ama dosya çöpte
+   * kalmış olurdu. Bu sırada taşıma düşerse satır çöpte kalıyor ve kullanıcı yeniden deneyebiliyor.
+   */
+  async bringBackFromTheBin(
+    share: ShareRef,
+    components: readonly string[],
+    kind: 'file' | 'folder',
+    correlationId: string,
+    reason: string,
+  ): Promise<void> {
+    if (components.length === 0) return;
+    const response = await this.agent.call(
+      {
+        op: 'move_entry',
+        share: share.name,
+        from: [...BIN, ...components],
+        to: [...components],
+      },
+      reason,
+      correlationId,
+    );
+    if (response.status === 'moved' || response.status === 'not_found') return;
+    if (response.status === 'conflict') {
+      // Aynı ad yeniden doldurulmuş: kullanıcı silmiş, sonra aynı adla yeni bir dosya koymuş.
+      // Üstüne yazmak, geri getirmeyi bir veri kaybına çevirirdi.
+      throw new NameTakenOnDiskError(components[components.length - 1] ?? '', response.reason);
+    }
+    this.logger.warn(
+      `could not bring ${share.name}/${components.join('/')} back from the bin (${kind}): ` +
+        `the agent answered '${response.status}'`,
+    );
+    expectStatus(response, 'moved');
+  }
+
   async restore(organizationId: string, id: string): Promise<FileEntryRow> {
     const entry = await this.find(organizationId, id);
     if (entry.trashed_at === null) return entry;

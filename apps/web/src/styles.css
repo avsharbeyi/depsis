@@ -1095,11 +1095,13 @@ select.pill.bad {
   font-size: 10.5px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  /* `--dim` DEĞİL, ve sebebi ölçülmüş: başlık artık opak bir zemin üstünde duruyor (yapışkan
-     olması için), ve o zeminde `--dim` 3.27:1 veriyor — WCAG'ın istediği 4.5'in altında. Erişim
-     denetimi bunu ilk kez şimdi görebildi, çünkü yarı saydam bir zeminde arka planı hiç
-     hesaplayamıyordu. Sayı 10.5 pikselde okunmuyorsa başlık da tıklanmıyor. */
-  color: var(--mut);
+  /* `--dim` DEĞİL `--ink2`, ve sebebi ölçülmüş: başlık artık opak bir zemin üstünde duruyor
+     (yapışkan olması için), ve erişilebilirlik denetimi zemini ilk kez o yüzden
+     hesaplayabiliyor. `--dim` 3.27:1, `--mut` 4.41:1 verdi — ikisi de WCAG'ın istediği 4.5'in
+     altında, ve ikinci sayı pencerenin kendi saydamlığı hesaba katıldığında ortaya çıktı: rengin
+     kendi değeri değil, EKRANDA OLUŞAN değer ölçülüyor. Başlıklar baştan beri fazla soluktu ve
+     yarı saydam bir zeminde bunu kimse ölçemiyordu. */
+  color: var(--ink2);
   cursor: pointer;
   display: flex;
   align-items: center;

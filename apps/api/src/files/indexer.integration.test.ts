@@ -173,6 +173,72 @@ describeDb('reconciling a share with the disk', () => {
     return rows[0]?.id ?? '';
   }
 
+  it('ağdan silinen dosyayı yok saymıyor, ÇÖP KUTUSUNA alıyor', async () => {
+    // ── SAHİBİNİN SORUSU ──────────────────────────────────────────────────────────────────
+    //
+    // *"Dosya gezgininden silinen öğeler çöp kutusuna gitmiyor?"* Gitmiyordu, ve iki ayrı sebebi
+    // vardı. Birincisi Samba tarafındaydı: dosya gerçekten unlink ediliyordu (artık `recycle`
+    // modülü onu `.depsis/bin` altına taşıyor). İkincisi burada: uzlaştırma, diskte olmayan bir
+    // satırı SİLİYORDU — yani baytlar çöp kutusunda dursa bile DEPSIS onları bir daha
+    // göstermezdi.
+    //
+    // Bu test ikinci yarıyı ölçüyor: dosya kendi klasöründen gitmiş ama çöp kutusunda duruyorsa,
+    // satır silinmiyor; çöpe alınıyor ve kullanıcı geri getirebiliyor.
+    const before: Disk = new Map([
+      ['', { entries: [{ name: 'rapor.txt', directory: false, size: 9 }] }],
+    ]);
+    await indexer(before).reconcile(org, share, held, 'ilk tur');
+    expect(await paths()).toContain('/rapor.txt');
+
+    // Ağdan silindi: kendi yerinde yok, çöp kutusunda var.
+    const after: Disk = new Map([
+      ['', { entries: [] }],
+      ['.depsis/bin', { entries: [{ name: 'rapor.txt', directory: false, size: 9 }] }],
+    ]);
+    const result = await indexer(after).reconcile(org, share, held, 'silmeden sonra');
+
+    expect(result.binned).toBe(1);
+    expect(result.removed).toBe(0);
+    // Listede yok…
+    expect(await paths()).not.toContain('/rapor.txt');
+    // …ama satır duruyor ve çöpte.
+    const rows = await db.withTenant(org, (q) =>
+      q.query<{ path: string }>(
+        `SELECT path FROM public.file_entries
+          WHERE organization_id = $1 AND trashed_at IS NOT NULL ORDER BY path`,
+        [org],
+      ),
+    );
+    expect(rows.map((r) => r.path)).toContain('/rapor.txt');
+  });
+
+  it('çöp kutusunda da yoksa satırı siliyor — orası kalıcı silme', async () => {
+    // Kontrol: çöp kutusu dalı, diskten gerçekten yok olmuş bir dosyayı sonsuza kadar listede
+    // tutan bir yol OLMAMALI. Ağ sürücüsünden `shift+delete` ya da bir betikle silinen dosya
+    // çöp kutusuna uğramıyor, ve satırı gitmeli.
+    const before: Disk = new Map([
+      ['', { entries: [{ name: 'gecici.txt', directory: false, size: 3 }] }],
+    ]);
+    await indexer(before).reconcile(org, share, held, 'ilk tur');
+
+    const after: Disk = new Map([
+      ['', { entries: [] }],
+      ['.depsis/bin', { entries: [] }],
+    ]);
+    const result = await indexer(after).reconcile(org, share, held, 'kalici silmeden sonra');
+
+    expect(result.removed).toBe(1);
+    expect(result.binned).toBe(0);
+    const rows = await db.withTenant(org, (q) =>
+      q.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM public.file_entries
+          WHERE organization_id = $1 AND name = 'gecici.txt'`,
+        [org],
+      ),
+    );
+    expect(rows[0]?.n).toBe('0');
+  });
+
   it('keeps walking when ONE folder cannot be listed', async () => {
     // ── SAHADAN GELEN ARIZA ───────────────────────────────────────────────────────────────
     //
@@ -578,7 +644,12 @@ describeDb('reconciling a share with the disk', () => {
     const files = new FilesService(db, agent, new PosixIdentityService(db), new JobsService(db));
     await new IndexerService(db, agent, files).reconcile(org, share, held, 'test');
 
-    expect(seen).toEqual(['list_directory']);
+    // HER ÇAĞRI BİR OKUMA — sabit bir liste değil, çünkü kaç okuma yapıldığı bu testin ölçtüğü
+    // şey değil. (Eksik bir satır görüldüğünde çöp kutusu da okunuyor: dosya oraya taşınmışsa
+    // satır silinmemeli.) Ölçülen tek şey, bu sınıftan yıkıcı bir işleme giden bir yol
+    // OLMADIĞI — bir zamanlayıcının gözetimsiz koşturduğu şeyi güvenli yapan da bu.
+    expect(seen).not.toHaveLength(0);
+    expect([...new Set(seen)]).toEqual(['list_directory']);
   });
 
   it('stops when the lease is gone and says there is more to do', async () => {

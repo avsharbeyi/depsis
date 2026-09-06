@@ -71,12 +71,13 @@ export function reconcileHandler(indexer: IndexerService): JobHandler {
       removed: result.removed,
       truncated: result.truncated,
       scanned: result.scanned,
+      binned: result.binned,
     });
 
-    if (result.discovered > 0 || result.removed > 0 || result.updated > 0) {
+    if (result.discovered > 0 || result.removed > 0 || result.updated > 0 || result.binned > 0) {
       logger.log(
         `share ${shareId}: ${result.discovered} discovered, ${result.updated} updated, ` +
-          `${result.removed} removed across ${result.scanned} folders`,
+          `${result.removed} removed, ${result.binned} binned across ${result.scanned} folders`,
       );
     }
     if (result.truncated > 0) {

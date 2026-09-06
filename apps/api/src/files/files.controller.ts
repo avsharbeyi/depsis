@@ -532,6 +532,17 @@ export class FilesController {
     requireWritableShare(share);
 
     try {
+      // ── ÖNCE BAYTLAR, SONRA DAMGA ─────────────────────────────────────────────────────
+      // Ağdan silinen dosya `.depsis/bin` altında duruyor; damgayı kaldırıp onu geri
+      // getirmemek, listede görünen ama açılmayan bir satır üretirdi. DEPSIS'ten silinmiş bir
+      // dosya için bu çağrı bir şey yapmıyor — ajan "böyle bir şey yok" diyor.
+      await this.files.bringBackFromTheBin(
+        share,
+        await this.files.componentsOf(caller.organizationId, id),
+        entry.kind,
+        randomUUID(),
+        `restoring ${entry.name} from the bin`,
+      );
       return toEntry(await this.files.restore(caller.organizationId, id), effective);
     } catch (error) {
       throw translate(error);

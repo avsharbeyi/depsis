@@ -265,6 +265,38 @@ check 'yayınlandı ve DOĞRULANDI' \
 check 'smbd paylaşımı gerçekten sunuyor' \
   "$(smbclient -N -L //127.0.0.1 2>/dev/null)" 'belgeler'
 
+# ── 6a. AĞDAN SİLİNEN DOSYA ÇÖP KUTUSUNA GİDİYOR ────────────────────────────
+#
+# Sahibinin sözü: *"dosya gezgininden silinen öğeler çöp kutusuna gitmiyor."* Gitmiyordu — DEPSIS'in
+# çöp kutusu satıra yazılan bir damgaydı, Samba ise dosyayı gerçekten unlink ediyordu. Ayarı
+# yazmak (`recycle:repository`) bir şeyi kanıtlamıyor: modülün veto'lu bir dizine (`.depsis`)
+# YAZABİLDİĞİ ancak gerçek bir istemci oturumuyla ölçülebilir, ve yazamazsa `recycle` sessizce
+# sıradan bir silmeye düşer — yani tam olarak "çalışıyor gibi görünen" hâl.
+say 'ağdan silme çöp kutusuna düşüyor'
+BIN_USER=depsisci-smb
+BIN_PASS="Depsis-CI-$RANDOM$RANDOM"
+id -u "$BIN_USER" >/dev/null 2>&1 || useradd -M -s /usr/sbin/nologin "$BIN_USER"
+printf '%s\n%s\n' "$BIN_PASS" "$BIN_PASS" | smbpasswd -s -a "$BIN_USER" >/dev/null
+smbpasswd -e "$BIN_USER" >/dev/null
+
+# Dosya paylaşımın kökünde ve silen kullanıcının silebileceği hâlde: bu kapı çöp kutusunu ölçüyor,
+# izinleri değil.
+printf 'silinecek' > "$SHARES_ROOT/belgeler/silinecek.txt"
+chown "$BIN_USER" "$SHARES_ROOT/belgeler/silinecek.txt"
+chmod 0666 "$SHARES_ROOT/belgeler/silinecek.txt"
+chmod 0777 "$SHARES_ROOT/belgeler"
+smb_out="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS" -c 'del silinecek.txt' 2>&1 || true)"
+
+if [ -e "$SHARES_ROOT/belgeler/silinecek.txt" ]; then gone=DURUYOR; else gone=GITTI; fi
+check 'dosya paylaşımdan kalktı' "$gone" 'GITTI'
+# ASIL İDDİA: baytlar yok olmadı, çöp kutusunda.
+if [ -e "$SHARES_ROOT/belgeler/.depsis/bin/silinecek.txt" ]; then binned=VAR; else binned="YOK ($smb_out)"; fi
+check 've çöp kutusunda duruyor' "$binned" 'VAR'
+check 'içeriği bozulmadan' \
+  "$(cat "$SHARES_ROOT/belgeler/.depsis/bin/silinecek.txt" 2>/dev/null || echo OKUNAMADI)" \
+  'silinecek'
+
+
 # ── 6b. DISK KIMLIGI ZINCIRI (ADR-0012, risk R1) ────────────────────────────
 #
 # Bu bolum uzun sure "fiziksel donanim ister" diye kapsam disinda birakildi, ve o iddia ZFS icin
