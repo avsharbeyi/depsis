@@ -268,7 +268,7 @@ export class FolderNotOnDiskError extends Error {
  * Samba'nın `recycle` modülü ağacı koruyarak buraya taşıyor, yani çöpteki bir satırın diskteki
  * karşılığı kendi yolundan türetilebiliyor — ikinci bir sütun ve onun dizinle ayrışması yok.
  */
-const BIN = ['.depsis-cop'] as const;
+const BIN = ['DEPSIS Çöp Kutusu'] as const;
 
 export class NameTakenOnDiskError extends Error {
   constructor(
@@ -2105,7 +2105,7 @@ export class FilesService {
       // ── ÇÖP KUTUSUNDAKİ KOPYA ───────────────────────────────────────────────────────────
       //
       // Ağdan silinen bir dosya kendi yerinde durmuyor: Samba'nın `recycle` modülü onu
-      // `.depsis-cop` altına taşımış oluyor. Kalıcı silme kendi yolunda "böyle bir şey yok"
+      // `DEPSIS Çöp Kutusu` altına taşımış oluyor. Kalıcı silme kendi yolunda "böyle bir şey yok"
       // cevabını alıyor, ve orada durursa baytlar diskte kalır — kullanıcı "kalıcı olarak sil"
       // demişken, kotasından yiyerek ve kimsenin göremediği bir yerde.
       if (response.status === 'not_found') {
@@ -2424,7 +2424,34 @@ export class FilesService {
       reason,
       correlationId,
     );
-    if (response.status === 'moved' || response.status === 'not_found') return;
+    if (response.status === 'moved') return;
+    if (response.status === 'not_found') {
+      // ── ÇÖP KUTUSUNDA YOK: İKİ AYRI HÂL, VE BİRİ SESSİZ GEÇMEMELİ ─────────────────────────
+      //
+      // DEPSIS'ten çöpe atılmış bir dosyanın baytları hiç taşınmadı: kendi yerinde duruyor, ve
+      // burada yapılacak bir şey yok. Ağdan silinip sonra baytları da yok olmuş bir dosya ise
+      // geri getirilemez — ve "Geri al"ın onu sessizce başarmış gibi görünmesi, kullanıcıya
+      // olmayan bir dosyayı geri verdiğini söylemek olurdu. Satır listeye döner, bir sonraki
+      // tarama onu yeniden düşürür, ve kimse ne olduğunu anlamaz.
+      //
+      // Sahada bu hâlde yedi satırdan altısı vardı: çöp kutusu çalışmadan önce ağdan silinmiş
+      // dosyalar.
+      const parent = components.slice(0, -1);
+      const name = components[components.length - 1] ?? '';
+      const listing = await this.agent.call(
+        { op: 'list_directory', share: share.name, path: parent },
+        reason,
+        correlationId,
+      );
+      const inPlace =
+        listing.status === 'listing' && listing.entries.some((entry) => entry.name === name);
+      if (!inPlace) {
+        throw new EntryMissingOnDiskError(
+          `${name}: ne kendi yerinde ne çöp kutusunda; baytları sunucuda yok`,
+        );
+      }
+      return;
+    }
     if (response.status === 'conflict') {
       // Aynı ad yeniden doldurulmuş: kullanıcı silmiş, sonra aynı adla yeni bir dosya koymuş.
       // Üstüne yazmak, geri getirmeyi bir veri kaybına çevirirdi.
@@ -2453,7 +2480,7 @@ export class FilesService {
       const rows = await this.db.withTenant(organizationId, (db) =>
         db.query<FileEntryRow>(
           `UPDATE public.file_entries
-              SET trashed_at = NULL, trashed_by = NULL
+              SET trashed_at = NULL, trashed_by = NULL, recycled = false
             WHERE organization_id = $1 AND id = $2
             RETURNING ${ENTRY_COLUMNS}`,
           [organizationId, id],

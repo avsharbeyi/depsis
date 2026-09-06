@@ -60,7 +60,7 @@ pub mod bin {
 /// dataset would mean writing every byte twice and doubling the user's quota mid-upload.
 pub const STAGING_DIR: [&str; 2] = [".depsis", "staging"];
 
-/// Ağdan silinen dosyaların indiği yer: `<paylaşım>/.depsis-cop/...`.
+/// Ağdan silinen dosyaların indiği yer: `<paylaşım>/DEPSIS Çöp Kutusu/...`.
 ///
 /// ── NEDEN `.depsis` ALTINDA DEĞİL ───────────────────────────────────────────────────────────
 ///
@@ -76,7 +76,21 @@ pub const STAGING_DIR: [&str; 2] = [".depsis", "staging"];
 /// `.` ile başlıyor (Samba nokta dosyalarını gizli işaretliyor) ve ayrıca veto'lu, yani ağ
 /// sürücüsünde hiç görünmüyor; ajan da paylaşım kökünün listesinden çıkarıyor, yani DEPSIS'in
 /// dosya ağacında da yok. Görünen tek yer, olması gereken yer: çöp kutusu ekranı.
-pub const BIN_DIR: &str = ".depsis-cop";
+pub const BIN_DIR: &str = "DEPSIS Çöp Kutusu";
+
+/// Çöp kutusunun eski adı. Yalnız göç için: bir kez taşınıp bir daha bakılmıyor.
+pub const BIN_DIR_WAS: &str = ".depsis-cop";
+
+/// Çöp kutusunun içinde duran ve SİLİNEMEYEN dosya.
+///
+/// Sahibinin sözü: *"silinmeyen bir klasör olsun ki meraklılar silmesin."* Bunun Samba'daki
+/// karşılığı `veto files` artı `delete veto files = no`: veto'lu bir dosya taşıyan bir dizin
+/// silinemiyor. Yani klasör görünür ve kullanılabilir kalıyor — içine girilebiliyor, içindeki
+/// dosyalar tek tek silinebiliyor — ama klasörün kendisi ağ sürücüsünden yok edilemiyor.
+///
+/// Nöbetçinin kendisi de veto'lu olduğu için istemcide hiç görünmüyor: kullanıcı boş bir çöp
+/// kutusu görüyor, silinemeyen bir dosya değil.
+pub const BIN_KEEP: &str = ".depsis-keep";
 
 fn depsis_agent_max_pending() -> usize {
     MAX_PENDING_TRANSFERS
@@ -818,7 +832,40 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
     /// yaptığı şey. Kapıyı tamamen kapalı tutmak, çöp kutusunu görüntüden ibaret bırakırdı —
     /// dosya listelenir, "geri al" düğmesi hiçbir şey yapmazdı.
     ///
-    /// Çöp kutusu (`.depsis-cop`) bu kapının DIŞINDA ve öyle olmalı: içinde duran şey
+    /// Çöp kutusunu ve içindeki nöbetçi dosyayı kur; eski adı varsa taşı.
+    ///
+    /// EN İYİ ÇABA: hiçbir adımı yayımı düşürmüyor. Klasör yoksa Samba ilk silmede kendisi
+    /// kuruyor; nöbetçi yoksa klasör silinebilir kalıyor — ikisi de yayımın kendisinden bağımsız,
+    /// ve bir paylaşımın sunulmasını bunlara bağlamak çok daha pahalı bir kusur olurdu.
+    fn ensure_bin(&self, share: &str) {
+        let Some(paths) = self.paths else {
+            return;
+        };
+        // ── KLASÖRÜ AJAN YARATMIYOR, VE BU BİLEREK ──────────────────────────────────────────
+        //
+        // `create_dir` 0750 ile yaratıp verilen uid'e chown ediyor. Ajan burada paylaşımın
+        // kullanıcısını bilmiyor, ve root olarak yaratılan bir klasöre `recycle` modülü —
+        // BAĞLANAN KULLANICININ kimliğiyle koşuyor — yazamaz. Sahada bir kez tam olarak bu oldu:
+        // depo `.depsis` altındaydı, kullanıcı giremiyordu, ve modül sessizce sıradan bir silmeye
+        // düşüyordu.
+        //
+        // Klasörü Samba'nın kendisi kuruyor: kullanıcının kimliğiyle, paylaşımın kendi ACL'leriyle,
+        // yani kullanıcının kendi yarattığı herhangi bir klasör gibi. Buradaki iş, o klasör
+        // varken NÖBETÇİYİ koymak — veto'lu bir dosya taşıyan dizin silinemiyor.
+        if paths.list_entries(&[share, BIN_DIR_WAS]).is_ok()
+            && paths.list_entries(&[share, BIN_DIR]).is_err()
+        {
+            // Ad iki kez değişti; her değişiklik öncekinin içindekilerini görünmez bir yerde
+            // bırakırdı.
+            let _ = paths.publish(&[share], BIN_DIR_WAS, &[share], BIN_DIR);
+        }
+        if paths.list_entries(&[share, BIN_DIR]).is_ok() {
+            // EN İYİ ÇABA: zaten varsa `AlreadyExists`, ve o da bir başarı.
+            let _ = paths.open(&[share, BIN_DIR, BIN_KEEP], OpenIntent::CreateNew);
+        }
+    }
+
+    /// Çöp kutusu bu kapının DIŞINDA ve öyle olmalı: içinde duran şey
     /// kullanıcının kendi dosyası, ağdan silindiği için Samba'nın taşıdığı hâli. Geri getirmek bir
     /// taşıma, kalıcı silmek bir silme — ikisi de tam olarak bu iki işlemin yaptığı şey, ve kapı
     /// ona kapalı olsaydı çöp kutusu görüntüden ibaret kalırdı.
@@ -2078,10 +2125,14 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 // filtered here as well as refused above, because the share ROOT's listing would
                 // otherwise report it as an ordinary folder for DEPSIS to create a row for.
                 //
-                // `.depsis-cop` aynı sebeple ve bir tane daha: içindekiler kullanıcının SİLDİĞİ
+                // Çöp kutusu aynı sebeple ve bir tane daha: içindekiler kullanıcının SİLDİĞİ
                 // dosyalar. Kökün listesinde görünseydi dizin onlara satır yazar, ve silinen her
                 // dosya dosya ağacında ikinci bir kopya olarak geri gelirdi.
-                if path.is_empty() && (entry.name == STAGING_DIR[0] || entry.name == BIN_DIR) {
+                if path.is_empty()
+                    && (entry.name == STAGING_DIR[0]
+                        || entry.name == BIN_DIR
+                        || entry.name == BIN_DIR_WAS)
+                {
                     return None;
                 }
                 Some(DirEntry {
@@ -4538,6 +4589,17 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 // Anything else, the failed rollback above all, is an error: it must be audited
                 // as a failure, because it is the one outcome that leaves the box worse than it
                 // was found.
+                // ── ÇÖP KUTUSU İSKELETİ, YAYIMDAN ÖNCE ──────────────────────────────────
+                //
+                // Klasörü Samba'nın `recycle` modülü ilk silmede kendisi kuruyor, ama nöbetçi
+                // dosyayı kuramaz — ve nöbetçi olmadan klasör silinebilir bir klasör. Burada
+                // kurulması ayrıca eski adı taşıyanları da taşıyor: depo bir kez `.depsis/bin`,
+                // bir kez `.depsis-cop` oldu, ve her ad değişikliği öncekinin içindekileri
+                // görünmez bir yerde bırakırdı.
+                for share in shares {
+                    self.ensure_bin(share.name.as_str());
+                }
+
                 let config = crate::samba::config_path();
                 let host = crate::samba::Host::new(self.runner);
                 match crate::samba::publish(&config, shares, &host) {
@@ -9050,7 +9112,7 @@ mod tests {
     fn the_bin_is_reachable_and_hidden_but_the_agents_tree_is_not() {
         // ── ÇÖP KUTUSU KAPININ DIŞINDA, AMA LİSTEDE DE DEĞİL ────────────────────────────────
         //
-        // Ağdan silinen dosya Samba'nın `recycle` modülüyle `.depsis-cop` altına taşınıyor.
+        // Ağdan silinen dosya Samba'nın `recycle` modülüyle çöp kutusu klasörüne taşınıyor.
         // "Geri al" bir taşıma, "kalıcı sil" bir silme — ikisi de tam olarak `MoveEntry` ve
         // `RemoveEntry`, ve kapı kapalı olsaydı çöp kutusu görüntüden ibaret olurdu.
         //
@@ -9059,9 +9121,10 @@ mod tests {
         let h = Harness::with_share("alice");
         let r = MockCommandRunner::default();
         let s = MemorySink::default();
-        std::fs::create_dir_all(h.share_path(&["alice", ".depsis-cop", "belgeler"])).expect("bin");
+        std::fs::create_dir_all(h.share_path(&["alice", "DEPSIS Çöp Kutusu", "belgeler"]))
+            .expect("bin");
         std::fs::write(
-            h.share_path(&["alice", ".depsis-cop", "belgeler", "rapor.txt"]),
+            h.share_path(&["alice", "DEPSIS Çöp Kutusu", "belgeler", "rapor.txt"]),
             b"silinmis",
         )
         .expect("write");
@@ -9074,14 +9137,14 @@ mod tests {
             "list",
         ) {
             Response::Listing { entries, .. } => assert!(
-                entries.iter().all(|e| e.name.as_str() != ".depsis-cop"),
+                entries.iter().all(|e| e.name.as_str() != "DEPSIS Çöp Kutusu"),
                 "got {entries:?}"
             ),
             other => panic!("expected a listing, got {other:?}"),
         }
 
         // Geri getirme: çöp kutusundan kendi yerine.
-        let back = r#"{"op":"move_entry","share":"alice","from":[".depsis-cop","belgeler","rapor.txt"],"to":["rapor.txt"]}"#;
+        let back = r#"{"op":"move_entry","share":"alice","from":["DEPSIS Çöp Kutusu","belgeler","rapor.txt"],"to":["rapor.txt"]}"#;
         match h
             .agent(&r, &s)
             .handle(back, peer(API_UID), "c-bin1", "restore")

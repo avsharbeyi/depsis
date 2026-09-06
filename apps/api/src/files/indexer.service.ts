@@ -11,13 +11,13 @@ export interface ReconcilePayload {
 
 /** What a pass found. */
 /**
- * Ağdan silinen dosyaların indiği yer, paylaşıma göre: `.depsis-cop/<özgün yol>`.
+ * Ağdan silinen dosyaların indiği yer, paylaşıma göre: `DEPSIS Çöp Kutusu/<özgün yol>`.
  *
  * Samba'nın `recycle` modülü ağacı koruyarak taşıyor (`keeptree = yes`, `versions = no`), yani
  * çöpteki bir satırın diskteki karşılığı KENDİ YOLUNDAN türetilebiliyor — ikinci bir sütun, ikinci
  * bir kayıt ve ikisinin ayrışması yok.
  */
-const BIN = ['.depsis-cop'] as const;
+const BIN = ['DEPSIS Çöp Kutusu'] as const;
 
 export interface ReconcileResult {
   /** Rows written for things on disk that DEPSIS did not know about. */
@@ -30,6 +30,8 @@ export interface ReconcileResult {
   truncated: number;
   /** Directories visited. */
   scanned: number;
+  /** Çöp kutusundan elle geri konduğu için çöpten çıkarılan satırlar. */
+  restored: number;
   /**
    * Ağdan silinip ÇÖP KUTUSUNA taşınan satırlar.
    *
@@ -47,6 +49,8 @@ interface Row {
   size_bytes: string;
   updated_at: Date;
   trashed: boolean;
+  /** Çöpe ağ sürücüsünden mi girdi: baytları çöp kutusu klasöründe. */
+  recycled: boolean;
 }
 
 export const RECONCILE_KIND = 'files.reconcile';
@@ -207,6 +211,7 @@ export class IndexerService implements OnModuleInit {
       truncated: 0,
       scanned: 0,
       binned: 0,
+      restored: 0,
     };
 
     // ── YÜRÜYÜŞ KALDIĞI YERDEN DEVAM EDİYOR ─────────────────────────────────────────────
@@ -312,7 +317,7 @@ export class IndexerService implements OnModuleInit {
         // The folder is in the database and not on disk. Its row goes — along with everything
         // under it, because a subtree whose root is absent is absent.
         //
-        // ÖNCE ÇÖP KUTUSUNA BAKILIYOR: ağdan silinen bir klasör yok olmuyor, `.depsis-cop` altına
+        // ÖNCE ÇÖP KUTUSUNA BAKILIYOR: ağdan silinen bir klasör yok olmuyor, `DEPSIS Çöp Kutusu` altına
         // taşınıyor. Satırı silmek, kullanıcının geri getirebileceği bir şeyi geri getirilemez
         // ilan etmek olurdu.
         if (folder.id !== null) {
@@ -497,6 +502,29 @@ export class IndexerService implements OnModuleInit {
       // not refreshed, and not descended into, because everything under it is in the bin as well.
       if (row.trashed) {
         if (found !== undefined) onDisk.delete(row.name);
+        // ── ÇÖPTE OLMANIN İKİ AYRI HÂLİ ────────────────────────────────────────────────────
+        //
+        // DEPSIS'ten çöpe atılmış bir satırın dosyası KENDİ YERİNDE duruyor — çöp bir sütun,
+        // bir klasör değil — ve buradan ona dokunulmuyor.
+        //
+        // Ağdan silinmiş bir satırın (`recycled`) dosyası ise çöp kutusu klasöründe. Onun için
+        // iki soru daha var, ve ikisi de kullanıcının Dosya Gezgini'nde yapabileceği şeyler:
+        // dosyayı çöp kutusundan çıkarıp yerine koymuş olabilir, ya da çöp kutusunu boşaltmış
+        // olabilir.
+        if (!row.recycled) continue;
+        if (found !== undefined) {
+          // Yerine geri konmuş: satır da çöpten çıkıyor. Yoksa aynı dosya hem klasörde hem
+          // çöpte görünürdü.
+          result.restored += await this.backFromTheBin(organizationId, row.id);
+          continue;
+        }
+        // Kırpılmış bir listeleme, görmediği adlar hakkında hiçbir şey söylemiyor.
+        if (listing.truncated) continue;
+        if (!(await recycled(row.name))) {
+          // Ne yerinde ne çöp kutusunda: kullanıcı çöpü Gezgin'den boşaltmış. Geri getirilecek
+          // bir şey kalmadı, ve listede tutmak "geri al" düğmesini yalancı yapardı.
+          result.removed += await this.forget(organizationId, row.id);
+        }
         continue;
       }
 
@@ -508,7 +536,7 @@ export class IndexerService implements OnModuleInit {
         // ── ÇÖP KUTUSU ÖNCE ────────────────────────────────────────────────────────────────
         //
         // Ağ sürücüsünden silinen bir dosya artık yok olmuyor: Samba'nın `recycle` modülü onu
-        // `.depsis-cop` altına, aynı ağaç yapısıyla taşıyor. Satırı silmek, kullanıcının geri
+        // `DEPSIS Çöp Kutusu` altına, aynı ağaç yapısıyla taşıyor. Satırı silmek, kullanıcının geri
         // getirebileceği bir dosyayı "hiç olmamış" ilan etmek olurdu — ve sahibinin sorduğu şey
         // tam olarak buydu: *"dosya gezgininden silinen öğeler çöp kutusuna gitmiyor?"*
         if (await recycled(row.name)) {
@@ -570,6 +598,7 @@ export class IndexerService implements OnModuleInit {
       truncated: 0,
       scanned: 1,
       binned: 0,
+      restored: 0,
     };
 
     const folder = await this.folderAt(organizationId, shareId, components);
@@ -800,13 +829,33 @@ export class IndexerService implements OnModuleInit {
     return this.db.withTenant(organizationId, (q) =>
       q.query<Row>(
         `SELECT id::text AS id, name, kind, size_bytes::text AS size_bytes, updated_at,
-                (trashed_at IS NOT NULL) AS trashed
+                (trashed_at IS NOT NULL) AS trashed, recycled
            FROM public.file_entries
           WHERE organization_id = $1 AND share_id = $2
             AND parent_id IS NOT DISTINCT FROM $3`,
         [organizationId, shareId, parentId],
       ),
     );
+  }
+
+  /**
+   * Ağdan silinmiş bir satırı çöpten ÇIKAR.
+   *
+   * Kullanıcı dosyayı Dosya Gezgini'nden çöp kutusu klasöründen çıkarıp yerine koydu: DEPSIS'in
+   * de aynı şeyi söylemesi gerekiyor. Söylemezse aynı dosya hem klasörde hem çöpte görünür — ve
+   * çöpteki satır artık var olmayan baytlara işaret ediyor olurdu.
+   */
+  private async backFromTheBin(organizationId: string, id: string): Promise<number> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ id: string }>(
+        `UPDATE public.file_entries
+            SET trashed_at = NULL, trashed_by = NULL, recycled = false
+          WHERE organization_id = $1 AND id = $2 AND recycled
+        RETURNING id::text AS id`,
+        [organizationId, id],
+      ),
+    );
+    return rows.length;
   }
 
   /** Write a row for something the disk has and the database did not. Returns its id. */
@@ -936,7 +985,7 @@ export class IndexerService implements OnModuleInit {
             WHERE child.organization_id = $1
          )
          UPDATE public.file_entries AS target
-            SET trashed_at = now(), trashed_by = NULL
+            SET trashed_at = now(), trashed_by = NULL, recycled = true
            FROM tree
           WHERE target.organization_id = $1
             AND target.id = tree.id
