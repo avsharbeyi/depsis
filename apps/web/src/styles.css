@@ -3281,23 +3281,15 @@ label textarea,
    `ConfirmBox` iki cevaplı bir soru soruyor — evet ve hayır — ve burada üç cevap var. Bileşene
    üçüncü bir düğme eklemek onu her çağıran için karmaşıklaştırırdı; bu şerit yalnız bu tek yerde
    duruyor ve kutunun hemen üstüne oturuyor. */
-.clashalt {
-  position: fixed;
-  inset: auto 0 calc(50% - 118px) 0;
-  z-index: 61;
+/* Kutunun düğme satırının altına giren serbest içerik — "kalan N dosyaya da uygula" gibi.
+   Kutunun İÇİNDE, çünkü ekrana sabitlenmiş ayrı bir şerit kutu bir satır uzayınca onun kendi
+   düğmelerinin üstüne biniyordu. */
+.cffoot {
   display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  pointer-events: none;
-}
-.clashalt .b {
-  pointer-events: auto;
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 
-/* "Kalan N dosyaya da uygula": kararı kuyruğun tamamına yayan onay kutusu. Düğmenin yanında ve
-   ondan sonra okunuyor — önce ne yapılacağı, sonra kaç dosyaya. */
 .clashall {
   pointer-events: auto;
   display: flex;

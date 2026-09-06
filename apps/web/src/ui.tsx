@@ -338,6 +338,8 @@ export function ConfirmBox({
   body,
   list,
   yesLabel,
+  extras,
+  footer,
   danger,
   onYes,
   onNo,
@@ -346,6 +348,20 @@ export function ConfirmBox({
   body: string;
   list?: string[];
   yesLabel: string;
+  /**
+   * İKİDEN FAZLA CEVABI OLAN SORULAR, ve neden kutunun kendi içinde.
+   *
+   * Ad çakışmasının üç cevabı var — atla, ikisini de tut, değiştir — ve bunlar bir süre kutunun
+   * ALTINA, ekrana sabitlenmiş ayrı bir şeritte çiziliyordu (`position: fixed`, kutunun o günkü
+   * yüksekliğine göre ayarlanmış bir kaçıklıkla). Kutu bir satır uzayınca şerit kutunun kendi
+   * düğmelerinin üstüne biniyor ve "Atla"ya basılamıyordu; e2e bunu yakaladı.
+   *
+   * Düğmeler artık aynı satırda ve aynı akışta: kutu ne kadar uzarsa uzasın, üst üste binecek
+   * bir şey yok.
+   */
+  extras?: { label: string; onClick: () => void }[];
+  /** Düğmelerin altına giren serbest içerik — "kalan N dosyaya da uygula" gibi. */
+  footer?: React.ReactNode;
   danger?: boolean;
   onYes: () => void;
   onNo: () => void;
@@ -399,6 +415,11 @@ export function ConfirmBox({
           >
             Vazgeç
           </button>
+          {extras?.map((extra) => (
+            <button key={extra.label} type="button" className="no" onClick={extra.onClick}>
+              {extra.label}
+            </button>
+          ))}
           <button
             type="button"
             className="yes"
@@ -408,6 +429,7 @@ export function ConfirmBox({
             {yesLabel}
           </button>
         </div>
+        {footer !== undefined && <div className="cffoot">{footer}</div>}
       </div>
     </div>
   );

@@ -1853,7 +1853,39 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Yuklemeden vazgec
+         * @description Ara alandaki baytlari siler ve oturumu kapatir. Yayimlanmis bir yukleme icin 409 —
+         *     vazgecilecek bir sey kalmamistir.
+         *
+         *     NEDEN VAR: ayni dosyayi yeniden yukleyen biri icin dogru cevap "ikisini de tut" degil.
+         *     Sahada olculdu — cevap bekleyen 233 yuklemenin 220'sinin adini AYNI BOYUTTA bir dosya
+         *     tutuyordu, yani hepsi ayni dosyanin ikinci kopyasiydi. Bu ucu olmadan tek cikis yol 220
+         *     tane "(2)" kopyasi uretmekti.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    uploadId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Vazgecildi */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                503: components["responses"]["Problem"];
+            };
+        };
         options?: never;
         /** Kaldığı yeri sor (tus HEAD) */
         head: {
@@ -7884,6 +7916,18 @@ export interface components {
             createdAt: string;
             /** Format: date-time */
             updatedAt: string;
+            /**
+             * @description Hedef klasorde AYNI ADDA ve AYNI BOYUTTA bir dosya duruyor mu.
+             *
+             *     Ayni dosyanin ikinci kez yuklenmesi ile gercekten farkli bir dosyanin ayni adi
+             *     istemesi, kullanicinin verecegi karari degistiriyor: birincisinde dogru cevap
+             *     "vazgec", ikincisinde "ikisini de tut". Ekranin bunu SOYLEMEDEN sormasi, sahada 220
+             *     gereksiz "(2)" kopyasi uretecek bir soru demekti.
+             *
+             *     Boyut esitligi bir kanit degil, bir isaret — ve cumle de oyle kuruluyor. Icerigi
+             *     karsilastirmak iki dosyayi bastan sona okumak olurdu.
+             */
+            duplicate: boolean;
         };
         TransferPage: {
             items: components["schemas"]["Transfer"][];

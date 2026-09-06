@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ConflictException,
   Controller,
+  Delete,
   Head,
   Headers,
   HttpCode,
@@ -125,6 +126,64 @@ export class UploadsController {
    * düşerse park GERİ ALINIYOR: satır çöpten çıkarılıp eski adına döndürülüyor, ve kullanıcının
    * gördüğü cümle yalnız yayımın neden düştüğü.
    */
+  /**
+   * Bir yüklemeden vazgeç: ara alandaki baytları sil, oturumu kapat.
+   *
+   * ── NEDEN ÜÇÜNCÜ BİR SEÇENEK GEREKLİ ────────────────────────────────────────────────────
+   *
+   * Ad çakışmasının iki cevabı vardı: "ikisini de tut" ve "değiştir". İkisi de yeni baytların
+   * saklanacağını varsayıyor. Ama sahada ölçtüğüm şey başka: cevap bekleyen 233 yüklemenin
+   * 220'sinin adını AYNI BOYUTTA bir dosya tutuyordu — hepsi, kullanıcının aynı fotoğrafları
+   * ikinci (ve beşinci) kez yüklemesiydi. O 220 dosya için doğru cevap ne kopya üretmek ne de
+   * var olanı çöpe atmak; hiçbir şey yapmamak.
+   *
+   * AYRI BİR UÇ, `resolve`a eklenen bir politika değil: `resolve` bir dosya satırı döndürüyor ve
+   * vazgeçmenin döndüreceği bir satır yok.
+   *
+   * Ajanın "zaten yoktu" cevabı da başarı sayılıyor: süpürücü ara dosyaları yaşa göre siliyor
+   * (`sweep.rs`), yani baytları çoktan gitmiş bir oturumu kapatmak tam olarak bu ucun işi.
+   */
+  @Delete(':uploadId')
+  @HttpCode(204)
+  async cancel(@Req() request: AuthenticatedRequest, @Param('uploadId') id: string): Promise<void> {
+    const session = requireSession(request);
+    const upload = await this.loadSession(session.organizationId, session.userId, id);
+    if (upload.file_id !== null) {
+      throw new ProblemException('conflict', 'bu yükleme zaten tamamlandı');
+    }
+
+    const share = await this.files
+      .shareFor(session.organizationId, upload.share_id)
+      .catch((error: unknown) => {
+        throw translate(error);
+      });
+
+    const correlationId = randomUUID();
+    const discarded = await this.agent
+      .call(
+        { op: 'discard_transfer', share: share.name, staging_name: upload.staging_name },
+        `cancelling the upload of ${upload.filename}`,
+        correlationId,
+      )
+      .catch(() => ({ status: 'unreachable' }) as const);
+    // `discarded` ARA DOSYA YOKKEN DE geliyor (`existed: false`), ve bu bir başarı: kapatılacak
+    // olan oturum kaydı, ve silinecek bayt zaten yok. Başka bir cevap gerçek bir aksaklık —
+    // satırı silmek, kimsenin bir daha bakmayacağı bir dosyayı diskte bırakmak olurdu.
+    if (discarded.status !== 'discarded') {
+      throw new ProblemException(
+        'dependency-unavailable',
+        'Yüklemeden vazgeçilemedi; ara alandaki dosya silinemedi.',
+      );
+    }
+
+    await this.db.withTenant(session.organizationId, (db) =>
+      db.query(`DELETE FROM public.upload_sessions WHERE organization_id = $1 AND id = $2`, [
+        session.organizationId,
+        upload.id,
+      ]),
+    );
+  }
+
   @Post(':uploadId/resolve')
   @HttpCode(200)
   async resolve(
