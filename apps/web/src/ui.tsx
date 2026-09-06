@@ -403,23 +403,24 @@ export function ConfirmBox({
             ))}
           </div>
         )}
-        <div className="row">
+        {/* ── ÜÇTEN FAZLA CEVAP VARSA ALT ALTA ──────────────────────────────────────────
+            İki düğme yan yana okunur; dört düğme dar bir ekranda birbirine girer ve hangisinin ne
+            yaptığı okunmadan basılır. Ek seçenek varken sütun düzeni: önce yapılacak şeyler,
+            en altta vazgeçmek. */}
+        <div className={extras === undefined || extras.length === 0 ? 'row' : 'row stack'}>
           {/* On a destructive question the safe answer takes the focus, so a stray Enter cancels
               rather than deletes. On an ordinary one the affirmative does, because that is what
               the reader opened the box to press. */}
-          <button
-            type="button"
-            className="no"
-            onClick={onNo}
-            ref={danger === true ? focusRef : null}
-          >
-            Vazgeç
-          </button>
-          {extras?.map((extra) => (
-            <button key={extra.label} type="button" className="no" onClick={extra.onClick}>
-              {extra.label}
+          {(extras === undefined || extras.length === 0) && (
+            <button
+              type="button"
+              className="no"
+              onClick={onNo}
+              ref={danger === true ? focusRef : null}
+            >
+              Vazgeç
             </button>
-          ))}
+          )}
           <button
             type="button"
             className="yes"
@@ -428,6 +429,16 @@ export function ConfirmBox({
           >
             {yesLabel}
           </button>
+          {extras?.map((extra) => (
+            <button key={extra.label} type="button" className="no" onClick={extra.onClick}>
+              {extra.label}
+            </button>
+          ))}
+          {extras !== undefined && extras.length > 0 && (
+            <button type="button" className="no" onClick={onNo}>
+              Vazgeç
+            </button>
+          )}
         </div>
         {footer !== undefined && <div className="cffoot">{footer}</div>}
       </div>

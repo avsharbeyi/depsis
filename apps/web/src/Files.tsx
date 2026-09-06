@@ -2494,7 +2494,9 @@ export function Files({
           orada sütun diye bir şey yok. */}
       {!trashed && !searching && layout === 'list' && (
         <div className="fhead">
-          <span className="pad" aria-hidden />
+          {/* Boşluk kutusu YALNIZ SEÇİM KİPİNDE: satırdaki onay kutusu da yalnız o kipte var, ve
+              kipsizken burada duran 24 piksel bütün başlıkları sütunlarının sağına itiyordu. */}
+          {picking && <span className="pad" aria-hidden />}
           <SortHead label="Tür" sort="type" active={order} dir={dir} onPick={pickSort} narrow />
           <SortHead label="Ad" sort="name" active={order} dir={dir} onPick={pickSort} grow />
           <SortHead
@@ -2513,6 +2515,10 @@ export function Files({
             onPick={pickSort}
             cell="dt"
           />
+          {/* Satırın sonundaki eylem düğmelerinin kapladığı yer. Sabit genişlikte (`--acts`),
+              yani boyut ve tarih sütunları her satırda aynı yerde duruyor — ve başlık da onların
+              üstünde. */}
+          <span className="pad acts" aria-hidden />
         </div>
       )}
 
