@@ -70,8 +70,12 @@ describeDb('sorting a folder', () => {
   let typed = '';
 
   /** The names in the order the given sort should produce them. */
-  const namesIn = async (sort: SortOrder, limit = 50): Promise<string[]> => {
-    const page = await files.list(org, share, null, null, limit, sort);
+  const namesIn = async (
+    sort: SortOrder,
+    direction?: 'asc' | 'desc',
+    limit = 50,
+  ): Promise<string[]> => {
+    const page = await files.list(org, share, null, null, limit, sort, direction);
     return page.items.map((row) => row.name);
   };
 
@@ -242,9 +246,27 @@ describeDb('sorting a folder', () => {
   it('sorts by size, largest first', async () => {
     const names = await namesIn('size');
     expect(names.slice(0, 3)).toEqual(['a.bin', 'c.bin', 'b.bin']);
-    // The two folders are both 0 bytes, so `id DESC` decides between them and the ids are random.
-    // Asserting a fixed order there would be asserting the uuid generator's output.
-    expect(names.slice(3).sort()).toEqual(['alfa', 'tipler', 'zeta']);
+    // ── EŞİT BOYUTLAR ALFABETİK ─────────────────────────────────────────────────────────
+    //
+    // Üç klasörün üçü de 0 bayt — bir klasörün `size_bytes`i her zaman 0 — ve aralarındaki
+    // sırayı eskiden `id` belirliyordu, yani doğuş sırası. Sahibinin paylaşım kökünde 20.249
+    // klasör var ve hiç dosya yok: "boyuta göre sırala" dendiğinde ekrana gelen şey rastgele
+    // dizilmiş yirmi bin satırdı, ve okunan şey "sıralama çalışmıyor" oluyordu.
+    //
+    // Sıra artık ada göre, ve YÖN NE OLURSA OLSUN artan: "en büyük önce" diyen biri, aynı
+    // boyuttakilerin ters alfabetik dizilmesini istemiyor.
+    expect(names.slice(3)).toEqual(['alfa', 'tipler', 'zeta']);
+  });
+
+  it('boyutta eşitliği ad bozuyor — azalan yönde de artan', async () => {
+    // Karışık yönlü imlecin ölçüldüğü yer: birincil anahtar azalan, eşitliği bozan ad artan.
+    // Tek bir satır-değeri karşılaştırması bunu yazamıyor, ve `by` ile `after` ayrışsaydı sayfa
+    // sınırında bir satır tekrarlanır ya da düşerdi.
+    const ascending = await namesIn('size', 'asc');
+    // Artan yönde de klasörler kendi aralarında alfabetik.
+    expect(ascending.slice(3)).toEqual(['alfa', 'tipler', 'zeta']);
+    // Ve dosyalar gerçekten küçükten büyüğe.
+    expect(ascending.slice(0, 3)).toEqual(['b.bin', 'c.bin', 'a.bin']);
   });
 
   it('pages every sort without repeating or skipping a row', async () => {
@@ -252,19 +274,24 @@ describeDb('sorting a folder', () => {
     // row's sort key and compares a row value against it; if `keys`, `after` and `by` ever stop
     // agreeing, a page boundary silently repeats or drops a row — which is exactly the failure
     // cursor pagination was chosen over offset pagination to avoid.
+    // İKİ YÖN DE: eşitliği bozan sütun yönle dönmüyor, yani imleç KARIŞIK yönlü bir zincir. O
+    // zincir `by` ile ayrışırsa bozulma tam da sayfa sınırında ortaya çıkıyor — ve yalnız bir
+    // yönü denemek, ayrışmanın yarısını hiç görmemek olurdu.
     for (const sort of ['name', 'type', 'modified', 'size'] as const) {
-      const whole = await namesIn(sort);
+      for (const direction of ['asc', 'desc'] as const) {
+        const whole = await namesIn(sort, direction);
 
-      const collected: string[] = [];
-      let cursor: string | null = null;
-      for (let guard = 0; guard < 10; guard += 1) {
-        const page = await files.list(org, share, null, cursor, 2, sort);
-        collected.push(...page.items.map((row) => row.name));
-        cursor = page.nextCursor;
-        if (cursor === null) break;
+        const collected: string[] = [];
+        let cursor: string | null = null;
+        for (let guard = 0; guard < 10; guard += 1) {
+          const page = await files.list(org, share, null, cursor, 2, sort, direction);
+          collected.push(...page.items.map((row) => row.name));
+          cursor = page.nextCursor;
+          if (cursor === null) break;
+        }
+
+        expect(collected, `paging by ${sort} ${direction}`).toEqual(whole);
       }
-
-      expect(collected, `paging by ${sort}`).toEqual(whole);
     }
   });
 

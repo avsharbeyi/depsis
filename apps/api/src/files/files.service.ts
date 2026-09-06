@@ -578,43 +578,80 @@ const DEFAULT_DIRECTION: Readonly<Record<SortOrder, SortDirection>> = {
 /**
  * Bir sıralamanın iki parçası: `by` sırayı üretir, `after` imleçten sonrasını seçer.
  *
- * ── KİND HER ZAMAN ARTAN, YÖN NE OLURSA OLSUN ───────────────────────────────────────────────
+ * ── KİND HER ZAMAN İLK ANAHTAR ──────────────────────────────────────────────────────────────
  *
- * Klasörler ve dosyalar hiçbir sırada birbirine karışmıyor, ve bu yönle birlikte dönmüyor: "tersten
- * sırala" diyen biri klasörlerin listenin ortasına dağılmasını istemiyor, adların tersten
- * dizilmesini istiyor. Bu yüzden `kind` daima ilk anahtar ve daima artan.
+ * Klasörler ve dosyalar hiçbir sırada birbirine karışmıyor, ve bu yönle birlikte dönmüyor:
+ * "tersten sırala" diyen biri klasörlerin listenin ortasına dağılmasını istemiyor, adların
+ * tersten dizilmesini istiyor. `kind` bir metin sütunu ve `'file' < 'folder'`, yani önce dosyalar.
  *
- * ── TEK BİÇİM, İKİ YÖN ──────────────────────────────────────────────────────────────────────
+ * ── EŞİTLİĞİ AD BOZUYOR, `id` DEĞİL ─────────────────────────────────────────────────────────
  *
- * `after` her zaman "önce kind, sonra geri kalanı tek bir satır-değeri karşılaştırması" biçiminde
- * yazılıyor. Artan sıralamalar eskiden `kind`i de tuple'ın içine alıyordu ve o hâl doğruydu —
- * ama yalnız her anahtar aynı yöne gittiği sürece. Yön bir seçenek olunca o kısayol iki koda
- * bölünürdü, ve `after` ile `by`nin ayrı yerlerde yazılması tam olarak imlecin kendi sırasıyla
- * uyumsuz kalma biçimi. Tek biçim, iki yön: karşılaştırma operatörü dışında hiçbir şey değişmiyor.
+ * Sahibinin şikâyeti: *"boyut ad tarih kısmı düzgün çalışmıyor, bilhassa boyut kısmı hatalı."*
+ * Ölçtüm, ve sıralamanın kendisi doğruydu — görünen şey yanlıştı.
  *
- * `id` her üçünü de kapatıyor: aynı milisaniyede değişen ya da aynı sayıda bayt taşıyan iki dosya
- * sıradan, ve eşitlik bozulmadığında imleç bir grubun ortasına düşüp sonraki sayfayı rastgele
- * yapar.
+ * Bir klasörün `size_bytes`i her zaman 0: satırın kendi boyutu ile içindekilerin toplamı farklı
+ * iki şey. Sahibinin paylaşım kökünde 20.249 klasör var ve hiç dosya yok, yani "boyuta göre
+ * sırala" dendiğinde ekrana gelen şey hepsi 0 bayt olan yirmi bin satır. Aralarındaki sırayı da
+ * `id` belirliyordu — uuidv7, yani doğuş sırası — ve ekranda okunan şey rastgele bir listeydi.
+ *
+ * Artık eşitliği AD bozuyor: aynı boyuttaki satırlar alfabetik, aynı tarihtekiler alfabetik.
+ * `id` en sonda ve yalnız eşitliği kapatmak için — kapanmazsa imleç bir grubun ortasına düşüp
+ * sonraki sayfayı rastgele yapıyor.
+ *
+ * Klasörleri kendi içerik toplamlarıyla sıralamak "doğru" cevap olurdu ama bir liste sorgusunun
+ * yapabileceği bir iş değil: toplam her satır için ayrı bir alt ağaç taraması, ve sıralamak onu
+ * SATIRLARIN TAMAMI için hesaplamak demek.
+ *
+ * ── KARIŞIK YÖNLÜ İMLEÇ ─────────────────────────────────────────────────────────────────────
+ *
+ * Eşitliği bozan ad, yön ne olursa olsun ARTAN: "en büyük önce" diyen biri, aynı boyuttakilerin
+ * ters alfabetik dizilmesini istemiyor. Bunun bedeli, imlecin tek bir satır-değeri
+ * karşılaştırmasıyla (`(a,b,id) < (ca,cb,cid)`) yazılamaması — o biçim bütün sütunların aynı yöne
+ * gitmesini gerektiriyor. Yerine zincir: her sütun, kendinden öncekilerin eşit olduğu durumda
+ * konuşuyor. `by` ile `after` aynı listeden üretiliyor, yani ikisinin ayrışması mümkün değil.
  */
 function sortFragments(sort: SortOrder, direction: SortDirection): { after: string; by: string } {
-  const keys: Readonly<Record<SortOrder, { cols: string[]; cursor: string[] }>> = {
-    name: { cols: ['name_fold'], cursor: ['c_name_fold'] },
-    // Aynı uzantılı dosyalar bir arada, her uzantının içinde alfabetik: bir klasörde otuz `.jpg`
-    // varken onları rastgele bir sırada göstermek, türe göre sıralamanın çözdüğü sorunu bir kat
-    // aşağıda yeniden yaratırdı.
-    type: { cols: [EXT, 'name_fold'], cursor: [CUR_EXT, 'c_name_fold'] },
-    modified: { cols: ['updated_at'], cursor: ['c_updated_at'] },
-    size: { cols: ['size_bytes'], cursor: ['c_size_bytes'] },
-  };
-  const { cols, cursor } = keys[sort];
+  /**
+   * Anahtarın sütunları: ilki yönle döner, EŞİTLİĞİ BOZANLAR HER ZAMAN ARTAN.
+   *
+   * Boyutu aynı olan satırlar arasında sıra ada göre — ve "azalan" seçildiğinde de ada göre
+   * artan. İkisini birlikte çevirmek, sahibinin gördüğü şeyi bir kat daha kötü yapardı: yirmi bin
+   * klasör bu kez ters alfabetik.
+   */
+  const keys: Readonly<Record<SortOrder, { col: string; cur: string; then: [string, string][] }>> =
+    {
+      name: { col: 'name_fold', cur: 'c_name_fold', then: [] },
+      // Aynı uzantılı dosyalar bir arada, her uzantının içinde alfabetik: bir klasörde otuz `.jpg`
+      // varken onları rastgele bir sırada göstermek, türe göre sıralamanın çözdüğü sorunu bir kat
+      // aşağıda yeniden yaratırdı.
+      type: { col: EXT, cur: CUR_EXT, then: [['name_fold', 'c_name_fold']] },
+      modified: { col: 'updated_at', cur: 'c_updated_at', then: [['name_fold', 'c_name_fold']] },
+      size: { col: 'size_bytes', cur: 'c_size_bytes', then: [['name_fold', 'c_name_fold']] },
+    };
+  const key = keys[sort];
   const descending = direction === 'desc';
-  const operator = descending ? '<' : '>';
-  const suffix = descending ? ' DESC' : '';
-  const tuple = `(${[...cols, 'id'].join(', ')})`;
-  const cursorTuple = `(${[...cursor, 'c_id'].join(', ')})`;
+  // Sıradaki her sütun, bir öncekilerin EŞİT olduğu durumda konuşuyor. Karışık yönlü bir imleç
+  // tek bir satır-değeri karşılaştırmasıyla yazılamıyor — o biçim bütün sütunların aynı yöne
+  // gitmesini gerektiriyor — ve zincir de tam olarak onun karışık yönlü hâli.
+  const chain: { col: string; cur: string; desc: boolean }[] = [
+    { col: key.col, cur: key.cur, desc: descending },
+    ...key.then.map(([col, cur]) => ({ col, cur, desc: false })),
+    // `id` en sonda ve daima artan: aynı milisaniyede değişen, aynı sayıda bayt taşıyan ve aynı
+    // adı taşıyamayan iki satır kalmıyor, ama eşitlik yine de kapanmalı — kapanmazsa imleç bir
+    // grubun ortasına düşüp sonraki sayfayı rastgele yapıyor.
+    { col: 'id', cur: 'c_id', desc: false },
+  ];
+
+  const equal: string[] = [];
+  const branches: string[] = [];
+  for (const step of chain) {
+    branches.push([...equal, `${step.col} ${step.desc ? '<' : '>'} ${step.cur}`].join(' AND '));
+    equal.push(`${step.col} = ${step.cur}`);
+  }
+
   return {
-    after: `kind > c_kind OR (kind = c_kind AND ${tuple} ${operator} ${cursorTuple})`,
-    by: `kind, ${cols.map((c) => c + suffix).join(', ')}, id${suffix}`,
+    after: `kind > c_kind OR (kind = c_kind AND (${branches.map((b) => `(${b})`).join(' OR ')}))`,
+    by: `kind, ${chain.map((step) => step.col + (step.desc ? ' DESC' : '')).join(', ')}`,
   };
 }
 
