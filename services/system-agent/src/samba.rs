@@ -448,7 +448,36 @@ pub fn render(sections: &[Section]) -> String {
         // ADR-0004 makes the POSIX ACL the one enforced substrate, and `acl_xattr` would have
         // Samba store NT ACLs in xattrs beside it — a second answer to who may read a file. That
         // is an ADR-0004 decision, not something to acquire as a side effect of adding auditing.
-        out.push_str("\tvfs objects = full_audit\n");
+        // ── AĞDAN SİLİNEN DOSYA ÇÖP KUTUSUNA GİDİYOR ────────────────────────────────────
+        //
+        // Sahibinin sözü: *"dosya gezgininden silinen öğeler çöp kutusuna gitmiyor."* Gitmiyordu:
+        // DEPSIS'in çöp kutusu satıra yazılan bir damga, Samba ise dosyayı gerçekten unlink
+        // ediyordu. Aynı kelimenin iki yolda iki farklı anlamı vardı, ve biri geri alınamıyordu.
+        //
+        // `recycle` ZİNCİRDE ÖNCE: silme isteğini ilk o görüyor ve bir yeniden adlandırmaya
+        // çeviriyor, `full_audit` de gerçekten olan şeyi — taşımayı — kaydediyor.
+        //
+        // Depo `.depsis/bin`: paylaşımın İÇİNDE, yani aynı veri kümesi ve geri getirmek O(1) bir
+        // yeniden adlandırma; ve `.depsis` istemcilere veto'lu olduğu için kullanıcı silinmiş
+        // dosyaları ağ sürücüsünde ikinci bir klasör olarak görmüyor. Gördüğü yer DEPSIS'in çöp
+        // kutusu.
+        //
+        // `versions = no`, ve bu bilinçli bir ödün: `yes` ikinci kez silinen aynı adı
+        // "Copy #1 of ..." diye yazıyor, ve o ad artık dosyanın kendi yolundan TÜRETİLEMİYOR —
+        // dizin, çöpteki satırı diskteki kopyasına o türetmeyle bağlıyor. `no` ile depo ağacın
+        // birebir aynası: aynı ad ikinci kez silinirse öncekinin üstüne yazılıyor.
+        //
+        // `exclude_dir` ajanın kendi ağacı: ara alandaki bir `.part` silindiğinde onu çöp
+        // kutusuna taşımak, hiç kimsenin istemediği bir dosyayı sonsuza kadar saklamak olurdu.
+        out.push_str("\tvfs objects = recycle full_audit\n");
+        out.push_str("\trecycle:repository = .depsis/bin\n");
+        out.push_str("\trecycle:keeptree = yes\n");
+        out.push_str("\trecycle:versions = no\n");
+        out.push_str("\trecycle:touch = no\n");
+        out.push_str("\trecycle:touch_mtime = no\n");
+        out.push_str("\trecycle:directory_mode = 0770\n");
+        out.push_str("\trecycle:subdir_mode = 0770\n");
+        out.push_str("\trecycle:exclude_dir = .depsis\n");
         out.push_str("\tfull_audit:prefix = %u|%I|%S\n");
         out.push_str("\tfull_audit:success = create_file renameat unlinkat mkdirat close ftruncate linkat symlinkat\n");
         // `failure = none`: a refused operation changed nothing, so indexing it would be work with
@@ -882,6 +911,55 @@ mod tests {
         assert_eq!(only.valid_users, vec!["ayse".to_string()]);
     }
 
+    // ── recycle: ağdan silinen dosya çöp kutusuna ──
+
+    #[test]
+    fn every_section_sends_deletes_to_the_bin() {
+        // ── SAHİBİNİN SÖZÜ ──────────────────────────────────────────────────────────────────
+        //
+        // *"Dosya gezgininden silinen öğeler çöp kutusuna gitmiyor."* Gitmiyordu: DEPSIS'in çöp
+        // kutusu satıra yazılan bir damga, Samba ise dosyayı gerçekten unlink ediyordu. Aynı
+        // kelimenin iki yolda iki farklı anlamı vardı ve biri geri alınamıyordu.
+        //
+        // Bu test ayarların ÜRETİLDİĞİNİ sabitliyor; gerçekten taşıdığını canlı bir smbclient
+        // oturumuyla `tools/ci/appliance-check.sh` ölçüyor — bir yapılandırma satırı, çalıştığının
+        // kanıtı değil.
+        let text = render(&[Section {
+            name: "belgeler".to_string(),
+            path: "/srv/belgeler".to_string(),
+            read_only: false,
+            valid_users: Vec::new(),
+        }]);
+        // Zincirde ÖNCE: silme isteğini ilk `recycle` görüyor, `full_audit` de gerçekten olan şeyi
+        // kaydediyor.
+        assert!(
+            text.contains("	vfs objects = recycle full_audit
+"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains("	recycle:repository = .depsis/bin
+"),
+            "got: {text}"
+        );
+        // Ağaç korunuyor: çöpteki satırın diskteki karşılığı kendi yolundan TÜRETİLEBİLİR olmalı.
+        assert!(text.contains("	recycle:keeptree = yes
+"), "got: {text}");
+        // Ve sürüm üretilmiyor — "Copy #1 of ..." o türetmeyi bozardı.
+        assert!(text.contains("	recycle:versions = no
+"), "got: {text}");
+        // Ajanın kendi ağacı dışarıda: yarım kalmış bir yükleme parçasını sonsuza kadar saklamak
+        // kimsenin istediği bir şey değil.
+        assert!(
+            text.contains("	recycle:exclude_dir = .depsis
+"),
+            "got: {text}"
+        );
+        // Tarihe dokunulmuyor: çöp kutusu ekranı dosyanın kendi tarihini gösteriyor.
+        assert!(text.contains("	recycle:touch = no
+"), "got: {text}");
+    }
+
     // ── full_audit (ADR-0011 Layer 1) ──
 
     #[test]
@@ -892,7 +970,10 @@ mod tests {
             read_only: false,
             valid_users: Vec::new(),
         }]);
-        assert!(text.contains("\tvfs objects = full_audit\n"), "got: {text}");
+        assert!(
+            text.contains("\tvfs objects = recycle full_audit\n"),
+            "got: {text}"
+        );
         assert!(
             text.contains("\tfull_audit:prefix = %u|%I|%S\n"),
             "got: {text}"

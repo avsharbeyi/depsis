@@ -10,6 +10,15 @@ export interface ReconcilePayload {
 }
 
 /** What a pass found. */
+/**
+ * Ağdan silinen dosyaların indiği yer, paylaşıma göre: `.depsis/bin/<özgün yol>`.
+ *
+ * Samba'nın `recycle` modülü ağacı koruyarak taşıyor (`keeptree = yes`, `versions = no`), yani
+ * çöpteki bir satırın diskteki karşılığı KENDİ YOLUNDAN türetilebiliyor — ikinci bir sütun, ikinci
+ * bir kayıt ve ikisinin ayrışması yok.
+ */
+const BIN = ['.depsis', 'bin'] as const;
+
 export interface ReconcileResult {
   /** Rows written for things on disk that DEPSIS did not know about. */
   discovered: number;
@@ -21,6 +30,14 @@ export interface ReconcileResult {
   truncated: number;
   /** Directories visited. */
   scanned: number;
+  /**
+   * Ağdan silinip ÇÖP KUTUSUNA taşınan satırlar.
+   *
+   * `removed`dan ayrı, çünkü söyledikleri şey farklı: biri "bu dosya artık yok", öteki "bu dosya
+   * kullanıcının çöp kutusunda ve geri getirilebilir". Aynı sayaca yazmak, kurtarılabilir bir
+   * silmeyi kalıcı bir silme gibi raporlamak olurdu.
+   */
+  binned: number;
 }
 
 interface Row {
@@ -189,6 +206,7 @@ export class IndexerService implements OnModuleInit {
       removed: 0,
       truncated: 0,
       scanned: 0,
+      binned: 0,
     };
 
     // ── YÜRÜYÜŞ KALDIĞI YERDEN DEVAM EDİYOR ─────────────────────────────────────────────
@@ -293,13 +311,31 @@ export class IndexerService implements OnModuleInit {
       if (listing === 'gone') {
         // The folder is in the database and not on disk. Its row goes — along with everything
         // under it, because a subtree whose root is absent is absent.
+        //
+        // ÖNCE ÇÖP KUTUSUNA BAKILIYOR: ağdan silinen bir klasör yok olmuyor, `.depsis/bin` altına
+        // taşınıyor. Satırı silmek, kullanıcının geri getirebileceği bir şeyi geri getirilemez
+        // ilan etmek olurdu.
         if (folder.id !== null) {
-          result.removed += await this.forget(organizationId, folder.id);
+          if (await this.inTheBin(share.name, folder.components, reason)) {
+            result.binned += await this.sendSubtreeToTheBin(organizationId, folder.id);
+          } else {
+            result.removed += await this.forget(organizationId, folder.id);
+          }
         }
         continue;
       }
       if (folder.id !== null) scannedIds.push(folder.id);
-      await this.compare(organizationId, shareId, folder, listing, result, queue, seen);
+      await this.compare(
+        organizationId,
+        shareId,
+        share.name,
+        folder,
+        listing,
+        result,
+        queue,
+        reason,
+        seen,
+      );
     }
 
     await this.markScanned(organizationId, scannedIds);
@@ -406,6 +442,7 @@ export class IndexerService implements OnModuleInit {
   private async compare(
     organizationId: string,
     shareId: string,
+    shareName: string,
     folder: { id: string | null; components: string[] },
     listing: {
       entries: Array<{ name: string; directory: boolean; size: number; modified_unix: number }>;
@@ -413,6 +450,7 @@ export class IndexerService implements OnModuleInit {
     },
     result: ReconcileResult,
     queue: Array<{ id: string | null; components: string[] }> | null,
+    reason: string,
     /**
      * Bu turda kuyruğa girmiş klasör kimlikleri.
      *
@@ -424,6 +462,19 @@ export class IndexerService implements OnModuleInit {
   ): Promise<void> {
     const known = await this.rowsUnder(organizationId, shareId, folder.id);
     const onDisk = new Map(listing.entries.map((entry) => [entry.name, entry]));
+    /**
+     * Bu klasörün çöp kutusundaki karşılığı — YALNIZ gerekince okunuyor.
+     *
+     * Bir klasörde eksik satır yoksa hiç sorulmuyor: uzlaştırma yürüyüşü yirmi bin klasör
+     * geziyor, ve her biri için ikinci bir listeleme turun bütçesini ikiye katlardı.
+     */
+    let bin: Set<string> | null = null;
+    const recycled = async (name: string): Promise<boolean> => {
+      if (bin === null) {
+        bin = await this.binNames(shareName, folder.components, reason);
+      }
+      return bin.has(name);
+    };
     const descend = (id: string | null, name: string): void => {
       // Kimliği olmayan bir klasör kuyruğa girmiyor: kimlik hem damganın hem de tekrar
       // görülmenin anahtarı, ve onsuz aynı klasör her turda yeniden okunurdu.
@@ -453,7 +504,18 @@ export class IndexerService implements OnModuleInit {
         // A clipped listing tells us nothing about the names it did not report, so NOTHING is
         // removed on the strength of it. Reconciling half a directory and deleting the rest of the
         // rows is the one mistake this pass must never make.
-        if (!listing.truncated) result.removed += await this.forget(organizationId, row.id);
+        if (listing.truncated) continue;
+        // ── ÇÖP KUTUSU ÖNCE ────────────────────────────────────────────────────────────────
+        //
+        // Ağ sürücüsünden silinen bir dosya artık yok olmuyor: Samba'nın `recycle` modülü onu
+        // `.depsis/bin` altına, aynı ağaç yapısıyla taşıyor. Satırı silmek, kullanıcının geri
+        // getirebileceği bir dosyayı "hiç olmamış" ilan etmek olurdu — ve sahibinin sorduğu şey
+        // tam olarak buydu: *"dosya gezgininden silinen öğeler çöp kutusuna gitmiyor?"*
+        if (await recycled(row.name)) {
+          result.binned += await this.sendSubtreeToTheBin(organizationId, row.id);
+        } else {
+          result.removed += await this.forget(organizationId, row.id);
+        }
         continue;
       }
       onDisk.delete(row.name);
@@ -507,6 +569,7 @@ export class IndexerService implements OnModuleInit {
       removed: 0,
       truncated: 0,
       scanned: 1,
+      binned: 0,
     };
 
     const folder = await this.folderAt(organizationId, shareId, components);
@@ -530,7 +593,11 @@ export class IndexerService implements OnModuleInit {
             `'${share.name}' paylaşımının kökü diskte yok; havuz bağlı değil — indekse dokunulmadı`,
           );
         }
-        result.removed += await this.forget(organizationId, folderId);
+        if (await this.inTheBin(share.name, components, reason)) {
+          result.binned += await this.sendSubtreeToTheBin(organizationId, folderId);
+        } else {
+          result.removed += await this.forget(organizationId, folderId);
+        }
       }
       return result;
     }
@@ -539,11 +606,13 @@ export class IndexerService implements OnModuleInit {
     await this.compare(
       organizationId,
       shareId,
+      share.name,
       { id: folderId, components: [...components] },
       listing,
       result,
       // No queue: a folder found here is not descended into.
       null,
+      reason,
     );
     return result;
   }
@@ -812,6 +881,73 @@ export class IndexerService implements OnModuleInit {
    * removed — so this touches the database only. It is what makes a scheduled, unattended pass
    * safe: there is no path from here to a destructive agent call.
    */
+  /**
+   * Bu klasörün çöp kutusundaki karşılığında hangi adlar var.
+   *
+   * Okunamıyorsa BOŞ küme, hata değil: çöp kutusu hiç doğmamış olabilir (henüz kimse ağdan bir
+   * şey silmemiştir), ve o durumda doğru cevap "burada bir şey yok". Bir istisna, uzlaştırma
+   * turunun tamamını düşürürdü.
+   */
+  private async binNames(
+    shareName: string,
+    components: readonly string[],
+    reason: string,
+  ): Promise<Set<string>> {
+    const answer = await this.listing(shareName, [...BIN, ...components], reason).catch(
+      () => 'gone' as const,
+    );
+    return answer === 'gone' ? new Set() : new Set(answer.entries.map((entry) => entry.name));
+  }
+
+  /** Bu yol çöp kutusunda duruyor mu — klasörler için. */
+  private async inTheBin(
+    shareName: string,
+    components: readonly string[],
+    reason: string,
+  ): Promise<boolean> {
+    if (components.length === 0) return false;
+    const answer = await this.listing(shareName, [...BIN, ...components], reason).catch(
+      () => 'gone' as const,
+    );
+    return answer !== 'gone';
+  }
+
+  /**
+   * Satırı ve altındaki her şeyi çöp kutusuna al — silmeden.
+   *
+   * `forget`in karşılığı: o satırı yok ediyor, bu onu kullanıcının geri getirebileceği yere
+   * koyuyor. Zaten çöpte olan satırlara dokunulmuyor, yoksa kullanıcının kendi sildiği bir
+   * dosyanın "ne zaman silindi" tarihi her uzlaştırma turunda tazelenirdi — ve saklama süresi
+   * o tarihten sayıyor.
+   *
+   * `trashed_by` NULL: silen kişi bir DEPSIS kullanıcısı değil, ağ sürücüsündeki bir istemci.
+   * Uydurulmuş bir kimlik yazmak, denetim kaydını yanlış bir yere işaret ettirirdi.
+   */
+  private async sendSubtreeToTheBin(organizationId: string, id: string): Promise<number> {
+    const rows = await this.db.withTenant(organizationId, (q) =>
+      q.query<{ id: string }>(
+        `WITH RECURSIVE tree AS (
+           SELECT id FROM public.file_entries
+            WHERE organization_id = $1 AND id = $2
+           UNION ALL
+           SELECT child.id
+             FROM public.file_entries child
+             JOIN tree ON child.parent_id = tree.id
+            WHERE child.organization_id = $1
+         )
+         UPDATE public.file_entries AS target
+            SET trashed_at = now(), trashed_by = NULL
+           FROM tree
+          WHERE target.organization_id = $1
+            AND target.id = tree.id
+            AND target.trashed_at IS NULL
+        RETURNING target.id::text AS id`,
+        [organizationId, id],
+      ),
+    );
+    return rows.length;
+  }
+
   private async forget(organizationId: string, id: string): Promise<number> {
     const rows = await this.db.withTenant(organizationId, async (q) => {
       // ── YÜKLEME OTURUMLARI ÖNCE ─────────────────────────────────────────────────────────
