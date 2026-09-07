@@ -505,14 +505,14 @@ pub fn render(sections: &[Section]) -> String {
         // `exclude_dir` ajanın kendi ağacı: ara alandaki bir `.part` silindiğinde onu çöp
         // kutusuna taşımak, hiç kimsenin istemediği bir dosyayı sonsuza kadar saklamak olurdu.
         out.push_str("\tvfs objects = recycle full_audit\n");
-        out.push_str("\trecycle:repository = DEPSIS Çöp Kutusu\n");
+        out.push_str("\trecycle:repository = !DEPSIS Çöp Kutusu\n");
         out.push_str("\trecycle:keeptree = yes\n");
         out.push_str("\trecycle:versions = no\n");
         out.push_str("\trecycle:touch = no\n");
         out.push_str("\trecycle:touch_mtime = no\n");
         out.push_str("\trecycle:directory_mode = 0770\n");
         out.push_str("\trecycle:subdir_mode = 0770\n");
-        out.push_str("\trecycle:exclude_dir = .depsis/DEPSIS Çöp Kutusu\n");
+        out.push_str("\trecycle:exclude_dir = .depsis/!DEPSIS Çöp Kutusu\n");
         out.push_str("\tfull_audit:prefix = %u|%I|%S\n");
         out.push_str("\tfull_audit:success = create_file renameat unlinkat mkdirat close ftruncate linkat symlinkat\n");
         // `failure = none`: a refused operation changed nothing, so indexing it would be work with
@@ -986,7 +986,7 @@ mod tests {
             "got: {text}"
         );
         assert!(
-            text.contains("\trecycle:repository = DEPSIS Çöp Kutusu\n"),
+            text.contains("\trecycle:repository = !DEPSIS Çöp Kutusu\n"),
             "got: {text}"
         );
         // Ağaç korunuyor: çöpteki satırın diskteki karşılığı kendi yolundan TÜRETİLEBİLİR olmalı.
@@ -996,7 +996,7 @@ mod tests {
         // Ajanın kendi ağacı dışarıda: yarım kalmış bir yükleme parçasını sonsuza kadar saklamak
         // kimsenin istediği bir şey değil.
         assert!(
-            text.contains("\trecycle:exclude_dir = .depsis/DEPSIS Çöp Kutusu\n"),
+            text.contains("\trecycle:exclude_dir = .depsis/!DEPSIS Çöp Kutusu\n"),
             "got: {text}"
         );
         // Tarihe dokunulmuyor: çöp kutusu ekranı dosyanın kendi tarihini gösteriyor.

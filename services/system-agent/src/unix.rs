@@ -601,6 +601,30 @@ impl SafePath for Openat2SafePath {
             .map_err(|e| SeamError::Io(format!("fsync destination directory: {e}")))
     }
 
+    fn set_dos_attribute(
+        &self,
+        relative: &[&str],
+        directory: bool,
+        hex: &str,
+    ) -> Result<(), SeamError> {
+        let file = if directory {
+            self.open_dir(relative)?
+        } else {
+            self.openat2(
+                relative,
+                rustix::fs::OFlags::RDONLY,
+                rustix::fs::Mode::empty(),
+            )?
+        };
+        rustix::fs::fsetxattr(
+            &file,
+            "user.DOSATTRIB",
+            hex.as_bytes(),
+            rustix::fs::XattrFlags::empty(),
+        )
+        .map_err(|e| SeamError::Io(format!("set user.DOSATTRIB on {}: {e}", relative.join("/"))))
+    }
+
     fn create_dir(&self, dir: &[&str], name: &str, uid: u32, gid: u32) -> Result<(), SeamError> {
         // The parent, resolved once under RESOLVE_BENEATH. Everything below is relative to THIS
         // descriptor: the mkdir, the reopen, and the fsync. No path is joined and nothing is

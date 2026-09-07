@@ -17,7 +17,7 @@ export interface ReconcilePayload {
  * çöpteki bir satırın diskteki karşılığı KENDİ YOLUNDAN türetilebiliyor — ikinci bir sütun, ikinci
  * bir kayıt ve ikisinin ayrışması yok.
  */
-const BIN = ['DEPSIS Çöp Kutusu'] as const;
+const BIN = ['!DEPSIS Çöp Kutusu'] as const;
 
 export interface ReconcileResult {
   /** Rows written for things on disk that DEPSIS did not know about. */

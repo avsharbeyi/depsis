@@ -268,7 +268,7 @@ export class FolderNotOnDiskError extends Error {
  * Samba'nın `recycle` modülü ağacı koruyarak buraya taşıyor, yani çöpteki bir satırın diskteki
  * karşılığı kendi yolundan türetilebiliyor — ikinci bir sütun ve onun dizinle ayrışması yok.
  */
-const BIN = ['DEPSIS Çöp Kutusu'] as const;
+const BIN = ['!DEPSIS Çöp Kutusu'] as const;
 
 export class NameTakenOnDiskError extends Error {
   constructor(

@@ -193,7 +193,7 @@ describeDb('reconciling a share with the disk', () => {
     // Ağdan silindi: kendi yerinde yok, çöp kutusunda var.
     const after: Disk = new Map([
       ['', { entries: [] }],
-      ['DEPSIS Çöp Kutusu', { entries: [{ name: 'rapor.txt', directory: false, size: 9 }] }],
+      ['!DEPSIS Çöp Kutusu', { entries: [{ name: 'rapor.txt', directory: false, size: 9 }] }],
     ]);
     const result = await indexer(after).reconcile(org, share, held, 'silmeden sonra');
 
@@ -223,7 +223,7 @@ describeDb('reconciling a share with the disk', () => {
 
     const after: Disk = new Map([
       ['', { entries: [] }],
-      ['DEPSIS Çöp Kutusu', { entries: [] }],
+      ['!DEPSIS Çöp Kutusu', { entries: [] }],
     ]);
     const result = await indexer(after).reconcile(org, share, held, 'kalici silmeden sonra');
 

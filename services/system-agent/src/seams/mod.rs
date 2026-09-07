@@ -220,6 +220,30 @@ pub trait SafePath {
     /// and the visible cost of not making it is that `ls -l` prints numbers instead of names.
     fn create_dir(&self, dir: &[&str], name: &str, uid: u32, gid: u32) -> Result<(), SeamError>;
 
+    /// Bir düğüme Windows'un DOS özniteliğini yaz (`user.DOSATTRIB`).
+    ///
+    /// ── NEDEN SEAM'DE ───────────────────────────────────────────────────────────────────────
+    ///
+    /// Genişletilmiş öznitelik yazmak dosya sistemi işi, ve bu dosyadaki her şeyin sebebi aynı:
+    /// yol sınırlaması (`openat2` + `RESOLVE_BENEATH`) yalnız burada. Bir yol birleştirip
+    /// `setfattr` çağırmak, ajanın kendi hapishanesinin dışına çıkmak olurdu.
+    ///
+    /// ── NİYE HİÇ GEREKİYOR ──────────────────────────────────────────────────────────────────
+    ///
+    /// Windows bir klasöre özel simge koymak için içindeki `desktop.ini`ye bakıyor, ama YALNIZ
+    /// klasör "sistem" ya da "salt okunur" işaretliyse. Samba bu işaretleri `store dos attributes`
+    /// açıkken bu öznitelikte saklıyor. Yani çöp kutusunun çöp kovası simgesiyle görünmesi, tek
+    /// bir xattr yazmaya bakıyor.
+    ///
+    /// `hex` Samba'nın eski biçimi (`0x04` gibi): modern Samba onu hâlâ okuyor, ve NDR bloğunu
+    /// elle üretmek ajanın Samba'nın iç veri yapısına bağlanması olurdu.
+    fn set_dos_attribute(
+        &self,
+        relative: &[&str],
+        directory: bool,
+        hex: &str,
+    ) -> Result<(), SeamError>;
+
     /// Bir dizinin sahibinin uid'i.
     ///
     /// SEAM'DE, çünkü `dispatch` platformdan bağımsız kalmak zorunda (ADR-0006) ve `MetadataExt`

@@ -304,9 +304,9 @@ smb_out="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS" -c 'cd alt;
 if [ -e "$SHARES_ROOT/belgeler/alt/silinecek.txt" ]; then gone=DURUYOR; else gone=GITTI; fi
 check 'dosya paylaşımdan kalktı' "$gone" 'GITTI'
 # ASIL İDDİA: baytlar yok olmadı, çöp kutusunda — ve ağaç yapısı korunmuş.
-if [ -e "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu/alt/silinecek.txt" ]; then binned=VAR; else binned="YOK ($smb_out)"; fi
+if [ -e "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu/alt/silinecek.txt" ]; then binned=VAR; else binned="YOK ($smb_out)"; fi
 check 've çöp kutusunda, kendi klasör yolunda duruyor' "$binned" 'VAR'
-check 'içeriği bozulmadan'   "$(cat "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu/alt/silinecek.txt" 2>/dev/null || echo OKUNAMADI)"   'silinecek'
+check 'içeriği bozulmadan'   "$(cat "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu/alt/silinecek.txt" 2>/dev/null || echo OKUNAMADI)"   'silinecek'
 
 # ── VE KLASÖRÜN KENDİSİ SİLİNEMİYOR ─────────────────────────────────────────
 #
@@ -320,18 +320,31 @@ check 'içeriği bozulmadan'   "$(cat "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu
 # (kullanıcının kimliğiyle, yoksa modül oraya yazamaz). Yayım bu yüzden ikinci kez çağrılıyor —
 # gerçek cihazda da her açılışta koşuyor.
 ask publish "{\"op\":\"publish_samba_config\",\"shares\":[{\"name\":\"belgeler\",\"dataset\":\"$POOL/depsis/belgeler\",\"read_only\":false,\"valid_users\":[]}]}" >/dev/null
-check 'nöbetçi dosya kondu'   "$([ -e "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu/.depsis-keep" ] && echo VAR || echo YOK)" 'VAR'
+check 'nöbetçi dosya kondu'   "$([ -e "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu/.depsis-keep" ] && echo VAR || echo YOK)" 'VAR'
+
+# Kartvizit denetimleri SİLME DENEMESİNDEN ÖNCE: `deltree` klasörü silemiyor ama içindeki
+# veto'suz dosyaları siliyor — `desktop.ini` de onlardan biri. Sonrasında bakmak, silinmiş bir
+# dosyayı "hiç yazılmamış" sanmak olurdu; ilk koşumda tam olarak bu oldu.
+# ── WINDOWS KARTVİZİTİ ──────────────────────────────────────────────────────
+#
+# Klasörün çöp kovası simgesiyle görünmesi iki şeye bakıyor: içindeki `desktop.ini` ve klasörün
+# "sistem" işareti. İkincisi Samba'nın `user.DOSATTRIB` özniteliğinde duruyor. Windows'un onu
+# gerçekten çizip çizmediğini burada ölçemeyiz — ölçebileceğimiz şey, ikisinin de YAZILDIĞI.
+check 'desktop.ini yazıldı'   "$(grep -c 'IconResource' "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu/desktop.ini" 2>/dev/null || echo 0)"   '1'
+check 'klasör sistem işaretli'   "$(getfattr -n user.DOSATTRIB --only-values "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu" 2>/dev/null || echo YOK)"   '0x04'
+check 'desktop.ini gizli ve sistem'   "$(getfattr -n user.DOSATTRIB --only-values "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu/desktop.ini" 2>/dev/null || echo YOK)"   '0x26'
 
 smb_ls="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS" -c 'ls' 2>&1 || true)"
 check 'çöp kutusu Gezgin''de görünüyor' "$smb_ls" 'DEPSIS'
-rm_out="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS"   -c 'deltree "DEPSIS Çöp Kutusu"' 2>&1 || true)"
-if [ -d "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu" ]; then survived=DURUYOR; else survived="SILINDI ($rm_out)"; fi
+rm_out="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS"   -c 'deltree "!DEPSIS Çöp Kutusu"' 2>&1 || true)"
+if [ -d "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu" ]; then survived=DURUYOR; else survived="SILINDI ($rm_out)"; fi
 check 'ama silinemiyor' "$survived" 'DURUYOR'
 # İÇİNDEKİLER SİLİNEBİLİR, ve öyle olmalı: çöp kutusunu boşaltmak kullanıcının hakkı — Windows'un
 # kendi geri dönüşüm kutusunda da öyle. Korunan şey KLASÖR: bir daha yaratılamayacak bir yer değil,
 # ama meraklı biri tarafından tek hamlede yok edilemeyen bir yer. Boşaltılan çöpün satırlarını
 # uzlaştırma turu düşürüyor.
-check 'nöbetçi hâlâ yerinde'   "$([ -e "$SHARES_ROOT/belgeler/DEPSIS Çöp Kutusu/.depsis-keep" ] && echo VAR || echo YOK)"   'VAR'
+check 'nöbetçi hâlâ yerinde'   "$([ -e "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu/.depsis-keep" ] && echo VAR || echo YOK)"   'VAR'
+
 
 
 # ── 6b. DISK KIMLIGI ZINCIRI (ADR-0012, risk R1) ────────────────────────────
