@@ -322,17 +322,14 @@ check 'içeriği bozulmadan'   "$(cat "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutus
 ask publish "{\"op\":\"publish_samba_config\",\"shares\":[{\"name\":\"belgeler\",\"dataset\":\"$POOL/depsis/belgeler\",\"read_only\":false,\"valid_users\":[]}]}" >/dev/null
 check 'nöbetçi dosya kondu'   "$([ -e "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu/.depsis-keep" ] && echo VAR || echo YOK)" 'VAR'
 
-# Kartvizit denetimleri SİLME DENEMESİNDEN ÖNCE: `deltree` klasörü silemiyor ama içindeki
-# veto'suz dosyaları siliyor — `desktop.ini` de onlardan biri. Sonrasında bakmak, silinmiş bir
-# dosyayı "hiç yazılmamış" sanmak olurdu; ilk koşumda tam olarak bu oldu.
-# ── WINDOWS KARTVİZİTİ ──────────────────────────────────────────────────────
+# ── KLASÖR GEZGİN'DE GÖRÜNÜYOR, "SİSTEM" DEĞİL ──────────────────────────────
 #
-# Klasörün çöp kovası simgesiyle görünmesi iki şeye bakıyor: içindeki `desktop.ini` ve klasörün
-# "sistem" işareti. İkincisi Samba'nın `user.DOSATTRIB` özniteliğinde duruyor. Windows'un onu
-# gerçekten çizip çizmediğini burada ölçemeyiz — ölçebileceğimiz şey, ikisinin de YAZILDIĞI.
-check 'desktop.ini yazıldı'   "$(grep -c 'IconResource' "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu/desktop.ini" 2>/dev/null || echo 0)"   '1'
-check 'klasör sistem işaretli'   "$(getfattr -n user.DOSATTRIB --only-values "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu" 2>/dev/null || echo YOK)"   '0x04'
-check 'desktop.ini gizli ve sistem'   "$(getfattr -n user.DOSATTRIB --only-values "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu/desktop.ini" 2>/dev/null || echo YOK)"   '0x26'
+# Simge denemesi klasöre "sistem" işareti koymuştu ve sahada klasör Gezgin'den KAYBOLDU: istemci
+# onu `DS` (dizin + sistem) olarak görüyor, ve Explorer korumalı sistem dosyalarını gizleyen
+# varsayılan ayarıyla çizmiyor. Ölçülen şey artık işaretin YOKLUĞU — çünkü bu kapının asıl işi,
+# kullanıcının çöp kutusunu görebilmesi.
+check 'çöp kutusu sistem işaretli DEĞİL'   "$(getfattr -n user.DOSATTRIB --only-values "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu" 2>/dev/null || echo yok)"   '0x00'
+check 'kartvizit dosyası kalmadı'   "$([ -e "$SHARES_ROOT/belgeler/!DEPSIS Çöp Kutusu/desktop.ini" ] && echo VAR || echo YOK)"   'YOK'
 
 smb_ls="$(smbclient "//127.0.0.1/belgeler" -U "$BIN_USER%$BIN_PASS" -c 'ls' 2>&1 || true)"
 check 'çöp kutusu Gezgin''de görünüyor' "$smb_ls" 'DEPSIS'
