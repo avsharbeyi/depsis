@@ -2186,7 +2186,7 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 if path.is_empty()
                     && (entry.name == STAGING_DIR[0]
                         || entry.name == BIN_DIR
-                        || entry.name == BIN_DIR_WAS)
+                        || BIN_DIR_WAS.iter().any(|was| entry.name == *was))
                 {
                     return None;
                 }
