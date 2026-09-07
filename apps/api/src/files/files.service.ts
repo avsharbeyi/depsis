@@ -2364,20 +2364,115 @@ export class FilesService {
    * emptying the trash is what asks the agent to unlink, and that is a separate decision a user
    * has to make.
    */
-  async trash(organizationId: string, id: string, userId: string): Promise<FileEntryRow> {
+  async trash(
+    organizationId: string,
+    id: string,
+    userId: string,
+    share: ShareRef,
+    correlationId: string,
+    reason: string,
+  ): Promise<FileEntryRow> {
+    // ── BAYTLAR DA ÇÖP KUTUSUNA GİDİYOR ───────────────────────────────────────────────────
+    //
+    // Sahibinin sözü: *"arayüzden sildiklerim windows dosya yöneticisindeki çöp kutumuza
+    // düşmüyor."* Düşmüyordu: DEPSIS'in çöp kutusu satıra yazılan bir damgaydı ve dosya kendi
+    // yerinde kalıyordu. Sonuç, iki istemcinin aynı dosya hakkında farklı şey söylemesi — web'de
+    // "sildim", ağ sürücüsünde dosya duruyor. Aynı kelimenin iki anlamı.
+    //
+    // Artık ikisi de aynı şeyi yapıyor: dosya paylaşımın çöp kutusu klasörüne taşınıyor, satır
+    // "ağdan silinmiş" gibi işaretleniyor, ve "Geri al" onu yerine geri getiriyor. Ağdan silme
+    // zaten aynı yere gidiyordu; tek fark, oraya taşıyan şeyin Samba yerine ajan olması.
+    const entry = await this.find(organizationId, id);
+    if (entry.trashed_at !== null) return entry;
+    const components = await this.componentsOf(organizationId, id);
+    const moved = await this.moveToTheBin(
+      organizationId,
+      share,
+      components,
+      entry.kind === 'folder',
+      userId,
+      correlationId,
+      reason,
+    );
+
     const rows = await this.db.withTenant(organizationId, (db) =>
       db.query<FileEntryRow>(
         `UPDATE public.file_entries
-            SET trashed_at = now(), trashed_by = $3
+            SET trashed_at = now(), trashed_by = $3, recycled = $4
           WHERE organization_id = $1 AND id = $2 AND trashed_at IS NULL
           RETURNING id, share_id, parent_id, kind, name, path, size_bytes, content_type,
                     trashed_at, created_at, updated_at`,
-        [organizationId, id, userId],
+        [organizationId, id, userId, moved],
       ),
     );
     const row = rows[0];
     if (!row) throw new EntryNotFoundError();
     return row;
+  }
+
+  /**
+   * Dosyayı paylaşımın çöp kutusu klasörüne taşı. Taşınabildiyse `true`.
+   *
+   * ── TAŞINAMAMAK BİR ARIZA DEĞİL ─────────────────────────────────────────────────────────
+   *
+   * Dosya diskte olmayabilir (dizin ile disk ayrışmış), ya da ajan erişilemez olabilir. İkisinde
+   * de doğru davranış satırı yine çöpe almak: kullanıcı "sil" dedi, ve listeden kalkmaması onun
+   * için bir kazanç değil. Dönen `false` yalnız `recycled` bayrağını dürüst tutuyor — uzlaştırma
+   * turu o bayrağa bakıp "bu satırın baytları çöp kutusunda" diye karar veriyor, ve olmayan bir
+   * kopyayı varmış gibi işaretlemek onu yanlış yönlendirirdi.
+   *
+   * ADI ÇÖP KUTUSUNDA DOLUYSA ESKİSİ GİDİYOR: aynı yolu ikinci kez silmek, çöpteki önceki
+   * kopyanın üstüne yazıyor. Samba'nın kendi `recycle` modülü de `versions = no` ile aynısını
+   * yapıyor, ve iki yolun aynı davranması bu işin tamamının amacı.
+   */
+  private async moveToTheBin(
+    organizationId: string,
+    share: ShareRef,
+    components: readonly string[],
+    directory: boolean,
+    userId: string,
+    correlationId: string,
+    reason: string,
+  ): Promise<boolean> {
+    if (components.length === 0) return false;
+    const destination = [...BIN, ...components];
+    const parents = destination.slice(0, -1);
+
+    const uid = await this.posix.posixUidFor(organizationId, userId).catch(() => null);
+    if (uid === null) return false;
+    // Çöp kutusu ve aynadaki klasör zinciri: ilk silmede hiçbiri yok.
+    await this.ensureDirectories(
+      share.name,
+      [parents],
+      uid,
+      correlationId,
+      `${reason} (bin)`,
+    ).catch(() => false);
+
+    const move = async (): Promise<{ status: string; reason?: string }> =>
+      this.agent.call(
+        { op: 'move_entry', share: share.name, from: [...components], to: destination },
+        reason,
+        correlationId,
+      );
+
+    let response = await move().catch(() => ({ status: 'unreachable' }) as const);
+    if (response.status === 'conflict') {
+      await this.agent
+        .call(
+          { op: 'remove_entry', share: share.name, path: destination, directory },
+          `${reason} (replacing the older copy in the bin)`,
+          correlationId,
+        )
+        .catch(() => undefined);
+      response = await move().catch(() => ({ status: 'unreachable' }) as const);
+    }
+    if (response.status === 'moved') return true;
+    this.logger.warn(
+      `could not move ${share.name}/${components.join('/')} into the bin: ` +
+        `the agent answered '${response.status}'`,
+    );
+    return false;
   }
 
   /**
