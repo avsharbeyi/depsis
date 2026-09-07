@@ -513,6 +513,40 @@ test.describe('Dosya yöneticisi', () => {
     await topla(pane, ad, artiklar);
   });
 
+  test('çöpteki satır telefonda taşmıyor ve "Geri al" ekranda kalıyor', async ({
+    page,
+    consoleWatch,
+    artiklar,
+  }) => {
+    // ── TELEFON ASIL EKRAN ────────────────────────────────────────────────────────────────
+    //
+    // Çöp görünümündeki satır, dosya görünümünden bir sütun DAHA taşıyor: boyutun yanında bir de
+    // kalıcı silinme tarihi. 360 pikselde ikisi birden sığmıyor, ve taşan şey satırın SONU —
+    // yani "Geri al" ile "Kalıcı sil" düğmeleri. Tarayıcıda ölçüldü: satır 393 piksel istiyor,
+    // 329 piksel yer var, ve aradaki 64 piksel tam olarak düğmelerin durduğu yer.
+    //
+    // Telefonda çöpten bir dosyayı geri alamamak, silinme tarihini görememekten kötü — tarih
+    // zaten üstteki saklama şeridinde yazıyor.
+    satirYaratanTestinGurultusu(consoleWatch);
+    const pane = await dosyalariAc(page);
+    const ad = isim('coptasma');
+    await klasorGerek(pane, ad, artiklar);
+    await copeAt(pane, ad);
+
+    await yerSecici(pane, 'Çöp').click();
+    const row = satir(pane, ad);
+    await expect(row).toBeVisible();
+
+    // Satır kendi kutusundan taşmıyor: taşsaydı sonu — düğmeler — kırpılırdı.
+    const tasma = await row.evaluate((el) => el.scrollWidth - el.clientWidth);
+    expect(tasma, 'çöp satırı kendi genişliğine sığmalı').toBeLessThanOrEqual(0);
+    // Ve düğme gerçekten orada: görünür olmak Playwright'ta "sıfır boyutlu değil" demek.
+    await expect(row.getByRole('button', { name: `${ad} geri al` })).toBeVisible();
+
+    await yerSecici(pane, 'Dosyalarım').click();
+    await kaliciSil(pane, ad, artiklar);
+  });
+
   test('"Seç" toplu işlemi ve "Tümünü seç"i aynı anda açar', async ({ page, consoleWatch }) => {
     // ── SAHİBİNİN SÖZÜ ────────────────────────────────────────────────────────────────────
     //
