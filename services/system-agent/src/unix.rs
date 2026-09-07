@@ -519,30 +519,6 @@ impl SafePath for Openat2SafePath {
         self.openat2(relative, oflags, mode)
     }
 
-    fn set_dos_attribute_inner(
-        &self,
-        relative: &[&str],
-        directory: bool,
-        hex: &str,
-    ) -> Result<(), SeamError> {
-        let file = if directory {
-            self.open_dir(relative)?
-        } else {
-            self.openat2(
-                relative,
-                rustix::fs::OFlags::RDONLY,
-                rustix::fs::Mode::empty(),
-            )?
-        };
-        rustix::fs::fsetxattr(
-            &file,
-            "user.DOSATTRIB",
-            hex.as_bytes(),
-            rustix::fs::XattrFlags::empty(),
-        )
-        .map_err(|e| SeamError::Io(format!("set user.DOSATTRIB on {}: {e}", relative.join("/"))))
-    }
-
     fn open_dir(&self, relative: &[&str]) -> Result<std::fs::File, SeamError> {
         self.openat2(
             relative,
@@ -631,7 +607,22 @@ impl SafePath for Openat2SafePath {
         directory: bool,
         hex: &str,
     ) -> Result<(), SeamError> {
-        self.set_dos_attribute_inner(relative, directory, hex)
+        let file = if directory {
+            self.open_dir(relative)?
+        } else {
+            self.openat2(
+                relative,
+                rustix::fs::OFlags::RDONLY,
+                rustix::fs::Mode::empty(),
+            )?
+        };
+        rustix::fs::fsetxattr(
+            &file,
+            "user.DOSATTRIB",
+            hex.as_bytes(),
+            rustix::fs::XattrFlags::empty(),
+        )
+        .map_err(|e| SeamError::Io(format!("set user.DOSATTRIB on {}: {e}", relative.join("/"))))
     }
 
     fn create_dir(&self, dir: &[&str], name: &str, uid: u32, gid: u32) -> Result<(), SeamError> {
