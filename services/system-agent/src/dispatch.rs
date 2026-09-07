@@ -919,7 +919,6 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         }
         let _ = paths.set_dos_attribute(&[share, BIN_DIR], true, BIN_DOS_SYSTEM);
     }
-    }
 
     /// Çöp kutusu bu kapının DIŞINDA ve öyle olmalı: içinde duran şey
     /// kullanıcının kendi dosyası, ağdan silindiği için Samba'nın taşıdığı hâli. Geri getirmek bir
