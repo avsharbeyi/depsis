@@ -78,37 +78,16 @@ pub const STAGING_DIR: [&str; 2] = [".depsis", "staging"];
 /// dosya ağacında da yok. Görünen tek yer, olması gereken yer: çöp kutusu ekranı.
 pub const BIN_DIR: &str = "!DEPSIS Çöp Kutusu";
 
-/// Klasörün içine yazılan Windows kartviziti: simge ve ad.
+/// Eski sürümün klasöre yazdığı Windows kartviziti. Yalnız SİLMEK için duruyor.
 ///
-/// Windows bir klasöre özel simge koymak için `desktop.ini`ye bakıyor — ama YALNIZ klasör
-/// "sistem" işaretliyse, ki onu da aşağıdaki öznitelik yazıyor. `imageres.dll,54` Windows 10 ve
-/// 11'de dolu geri dönüşüm kutusu; `shell32.dll,31` eski sürümlerin aynısı, ikisi birden yazılıyor
-/// çünkü hangi Windows'un bağlandığını kimse bilmiyor.
-///
-/// `ConfirmFileOp=0`: klasörü silmeye kalkan birine Windows'un "bu bir sistem klasörü" uyarısını
-/// göstermemesi için değil — tam tersi, gösterilsin diye 1 bırakılabilirdi; ama silme zaten
-/// nöbetçi dosyayla engelleniyor ve ikinci bir uyarı gürültü.
+/// Simge denendi ve geri alındı: Windows `desktop.ini`ye ancak klasör "sistem" işaretliyken
+/// bakıyor, ve o işaret klasörü Gezgin'in varsayılan ayarında görünmez yapıyor. Simgesiz bir çöp
+/// kutusu, görünmeyen bir çöp kutusundan iyidir.
 pub const BIN_DESKTOP_INI: &str = "desktop.ini";
 
-/// `desktop.ini`nin içeriği. Satır sonu CRLF, çünkü bunu okuyan şey Windows.
-pub const BIN_DESKTOP_INI_BODY: &str = concat!(
-    "[.ShellClassInfo]\r\n",
-    "IconResource=%SystemRoot%\\system32\\imageres.dll,54\r\n",
-    "IconFile=%SystemRoot%\\system32\\shell32.dll\r\n",
-    "IconIndex=31\r\n",
-    "LocalizedResourceName=DEPSIS Çöp Kutusu\r\n",
-    "InfoTip=Ağdan silinen dosyalar burada bekler; DEPSIS arayüzündeki Çöp ekranında da görünür.\r\n",
-    "ConfirmFileOp=0\r\n",
-);
-
-/// SYSTEM (0x04). Klasörün `desktop.ini`sinin okunması için gereken tek işaret.
-///
-/// READONLY (0x01) DEĞİL: o da işe yarardı ama Samba salt okunur bir dizine yazmayı reddedebilir,
-/// ve bu dizine yazan şey çöp kutusunun kendisi.
-pub const BIN_DOS_SYSTEM: &str = "0x04";
-
-/// HIDDEN | SYSTEM | ARCHIVE (0x26) — `desktop.ini` kullanıcıya görünmesin.
-pub const BIN_DOS_INI: &str = "0x26";
+/// Hiçbir DOS özniteliği. Eski sürümün koyduğu "sistem" işaretini temizliyor — o işaret
+/// klasörü Windows Gezgini'nde görünmez yapmıştı.
+pub const BIN_DOS_PLAIN: &str = "0x00";
 
 /// Çöp kutusunun ESKİ adları, yeniden eskiye. Yalnız göç için.
 ///
@@ -906,23 +885,22 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         // EN İYİ ÇABA: zaten varsa `AlreadyExists`, ve o da bir başarı.
         let _ = paths.open(&[share, BIN_DIR, BIN_KEEP], OpenIntent::CreateNew);
 
-        // ── WINDOWS KARTVİZİTİ ──────────────────────────────────────────────────────────────
+        // ── SİMGE DENENDİ VE GERİ ALINDI ────────────────────────────────────────────────────
         //
-        // `desktop.ini` klasöre çöp kovası simgesini veriyor, ama Windows ona YALNIZ klasör
-        // "sistem" işaretliyken bakıyor — o yüzden ikisi birlikte yazılıyor. Hiçbiri yayımı
-        // düşürmüyor: simgesiz bir çöp kutusu hâlâ çalışan bir çöp kutusu.
-        if let Ok(mut ini) = paths.open(&[share, BIN_DIR, BIN_DESKTOP_INI], OpenIntent::CreateNew) {
-            use std::io::Write as _;
-            let _ = ini.write_all(BIN_DESKTOP_INI_BODY.as_bytes());
-            let _ = ini.sync_all();
-            // OKUNABİLİR OLMALI, ve ilk deneme tam burada düştü: seam yeni dosyaları 0600
-            // root'a açıyor — ara alandaki yarım yüklemeler için doğru olan şey — ama
-            // `desktop.ini`yi okuyacak olan Windows istemcisi root değil. Simge çizilmiyordu ve
-            // sebebi klasörde değil, dosyanın izinlerindeydi.
-            let _ = paths.set_mode(&ini, 0o644);
-            let _ = paths.set_dos_attribute(&[share, BIN_DIR, BIN_DESKTOP_INI], false, BIN_DOS_INI);
-        }
-        let _ = paths.set_dos_attribute(&[share, BIN_DIR], true, BIN_DOS_SYSTEM);
+        // Windows bir klasöre özel simge koymak için içindeki `desktop.ini`ye bakıyor, ama YALNIZ
+        // klasör "sistem" işaretliyse. İşareti koyduk, ve klasör Gezgin'den KAYBOLDU: sahibinin
+        // istemcisinde `!DEPSIS Çöp Kutusu` artık `DS` (dizin + sistem) olarak geliyordu ve
+        // Explorer, korumalı sistem dosyalarını gizleyen varsayılan ayarıyla onu çizmiyordu.
+        //
+        // Yani simge ile görünürlük bu yolla birbirini dışlıyor, ve ikisinden hangisinin önemli
+        // olduğu belli: çöp kutusunun görünmediği bir çöp kutusu, simgesiz olandan kötü.
+        //
+        // `0x00` YAZILIYOR, öznitelik silinmiyor: eski sürümün koyduğu `0x04`ü temizlemenin
+        // yolu bu, ve Samba dizin bayrağını kendisi ekliyor — istemci düz bir `D` görüyor.
+        let _ = paths.set_dos_attribute(&[share, BIN_DIR], true, BIN_DOS_PLAIN);
+        // Ve kartvizit gidiyor: sistem işareti olmadan Windows ona zaten bakmıyor, geriye çöp
+        // kutusunun içinde duran işlevsiz bir dosya kalırdı.
+        let _ = paths.remove_file(&[share, BIN_DIR], BIN_DESKTOP_INI);
     }
 
     /// Çöp kutusu bu kapının DIŞINDA ve öyle olmalı: içinde duran şey
@@ -9250,7 +9228,10 @@ mod tests {
         let r = MockCommandRunner::default();
         let s = MemorySink::default();
         let raw = r#"{"op":"create_directory","share":"alice","path":["!DEPSIS Çöp Kutusu"],"owner_uid":300101,"owner_gid":302001}"#;
-        match h.agent(&r, &s).handle(raw, peer(API_UID), "c-bin9", "mkdir") {
+        match h
+            .agent(&r, &s)
+            .handle(raw, peer(API_UID), "c-bin9", "mkdir")
+        {
             Response::Refused { reason } => assert!(reason.contains("bin"), "{reason}"),
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -9259,7 +9240,10 @@ mod tests {
         // olabilir, ve orada kimseyle çakışmıyor.
         std::fs::create_dir(h.share_path(&["alice", "belgeler"])).expect("mkdir");
         let nested = r#"{"op":"create_directory","share":"alice","path":["belgeler","!DEPSIS Çöp Kutusu"],"owner_uid":300101,"owner_gid":302001}"#;
-        match h.agent(&r, &s).handle(nested, peer(API_UID), "c-bin10", "mkdir") {
+        match h
+            .agent(&r, &s)
+            .handle(nested, peer(API_UID), "c-bin10", "mkdir")
+        {
             Response::DirectoryCreated {} => {}
             other => panic!("expected the nested one to be allowed, got {other:?}"),
         }
