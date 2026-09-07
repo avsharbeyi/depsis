@@ -342,7 +342,14 @@ describeDb('the file tree, against a real PostgreSQL', () => {
       'cid-bin',
       'test',
     );
-    await binned.files.trash(orgA, folder.id, userA);
+    await binned.files.trash(
+      orgA,
+      folder.id,
+      userA,
+      { id: shareA, name: 'files-a' },
+      'cid',
+      'test',
+    );
 
     const failure = await binned.files
       .createFolder(orgA, shareRefA(), null, 'cop-belgeler', userA, 'cid-bin-2', 'test')
@@ -414,7 +421,14 @@ describeDb('the file tree, against a real PostgreSQL', () => {
       'cid-r1',
       'test',
     );
-    await renaming.files.trash(orgA, doomed.id, userA);
+    await renaming.files.trash(
+      orgA,
+      doomed.id,
+      userA,
+      { id: shareA, name: 'files-a' },
+      'cid',
+      'test',
+    );
     const other = await renaming.files.createFolder(
       orgA,
       shareRefA(),
@@ -613,7 +627,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
 
   it('frees the name when an entry is trashed, and can refuse a restore that would collide', async () => {
     const first = await mkdir(orgA, shareA, null, 'yeniden');
-    await files.trash(orgA, first.id, userA);
+    await files.trash(orgA, first.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     // The unique indexes are partial on `trashed_at IS NULL` precisely so this works: a user who
     // deleted `rapor.pdf` must be able to upload a new one without emptying the trash first.
@@ -627,7 +641,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
 
   it('hides a trashed entry from listings but keeps its id', async () => {
     const folder = await mkdir(orgA, shareA, null, 'gidecek');
-    await files.trash(orgA, folder.id, userA);
+    await files.trash(orgA, folder.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     const page = await files.list(orgA, shareA, null, null, 100);
     expect(page.items.map((i) => i.name)).not.toContain('gidecek');
@@ -718,7 +732,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   it('lists what is in the trash and leaves what is not out of it', async () => {
     const kept = await mkdir(orgB, shareB, null, 'cop-kalan');
     const thrown = await mkdir(orgB, shareB, null, 'cop-atilan');
-    await files.trash(orgB, thrown.id, userB);
+    await files.trash(orgB, thrown.id, userB, { id: shareB, name: 'files-b' }, 'cid', 'test');
 
     const bin = await files.listTrash(orgB, shareB, null, 100);
     const ids = bin.items.map((i) => i.id);
@@ -763,7 +777,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
 
   it("does not show one tenant the other tenant's trash", async () => {
     const mine = await mkdir(orgA, shareA, null, 'cop-gizli');
-    await files.trash(orgA, mine.id, userA);
+    await files.trash(orgA, mine.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     const theirs = await files.listTrash(orgB, shareB, null, 200);
     expect(theirs.items.map((i) => i.id)).not.toContain(mine.id);
@@ -776,7 +790,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
 
   it('restores an entry and puts it back in its folder', async () => {
     const folder = await mkdir(orgA, shareA, null, 'geri-alinacak');
-    await files.trash(orgA, folder.id, userA);
+    await files.trash(orgA, folder.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
     const restored = await files.restore(orgA, folder.id);
 
     expect(restored.trashed_at).toBeNull();
@@ -801,8 +815,8 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // no folder and in no bin, reachable only by an id nothing on screen would ever show.
     const parent = await mkdir(orgA, shareA, null, 'ust-cop');
     const child = await mkdir(orgA, shareA, parent.id, 'alt-cop');
-    await files.trash(orgA, child.id, userA);
-    await files.trash(orgA, parent.id, userA);
+    await files.trash(orgA, child.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
+    await files.trash(orgA, parent.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     await expect(files.restore(orgA, child.id)).rejects.toBeInstanceOf(TrashedParentError);
 
@@ -848,7 +862,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     const scope = await mkdir(orgA, shareA, null, 'ara-cop');
     const gone = await mkdir(orgA, shareA, scope.id, 'silinen-belge');
     const here = await mkdir(orgA, shareA, scope.id, 'duran-belge');
-    await files.trash(orgA, gone.id, userA);
+    await files.trash(orgA, gone.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     const hits = await files.search(orgA, shareA, scope.id, 'belge', null, 50);
     expect(hits.items.map((i) => i.id)).toEqual([here.id]);
@@ -1351,6 +1365,48 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     ]);
   });
 
+  it('çöpe atmak baytları da çöp kutusu klasörüne taşıyor', async () => {
+    // ── SAHİBİNİN SÖZÜ ──────────────────────────────────────────────────────────────────────
+    //
+    // *"Arayüzden sildiklerim windows dosya yöneticisindeki çöp kutumuza düşmüyor."* Düşmüyordu:
+    // DEPSIS'in çöp kutusu satıra yazılan bir damgaydı, dosya kendi yerinde kalıyordu. İki
+    // istemci aynı dosya hakkında farklı şey söylüyordu — web'de "sildim", ağ sürücüsünde dosya
+    // duruyor.
+    const script: Record<string, unknown>[] = [];
+    const binning = withAgent((request) => {
+      script.push(request);
+      if (request.op === 'create_directory') return { status: 'directory_created' };
+      return { status: 'moved' };
+    });
+    const doomed = await files.recordPublishedFile(orgA, shareA, null, 'copegiden.txt', 4, null);
+
+    const row = await binning.files.trash(
+      orgA,
+      doomed.id,
+      userA,
+      { id: shareA, name: 'files-a' },
+      'cid',
+      'test',
+    );
+
+    expect(row.trashed_at).not.toBeNull();
+    const move = script.find((call) => call['op'] === 'move_entry');
+    expect(move, 'çöpe atmak bir taşıma olmalı').toBeDefined();
+    expect(move).toMatchObject({
+      from: ['copegiden.txt'],
+      to: ['!DEPSIS Çöp Kutusu', 'copegiden.txt'],
+    });
+    // VE SATIR BUNU BİLİYOR: uzlaştırma turu `recycled` bayrağına bakıp "baytları çöp kutusunda"
+    // diye karar veriyor; taşındığı hâlde false kalsaydı tur onu kendi yerinde arardı.
+    const flags = await db.withTenant(orgA, (q) =>
+      q.query<{ recycled: boolean }>(
+        `SELECT recycled FROM public.file_entries WHERE organization_id = $1 AND id = $2`,
+        [orgA, doomed.id],
+      ),
+    );
+    expect(flags[0]?.recycled).toBe(true);
+  });
+
   // ─── permanent deletion ─────────────────────────────────────────────────────
 
   it('refuses to permanently delete something that is not in the trash', async () => {
@@ -1371,7 +1427,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     const middle = await mkdir(orgA, shareA, root.id, 'kalici-orta');
     const deep = await mkdir(orgA, shareA, middle.id, 'kalici-derin');
     const sibling = await mkdir(orgA, shareA, root.id, 'kalici-kardes');
-    await files.trash(orgA, root.id, userA);
+    await files.trash(orgA, root.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     await purging.files.purge(orgA, root.id, shareRefA(), 'cid-purge', 'test');
 
@@ -1401,7 +1457,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     });
     const root = await mkdir(orgA, shareA, null, 'ulasilamaz-kok');
     const child = await mkdir(orgA, shareA, root.id, 'ulasilamaz-alt');
-    await files.trash(orgA, root.id, userA);
+    await files.trash(orgA, root.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     await expect(
       purging.files.purge(orgA, root.id, shareRefA(), 'cid', 'test'),
@@ -1419,7 +1475,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     const root = await mkdir(orgA, shareA, null, 'yarim-kok');
     const first = await mkdir(orgA, shareA, root.id, 'yarim-bir');
     const second = await mkdir(orgA, shareA, root.id, 'yarim-iki');
-    await files.trash(orgA, root.id, userA);
+    await files.trash(orgA, root.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     let answered = 0;
     const interrupted = withAgent(() => {
@@ -1483,7 +1539,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // Ölçülen şey KİLİDİN AÇILMASI: ajan ilk `rmdir`da çakışma diyor, uç dizini listeleyip
     // bilmediği öğeyi siliyor, ve ikinci `rmdir` geçiyor.
     const folder = await mkdir(orgA, shareA, null, 'icinde-bilinmeyen-var');
-    await files.trash(orgA, folder.id, userA);
+    await files.trash(orgA, folder.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     let emptied = false;
     const calls: string[] = [];
@@ -1530,7 +1586,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // sat in the trash permanently, its contents already gone.
     const folder = await mkdir(orgA, shareA, null, 'yukleme-hedefi');
     await seedUploadSession({ parentId: folder.id, fileId: null });
-    await files.trash(orgA, folder.id, userA);
+    await files.trash(orgA, folder.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     const purging = withAgent(() => ({ status: 'removed' }));
     await purging.files.purge(orgA, folder.id, shareRefA(), 'cid-fk', 'test');
@@ -1553,7 +1609,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
     // already unlinked.
     const file = await files.recordPublishedFile(orgA, shareA, null, 'kalici.bin', 7, null);
     await seedUploadSession({ parentId: null, fileId: file.id });
-    await files.trash(orgA, file.id, userA);
+    await files.trash(orgA, file.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     const purging = withAgent(() => ({ status: 'removed' }));
     await purging.files.purge(orgA, file.id, shareRefA(), 'cid-fk2', 'test');
@@ -1567,7 +1623,7 @@ describeDb('the file tree, against a real PostgreSQL', () => {
   it("will not permanently delete another tenant's entry", async () => {
     const purging = withAgent(() => ({ status: 'removed' }));
     const mine = await mkdir(orgA, shareA, null, 'kalici-gizli');
-    await files.trash(orgA, mine.id, userA);
+    await files.trash(orgA, mine.id, userA, { id: shareA, name: 'files-a' }, 'cid', 'test');
 
     await expect(
       purging.files.purge(orgB, mine.id, { id: shareB, name: 'files-b' }, 'cid', 'test'),
@@ -2292,7 +2348,7 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
   it('needs create in the parent to restore, and delete to purge', async () => {
     const parent = await folder(null, 'geri-al-ust');
     const entry = await folder(parent.id, 'geri-alinan');
-    await pfiles.trash(org, entry.id, admin);
+    await pfiles.trash(org, entry.id, admin, { id: share, name: 'files-p' }, 'cid', 'test');
 
     await grantTo({ user: alice }, parent.id, ['list', 'read']);
     await grantTo({ user: alice }, entry.id, ['list', 'read', 'delete']);
@@ -2303,7 +2359,7 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     await grantTo({ user: alice }, parent.id, ['list', 'read', 'create']);
     expect((await controller.restore(as(alice), entry.id)).id).toBe(entry.id);
 
-    await pfiles.trash(org, entry.id, admin);
+    await pfiles.trash(org, entry.id, admin, { id: share, name: 'files-p' }, 'cid', 'test');
     await grantTo({ user: alice }, entry.id, ['list', 'read']);
     await expect(controller.purge(as(alice), entry.id)).rejects.toBeInstanceOf(ForbiddenException);
     // Refused before the agent was asked, so nothing left the disk.
@@ -2329,13 +2385,13 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
     await grantTo({ user: alice }, secret.id, ['list', 'read']);
 
     // Named directly, the refusal already worked.
-    await pfiles.trash(org, secret.id, admin);
+    await pfiles.trash(org, secret.id, admin, { id: share, name: 'files-p' }, 'cid', 'test');
     await expect(controller.purge(as(alice), secret.id)).rejects.toBeInstanceOf(ForbiddenException);
     await pfiles.restore(org, secret.id);
 
     // Through the parent it did not: `delete` resolved at `top`, the walk picked up `secret`, and
     // the bytes went. Irreversibly.
-    await pfiles.trash(org, top.id, admin);
+    await pfiles.trash(org, top.id, admin, { id: share, name: 'files-p' }, 'cid', 'test');
     await expect(controller.purge(as(alice), top.id)).rejects.toBeInstanceOf(ForbiddenException);
     expect(agentCalls.filter((call) => call['op'] === 'remove_entry')).toEqual([]);
 

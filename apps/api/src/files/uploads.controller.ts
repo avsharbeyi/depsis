@@ -373,7 +373,17 @@ export class UploadsController {
     // ZATEN ÇÖPTEYSE İKİNCİ KEZ ÇÖPE ATILMIYOR: `trash` çöpteki bir satırı bulamaz ve bulsa da
     // atacağı yer aynı yer. Kullanıcı onu zaten silmişti; burada değişen tek şey adı.
     if (!existing.trashed) {
-      await this.files.trash(session.organizationId, existing.id, session.userId);
+      // Park edilen dosya da çöp kutusuna gidiyor: kullanıcının klasöründe `rapor (2).pdf` diye
+      // duran ve listede görünmeyen bir dosya bırakmak, "sil" kelimesinin iki anlamı sorununun
+      // aynısı olurdu.
+      await this.files.trash(
+        session.organizationId,
+        existing.id,
+        session.userId,
+        share,
+        correlationId,
+        `binning the replaced ${upload.filename}`,
+      );
     }
     return existing.id;
   }

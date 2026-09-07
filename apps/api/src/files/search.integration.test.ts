@@ -277,7 +277,7 @@ describeDb('GET /search, at the controller', () => {
 
   it('answers 404 for a scope in the trash', async () => {
     const folder = await mkdir(orgA, shareA, 'search-a', 'cope-giden');
-    await files.trash(orgA, folder.id, userA);
+    await files.trash(orgA, folder.id, userA, { id: shareA, name: 'search-a' }, 'cid', 'test');
     expect(await statusOf(search.search(signedIn(), 'kayit', folder.id))).toBe(404);
   });
 });

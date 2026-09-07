@@ -325,7 +325,7 @@ describeDb('interface preferences, against a real PostgreSQL', () => {
     ).rejects.toBeInstanceOf(PreferencesRejectedError);
 
     const trashed = await seedFile(orgA, shareA, 'silinecek.jpg');
-    await files.trash(orgA, trashed, user);
+    await files.trash(orgA, trashed, user, { id: shareA, name: 'prefs-a' }, 'cid', 'test');
     await expect(
       preferences.write(orgA, user, { background: { kind: 'file', fileId: trashed } }),
     ).rejects.toBeInstanceOf(PreferencesRejectedError);

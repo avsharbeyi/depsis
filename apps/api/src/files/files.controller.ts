@@ -582,7 +582,17 @@ export class FilesController {
     });
     try {
       // Trashing changes a flag, not a parent, so the set resolved above is still the entry's.
-      return toEntry(await this.files.trash(caller.organizationId, id, caller.userId), effective);
+      return toEntry(
+        await this.files.trash(
+          caller.organizationId,
+          id,
+          caller.userId,
+          share,
+          randomUUID(),
+          'moving an entry to the bin',
+        ),
+        effective,
+      );
     } catch (error) {
       throw translate(error);
     }
