@@ -2502,6 +2502,8 @@ export class FilesService {
    * kalmış olurdu. Bu sırada taşıma düşerse satır çöpte kalıyor ve kullanıcı yeniden deneyebiliyor.
    */
   async bringBackFromTheBin(
+    organizationId: string,
+    restorerId: string,
     share: ShareRef,
     components: readonly string[],
     kind: 'file' | 'folder',
@@ -2521,6 +2523,36 @@ export class FilesService {
     );
     if (response.status === 'moved') return;
     if (response.status === 'not_found') {
+      // ── HEDEF KLASÖR EKSİK OLABİLİR ─────────────────────────────────────────────────────
+      //
+      // `not_found` iki şeyi birden anlatıyor: çöp kutusundaki kopya yok, ya da dosyanın GERİ
+      // GİDECEĞİ klasör diskte yok. İkincisi olağan bir hâl — DEPSIS'ten önce var olan ya da hiç
+      // kullanılmamış bir klasör dizinde bir satır olarak durur, diskte hiç doğmamış olabilir —
+      // ve onarılabilir. Klasörü yaratıp bir kez daha denemeden "baytlar yok" demek, duran bir
+      // dosya için geri getirilemez demek olurdu.
+      const chain = components.slice(0, -1);
+      if (chain.length > 0) {
+        const built = await this.ensureDirectories(
+          share.name,
+          [chain],
+          await this.posix.posixUidFor(organizationId, restorerId).catch(() => 0),
+          correlationId,
+          `${reason} (materialising the folder it goes back into)`,
+        ).catch(() => false);
+        if (built) {
+          const retried = await this.agent.call(
+            {
+              op: 'move_entry',
+              share: share.name,
+              from: [...BIN, ...components],
+              to: [...components],
+            },
+            reason,
+            correlationId,
+          );
+          if (retried.status === 'moved') return;
+        }
+      }
       // ── ÇÖP KUTUSUNDA YOK: İKİ AYRI HÂL, VE BİRİ SESSİZ GEÇMEMELİ ─────────────────────────
       //
       // DEPSIS'ten çöpe atılmış bir dosyanın baytları hiç taşınmadı: kendi yerinde duruyor, ve

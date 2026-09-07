@@ -3349,6 +3349,16 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
                 reason: format!("{}/ is the agent's own tree", STAGING_DIR[0]),
             });
         }
+        // ── ÇÖP KUTUSUNUN ADI AYRILMIŞ ──────────────────────────────────────────────────────
+        //
+        // Paylaşımın kökündeki bu ad ürünün: ağdan silinen dosyalar oraya iniyor ve ajan onu kök
+        // listesinden çıkarıyor. Kullanıcı aynı adla bir klasör yaratabilseydi, o klasör DEPSIS'in
+        // dosya ağacında hiç görünmezdi — kendi yarattığı, kendi göremediği bir klasör.
+        if dirs.is_empty() && *name == BIN_DIR {
+            return Ok(Response::Refused {
+                reason: format!("'{BIN_DIR}' is the share's bin and cannot be created by hand"),
+            });
+        }
         // No owner check here either, and for the reason `publish_transfer` gives: `PosixId` makes
         // root and the host's own accounts unrepresentable, so the refusal happens at parse time.
         // A directory owned by root at 0750 is one the user cannot enter, and the obvious-looking
@@ -9228,6 +9238,30 @@ mod tests {
                 Response::Refused { .. } => {}
                 other => panic!("expected a refusal for {raw}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn the_bins_name_is_reserved_at_the_share_root() {
+        // Kullanıcı aynı adla bir klasör yaratabilseydi, o klasör DEPSIS'in dosya ağacında hiç
+        // görünmezdi — ajan çöp kutusunu kök listesinden çıkarıyor. Kendi yarattığı ve kendi
+        // göremediği bir klasör, düzeltmesi olmayan bir şaşkınlık.
+        let h = Harness::with_share("alice");
+        let r = MockCommandRunner::default();
+        let s = MemorySink::default();
+        let raw = r#"{"op":"create_directory","share":"alice","path":["!DEPSIS Çöp Kutusu"],"owner_uid":300101,"owner_gid":302001}"#;
+        match h.agent(&r, &s).handle(raw, peer(API_UID), "c-bin9", "mkdir") {
+            Response::Refused { reason } => assert!(reason.contains("bin"), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // AMA ALT KLASÖRLERDE DEĞİL: kullanıcının kendi ağacında aynı adı taşıyan bir klasör
+        // olabilir, ve orada kimseyle çakışmıyor.
+        std::fs::create_dir(h.share_path(&["alice", "belgeler"])).expect("mkdir");
+        let nested = r#"{"op":"create_directory","share":"alice","path":["belgeler","!DEPSIS Çöp Kutusu"],"owner_uid":300101,"owner_gid":302001}"#;
+        match h.agent(&r, &s).handle(nested, peer(API_UID), "c-bin10", "mkdir") {
+            Response::DirectoryCreated {} => {}
+            other => panic!("expected the nested one to be allowed, got {other:?}"),
         }
     }
 

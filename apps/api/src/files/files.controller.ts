@@ -537,6 +537,8 @@ export class FilesController {
       // getirmemek, listede görünen ama açılmayan bir satır üretirdi. DEPSIS'ten silinmiş bir
       // dosya için bu çağrı bir şey yapmıyor — ajan "böyle bir şey yok" diyor.
       await this.files.bringBackFromTheBin(
+        caller.organizationId,
+        caller.userId,
         share,
         await this.files.componentsOf(caller.organizationId, id),
         entry.kind,
