@@ -272,6 +272,21 @@ impl SafePath for MockSafePath {
         }
     }
 
+    fn set_dos_attribute(
+        &self,
+        relative: &[&str],
+        _directory: bool,
+        _hex: &str,
+    ) -> Result<(), SeamError> {
+        // Testlerde ölçülen şey öznitelik değil, onu yazan yolun çalıştığı: var olmayan bir
+        // düğüme yazmak yine de bir hata olmalı, yoksa bir yazım hatası sessiz geçerdi.
+        let path = self.join(relative)?;
+        if !path.exists() {
+            return Err(SeamError::NotFound(relative.join("/")));
+        }
+        Ok(())
+    }
+
     fn create_dir(&self, dir: &[&str], name: &str, uid: u32, gid: u32) -> Result<(), SeamError> {
         let parent = self.join(dir)?;
         // `join` again with the name as its own component, so a name the dispatcher somehow let

@@ -60,7 +60,7 @@ pub mod bin {
 /// dataset would mean writing every byte twice and doubling the user's quota mid-upload.
 pub const STAGING_DIR: [&str; 2] = [".depsis", "staging"];
 
-/// Ağdan silinen dosyaların indiği yer: `<paylaşım>/DEPSIS Çöp Kutusu/...`.
+/// Ağdan silinen dosyaların indiği yer: `<paylaşım>/!DEPSIS Çöp Kutusu/...`.
 ///
 /// ── NEDEN `.depsis` ALTINDA DEĞİL ───────────────────────────────────────────────────────────
 ///
@@ -76,10 +76,55 @@ pub const STAGING_DIR: [&str; 2] = [".depsis", "staging"];
 /// `.` ile başlıyor (Samba nokta dosyalarını gizli işaretliyor) ve ayrıca veto'lu, yani ağ
 /// sürücüsünde hiç görünmüyor; ajan da paylaşım kökünün listesinden çıkarıyor, yani DEPSIS'in
 /// dosya ağacında da yok. Görünen tek yer, olması gereken yer: çöp kutusu ekranı.
-pub const BIN_DIR: &str = "DEPSIS Çöp Kutusu";
+pub const BIN_DIR: &str = "!DEPSIS Çöp Kutusu";
 
-/// Çöp kutusunun eski adı. Yalnız göç için: bir kez taşınıp bir daha bakılmıyor.
-pub const BIN_DIR_WAS: &str = ".depsis-cop";
+/// Klasörün içine yazılan Windows kartviziti: simge ve ad.
+///
+/// Windows bir klasöre özel simge koymak için `desktop.ini`ye bakıyor — ama YALNIZ klasör
+/// "sistem" işaretliyse, ki onu da aşağıdaki öznitelik yazıyor. `imageres.dll,54` Windows 10 ve
+/// 11'de dolu geri dönüşüm kutusu; `shell32.dll,31` eski sürümlerin aynısı, ikisi birden yazılıyor
+/// çünkü hangi Windows'un bağlandığını kimse bilmiyor.
+///
+/// `ConfirmFileOp=0`: klasörü silmeye kalkan birine Windows'un "bu bir sistem klasörü" uyarısını
+/// göstermemesi için değil — tam tersi, gösterilsin diye 1 bırakılabilirdi; ama silme zaten
+/// nöbetçi dosyayla engelleniyor ve ikinci bir uyarı gürültü.
+pub const BIN_DESKTOP_INI: &str = "desktop.ini";
+
+/// `desktop.ini`nin içeriği. `
+`, çünkü bunu okuyan şey Windows.
+pub const BIN_DESKTOP_INI_BODY: &str = concat!(
+    "[.ShellClassInfo]
+",
+    "IconResource=%SystemRoot%\system32\imageres.dll,54
+",
+    "IconFile=%SystemRoot%\system32\shell32.dll
+",
+    "IconIndex=31
+",
+    "LocalizedResourceName=DEPSIS Çöp Kutusu
+",
+    "InfoTip=Ağdan silinen dosyalar burada bekler. DEPSIS arayüzündeki Çöp ekranından da görünür.
+",
+    "ConfirmFileOp=0
+",
+);
+
+/// SYSTEM (0x04). Klasörün `desktop.ini`sinin okunması için gereken tek işaret.
+///
+/// READONLY (0x01) DEĞİL: o da işe yarardı ama Samba salt okunur bir dizine yazmayı reddedebilir,
+/// ve bu dizine yazan şey çöp kutusunun kendisi.
+pub const BIN_DOS_SYSTEM: &str = "0x04";
+
+/// HIDDEN | SYSTEM | ARCHIVE (0x26) — `desktop.ini` kullanıcıya görünmesin.
+pub const BIN_DOS_INI: &str = "0x26";
+
+/// Çöp kutusunun ESKİ adları, yeniden eskiye. Yalnız göç için.
+///
+/// Ad iki kez değişti ve üçüncüsünde başındaki `!` işareti var: Windows Gezgini adları
+/// sıralarken noktalama işaretlerini harflerden önce koyuyor, yani çöp kutusu listenin en
+/// üstünde duruyor. Sahibinin istediği buydu, ve klasörün yerini her açılışta aramak zorunda
+/// kalmamak da bir özellik.
+pub const BIN_DIR_WAS: [&str; 2] = [".depsis-cop", "DEPSIS Çöp Kutusu"];
 
 /// Çöp kutusunun içinde duran ve SİLİNEMEYEN dosya.
 ///
@@ -852,17 +897,36 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
         // Klasörü Samba'nın kendisi kuruyor: kullanıcının kimliğiyle, paylaşımın kendi ACL'leriyle,
         // yani kullanıcının kendi yarattığı herhangi bir klasör gibi. Buradaki iş, o klasör
         // varken NÖBETÇİYİ koymak — veto'lu bir dosya taşıyan dizin silinemiyor.
-        if paths.list_entries(&[share, BIN_DIR_WAS]).is_ok()
-            && paths.list_entries(&[share, BIN_DIR]).is_err()
-        {
-            // Ad iki kez değişti; her değişiklik öncekinin içindekilerini görünmez bir yerde
-            // bırakırdı.
-            let _ = paths.publish(&[share], BIN_DIR_WAS, &[share], BIN_DIR);
+        // Eski adları taşı: ad iki kez değişti, ve her değişiklik öncekinin içindekilerini
+        // görünmez bir yerde bırakırdı.
+        for was in BIN_DIR_WAS {
+            if paths.list_entries(&[share, was]).is_ok()
+                && paths.list_entries(&[share, BIN_DIR]).is_err()
+            {
+                let _ = paths.publish(&[share], was, &[share], BIN_DIR);
+            }
         }
-        if paths.list_entries(&[share, BIN_DIR]).is_ok() {
-            // EN İYİ ÇABA: zaten varsa `AlreadyExists`, ve o da bir başarı.
-            let _ = paths.open(&[share, BIN_DIR, BIN_KEEP], OpenIntent::CreateNew);
+        if paths.list_entries(&[share, BIN_DIR]).is_err() {
+            return;
         }
+
+        // Nöbetçi: veto'lu bir dosya taşıyan dizin silinemiyor (`delete veto files = no`).
+        // EN İYİ ÇABA: zaten varsa `AlreadyExists`, ve o da bir başarı.
+        let _ = paths.open(&[share, BIN_DIR, BIN_KEEP], OpenIntent::CreateNew);
+
+        // ── WINDOWS KARTVİZİTİ ──────────────────────────────────────────────────────────────
+        //
+        // `desktop.ini` klasöre çöp kovası simgesini veriyor, ama Windows ona YALNIZ klasör
+        // "sistem" işaretliyken bakıyor — o yüzden ikisi birlikte yazılıyor. Hiçbiri yayımı
+        // düşürmüyor: simgesiz bir çöp kutusu hâlâ çalışan bir çöp kutusu.
+        if let Ok(mut ini) = paths.open(&[share, BIN_DIR, BIN_DESKTOP_INI], OpenIntent::CreateNew) {
+            use std::io::Write as _;
+            let _ = ini.write_all(BIN_DESKTOP_INI_BODY.as_bytes());
+            let _ = ini.sync_all();
+            let _ = paths.set_dos_attribute(&[share, BIN_DIR, BIN_DESKTOP_INI], false, BIN_DOS_INI);
+        }
+        let _ = paths.set_dos_attribute(&[share, BIN_DIR], true, BIN_DOS_SYSTEM);
+    }
     }
 
     /// Çöp kutusu bu kapının DIŞINDA ve öyle olmalı: içinde duran şey
@@ -9121,10 +9185,10 @@ mod tests {
         let h = Harness::with_share("alice");
         let r = MockCommandRunner::default();
         let s = MemorySink::default();
-        std::fs::create_dir_all(h.share_path(&["alice", "DEPSIS Çöp Kutusu", "belgeler"]))
+        std::fs::create_dir_all(h.share_path(&["alice", "!DEPSIS Çöp Kutusu", "belgeler"]))
             .expect("bin");
         std::fs::write(
-            h.share_path(&["alice", "DEPSIS Çöp Kutusu", "belgeler", "rapor.txt"]),
+            h.share_path(&["alice", "!DEPSIS Çöp Kutusu", "belgeler", "rapor.txt"]),
             b"silinmis",
         )
         .expect("write");
@@ -9139,14 +9203,14 @@ mod tests {
             Response::Listing { entries, .. } => assert!(
                 entries
                     .iter()
-                    .all(|e| e.name.as_str() != "DEPSIS Çöp Kutusu"),
+                    .all(|e| e.name.as_str() != "!DEPSIS Çöp Kutusu"),
                 "got {entries:?}"
             ),
             other => panic!("expected a listing, got {other:?}"),
         }
 
         // Geri getirme: çöp kutusundan kendi yerine.
-        let back = r#"{"op":"move_entry","share":"alice","from":["DEPSIS Çöp Kutusu","belgeler","rapor.txt"],"to":["rapor.txt"]}"#;
+        let back = r#"{"op":"move_entry","share":"alice","from":["!DEPSIS Çöp Kutusu","belgeler","rapor.txt"],"to":["rapor.txt"]}"#;
         match h
             .agent(&r, &s)
             .handle(back, peer(API_UID), "c-bin1", "restore")
