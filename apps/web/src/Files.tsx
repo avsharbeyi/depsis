@@ -2689,7 +2689,7 @@ export function Files({
                     folder's date rather than its own. Inventing a date here would be a countdown
                     the purge does not honour. */}
                 {entry.expiresAt !== undefined && (
-                  <span className="sz" title="Kalıcı olarak silineceği tarih">
+                  <span className="sz exp" title="Kalıcı olarak silineceği tarih">
                     ⏳ {new Date(entry.expiresAt).toLocaleDateString('tr')}
                   </span>
                 )}

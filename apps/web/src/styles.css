@@ -3842,6 +3842,15 @@ label textarea,
   .frow .n {
     min-width: 64px;
   }
+  /* ── ÇÖPTEKİ SATIRIN İKİNCİ SAYI SÜTUNU DAR EKRANDA YOK ────────────────────────────────
+     Çöp görünümündeki satır iki sayı taşıyor: boyut ve kalıcı silinme tarihi. 360 pikselde
+     ikisi birden sığmıyor ve taşan şey satırın SONU oluyor — yani "Geri al" ile "Kalıcı sil"
+     düğmeleri. Telefonda çöpten bir dosyayı geri alamamak, tarihi görememekten kötü; tarih
+     zaten üstteki saklama şeridinde yazıyor. Ölçüldü: sütun kalkınca satır 393'ten 315
+     piksele iniyor ve düğmeler ekrana giriyor. */
+  .frow .sz.exp {
+    display: none;
+  }
   .fact {
     gap: 2px;
   }
