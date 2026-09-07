@@ -65,6 +65,31 @@ export class AgentService implements OnModuleInit {
   private static readonly MAX_QUEUE_DEPTH = 32;
 
   /**
+   * Konfor işlerinin bırakması gereken pay.
+   *
+   * Kuyruk tek ve herkes aynı sıraya giriyor: bir klasörü listelemek de, bir dosya yüklemek de,
+   * bir küçük resim okumak da. Sahada bunun bedeli ölçüldü — iki yüz fotoğrafın küçük resmi
+   * kuyruğu 32'de doldurunca kullanıcının BASTIĞI şey, indirme düğmesi, dakikalarca sıra
+   * bekledi. Yani ikincil bir iş birincil işi aç bırakabiliyordu.
+   *
+   * `crowded()` bunu tersine çeviriyor: küçük resim gibi, olmasa da ürünün çalıştığı işler
+   * kuyruk sekizi geçtiğinde sıraya HİÇ girmiyor. Kalan 24 yer, kullanıcının beklediği işlere
+   * ayrılmış oluyor. Sayı, ajanın bir çağrıyı milisaniyeler içinde bitirdiği varsayımına değil,
+   * "dörtte üçü gerçek işe" oranına dayanıyor.
+   */
+  private static readonly COMFORT_QUEUE_DEPTH = 8;
+
+  /**
+   * Kuyruk, ertelenebilir işlere kapalı mı.
+   *
+   * Yalnız SORAR — çağıranın kendi kararı, çünkü "vazgeçmek" ancak vazgeçilebilecek bir iş için
+   * anlamlı. Kullanıcının beklediği hiçbir uç bunu çağırmamalı.
+   */
+  crowded(): boolean {
+    return this.depth >= AgentService.COMFORT_QUEUE_DEPTH;
+  }
+
+  /**
    * The budget for a whole call — queue wait included, not just the exchange.
    *
    * Deadlining only the socket exchange would let the last caller in a full queue wait

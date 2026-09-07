@@ -3169,6 +3169,42 @@ const ORIENTATION: Record<string, string> = {
  * yapıyor, ve iptal edilmeyen her biri hem bir bağlantı hem de sökülmüş bir bileşene yazan bir
  * `setState` demek.
  */
+/**
+ * Aynı anda kaç küçük resim isteniyor.
+ *
+ * ── SAHADA ÖLÇÜLDÜ ──────────────────────────────────────────────────────────────────────────
+ *
+ * Her satır kendi küçük resmini bağımsız istiyordu, ve iki yüz satırlık bir fotoğraf klasörü iki
+ * yüz eşzamanlı istek demekti. Her biri ajanda bir çağrı; ajanın kuyruğu 32'de dolu, ve dolduktan
+ * sonra AJANA GİDEN HER ŞEY reddediliyor — listeleme, yükleme, indirme. Cihazın günlüğünde bunun
+ * karşılığı 18 tane "32 calls are already queued" hatasıydı.
+ *
+ * Kullanıcının gördüğü şey: *"50 tane dosya seçtim, 4-5 dakika beklemem gerekiyor indir butonu
+ * çalışsın diye."* Ekran donmuş değildi; sırada bekliyordu.
+ *
+ * Dört, çünkü küçük resim bir konfor: iki yüz kareyi bir saniye erken çizmek, o sırada yüklenen
+ * bir dosyanın düşmesine değmez. Sıra ekrandaki satır sırası, yani üstteki kareler önce doluyor.
+ */
+const THUMB_AT_ONCE = 4;
+
+/** Sıradaki küçük resim işleri ve o an koşan sayısı — modül düzeyinde, çünkü sınır EKRANIN. */
+const thumbQueue: (() => void)[] = [];
+let thumbRunning = 0;
+
+function thumbSlot(): Promise<() => void> {
+  return new Promise((resolve) => {
+    const start = (): void => {
+      thumbRunning += 1;
+      resolve(() => {
+        thumbRunning -= 1;
+        thumbQueue.shift()?.();
+      });
+    };
+    if (thumbRunning < THUMB_AT_ONCE) start();
+    else thumbQueue.push(start);
+  });
+}
+
 function Thumb({
   entry,
   tone,
@@ -3207,7 +3243,9 @@ function Thumb({
     let url: string | null = null;
 
     void (async () => {
+      const release = await thumbSlot();
       try {
+        if (stop.signal.aborted) return;
         const answer = await fetch(`${API_BASE_URL}/files/${entry.id}/thumbnail`, {
           credentials: 'same-origin',
           signal: stop.signal,
@@ -3220,6 +3258,10 @@ function Thumb({
         setSource({ url, spin: ORIENTATION[answer.headers.get('x-depsis-orientation') ?? '1'] });
       } catch {
         // Ağ hatası ya da iptal. Bir küçük resmin gelmemesi, dosya yöneticisinin bir sorunu değil.
+      } finally {
+        // SIRAYI HER HÂLDE BIRAK: bir hata yüzünden bırakılmayan bir yer, kalan bütün kareleri
+        // sonsuza kadar bekletirdi.
+        release();
       }
     })();
 
@@ -3748,6 +3790,43 @@ const CHUNK_BYTES = 5 * 1024 * 1024;
 const BROKEN_CHUNK_RETRIES = 3;
 
 /**
+ * Sunucunun "şimdi değil" dediği durumlar.
+ *
+ * ── SAHADA ÖLÇÜLDÜ ──────────────────────────────────────────────────────────────────────────
+ *
+ * *"150 foto seçtim yüklemek için, bi kısmını yüklüyor sonra hata veriyor."* Sebep bir arıza
+ * değildi: cihazın ajanı tek sıra üzerinden çalışıyor ve sıra dolduğunda cevap 503 oluyor. Bu
+ * kod ise 503'ü diğer her hata gibi okuyup dosyayı "yüklenemedi" sayıyordu — oysa sunucunun
+ * söylediği şey "olmaz" değil, "birazdan".
+ *
+ * 429 da aynı kümede: hız sınırı, tanımı gereği geçici.
+ *
+ * Ağ kopmasıyla aynı sayaç kullanılıyor, çünkü kullanıcı için ikisi de tek bir şey — bir parça
+ * gitmedi — ve sınır ikisinin TOPLAMI olmalı.
+ */
+const TRY_AGAIN_LATER = new Set([429, 503]);
+
+/** En fazla bu kadar bekleniyor: bundan uzun bir duraklama, donmuş bir çubuktan ayırt edilemez. */
+const RETRY_CEILING_MS = 10_000;
+
+/**
+ * Bir sonraki denemeye kadar beklenecek süre.
+ *
+ * Sunucu `Retry-After` söylediyse ona uyuluyor — sıranın ne zaman boşalacağını bilen o. Yoksa
+ * ikiye katlanan bir bekleme: 1s, 2s, 4s. Hemen tekrar denemek, dolu bir sırayı bir istekle daha
+ * doldurmaktan başka bir şey yapmazdı.
+ */
+function backoffMs(answer: Response, attempt: number): number {
+  const asked = Number(answer.headers.get('retry-after'));
+  if (Number.isFinite(asked) && asked > 0) return Math.min(asked * 1000, RETRY_CEILING_MS);
+  return Math.min(1000 * 2 ** (attempt - 1), RETRY_CEILING_MS);
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * A tus upload, yielding percent complete.
  *
  * `fetch` directly rather than through the generated client, and the reason is worth stating
@@ -3807,12 +3886,24 @@ async function* uploadFile(
   if (location === null) {
     const metadata = uploadMetadata(file.name, parentId, share);
 
-    const created = await fetch(`${API_BASE_URL}/uploads`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'upload-length': String(file.size), 'upload-metadata': metadata },
-    });
-    if (!created.ok) throw await failure(created, `"${file.name}" yüklenemedi.`);
+    // Oturumu AÇARKEN de sıra dolu olabiliyor, ve orada pes etmek dosyanın tek baytını
+    // göndermeden vazgeçmek demek. Toplu bir yüklemede ilk düşen yer burası.
+    let created: Response | null = null;
+    for (let attempt = 1; created === null; attempt += 1) {
+      const answer = await fetch(`${API_BASE_URL}/uploads`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'upload-length': String(file.size), 'upload-metadata': metadata },
+      });
+      if (answer.ok) {
+        created = answer;
+        break;
+      }
+      if (!TRY_AGAIN_LATER.has(answer.status) || attempt > BROKEN_CHUNK_RETRIES) {
+        throw await failure(answer, `"${file.name}" yüklenemedi.`);
+      }
+      await pause(backoffMs(answer, attempt));
+    }
     const fresh = created.headers.get('location');
     if (fresh === null) throw new Error('Sunucu yükleme adresi vermedi.');
     location = fresh;
@@ -3862,9 +3953,24 @@ async function* uploadFile(
       }
       throw await failure(sent, `"${file.name}" yüklenemedi.`);
     }
+    if (TRY_AGAIN_LATER.has(sent.status)) {
+      broken += 1;
+      if (broken > BROKEN_CHUNK_RETRIES) throw await failure(sent, `"${file.name}" yüklenemedi.`);
+      await pause(backoffMs(sent, broken));
+      // Sunucu istek gövdesini okurken cevap vermiş olabilir; o hâlde baytların bir kısmı ara
+      // dosyaya yazılmış oluyor. Nerede kaldığını yine SUNUCUYA soruyoruz — ölçen taraf o.
+      const where = await probe(location, file.size);
+      if (where === null) throw await failure(sent, `"${file.name}" yüklenemedi.`);
+      offset = where;
+      yield Math.round((offset / Math.max(1, file.size)) * 100);
+      continue;
+    }
     if (!sent.ok) throw await failure(sent, `"${file.name}" yüklenemedi.`);
 
     offset = end;
+    // ÜST ÜSTE üç, toplamda üç değil: bir parça geçtiyse ağ da sıra da yeniden çalışıyor demek,
+    // ve on gigabaytlık bir yüklemenin başındaki üç aksaklık sonunu bağlamamalı.
+    broken = 0;
     yield Math.round((offset / Math.max(1, file.size)) * 100);
   }
 

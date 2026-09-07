@@ -1755,7 +1755,7 @@ describeDb('§6.2 permissions, enforced by the file endpoints', () => {
       pfiles,
       stubData,
       new TrashRetentionService(pdb, pfiles),
-      new ThumbnailsService(pfiles, stubData),
+      new ThumbnailsService(pfiles, stubData, { crowded: () => false } as unknown as AgentService),
       new AuditService(pdb),
     );
     search = new SearchController(pfiles);
