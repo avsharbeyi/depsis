@@ -1,8 +1,9 @@
 import type { OpenApi } from '@depsis/contracts';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api, API_BASE_URL } from './api.js';
 import { previewAs } from './Files.js';
+import { couldHavePreview, previewOf, type Preview } from './thumbs.js';
 import { Empty, Win } from './ui.js';
 
 type FileEntry = OpenApi.components['schemas']['FileEntry'];
@@ -327,63 +328,82 @@ export function Photos({
   );
 }
 
-/** Karesi olan tek tür JPEG: uç, EXIF'e gömülü küçük resmi çıkarıyor, kod çözmüyor. */
-const EMBEDDED = new Set(['jpg', 'jpeg']);
-
-/** Küçük resmi olmayan bir fotoğrafın karesi için okunacak en büyük dosya. */
-const INLINE_LIMIT = 1_500_000;
-
 /**
  * Izgaranın bir karesi.
  *
- * `fetch`, `<img src>` DEĞİL: uç küçük resmi olmayan dosyaya 204 dönüyor ve bir `<img>` bunu
- * "çözülemedi" diye ele alıp konsola satır yazardı — dosya yöneticisindeki `Thumb`ın aynı
- * gerekçesi. PNG/HEIC gibi gömülü küçük resmi olmayan türlerde kare, dosya YETERİNCE KÜÇÜKSE tam
- * dosyaya düşüyor; büyükse simge kalıyor, çünkü bir ızgarayı kırk megapiksellik dosyalarla
- * doldurmak bu sekmenin belleğini tüketir.
+ * İş `thumbs.ts`'te ve dosya yöneticisiyle paylaşılıyor: gömülü küçük resim varsa o, yoksa
+ * dosyanın kendisi tarayıcıda küçültülüyor ve sonuç saklanıyor. Eskiden burada yalnız gömülü
+ * olan deneniyordu, ve sahibinin telefondan gelen fotoğraflarının hiçbirinde o yok — albümün
+ * tamamı boş çerçeveydi.
+ *
+ * `<img src>` yerine `fetch`: uç küçük resmi olmayan dosyaya 204 dönüyor ve bir `<img>` bunu
+ * "çözülemedi" diye ele alıp konsola satır yazardı.
  */
 function Tile({ entry }: { entry: FileEntry }): React.JSX.Element {
-  const [url, setUrl] = useState<string | null>(null);
-  const embedded = EMBEDDED.has(entry.name.slice(entry.name.lastIndexOf('.') + 1).toLowerCase());
-  const inline = !embedded && entry.size <= INLINE_LIMIT;
+  const [source, setSource] = useState<Preview | null>(null);
+  // Gözlemcinin tutunduğu düğüm, kare gelmeden önce yer tutan simge ve geldikten sonra
+  // görüntünün kendisi: ikisi de aynı hücrede duruyor, o yüzden tek bir referans yetiyor.
+  const box = useRef<HTMLElement | null>(null);
+  /** Ekrana girene kadar hiçbir şey istenmiyor; bir kez girdiyse geri dönmüyor. */
+  const [seen, setSeen] = useState(false);
+  const wanted = couldHavePreview(entry.name, entry.size);
 
   useEffect(() => {
-    if (!embedded) {
-      if (inline) setUrl(`${API_BASE_URL}/files/${entry.id}/content`);
+    if (!wanted || seen) return undefined;
+    const node = box.current;
+    if (node === null || typeof IntersectionObserver !== 'function') {
+      setSeen(true);
       return undefined;
     }
+    const watcher = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((one) => one.isIntersecting)) setSeen(true);
+      },
+      { rootMargin: '300px' },
+    );
+    watcher.observe(node);
+    return () => watcher.disconnect();
+  }, [wanted, seen]);
+
+  useEffect(() => {
+    if (!wanted || !seen) return undefined;
     const stop = new AbortController();
-    let object: string | null = null;
+    let url: string | null = null;
     void (async () => {
-      try {
-        const answer = await fetch(`${API_BASE_URL}/files/${entry.id}/thumbnail`, {
-          credentials: 'same-origin',
-          signal: stop.signal,
-        });
-        if (answer.status !== 200) return;
-        const blob = await answer.blob();
-        if (stop.signal.aborted) return;
-        object = URL.createObjectURL(blob);
-        setUrl(object);
-      } catch {
-        // Ağ hatası ya da iptal. Bir karenin gelmemesi albümün sorunu değil.
+      const found = await previewOf(entry, stop.signal);
+      if (found === null) return;
+      if (stop.signal.aborted) {
+        URL.revokeObjectURL(found.url);
+        return;
       }
+      url = found.url;
+      setSource(found);
     })();
     return () => {
       stop.abort();
       // Nesne URL'i açıkça bırakılıyor: tarayıcı onu belge ömrü boyunca tutar, ve bin fotoğraflık
       // bir ızgarada gezinmek onları sızdırmanın en kolay yolu.
-      if (object !== null) URL.revokeObjectURL(object);
-      setUrl(null);
+      if (url !== null) URL.revokeObjectURL(url);
+      setSource(null);
     };
-  }, [entry.id, embedded, inline]);
+  }, [entry.id, wanted, seen]);
 
-  if (url === null) {
+  if (source === null) {
     return (
-      <span className="phnone" aria-hidden>
+      <span className="phnone" aria-hidden ref={box}>
         🖼
       </span>
     );
   }
-  return <img src={url} alt="" loading="lazy" />;
+  return (
+    <img
+      ref={box as React.RefObject<HTMLImageElement>}
+      src={source.url}
+      alt=""
+      loading="lazy"
+      style={
+        source.spin === undefined || source.spin === '' ? undefined : { transform: source.spin }
+      }
+    />
+  );
 }

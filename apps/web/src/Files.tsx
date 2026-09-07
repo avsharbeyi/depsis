@@ -3,6 +3,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { Fragment, useEffect, useRef, useState } from 'react';
 
 import { api, API_BASE_URL, problemMessage } from './api.js';
+import { couldHavePreview, previewOf, type Preview } from './thumbs.js';
 import { History } from './History.js';
 import { decodeImage, warmScanner } from './scan.js';
 import { formatBytes } from './Dashboard.js';
@@ -3136,75 +3137,12 @@ export function Files({
  * bakan bir kontrol aynı dosyayı bazen soruyor bazen sormuyor olurdu. `typeOf` da aynı sebeple
  * uzantıya bakıyor.
  */
-const THUMBNAILED = new Set(['jpg', 'jpeg']);
-
 /**
- * EXIF yönlendirmesinin (1–8) CSS karşılığı.
+ * Satırın solundaki kare: bir önizleme varsa o, yoksa tür simgesi.
  *
- * Gömülü küçük resim ana görüntüyle aynı yönde saklanıyor, ve sunucu pikselleri çevirmiyor —
- * çevirmek, o ucun var olma sebebi olan "hiçbir şeyin kodunu çözme" kuralını bozardı. Döndürme
- * burada, bir dönüşüm olarak: bedava, ve kare zaten `object-fit: cover`.
- *
- * Aynalanan hâller (2, 4, 5, 7) fotoğraf makinelerinde neredeyse hiç görülmüyor ama tanımlı, ve
- * atlanmış bir değer sessizce yan yatmış bir fotoğraf demek.
+ * İşin kendisi `thumbs.ts`'te ve orada paylaşılıyor — aynı kural albüm ızgarasında da geçerli.
+ * Buradaki iki şey ona ait değil: NE ZAMAN isteneceği, ve nesne URL'inin bırakılması.
  */
-const ORIENTATION: Record<string, string> = {
-  '2': 'scaleX(-1)',
-  '3': 'rotate(180deg)',
-  '4': 'scaleY(-1)',
-  '5': 'rotate(90deg) scaleX(-1)',
-  '6': 'rotate(90deg)',
-  '7': 'rotate(270deg) scaleX(-1)',
-  '8': 'rotate(270deg)',
-};
-
-/**
- * Satırın solundaki kare: küçük resim varsa o, yoksa tür simgesi.
- *
- * `fetch`, `<img src>` DEĞİL. Bir `<img>`'i doğrudan uca yöneltmek daha az kod olurdu ama 204'ü
- * "çözülemedi" diye ele alır ve tarayıcı konsoluna bir satır yazardı — küçük resmi olmayan seksen
- * fotoğraflık bir klasör, seksen satır. `fetch` ile 204 sessiz ve olağan bir cevap.
- *
- * `AbortController` kaçınılmaz: bir klasörden çıkmak, henüz cevaplanmamış onlarca isteği anlamsız
- * yapıyor, ve iptal edilmeyen her biri hem bir bağlantı hem de sökülmüş bir bileşene yazan bir
- * `setState` demek.
- */
-/**
- * Aynı anda kaç küçük resim isteniyor.
- *
- * ── SAHADA ÖLÇÜLDÜ ──────────────────────────────────────────────────────────────────────────
- *
- * Her satır kendi küçük resmini bağımsız istiyordu, ve iki yüz satırlık bir fotoğraf klasörü iki
- * yüz eşzamanlı istek demekti. Her biri ajanda bir çağrı; ajanın kuyruğu 32'de dolu, ve dolduktan
- * sonra AJANA GİDEN HER ŞEY reddediliyor — listeleme, yükleme, indirme. Cihazın günlüğünde bunun
- * karşılığı 18 tane "32 calls are already queued" hatasıydı.
- *
- * Kullanıcının gördüğü şey: *"50 tane dosya seçtim, 4-5 dakika beklemem gerekiyor indir butonu
- * çalışsın diye."* Ekran donmuş değildi; sırada bekliyordu.
- *
- * Dört, çünkü küçük resim bir konfor: iki yüz kareyi bir saniye erken çizmek, o sırada yüklenen
- * bir dosyanın düşmesine değmez. Sıra ekrandaki satır sırası, yani üstteki kareler önce doluyor.
- */
-const THUMB_AT_ONCE = 4;
-
-/** Sıradaki küçük resim işleri ve o an koşan sayısı — modül düzeyinde, çünkü sınır EKRANIN. */
-const thumbQueue: (() => void)[] = [];
-let thumbRunning = 0;
-
-function thumbSlot(): Promise<() => void> {
-  return new Promise((resolve) => {
-    const start = (): void => {
-      thumbRunning += 1;
-      resolve(() => {
-        thumbRunning -= 1;
-        thumbQueue.shift()?.();
-      });
-    };
-    if (thumbRunning < THUMB_AT_ONCE) start();
-    else thumbQueue.push(start);
-  });
-}
-
 function Thumb({
   entry,
   tone,
@@ -3214,18 +3152,31 @@ function Thumb({
   tone: Tone;
   glyph: string;
 }): React.JSX.Element {
-  const [source, setSource] = useState<{ url: string; spin: string | undefined } | null>(null);
+  const [source, setSource] = useState<Preview | null>(null);
+  const box = useRef<HTMLSpanElement | null>(null);
+  /**
+   * EKRANA GİRENE KADAR HİÇBİR ŞEY İSTENMİYOR.
+   *
+   * Bir sayfa 200 satır çiziyor ve telefonda aynı anda görünen sekiz tanesi. Eskiden 200'ünün
+   * karesi birden isteniyordu; sahibinin 685 fotoğraflık klasöründe bu, kullanıcının bakmadığı
+   * yüzlerce dosya için ajanda yer tutmak demekti. Şimdi kare, satır görünür olduğunda isteniyor.
+   *
+   * TEK YÖNLÜ bir mandal: bir kez görünen satır, yukarı kaydırılınca "görünmez"e dönmüyor.
+   * Dönseydi, listeyi aşağı yukarı gezmek aynı kareleri defalarca istemek olurdu.
+   */
+  const [seen, setSeen] = useState(false);
+
   /**
    * SUNUCUNUN REDDEDECEĞİ BİR ŞEY SORULMUYOR, ve üç koşulun üçü de ölçülmüş bir sebeple burada.
    *
-   * `THUMBNAILED`: uç yalnız JPEG'in EXIF'ine gömülü küçük resmi çıkarıyor, PNG ve WebP öyle bir
-   * şey taşımıyor — onlar için istek her zaman 204 dönerdi.
+   * `couldHavePreview`: gömülü küçük resmi olabilecek (JPEG) ya da tarayıcının küçültebileceği
+   * kadar küçük bir görüntü. Bir metin dosyası için istek her zaman boş dönerdi.
    *
    * `trashedAt`: çöpteki bir girdi indirilemiyor, ve uç 404 veriyor. CI'nin mobil projesi tam
    * bunu yakaladı: çöp görünümünde iki JPEG vardı, iki 404, ve iki konsol hatası.
    *
-   * `download`: bir satır `read` ile görünüp `download` olmadan durabiliyor, ve küçük resim
-   * içeriğin küçültülmüş kopyası olduğu için o izni istiyor. Yine bir 4xx.
+   * `download`: bir satır `read` ile görünüp `download` olmadan durabiliyor, ve kare içeriğin
+   * küçültülmüş kopyası olduğu için o izni istiyor. Yine bir 4xx.
    *
    * Kuralı ikinci kez YAZMIYOR — reddi hâlâ sunucu veriyor. Buradaki iş, hiçbir zaman
    * cevaplanmayacak bir isteği hiç göndermemek, ve tarayıcı konsolunu bir klasör açılışında
@@ -3233,36 +3184,45 @@ function Thumb({
    */
   const wanted =
     entry.kind === 'file' &&
-    THUMBNAILED.has(suffix(entry.name)) &&
+    couldHavePreview(entry.name, entry.size) &&
     entry.trashedAt === undefined &&
     can(entry, 'download');
 
   useEffect(() => {
-    if (!wanted) return undefined;
+    if (!wanted || seen) return undefined;
+    const node = box.current;
+    // Gözlemci yoksa (eski bir tarayıcı, ya da testteki jsdom) beklemeden isteniyor: kısıtlama
+    // bir iyileştirme, ve olmaması karenin hiç gelmemesine yol açmamalı.
+    if (node === null || typeof IntersectionObserver !== 'function') {
+      setSeen(true);
+      return undefined;
+    }
+    const watcher = new IntersectionObserver(
+      (entries) => {
+        // `rootMargin` ile bir ekran boyu ÖNCEDEN başlıyor: kullanıcı oraya vardığında kare
+        // çoktan yerinde olsun.
+        if (entries.some((one) => one.isIntersecting)) setSeen(true);
+      },
+      { rootMargin: '300px' },
+    );
+    watcher.observe(node);
+    return () => watcher.disconnect();
+  }, [wanted, seen]);
+
+  useEffect(() => {
+    if (!wanted || !seen) return undefined;
     const stop = new AbortController();
     let url: string | null = null;
 
     void (async () => {
-      const release = await thumbSlot();
-      try {
-        if (stop.signal.aborted) return;
-        const answer = await fetch(`${API_BASE_URL}/files/${entry.id}/thumbnail`, {
-          credentials: 'same-origin',
-          signal: stop.signal,
-        });
-        // 204 = gömülü küçük resmi yok. Bir hata değil, olağan cevap; kare simgede kalıyor.
-        if (answer.status !== 200) return;
-        const blob = await answer.blob();
-        if (stop.signal.aborted) return;
-        url = URL.createObjectURL(blob);
-        setSource({ url, spin: ORIENTATION[answer.headers.get('x-depsis-orientation') ?? '1'] });
-      } catch {
-        // Ağ hatası ya da iptal. Bir küçük resmin gelmemesi, dosya yöneticisinin bir sorunu değil.
-      } finally {
-        // SIRAYI HER HÂLDE BIRAK: bir hata yüzünden bırakılmayan bir yer, kalan bütün kareleri
-        // sonsuza kadar bekletirdi.
-        release();
+      const found = await previewOf(entry, stop.signal);
+      if (found === null) return;
+      if (stop.signal.aborted) {
+        URL.revokeObjectURL(found.url);
+        return;
       }
+      url = found.url;
+      setSource(found);
     })();
 
     return () => {
@@ -3272,21 +3232,24 @@ function Thumb({
       if (url !== null) URL.revokeObjectURL(url);
       setSource(null);
     };
-  }, [entry.id, wanted]);
+    // `entry` her çizimde yeni bir nesne; bağımlılık satırın KİMLİĞİ.
+  }, [entry.id, wanted, seen]);
 
   if (source === null) {
     return (
-      <span className="g" style={tint(tone)} aria-hidden>
+      <span className="g" style={tint(tone)} aria-hidden ref={box}>
         {glyph}
       </span>
     );
   }
   return (
-    <span className="g thumb" aria-hidden>
+    <span className="g thumb" aria-hidden ref={box}>
       <img
         src={source.url}
         alt=""
-        style={source.spin === undefined ? undefined : { transform: source.spin }}
+        style={
+          source.spin === undefined || source.spin === '' ? undefined : { transform: source.spin }
+        }
       />
     </span>
   );
