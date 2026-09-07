@@ -90,23 +90,15 @@ pub const BIN_DIR: &str = "!DEPSIS Çöp Kutusu";
 /// nöbetçi dosyayla engelleniyor ve ikinci bir uyarı gürültü.
 pub const BIN_DESKTOP_INI: &str = "desktop.ini";
 
-/// `desktop.ini`nin içeriği. `
-`, çünkü bunu okuyan şey Windows.
+/// `desktop.ini`nin içeriği. Satır sonu CRLF, çünkü bunu okuyan şey Windows.
 pub const BIN_DESKTOP_INI_BODY: &str = concat!(
-    "[.ShellClassInfo]
-",
-    "IconResource=%SystemRoot%\system32\imageres.dll,54
-",
-    "IconFile=%SystemRoot%\system32\shell32.dll
-",
-    "IconIndex=31
-",
-    "LocalizedResourceName=DEPSIS Çöp Kutusu
-",
-    "InfoTip=Ağdan silinen dosyalar burada bekler. DEPSIS arayüzündeki Çöp ekranından da görünür.
-",
-    "ConfirmFileOp=0
-",
+    "[.ShellClassInfo]\r\n",
+    "IconResource=%SystemRoot%\\system32\\imageres.dll,54\r\n",
+    "IconFile=%SystemRoot%\\system32\\shell32.dll\r\n",
+    "IconIndex=31\r\n",
+    "LocalizedResourceName=DEPSIS Çöp Kutusu\r\n",
+    "InfoTip=Ağdan silinen dosyalar burada bekler; DEPSIS arayüzündeki Çöp ekranında da görünür.\r\n",
+    "ConfirmFileOp=0\r\n",
 );
 
 /// SYSTEM (0x04). Klasörün `desktop.ini`sinin okunması için gereken tek işaret.
