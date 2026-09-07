@@ -55,6 +55,14 @@ const INTERESTING = new Set([
 const MARKER = 'smbd_audit: ';
 
 /**
+ * Ağdan silinen dosyaların indiği klasör, paylaşımın kökünde.
+ *
+ * Adı burada da geçmek zorunda ve sebebi aşağıdaki eşleme: çöp kutusu ağacın AYNASI, ve orada
+ * olan bir şey aslında özgün klasör hakkında bir haber.
+ */
+const BIN = '!DEPSIS Çöp Kutusu';
+
+/**
  * Turn one log line into the directories that need re-reading.
  *
  * Returns an ARRAY because `renameat` names both ends, and they can be in different directories —
@@ -88,7 +96,20 @@ export function parseAuditLine(line: string): AuditEvent[] {
   if (files.length === 0) return [];
 
   const directories = new Set(
-    files.map((file) => parentOf(file, share)).filter((path): path is string => path !== null),
+    files
+      .map((file) => parentOf(file, share))
+      .filter((path): path is string => path !== null)
+      // ── ÇÖP KUTUSUNDAKİ OLAY, ÖZGÜN KLASÖRÜN HABERİ ─────────────────────────────────────
+      //
+      // Sahada ölçüldü: kullanıcı çöp kutusundan bir dosyayı sildi ve bir başkasını dışarı
+      // taşıdı; ikisinin de satırı ÖZGÜN klasörlerinde duruyor, ve o klasörleri hiçbir olay
+      // uyandırmıyordu. Olayın adres ettiği yer `!DEPSIS Çöp Kutusu/ZTEST`, dizinde öyle bir
+      // klasör yok, ve olay sessizce düşüyordu. Geriye on beş dakikalık tam ağaç yürüyüşü
+      // kalıyor — yirmi bin klasörde saatler.
+      //
+      // Çöp kutusu ağacın birebir aynası (`recycle:keeptree = yes`), yani ön eki atmak doğru
+      // klasörü veriyor: `!DEPSIS Çöp Kutusu/ZTEST` → `ZTEST`.
+      .map((path) => mirrored(path)),
   );
   return [...directories].map((directory) => ({
     share,
@@ -139,6 +160,12 @@ function withoutShareRoot(absolute: string, share: string): string | null {
   const at = parts.indexOf(share);
   if (at < 0) return null;
   return parts.slice(at + 1).join('/');
+}
+
+/** Çöp kutusundaki bir yolu, aynaladığı özgün klasöre çevir. */
+function mirrored(directory: string): string {
+  if (directory === BIN) return '';
+  return directory.startsWith(`${BIN}/`) ? directory.slice(BIN.length + 1) : directory;
 }
 
 /**
