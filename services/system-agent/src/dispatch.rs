@@ -915,6 +915,11 @@ impl<'a, R: CommandRunner, S: Sink, P: SafePath> Agent<'a, R, S, P> {
             use std::io::Write as _;
             let _ = ini.write_all(BIN_DESKTOP_INI_BODY.as_bytes());
             let _ = ini.sync_all();
+            // OKUNABİLİR OLMALI, ve ilk deneme tam burada düştü: seam yeni dosyaları 0600
+            // root'a açıyor — ara alandaki yarım yüklemeler için doğru olan şey — ama
+            // `desktop.ini`yi okuyacak olan Windows istemcisi root değil. Simge çizilmiyordu ve
+            // sebebi klasörde değil, dosyanın izinlerindeydi.
+            let _ = paths.set_mode(&ini, 0o644);
             let _ = paths.set_dos_attribute(&[share, BIN_DIR, BIN_DESKTOP_INI], false, BIN_DOS_INI);
         }
         let _ = paths.set_dos_attribute(&[share, BIN_DIR], true, BIN_DOS_SYSTEM);

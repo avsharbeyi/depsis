@@ -172,6 +172,38 @@ describe('mutlak yollu satırlar', () => {
   });
 });
 
+describe('çöp kutusundaki hareketler', () => {
+  // ── SAHADA ÖLÇÜLDÜ ────────────────────────────────────────────────────────────────────────
+  //
+  // Kullanıcı çöp kutusundan bir dosyayı sildi ve bir başkasını dışarı taşıdı. İkisinin de satırı
+  // ÖZGÜN klasöründe duruyor — çöp kutusu dizine hiç girmiyor — ve o klasörleri hiçbir olay
+  // uyandırmıyordu: olayın adres ettiği `!DEPSIS Çöp Kutusu/ZTEST` diye bir klasör dizinde yok, ve
+  // olay sessizce düşüyordu. Geriye yirmi bin klasörlük tam ağaç yürüyüşü kalıyordu.
+  it('çöp kutusundaki bir silme, özgün klasörü uyandırıyor', () => {
+    const [event] = parseAuditLine(
+      'x smbd_audit: ali|10.0.0.2|belgeler|unlinkat|ok|' +
+        '/srv/depsis/belgeler/!DEPSIS Çöp Kutusu/ZTEST/a.jpg',
+    );
+    expect(event?.directory).toBe('ZTEST');
+  });
+
+  it('çöp kutusunun kökündeki bir silme, paylaşımın kökünü uyandırıyor', () => {
+    const [event] = parseAuditLine(
+      'x smbd_audit: ali|10.0.0.2|belgeler|unlinkat|ok|' +
+        '/srv/depsis/belgeler/!DEPSIS Çöp Kutusu/rapor.pdf',
+    );
+    expect(event?.directory).toBe('');
+  });
+
+  it('çöpten dışarı taşımada iki ucu da veriyor: özgün klasör ve varış', () => {
+    const events = parseAuditLine(
+      'x smbd_audit: ali|10.0.0.2|belgeler|renameat|ok|' +
+        '/srv/depsis/belgeler/!DEPSIS Çöp Kutusu/ZTEST/a.jpg|/srv/depsis/belgeler/yeni/a.jpg',
+    );
+    expect(events.map((e) => e.directory).sort()).toEqual(['ZTEST', 'yeni']);
+  });
+});
+
 describe('what is worth indexing', () => {
   it('refuses the agent’s own tree', () => {
     // Samba vetoes `.depsis/`, so a client cannot reach it — but the AGENT writes there constantly,
