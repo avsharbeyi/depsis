@@ -31,7 +31,11 @@ import { AgentDataService } from '../agent/agent-data.service.js';
 import { AgentRefusedError, AgentUnavailableError } from '../agent/agent.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
-import { ThumbnailsService, ThumbnailUnreadableError } from './thumbnails.service.js';
+import {
+  ThumbnailBusyError,
+  ThumbnailsService,
+  ThumbnailUnreadableError,
+} from './thumbnails.service.js';
 import { TrashRetentionService } from './trash-retention.service.js';
 import { ProblemException } from '../common/problem.filter.js';
 import { IdempotencyInterceptor } from '../common/idempotency.interceptor.js';
@@ -930,6 +934,11 @@ export class FilesController {
         // öyle çevirmek istemciye asla düzelmeyecek bir olgu bildirmek olurdu.
         if (error instanceof ThumbnailUnreadableError) {
           throw new ServiceUnavailableException('küçük resim okunamadı');
+        }
+        // Kalabalık da 503: "şimdi değil". 204 OLMAZ — o "bu fotoğrafta küçük resim yok" demek,
+        // ve istemci onu kalıcı bir olgu olarak alır; oysa bir sonraki denemede gelecek.
+        if (error instanceof ThumbnailBusyError) {
+          throw new ServiceUnavailableException(error.message);
         }
         throw error;
       });

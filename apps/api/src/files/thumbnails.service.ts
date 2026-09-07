@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Writable } from 'node:stream';
 
 import { AgentDataService } from '../agent/agent-data.service.js';
+import { AgentService } from '../agent/agent.service.js';
 import { embeddedThumbnail, type EmbeddedThumbnail } from './exif-thumbnail.js';
 import { FilesService } from './files.service.js';
 
@@ -45,6 +46,20 @@ function costOf(value: Cached): number {
  * Kendi hatası, çünkü çağıranın vereceği cevap farklı: "küçük resmi yok" 204, "okuyamadım" 503.
  * İkisini bir araya getirmek, geçici bir aksaklığı kalıcı bir olguya çevirirdi.
  */
+/**
+ * Ajan şu an gerçek işle meşgul; küçük resim sıraya girmeden vazgeçti.
+ *
+ * `ThumbnailUnreadableError`'dan AYRI, çünkü anlamı ayrı: orada bir aksaklık var, burada yok —
+ * yalnız sıra kullanıcının beklediği işlerin. İkisi de 503'e çevriliyor ama karışmamaları
+ * gerekiyor, yoksa ilkini arayan biri kalabalığı bir arıza sanır.
+ */
+export class ThumbnailBusyError extends Error {
+  constructor() {
+    super('ajan meşgul; küçük resim sıraya girmedi');
+    this.name = 'ThumbnailBusyError';
+  }
+}
+
 export class ThumbnailUnreadableError extends Error {
   constructor() {
     super('the file could not be read for a thumbnail');
@@ -83,6 +98,7 @@ export class ThumbnailsService {
   constructor(
     private readonly files: FilesService,
     private readonly data: AgentDataService,
+    private readonly agent: AgentService,
   ) {}
 
   /**
@@ -127,6 +143,11 @@ export class ThumbnailsService {
       this.remember(key, { hit: null });
       return null;
     }
+
+    // KUYRUĞA GİRMEDEN ÖNCE VAZGEÇ. Buradan sonrası ajanda bir sıra yeri tutuyor, ve bir küçük
+    // resim, o sırada yüklenen bir dosyanın önüne geçmeye değmez. Önbellekten dönen cevaplar
+    // yukarıda çıktı, yani vazgeçilen şey yalnız YENİ bir okuma.
+    if (this.agent.crowded()) throw new ThumbnailBusyError();
 
     const opened = await this.files.openDownload(shareName, components, correlationId, reason);
     // Diskteki boyut satırdakiyle uyuşmuyorsa dosya SMB'den değişmiş ve uzlaştırma turu satırı
