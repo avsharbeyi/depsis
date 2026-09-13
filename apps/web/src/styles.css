@@ -688,6 +688,20 @@ select.pill.bad {
   font-size: 10px;
   color: var(--mut);
 }
+/* Yüklenemeyenlerin şeridi: ilerleme çubuğunun yerine geçiyor, aynı hizada ve aynı yazı boyunda.
+   Düğmeler sağda, cümle uzayınca sarılıyor — dar ekranda "Yeniden dene" ekranda kalmalı. */
+.leftover {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 13px 9px;
+  font-size: 11.5px;
+  color: var(--rose);
+}
+.leftover span {
+  flex: 1 1 200px;
+}
 .bar2 {
   height: 5px;
   border-radius: 99px;

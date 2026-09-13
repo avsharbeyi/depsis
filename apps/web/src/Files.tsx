@@ -627,6 +627,22 @@ export function Files({
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [progress, setProgress] = useState<{ label: string; percent: number } | null>(null);
+  /**
+   * Yüklenemeyenler, YENİDEN DENENEBİLİR olanlar ve olmayanlar diye ikiye ayrılmış.
+   *
+   * *"iOS'ta hâlâ dosya yüklerken hepsini yüklemiyor."* Yüz elli fotoğraflık bir seçimde otuz
+   * tanesi düşünce kullanıcının elinde otuz bildirim ve hiçbir çıkış yolu kalıyordu: hangileri
+   * düştü belli değil, yeniden seçmek demek yüz elliyi baştan yüklemek demek. Düşenler burada
+   * tutuluyor ve tek düğmeyle yeniden gidiyor — dosya nesneleri sayfa ömrü boyunca bizde.
+   *
+   * `unreadable`: telefonun artık OKUTMADIĞI dosyalar. iOS, seçilen fotoğrafları bir süre sonra
+   * bırakıyor; o dosyayı yeniden denemek yine aynı hatayı verir. Bunlar ayrı sayılıyor ve cümle
+   * "yeniden seç" diyor, "yeniden dene" değil.
+   */
+  const [leftovers, setLeftovers] = useState<{ again: Upload[]; unreadable: number }>({
+    again: [],
+    unreadable: 0,
+  });
   const [modal, setModal] = useState<Modal>({ kind: 'none' });
   /** Filled while the permanent-delete box is open. Absent for a folder means "not counted", not
    *  "empty" — the box words those two differently on purpose. */
@@ -1681,70 +1697,98 @@ export function Files({
     let failed = 0;
     /** Kullanıcının "atla" dediği dosyalar: yüklenmedi, ve bir hata da değil. */
     let skipped = 0;
+    const again: Upload[] = [];
+    let unreadable = 0;
+    /** Her düşenin sebebi, sırayla; özet bildirim ilkini söylüyor. */
+    const reasons: string[] = [];
+    setLeftovers({ again: [], unreadable: 0 });
 
-    for (const [index, { file, segments }] of list.entries()) {
-      if (segments.length === 0 && skipping.has(foldName(file.name))) {
-        skipped += 1;
-        continue;
-      }
-      const label = list.length === 1 ? file.name : `${index + 1}/${list.length} · ${file.name}`;
-      setProgress({ label, percent: 0 });
+    // ── EKRAN KİLİTLENMESİN ──────────────────────────────────────────────────────────────
+    //
+    // Yüz elli fotoğraf dakikalar sürüyor ve telefon o sürede kendini kilitliyor. iOS kilitte
+    // sekmeyi durduruyor: açık istek "Load failed" ile düşüyor, sıradakiler hiç başlamıyor.
+    // Kullanıcının gördüğü şey, "bir kısmını yüklüyor sonra hata veriyor". Yükleme sürerken
+    // ekran uyanık tutuluyor; bitince bırakılıyor.
+    const rest = await stayAwake();
 
-      let target = parentId;
-      if (segments.length > 0) {
-        const resolved = await ensureChain(segments, cache);
-        if (resolved === null) {
-          failed += 1;
-          notify('error', `"${file.name}" için klasör kurulamadı.`);
+    try {
+      for (const [index, { file, segments }] of list.entries()) {
+        if (segments.length === 0 && skipping.has(foldName(file.name))) {
+          skipped += 1;
           continue;
         }
-        target = resolved.id;
-      }
+        const label = list.length === 1 ? file.name : `${index + 1}/${list.length} · ${file.name}`;
+        setProgress({ label, percent: 0 });
 
-      try {
-        for await (const percent of uploadFile(file, target, shareId)) {
-          setProgress({ label, percent });
-        }
-      } catch (problem) {
-        // ── ÇAKIŞMA BİR HATA DEĞİL, BİR SORU ──────────────────────────────────────────
-        // Baytlar karşı tarafta ve duruyor; eksik olan tek şey kullanıcının kararı. Bunu bir
-        // bildirimle geçiştirmek, bir gigabaytı çöpe atıp "yüklenemedi" demek olurdu.
-        if (problem instanceof UploadNameClash) {
-          // KARAR ZATEN VERİLDİYSE İKİNCİ KEZ SORULMUYOR. Ön kontrol adı listede bulamamış
-          // olabilir — sayfa yüklenmemiştir, ya da adı çöpteki bir dosya tutuyordur — ama
-          // kullanıcı bu yükleme turu için ne istediğini çoktan söyledi.
-          if (decided !== null) {
-            const outcome = await sendResolution(problem, decided);
-            if (outcome === 'ok') continue;
+        let target = parentId;
+        if (segments.length > 0) {
+          const resolved = await ensureChain(segments, cache);
+          if (resolved === null) {
             failed += 1;
-            notify(
-              'error',
-              outcome === 'gone'
-                ? `"${file.name}" için gönderilen baytlar sunucuda kalmamış; yeniden yükleyin.`
-                : `"${file.name}" yayımlanamadı.`,
-            );
+            notify('error', `"${file.name}" için klasör kurulamadı.`);
+            continue;
+          }
+          target = resolved.id;
+        }
+
+        try {
+          for await (const percent of uploadFile(file, target, shareId)) {
+            setProgress({ label, percent });
+          }
+        } catch (problem) {
+          // ── ÇAKIŞMA BİR HATA DEĞİL, BİR SORU ──────────────────────────────────────────
+          // Baytlar karşı tarafta ve duruyor; eksik olan tek şey kullanıcının kararı. Bunu bir
+          // bildirimle geçiştirmek, bir gigabaytı çöpe atıp "yüklenemedi" demek olurdu.
+          if (problem instanceof UploadNameClash) {
+            // KARAR ZATEN VERİLDİYSE İKİNCİ KEZ SORULMUYOR. Ön kontrol adı listede bulamamış
+            // olabilir — sayfa yüklenmemiştir, ya da adı çöpteki bir dosya tutuyordur — ama
+            // kullanıcı bu yükleme turu için ne istediğini çoktan söyledi.
+            if (decided !== null) {
+              const outcome = await sendResolution(problem, decided);
+              if (outcome === 'ok') continue;
+              failed += 1;
+              notify(
+                'error',
+                outcome === 'gone'
+                  ? `"${file.name}" için gönderilen baytlar sunucuda kalmamış; yeniden yükleyin.`
+                  : `"${file.name}" yayımlanamadı.`,
+              );
+              continue;
+            }
+            failed += 1;
+            // KUYRUĞA EKLENİYOR, ÜSTÜNE YAZILMIYOR. Eskiden her çakışma bir öncekini siliyordu ve
+            // toplu bir yüklemede yalnız son dosya sorulup gerisi sessizce kayboluyordu.
+            setClashes((current) => [
+              ...current,
+              {
+                location: problem.location,
+                filename: problem.filename,
+                // Bir klasör sürüklendiyse dosya o alt klasöre gidiyor; yoksa açık olan klasöre.
+                folder: segments[segments.length - 1] ?? folderNow,
+              },
+            ]);
             continue;
           }
           failed += 1;
-          // KUYRUĞA EKLENİYOR, ÜSTÜNE YAZILMIYOR. Eskiden her çakışma bir öncekini siliyordu ve
-          // toplu bir yüklemede yalnız son dosya sorulup gerisi sessizce kayboluyordu.
-          setClashes((current) => [
-            ...current,
-            {
-              location: problem.location,
-              filename: problem.filename,
-              // Bir klasör sürüklendiyse dosya o alt klasöre gidiyor; yoksa açık olan klasöre.
-              folder: segments[segments.length - 1] ?? folderNow,
-            },
-          ]);
-          continue;
+          reasons.push(problem instanceof Error ? problem.message : `"${file.name}" yüklenemedi.`);
+          if (problem instanceof FileUnreadable) unreadable += 1;
+          else again.push({ file, segments });
         }
-        failed += 1;
-        notify('error', problem instanceof Error ? problem.message : `"${file.name}" yüklenemedi.`);
       }
+    } finally {
+      rest();
     }
 
     setProgress(null);
+    setLeftovers({ again, unreadable });
+    // TEK BİLDİRİM, otuz değil. İlk sebep söyleniyor — bir toplu yüklemede düşenlerin sebebi
+    // neredeyse hep aynı — ve kalanı aşağıdaki şeritte, yeniden deneme düğmesiyle birlikte.
+    if (failed > 0 && reasons[0] !== undefined) {
+      notify(
+        'error',
+        failed === 1 ? reasons[0] : `${failed} dosya yüklenemedi. İlki: ${reasons[0]}`,
+      );
+    }
     const done = list.length - failed - skipped;
     if (done > 0) {
       notify(
@@ -2477,6 +2521,39 @@ export function Files({
           <span>{progress.label}</span>
           <Bar ratio={progress.percent / 100} label={progress.label} />
           <em>%{progress.percent}</em>
+        </div>
+      )}
+
+      {progress === null && (leftovers.again.length > 0 || leftovers.unreadable > 0) && (
+        <div className="leftover" role="status">
+          <span>
+            {leftovers.again.length > 0 &&
+              (leftovers.again.length === 1
+                ? `"${leftovers.again[0]?.file.name ?? ''}" yüklenemedi.`
+                : `${leftovers.again.length} dosya yüklenemedi.`)}
+            {leftovers.unreadable > 0 &&
+              ` ${leftovers.unreadable} dosyayı telefon artık okutmuyor; onları yeniden seçin.`}
+          </span>
+          {leftovers.again.length > 0 && (
+            <button
+              type="button"
+              className="sb"
+              onClick={() => {
+                const list = leftovers.again;
+                setLeftovers({ again: [], unreadable: 0 });
+                void runUploads(list);
+              }}
+            >
+              Yeniden dene
+            </button>
+          )}
+          <button
+            type="button"
+            className="sb"
+            onClick={() => setLeftovers({ again: [], unreadable: 0 })}
+          >
+            Kapat
+          </button>
         </div>
       )}
 
@@ -3744,6 +3821,57 @@ function entryFile(entry: FileSystemFileEntry): Promise<File | null> {
 const CHUNK_BYTES = 5 * 1024 * 1024;
 
 /**
+ * Tarayıcı dosyayı artık okutmuyor.
+ *
+ * Ağ hatasından AYRI bir tür, çünkü cevabı ayrı: ağ kopmasında sunucuya nerede kalındığı sorulup
+ * devam edilir; bu ise aynı dosyayla ne kadar denense o kadar düşer. Kullanıcının yapması gereken
+ * şey dosyayı yeniden seçmek, ve cümle bunu söylemeli.
+ */
+export class FileUnreadable extends Error {
+  constructor(name: string) {
+    super(
+      `"${name}" telefondan artık okunamıyor — iOS, seçilen fotoğrafları bir süre sonra bırakıyor. ` +
+        'Kalanları yeniden seçip yükleyin.',
+    );
+    this.name = 'FileUnreadable';
+  }
+}
+
+/**
+ * Yükleme sürerken ekranı uyanık tutar; dönen işlev bırakır.
+ *
+ * Kilit, sekmeyi arka plana atmakla eşdeğer ve iOS arka plandaki sekmenin isteklerini kesiyor.
+ * `wakeLock` olmayan bir tarayıcıda (eski Safari, bazı gömülü tarayıcılar) hiçbir şey yapmıyor —
+ * yükleme yine gidiyor, yalnız kullanıcı ekrana dokunmak zorunda.
+ *
+ * Sekme görünür olunca YENİDEN alınıyor: tarayıcı, sekme arka plana gittiğinde kilidi kendisi
+ * bırakıyor ve geri gelince kendiliğinden almıyor.
+ */
+async function stayAwake(): Promise<() => void> {
+  const lock = navigator.wakeLock;
+  if (lock === undefined) return () => undefined;
+  let held: WakeLockSentinel | null = null;
+  const grab = async (): Promise<void> => {
+    try {
+      held = await lock.request('screen');
+    } catch {
+      // İzin yok ya da pil tasarrufu: kilit olmadan devam.
+      held = null;
+    }
+  };
+  const back = (): void => {
+    if (document.visibilityState === 'visible' && (held === null || held.released)) void grab();
+  };
+  await grab();
+  document.addEventListener('visibilitychange', back);
+  return () => {
+    document.removeEventListener('visibilitychange', back);
+    void held?.release();
+    held = null;
+  };
+}
+
+/**
  * Kopan bir parça kaç kez yeniden denenir.
  *
  * Üç: bir kopma sıradan (asansör, tünel, uyanan bir telefon), üçü üst üste ise ağ gerçekten yok
@@ -3799,7 +3927,7 @@ function pause(ms: number): Promise<void> {
  * because it is the same string the generated client would have used and `contract.test.ts` fails
  * on a route the document does not describe.
  */
-async function* uploadFile(
+export async function* uploadFile(
   file: File,
   parentId: string | undefined,
   shareId: string | undefined,
@@ -3886,6 +4014,24 @@ async function* uploadFile(
   let broken = 0;
   while (offset < file.size) {
     const end = Math.min(offset + CHUNK_BYTES, file.size);
+
+    // ── PARÇA GÖNDERİLMEDEN ÖNCE OKUNUYOR ─────────────────────────────────────────────────
+    //
+    // `body: file.slice(...)` ile tarayıcı dosyayı istek giderken okuyor, ve iOS'ta okuma
+    // başarısız olunca bu bir AĞ hatası gibi görünüyor ("Load failed"). Aşağıdaki dal onu bir
+    // kopma sanıp üç kez yeniden deniyor, üçü de aynı şekilde düşüyor, ve kullanıcıya "ağ"
+    // deniyordu — oysa ağ sağlamdı: iOS, seçilen fotoğrafların geçici kopyasını bir süre sonra
+    // bırakıyor ve dosya artık okunamıyor.
+    //
+    // Önce belleğe okumak ikisini ayırıyor: burada düşen okuma, aşağıda düşen ağ. Beş megabayt,
+    // her seferinde.
+    let bytes: ArrayBuffer;
+    try {
+      bytes = await file.slice(offset, end).arrayBuffer();
+    } catch {
+      throw new FileUnreadable(file.name);
+    }
+
     let sent: Response;
     try {
       sent = await fetch(location, {
@@ -3895,7 +4041,7 @@ async function* uploadFile(
           'content-type': 'application/offset+octet-stream',
           'upload-offset': String(offset),
         },
-        body: file.slice(offset, end),
+        body: bytes,
       });
     } catch (network) {
       broken += 1;
