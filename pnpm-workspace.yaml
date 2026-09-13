@@ -42,3 +42,13 @@ allowBuilds:
   # has to assume the owner's oldest PC. The C package's install script compiles (or picks a
   # baseline prebuild) ON the machine it will run on, which is the whole point.
   argon2: true
+
+# Geçişli bağımlılıkların yamalı sürümleri. Ana paketler (NestJS'in platform-express'i, vitest'in
+# kendi alt paketleri) henüz yamalı sürümü istemiyor ve `dependency · secret scan` işi danışmanlık
+# yayımlandığı gün kırmızıya dönüyor. Danışmanlıklar: GHSA-qfvm-cv95-jqjf ve GHSA-535w-7cp7-47q4
+# (multer), js-yaml maxTotalMergeKeys, qs array-limit / isBuffer, vitest yol geçişi.
+overrides:
+  multer: '>=2.3.0'
+  js-yaml: '>=4.3.2 <5'
+  qs: '>=6.16.0'
+  '@vitest/mocker': '4.1.11'
