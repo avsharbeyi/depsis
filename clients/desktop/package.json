@@ -1,0 +1,45 @@
+{
+  "name": "depsis-desktop",
+  "productName": "DEPSIS",
+  "version": "0.22.1",
+  "description": "DEPSIS masaüstü uygulaması: cihazın arayüzü ve arka planda ZeroTier bağlantısı",
+  "author": "DEPSIS",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "dist": "electron-builder --win nsis --publish never"
+  },
+  "devDependencies": {
+    "electron": "44.9.3",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.depsis.desktop",
+    "productName": "DEPSIS",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "pairing.js",
+      "zerotier.js",
+      "ui.html",
+      "assets/icon.png"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "shortcutName": "DEPSIS",
+      "artifactName": "DEPSIS-Kurulum-${version}.exe"
+    }
+  }
+}

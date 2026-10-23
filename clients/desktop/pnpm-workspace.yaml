@@ -1,0 +1,8 @@
+# Bu dizin deponun ana çalışma alanının DIŞINDA, ve bilerek: Electron'un ikilisi yüz megabayt ve
+# ana çalışma alanına girseydi CI'nin her işi onu indirirdi. Kendi kilit dosyası var; buradan
+# `pnpm install` ana depoya dokunmuyor.
+packages: []
+allowBuilds:
+  electron: true
+  # Squirrel kurucusu için; biz NSIS kullanıyoruz.
+  electron-winstaller: false
