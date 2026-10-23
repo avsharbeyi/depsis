@@ -12,6 +12,14 @@ type Notify = (kind: 'ok' | 'error', text: string) => void;
 /** The fewest disks each arrangement means anything with. Mirrors `PoolTopology::minimum_disks`. */
 const MINIMUM: Record<Topology, number> = { single: 1, mirror: 2, raidz1: 3, raidz2: 4 };
 
+/** Seçicide görünen ad. `single`/`mirror` sözcükleri ZFS'in, kullanıcının değil. */
+const LABEL: Record<Topology, string> = {
+  single: 'Tek disk',
+  mirror: 'Ayna',
+  raidz1: 'RAID-Z1',
+  raidz2: 'RAID-Z2',
+};
+
 const DESCRIBED: Record<Topology, string> = {
   single: 'Tek disk. Yedeklilik yok — disk giderse veri gider.',
   mirror: 'Her disk her baytı tutuyor. Biri hariç hepsi gidebilir.',
@@ -51,7 +59,7 @@ export function CreatePool({
   onCreated: () => void;
 }): React.JSX.Element {
   const [name, setName] = useState('');
-  const [topology, setTopology] = useState<Topology>('mirror');
+  const [picked, setPicked] = useState<Topology>('mirror');
   const [chosen, setChosen] = useState<string[]>([]);
   const [confirm, setConfirm] = useState('');
   const [password, setPassword] = useState('');
@@ -86,9 +94,28 @@ export function CreatePool({
   );
   const blocked = disks.filter((disk) => !candidates.includes(disk));
 
+  // ── KUTUNUN TAŞIYAMADIĞI DÜZEN SEÇİLİ GELMİYOR ────────────────────────────────────────────
+  //
+  // Varsayılan "ayna"ydı, ve tek diskli bir kutuda — sistem diskinin veri bölümü tek aday —
+  // düğme "en az 2 disk" yüzünden hiç açılmıyordu. Sahibi havuzu kuramadı. Seçim, aday sayısının
+  // yetmediği bir düzende kalamıyor: o hâlde aday sayısına uyan en güvenli düzene düşülüyor.
+  const fits = (option: Topology): boolean => MINIMUM[option] <= Math.max(1, candidates.length);
+  const topology: Topology = fits(picked) ? picked : candidates.length >= 2 ? 'mirror' : 'single';
+
   const selected = candidates.filter((disk) => chosen.includes(disk.byId as string));
   const enough = selected.length >= MINIMUM[topology];
   const tooMany = topology === 'single' && selected.length > 1;
+  const missing = !enough
+    ? `en az ${MINIMUM[topology]} disk seçin`
+    : tooMany
+      ? 'tek disk düzeninde yalnız bir disk seçin'
+      : name === ''
+        ? 'havuza bir ad verin'
+        : confirm !== name
+          ? 'onay kutusuna havuzun adını aynen yazın'
+          : password === ''
+            ? 'parolanızı girin'
+            : null;
   // The smallest disk decides a mirror's or raidz's capacity, so a mismatched set is worth saying
   // out loud before somebody builds a 4 TB mirror out of a 4 TB and a 1 TB disk.
   const sizes = new Set(selected.map((disk) => disk.sizeBytes));
@@ -254,10 +281,10 @@ export function CreatePool({
 
       <label>
         Düzen
-        <select value={topology} onChange={(event) => setTopology(event.target.value as Topology)}>
+        <select value={topology} onChange={(event) => setPicked(event.target.value as Topology)}>
           {(['single', 'mirror', 'raidz1', 'raidz2'] as const).map((option) => (
-            <option key={option} value={option}>
-              {option} — en az {MINIMUM[option]} disk
+            <option key={option} value={option} disabled={!fits(option)}>
+              {LABEL[option]} — en az {MINIMUM[option]} disk
             </option>
           ))}
         </select>
@@ -380,13 +407,12 @@ export function CreatePool({
         </small>
       </label>
 
-      <button
-        type="submit"
-        className="b danger"
-        disabled={busy || !enough || tooMany || name === '' || confirm !== name || password === ''}
-      >
+      <button type="submit" className="b danger" disabled={busy || missing !== null}>
         {busy ? 'Oluşturuluyor…' : `${selected.length} diski sil ve havuzu kur`}
       </button>
+      {/* KAPALI DÜĞME NEDENİNİ SÖYLÜYOR. Beş koşuldan biri eksikken düğme sessizce gri kalıyordu,
+          ve hangisinin eksik olduğu ekranın hiçbir yerinde yazmıyordu. */}
+      {!busy && missing !== null && <small className="note">Önce {missing}.</small>}
     </form>
   );
 }
