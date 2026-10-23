@@ -54,6 +54,8 @@ export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
   const [label, setLabel] = useState('');
   const [busy, setBusy] = useState(false);
   const [leaving, setLeaving] = useState<RemoteNetwork | null>(null);
+  /** Cihaz sertifikasının SHA-256'sı, ayraçsız — masaüstü uygulamasının eşleştirme kodu için. */
+  const [fingerprint, setFingerprint] = useState<string | null>(null);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
 
@@ -73,10 +75,23 @@ export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
     };
   }, [reloadKey]);
 
-  async function copyNodeId(value: string): Promise<void> {
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const { data } = await api.GET('/system/tls', {});
+      if (alive && data !== undefined) {
+        setFingerprint(data.fingerprint.replace(/:/g, '').toLowerCase());
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  async function copyNodeId(value: string, what = 'Düğüm kimliği'): Promise<void> {
     try {
       await navigator.clipboard.writeText(value);
-      notify('ok', 'Düğüm kimliği kopyalandı.');
+      notify('ok', `${what} kopyalandı.`);
     } catch {
       // Clipboard access is refused outright on an insecure origin, which is exactly how a NAS on
       // a home LAN is usually reached. Saying so beats a button that silently does nothing.
@@ -186,6 +201,17 @@ export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
       </div>
 
       <div className="lbl">Ağlar</div>
+      {/* Eşleştirme kodu ancak cihaz onaylanmış bir ağda adres aldığında çıkabiliyor. Kod
+          görünmeyince ekran bunu söylemeli; yoksa "bağlantı kodu nerede" sorusunun cevabı yok. */}
+      {!status.networks.some(
+        (n) => n.status === 'OK' && n.addresses.some((a) => /^\d+\.\d+\.\d+\.\d+/.test(a)),
+      ) && (
+        <div className="note">
+          <b>Masaüstü uygulamasının eşleştirme kodu</b> cihaz bir ağa katılıp adres aldığında
+          burada, ağın satırında çıkar. En kolayı aşağıdaki <b>Ağ yöneticisi</b>nden kendi ağınızı
+          kurmak: cihaz o ağa kendiliğinden katılır ve kendini onaylar.
+        </div>
+      )}
       {status.networks.length === 0 ? (
         <Empty glyph="🔗" text="Hiçbir ağa katılınmamış." />
       ) : (
@@ -235,6 +261,32 @@ export function Remote({ notify, isAdmin }: Props): React.JSX.Element {
                   yöneticisinin ZeroTier Central&apos;da bu düğümü onaylaması gerekiyor.
                 </div>
               )}
+              {/* MASAÜSTÜ UYGULAMASININ EŞLEŞTİRME KODU. Ağ, adres ve sertifikanın parmak izi tek
+                  satırda: uygulama ağa katılıyor, adresi açıyor ve sertifikayı bu parmak iziyle
+                  doğruluyor. Parmak izi olmadan uygulama her sertifikayı kabul etmek zorunda
+                  kalırdı. */}
+              {(() => {
+                const ipv4 = network.addresses.find((a) => /^\d+\.\d+\.\d+\.\d+/.test(a));
+                if (network.status !== 'OK' || ipv4 === undefined || fingerprint === null) {
+                  return null;
+                }
+                const code = `DEPSIS:${network.networkId}:${ipv4.split('/')[0]}:${fingerprint}`;
+                return (
+                  <div className="netrow">
+                    <span className="lbl">Masaüstü uygulaması</span>
+                    <span className="val m" style={{ wordBreak: 'break-all' }}>
+                      {code}
+                    </span>
+                    <button
+                      type="button"
+                      className="b"
+                      onClick={() => void copyNodeId(code, 'Eşleştirme kodu')}
+                    >
+                      Kopyala
+                    </button>
+                  </div>
+                );
+              })()}
               {network.joinedAt !== null && network.joinedAt !== undefined && (
                 // The date goes in `.val` — mono, tabular — like every other figure on this card.
                 <div className="netrow">

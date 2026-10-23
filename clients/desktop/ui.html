@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    />
+    <title>DEPSIS</title>
+    <style>
+      :root {
+        --ground: #02040a;
+        --glass: #0c1322;
+        --edge: rgba(120, 160, 230, 0.18);
+        --ink: #e8eef9;
+        --mut: #a9b4ca;
+        --mint: #4fe3a8;
+        --amber: #f5c26b;
+        --rose: #ff7e8a;
+        --mono: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(1200px 600px at 20% -10%, rgba(91, 200, 245, 0.08), transparent 60%),
+          var(--ground);
+        color: var(--ink);
+        font:
+          14px/1.5 'Segoe UI',
+          system-ui,
+          sans-serif;
+      }
+      main {
+        width: min(520px, 92vw);
+        padding: 28px;
+        border: 1px solid var(--edge);
+        border-radius: 18px;
+        background: var(--glass);
+        backdrop-filter: blur(18px);
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 22px;
+        letter-spacing: 0.02em;
+      }
+      .state {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 16px 0;
+        color: var(--mut);
+      }
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--amber);
+        box-shadow: 0 0 12px currentColor;
+      }
+      .dot.ok {
+        background: var(--mint);
+      }
+      .dot.err {
+        background: var(--rose);
+      }
+      textarea {
+        width: 100%;
+        min-height: 70px;
+        padding: 10px 12px;
+        border: 1px solid var(--edge);
+        border-radius: 12px;
+        background: rgba(0, 0, 0, 0.35);
+        color: var(--ink);
+        font: 12px/1.5 var(--mono);
+        resize: vertical;
+      }
+      button {
+        margin-top: 12px;
+        padding: 9px 18px;
+        border: 1px solid rgba(79, 227, 168, 0.45);
+        border-radius: 99px;
+        background: rgba(79, 227, 168, 0.12);
+        color: var(--mint);
+        font: inherit;
+        cursor: pointer;
+      }
+      button:focus-visible,
+      textarea:focus-visible {
+        outline: 2px solid #5bc8f5;
+        outline-offset: 2px;
+      }
+      .node {
+        font-family: var(--mono);
+        font-size: 18px;
+        letter-spacing: 0.08em;
+        color: var(--ink);
+      }
+      .error {
+        color: var(--rose);
+        min-height: 1.5em;
+      }
+      p {
+        color: var(--mut);
+        margin: 8px 0;
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>DEPSIS</h1>
+      <div class="state">
+        <span class="dot" id="dot"></span><span id="text">Başlatılıyor…</span>
+      </div>
+
+      <section id="pair" hidden>
+        <p>
+          Cihazın arayüzünde <b>Uzak erişim</b> ekranını açın ve <b>Masaüstü uygulaması</b>
+          satırındaki kodu buraya yapıştırın.
+        </p>
+        <textarea id="code" placeholder="DEPSIS:…" spellcheck="false"></textarea>
+        <button id="pairButton" type="button">Bağlan</button>
+      </section>
+
+      <section id="prepare" hidden>
+        <p>
+          Bu bilgisayarın cihazın ağına katılması için ZeroTier servisi gerekiyor. Uygulama onu
+          ZeroTier'ın kendi sunucusundan indirip imzasını doğrulayarak kuruyor; Windows bir kez
+          yönetici onayı isteyecek.
+        </p>
+        <button id="prepareButton" type="button">ZeroTier'ı hazırla</button>
+      </section>
+
+      <section id="authorize" hidden>
+        <p>Bu bilgisayar ağa katıldı, cihazın onayını bekliyor. Onaylanacak kimlik:</p>
+        <p class="node" id="node"></p>
+        <p>
+          Cihazda <b>Uzak erişim → Ağ yöneticisi</b> ekranında bu kimliği onaylayın (ZeroTier
+          Central kullanıyorsanız orada <b>Auth</b> kutusunu işaretleyin). Onaylanınca bu pencere
+          kendiliğinden açılır.
+        </p>
+      </section>
+
+      <p class="error" id="error"></p>
+    </main>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      function show(state) {
+        $('text').textContent = state.text;
+        $('dot').className =
+          'dot' + (state.phase === 'ready' ? ' ok' : state.phase === 'error' ? ' err' : '');
+        for (const id of ['pair', 'prepare', 'authorize']) $(id).hidden = state.phase !== id;
+        $('node').textContent = state.nodeId ?? '';
+      }
+      $('pairButton').addEventListener('click', async () => {
+        $('error').textContent = (await window.depsis.pair($('code').value)) ?? '';
+      });
+      $('prepareButton').addEventListener('click', async () => {
+        $('prepareButton').disabled = true;
+        $('error').textContent = (await window.depsis.prepare()) ?? '';
+        $('prepareButton').disabled = false;
+      });
+      window.depsis.onState(show);
+      void window.depsis.state().then(show);
+    </script>
+  </body>
+</html>
