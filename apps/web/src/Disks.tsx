@@ -2,7 +2,7 @@ import type { OpenApi } from '@depsis/contracts';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from './api.js';
-import { CreatePool } from './CreatePool.js';
+import { CreatePool, nameOf } from './CreatePool.js';
 import { formatBytes } from './Dashboard.js';
 import { ShareTreeNotice } from './ShareTree.js';
 import type { Snapshot as SystemSnapshot } from './snapshot.js';
@@ -328,7 +328,7 @@ function Row({
               `wwn-0x5001b448b6bf6163` bir insanın ayırt edebileceği bir ad değil; "Sol yuva"
               öyle. Ad varsa kalın olan o oluyor ve modeli bir satır aşağı iniyor — model hâlâ
               orada, çünkü diski satın alırken bakılan şey o. */}
-          <b>{disk.label ?? disk.model ?? disk.kname}</b>
+          <b>{disk.label ?? nameOf(disk)}</b>
           {disk.removable && <span className="pill dim"> çıkarılabilir</span>}
           {disk.byId !== undefined && (
             <button
