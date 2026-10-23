@@ -287,7 +287,11 @@ export class SystemService {
       const { disks } = await this.inventory(correlationId);
       return {
         ids: disks
-          .filter((disk) => !disk.removable && disk.byId !== undefined)
+          // Bölümler SORULMUYOR: sistem diskinin veri bölümü kendi satırıyla listeleniyor, ama
+          // SMART bir DİSKİN özelliği — aynı diski iki kez okutmak yalnız onu uyandırır.
+          .filter(
+            (disk) => !disk.removable && disk.byId !== undefined && !/-part\d+$/.test(disk.byId),
+          )
           .map((disk) => disk.byId as string),
         configured: false,
       };

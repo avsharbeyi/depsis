@@ -202,7 +202,7 @@ export function CreatePool({
             <div style={{ marginTop: 6 }}>
               {blocked.map((disk) => (
                 <div className="netrow" key={disk.byId ?? disk.kname}>
-                  <span className="lbl">{disk.model ?? disk.kname}</span>
+                  <span className="lbl">{nameOf(disk)}</span>
                   <span className="val m">{why(disk)}</span>
                   <WipeDisk disk={disk} notify={notify} onWiped={onCreated} />
                 </div>
@@ -284,7 +284,7 @@ export function CreatePool({
               checked={chosen.includes(disk.byId as string)}
               onChange={() => toggle(disk.byId as string)}
             />
-            <span className="lbl">{disk.model ?? disk.kname}</span>
+            <span className="lbl">{nameOf(disk)}</span>
             <span className="val">
               {formatBytes(disk.sizeBytes)} · <span className="m">{disk.byId}</span>
             </span>
@@ -302,7 +302,7 @@ export function CreatePool({
               Nedenle birlikte çare de aynı satırda durmalı. */}
           {blocked.map((disk) => (
             <div className="netrow" key={disk.byId ?? disk.kname}>
-              <span className="lbl">{disk.model ?? disk.kname}</span>
+              <span className="lbl">{nameOf(disk)}</span>
               <span className="val m">{why(disk)}</span>
               <WipeDisk disk={disk} notify={notify} onWiped={onCreated} />
             </div>
@@ -389,6 +389,16 @@ export function CreatePool({
       </button>
     </form>
   );
+}
+
+/**
+ * Satırda gösterilen ad. Sistem diskinin veri bölümü (tek diskli kutunun "D:"si) aynı modeli
+ * taşıyor, ve iki satırda aynı ad "aynı diski iki kez mi gösteriyor?" sorusu demek — o yüzden
+ * bölüm olduğu söyleniyor. udev bölümlerin by-id adına her zaman `-partN` ekliyor.
+ */
+export function nameOf(disk: Disk): string {
+  const name = disk.model ?? disk.kname;
+  return /-part\d+$/.test(disk.byId ?? '') ? `${name} — sistem diskinin veri bölümü` : name;
 }
 
 /** Why a disk is not on offer. The reason, not just the exclusion. */

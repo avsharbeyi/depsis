@@ -11,6 +11,12 @@
 //! WHAT IS DELIBERATELY NOT REPORTED. Partitions are not disks. They shape three fields of their
 //! parent — `holds`, `mounted`, `holds_system` — and are otherwise dropped, because the caller of
 //! this operation is about to make a decision about a whole device.
+//!
+//! ONE EXCEPTION: the system disk's data partition. A one-disk box has nowhere else to put a pool,
+//! so the installer leaves the tail of the system disk as an unformatted partition, and that
+//! partition is reported as an entry of its own — see [`data_partitions`]. Its `by_id` is the
+//! udev `-partN` link, so every check downstream (`plan`, `wipe_plan`) sees exactly that
+//! partition and never the disk the box boots from.
 
 use serde::Deserialize;
 
@@ -155,10 +161,68 @@ pub fn parse(json: &str) -> Result<(Vec<DiskInfo>, bool), SeamError> {
             truncated = true;
             break;
         }
-        disks.push(convert(node));
+        let disk = convert(node);
+        let system = disk.holds_system;
+        disks.push(disk);
+        if system {
+            for part in data_partitions(node) {
+                if disks.len() >= MAX_DISKS {
+                    truncated = true;
+                    break;
+                }
+                disks.push(part);
+            }
+        }
     }
 
     Ok((disks, truncated))
+}
+
+/// Smallest partition worth offering as a pool. Below this it is an ESP, a BIOS boot stub or a
+/// leftover, not somewhere a NAS keeps files.
+const MIN_DATA_PARTITION: u64 = 8 * 1024 * 1024 * 1024;
+
+/// The system disk's partitions a pool may be built on — the "D:" of a one-disk box.
+///
+/// Only what cannot be anything else: a leaf partition, not mounted, at least
+/// [`MIN_DATA_PARTITION`], and either blank or already a ZFS member (so a pool built here keeps
+/// showing up). A partition carrying any other filesystem is NOT reported — on a dual-boot disk
+/// that is somebody's Windows, and offering it beside a "wipe" button is the mistake this module
+/// exists to make impossible.
+fn data_partitions(disk: &Node) -> Vec<DiskInfo> {
+    disk.children
+        .iter()
+        .filter(|part| {
+            let (mut mounted, mut system) = (false, false);
+            note_mounts(part, &mut mounted, &mut system);
+            part.kind.as_deref() == Some("part")
+                && part.children.is_empty()
+                && !mounted
+                && part.size.unwrap_or(0) >= MIN_DATA_PARTITION
+                && matches!(
+                    clean(part.fstype.as_deref()).as_deref(),
+                    None | Some("zfs_member")
+                )
+        })
+        .map(|part| DiskInfo {
+            by_id: clean(part.id_link.as_deref()),
+            kname: clean(part.kname.as_deref()).unwrap_or_else(|| "?".to_string()),
+            size_bytes: part.size.unwrap_or(0),
+            model: clean(disk.model.as_deref()),
+            serial: clean(disk.serial.as_deref()),
+            // udev copies the disk's WWN onto its partitions; read the parent's when it did not,
+            // so the confirm-what-you-saw check in `plan` still has something to compare.
+            wwn: clean(part.wwn.as_deref()).or_else(|| clean(disk.wwn.as_deref())),
+            rotational: disk.rota.unwrap_or(false),
+            removable: disk.rm.unwrap_or(false),
+            transport: clean(disk.tran.as_deref()),
+            // NOT the parent's `pttype` — lsblk repeats the table type on every partition, and a
+            // blank data partition would otherwise read as "holds gpt" and never be offered.
+            holds: clean(part.fstype.as_deref()).into_iter().collect(),
+            mounted: false,
+            holds_system: false,
+        })
+        .collect()
 }
 
 fn convert(node: &Node) -> DiskInfo {
@@ -668,6 +732,63 @@ mod tests {
             format!("{error:?}").contains("flat list"),
             "the failure has to name what went wrong: {error:?}"
         );
+    }
+
+    /// What the DEPSIS installer leaves on a one-disk box: ESP, root, swap, and the rest blank.
+    const ONE_DISK: &str = r#"{"blockdevices":[
+      {"kname":"sda","type":"disk","size":1000204886016,"model":"WDC WD10EZEX","wwn":"0x50014ee2",
+       "pttype":"gpt","id-link":"ata-WDC_WD10EZEX_WD-1","children":[
+        {"kname":"sda1","type":"part","size":1048576,"pttype":"gpt","children":[]},
+        {"kname":"sda2","type":"part","size":564133888,"fstype":"vfat","pttype":"gpt",
+         "mountpoints":["/boot/efi"],"children":[]},
+        {"kname":"sda3","type":"part","size":64000000000,"fstype":"ext4","pttype":"gpt",
+         "mountpoints":["/"],"children":[]},
+        {"kname":"sda4","type":"part","size":2147483648,"fstype":"swap","pttype":"gpt",
+         "mountpoints":["[SWAP]"],"children":[]},
+        {"kname":"sda5","type":"part","size":933000000000,"pttype":"gpt","wwn":"0x50014ee2",
+         "id-link":"ata-WDC_WD10EZEX_WD-1-part5","mountpoints":[null],"children":[]}]}]}"#;
+
+    #[test]
+    fn a_one_disk_box_offers_the_blank_tail_of_its_system_disk() {
+        let (disks, _) = parse(ONE_DISK).expect("parses");
+        assert_eq!(
+            disks.iter().map(|d| d.kname.as_str()).collect::<Vec<_>>(),
+            ["sda", "sda5"],
+            "the ESP, root, swap and BIOS stub are not pool candidates; only the data partition is"
+        );
+        assert!(disks[0].holds_system);
+        let data = &disks[1];
+        assert!(!data.holds_system && !data.mounted);
+        assert!(
+            data.holds.is_empty(),
+            "the table type is the parent's, not content: {:?}",
+            data.holds
+        );
+        assert_eq!(data.by_id.as_deref(), Some("ata-WDC_WD10EZEX_WD-1-part5"));
+        assert_eq!(data.wwn.as_deref(), Some("0x50014ee2"));
+
+        // And the pool planner takes it — while still refusing the disk it lives on.
+        let part = [named("ata-WDC_WD10EZEX_WD-1-part5", "0x50014ee2")];
+        let argv = plan("depo", PoolTopology::Single, &part, &disks).expect("the data partition");
+        assert!(argv
+            .iter()
+            .any(|a| a == "/dev/disk/by-id/ata-WDC_WD10EZEX_WD-1-part5"));
+        let whole = [named("ata-WDC_WD10EZEX_WD-1", "0x50014ee2")];
+        assert!(matches!(
+            plan("depo", PoolTopology::Single, &whole, &disks),
+            Err(PoolPlanError::SystemDisk { .. })
+        ));
+    }
+
+    #[test]
+    fn a_partition_with_somebody_elses_filesystem_is_never_offered() {
+        // A dual-boot disk: the big partition is Windows. It must not appear beside a wipe button.
+        let json = ONE_DISK.replace(
+            r#""id-link":"ata-WDC_WD10EZEX_WD-1-part5""#,
+            r#""id-link":"ata-WDC_WD10EZEX_WD-1-part5","fstype":"ntfs""#,
+        );
+        let (disks, _) = parse(&json).expect("parses");
+        assert_eq!(disks.len(), 1, "only the system disk itself: {disks:?}");
     }
 
     #[test]
