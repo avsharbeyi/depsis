@@ -156,8 +156,15 @@
       function show(state) {
         $('text').textContent = state.text;
         $('dot').className =
-          'dot' + (state.phase === 'ready' ? ' ok' : state.phase === 'error' ? ' err' : '');
-        for (const id of ['pair', 'prepare', 'authorize']) $(id).hidden = state.phase !== id;
+          'dot' +
+          (state.phase === 'ready'
+            ? ' ok'
+            : state.phase === 'error' || state.phase === 'mismatch'
+              ? ' err'
+              : '');
+        for (const id of ['prepare', 'authorize']) $(id).hidden = state.phase !== id;
+        // Sertifika uyuşmuyorsa yapılacak şey yeni kodla eşleştirmek; kutu orada da açık.
+        $('pair').hidden = state.phase !== 'pair' && state.phase !== 'mismatch';
         $('node').textContent = state.nodeId ?? '';
       }
       $('pairButton').addEventListener('click', async () => {

@@ -41,3 +41,17 @@ test('PEM ve DER aynı parmak izini veriyor', () => {
   assert.equal(certificateFingerprint(der), expected);
   assert.equal(certificateFingerprint(pem), expected);
 });
+
+test('yükseltilmiş betik kurulumdan hemen önce imzayı yeniden doğruluyor ve 0 ile bitiyor', () => {
+  const { elevatedScript, SIGNER } = require('./zerotier.js');
+  const script = elevatedScript({
+    msi: String.raw`C:\Users\Gökhan Çağrı\Temp\z.msi`,
+    ownCopy: String.raw`C:\x`,
+  });
+  // Türkçe yol bozulmadan betiğin içinde; betik dosya değil, UTF-16 kodlu komut olarak gidiyor.
+  assert.match(script, /Gökhan Çağrı/);
+  assert.ok(script.indexOf('Get-AuthenticodeSignature') < script.indexOf('msiexec'));
+  assert.match(script, /exit 0$/);
+  assert.ok(SIGNER.test('CN="ZeroTier, Inc.", O="ZeroTier, Inc.", L=Irvine, S=California, C=US'));
+  assert.ok(!SIGNER.test('CN=x, O="ZeroTier, Inc. Evil Twin LLC", C=US'));
+});

@@ -18,16 +18,37 @@ const os = require('node:os');
 const path = require('node:path');
 
 const PROGRAM_DATA = process.env.ProgramData || 'C:\\ProgramData';
-const SERVICE_TOKEN = path.join(PROGRAM_DATA, 'ZeroTier', 'One', 'authtoken.secret');
+const SERVICE_DIR = path.join(PROGRAM_DATA, 'ZeroTier', 'One');
+const SERVICE_TOKEN = path.join(SERVICE_DIR, 'authtoken.secret');
 /** ZeroTier'ın kendi tepsi uygulamasının kullanıcı için bıraktığı kopya. */
 const UI_TOKEN = path.join(process.env.LOCALAPPDATA || '', 'ZeroTier', 'authtoken.secret');
 const MSI_URL = 'https://download.zerotier.com/dist/ZeroTier%20One.msi';
-const API = 'http://127.0.0.1:9993';
+/** Authenticode imzalayanının konu satırında ARANAN kurum — tam ad, önek değil. */
+const SIGNER = /(^|,\s*)O="?ZeroTier, Inc\.?"?(,|$)/;
+
+/** Servis bağlandığı portu bu dosyaya yazıyor; okunamazsa varsayılan. */
+function apiBase() {
+  try {
+    const port = Number(fs.readFileSync(path.join(SERVICE_DIR, 'zerotier-one.port'), 'utf8'));
+    if (Number.isInteger(port) && port > 0 && port < 65536) return `http://127.0.0.1:${port}`;
+  } catch {
+    // varsayılan
+  }
+  return 'http://127.0.0.1:9993';
+}
 
 function run(file, args) {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { windowsHide: true, timeout: 15 * 60 * 1000 }, (error, stdout, stderr) =>
-      error ? reject(new Error(String(stderr || error.message).trim())) : resolve(String(stdout)),
+    execFile(
+      file,
+      args,
+      { windowsHide: true, timeout: 15 * 60 * 1000 },
+      (error, stdout, stderr) => {
+        if (!error) return resolve(String(stdout));
+        const failure = new Error(String(stderr || error.message).trim());
+        failure.exitCode = typeof error.code === 'number' ? error.code : null;
+        reject(failure);
+      },
     );
   });
 }
@@ -56,72 +77,105 @@ function ps(text) {
 }
 
 /**
- * Gerekirse ZeroTier'ı kurar ve jetonu kullanıcının okuyabileceği yere kopyalar — TEK bir yönetici
- * onayıyla (UAC). Kullanıcı eşleştirme kodunu girdiğinde çağrılıyor; onay o.
+ * Yükseltilmiş betik. `-EncodedCommand` ile, DOSYA OLARAK DEĞİL:
+ *
+ * - Windows PowerShell 5.1 BOM'suz bir .ps1'i ANSI kod sayfasıyla okuyor; Türkçe bir kullanıcı
+ *   adında (Gökhan, Çağrı) yollar bozuluyor ve kurulum her denemede düşüyordu.
+ * - Kullanıcının yazabildiği %TEMP%'te duran bir betik, onaydan sonra ama çalışmadan önce
+ *   değiştirilebilirdi. Komut satırındaki metni kimse değiştiremez.
+ *
+ * MSI da aynı sebeple yükseltilmiş süreçte, yalnız yöneticinin yazabildiği bir dizine kopyalanıp
+ * imzası ORADA yeniden doğrulanıyor: yetkisiz kontrol ile yükseltilmiş kurulum arasında %TEMP%'teki
+ * dosya değiştirilmiş olabilir.
  */
-async function prepare(ownCopy) {
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'depsis-zt-'));
-  const steps = [];
-
-  if (!installed()) {
-    const msi = path.join(work, 'ZeroTierOne.msi');
-    const answer = await fetch(MSI_URL);
-    if (!answer.ok) throw new Error(`ZeroTier indirilemedi (HTTP ${answer.status}).`);
-    fs.writeFileSync(msi, Buffer.from(await answer.arrayBuffer()));
-    // İMZA KURMADAN ÖNCE ve yönetici YETKİSİZ doğrulanıyor: yükseltilmiş bir süreç, kimin
-    // yazdığı belli olmayan bir paketi asla çalıştırmamalı.
-    const signer = await run('powershell.exe', [
-      '-NoProfile',
-      '-Command',
-      `$s = Get-AuthenticodeSignature -LiteralPath ${ps(msi)}; ` +
-        `if ($s.Status -ne 'Valid') { exit 3 }; $s.SignerCertificate.Subject`,
-    ]).catch(() => '');
-    if (!/O="?ZeroTier,? Inc/i.test(signer)) {
-      throw new Error('İndirilen ZeroTier paketinin imzası doğrulanamadı; kurulmadı.');
-    }
-    steps.push(
-      `$p = Start-Process msiexec.exe -ArgumentList '/i',${ps(`"${msi}"`)},'/qn','/norestart' -Wait -PassThru`,
+function elevatedScript({ msi, ownCopy }) {
+  const lines = ["$ErrorActionPreference = 'Stop'"];
+  if (msi !== null) {
+    lines.push(
+      `$dir = Join-Path $env:SystemRoot ('Temp\\depsis-' + [guid]::NewGuid())`,
+      'New-Item -ItemType Directory -Path $dir | Out-Null',
+      `$pkg = Join-Path $dir 'ZeroTierOne.msi'`,
+      `Copy-Item -LiteralPath ${ps(msi)} -Destination $pkg`,
+      '$s = Get-AuthenticodeSignature -LiteralPath $pkg',
+      `if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch ${ps(SIGNER.source)}) { exit 21 }`,
+      // ZTHEADLESS: ZeroTier'ın kendi tepsi arayüzü kurulmuyor — onun işini bu uygulama yapıyor.
+      `$p = Start-Process msiexec.exe -ArgumentList '/i',('"' + $pkg + '"'),'/qn','/norestart','ZTHEADLESS=Yes' -Wait -PassThru`,
+      'Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue',
       'if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { exit $p.ExitCode }',
       // Servis jetonunu ilk açılışta yazıyor; birkaç saniye sürebiliyor.
       `for ($i = 0; $i -lt 60 -and -not (Test-Path -LiteralPath ${ps(SERVICE_TOKEN)}); $i++) { Start-Sleep 1 }`,
     );
   }
-
-  fs.mkdirSync(path.dirname(ownCopy), { recursive: true });
-  steps.push(
+  // Kopya %APPDATA% altında; izinleri o dizinden miras alıyor, kullanıcı okuyabiliyor.
+  lines.push(
     `Copy-Item -LiteralPath ${ps(SERVICE_TOKEN)} -Destination ${ps(ownCopy)} -Force`,
-    // Dosya yükseltilmiş süreçte yazıldı; okuyacak olan normal kullanıcı.
-    `icacls ${ps(ownCopy)} /grant ${ps(`${process.env.USERNAME}:R`)} | Out-Null`,
+    'exit 0',
   );
+  return lines.join('\n');
+}
 
-  const script = path.join(work, 'depsis-zt.ps1');
-  fs.writeFileSync(script, `$ErrorActionPreference = 'Stop'\r\n${steps.join('\r\n')}\r\n`, 'utf8');
+/**
+ * Gerekirse ZeroTier'ı kurar ve jetonu kullanıcının okuyabileceği yere kopyalar — TEK bir yönetici
+ * onayıyla (UAC). Kullanıcı "ZeroTier'ı hazırla"ya bastığında çağrılıyor; onay o.
+ */
+async function prepare(ownCopy) {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'depsis-zt-'));
+  let msi = null;
   try {
+    if (!installed()) {
+      msi = path.join(work, 'ZeroTierOne.msi');
+      const answer = await fetch(MSI_URL);
+      if (!answer.ok) throw new Error(`ZeroTier indirilemedi (HTTP ${answer.status}).`);
+      fs.writeFileSync(msi, Buffer.from(await answer.arrayBuffer()));
+      // İlk kontrol YETKİSİZ: imzası tutmayan bir paket için kullanıcıya UAC bile sorulmuyor.
+      const signer = await run('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$s = Get-AuthenticodeSignature -LiteralPath ${ps(msi)}; ` +
+          `if ($s.Status -ne 'Valid') { exit 3 }; $s.SignerCertificate.Subject`,
+      ]).catch(() => '');
+      if (!SIGNER.test(signer.trim())) {
+        throw new Error('İndirilen ZeroTier paketinin imzası doğrulanamadı; kurulmadı.');
+      }
+    }
+    fs.mkdirSync(path.dirname(ownCopy), { recursive: true });
+
+    const encoded = Buffer.from(elevatedScript({ msi, ownCopy }), 'utf16le').toString('base64');
     await run('powershell.exe', [
       '-NoProfile',
+      '-NonInteractive',
       '-Command',
       `$p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden ` +
-        `-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',${ps(`"${script}"`)}; ` +
+        `-ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','${encoded}'; ` +
         'exit $p.ExitCode',
-    ]);
-  } catch (error) {
-    throw new Error(
-      /cancel|iptal|1223/i.test(error.message)
-        ? 'Yönetici onayı verilmedi. ZeroTier kurulamadı.'
-        : `ZeroTier hazırlanamadı: ${error.message}`,
-    );
+    ]).catch((error) => {
+      if (/cancel|iptal|1223/i.test(error.message)) {
+        throw new Error('Yönetici onayı verilmedi. ZeroTier kurulamadı.');
+      }
+      if (error.exitCode === 21) {
+        throw new Error('ZeroTier paketinin imzası kurulumdan hemen önce tutmadı; kurulmadı.');
+      }
+      throw new Error(
+        `ZeroTier hazırlanamadı${error.exitCode === null ? '' : ` (çıkış ${error.exitCode})`}.`,
+      );
+    });
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }
 }
 
+/** Jeton geçersiz: servis yeniden kurulmuş ya da kopya başka bir makineden gelmiş. */
+class TokenRejected extends Error {}
+
 async function call(token, method, route, body) {
-  const answer = await fetch(`${API}${route}`, {
+  const answer = await fetch(`${apiBase()}${route}`, {
     method,
     headers: { 'X-ZT1-Auth': token, 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(5000),
   });
+  if (answer.status === 401) throw new TokenRejected('ZeroTier jetonu reddetti.');
   if (answer.status === 404) return null;
   if (!answer.ok) throw new Error(`ZeroTier servisi ${answer.status} döndü.`);
   return answer.json();
@@ -150,4 +204,14 @@ async function leave(token, networkId) {
   await call(token, 'DELETE', `/network/${networkId}`);
 }
 
-module.exports = { installed, readToken, prepare, nodeId, ensureJoined, leave };
+module.exports = {
+  installed,
+  readToken,
+  prepare,
+  nodeId,
+  ensureJoined,
+  leave,
+  TokenRejected,
+  SIGNER,
+  elevatedScript,
+};
